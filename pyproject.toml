@@ -1,0 +1,24 @@
+[project]
+name = "hlanalysis"
+version = "0.0.1"
+description = "Market-making research and recording infra for Hyperliquid + reference venues"
+requires-python = ">=3.12"
+dependencies = [
+  "websockets>=13.0",
+  "aiohttp>=3.10",
+  "pyarrow>=18.0",
+  "pydantic>=2.9",
+  "pyyaml>=6.0",
+  "duckdb>=1.1",
+  "boto3>=1.35",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["hlanalysis"]
+
+[project.scripts]
+hl-recorder = "hlanalysis.recorder.main:main"

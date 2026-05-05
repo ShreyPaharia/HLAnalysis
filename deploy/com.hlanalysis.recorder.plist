@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hlanalysis.recorder</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/shreypaharia/Documents/Projects/Trading/HLAnalysis</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/shreypaharia/Documents/Projects/Trading/HLAnalysis/.venv/bin/python</string>
+        <string>-m</string>
+        <string>hlanalysis.recorder.main</string>
+        <string>--config</string>
+        <string>config/symbols.yaml</string>
+        <string>--data-root</string>
+        <string>data</string>
+        <string>--log-file</string>
+        <string>logs/recorder.log</string>
+        <string>--log-level</string>
+        <string>INFO</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/shreypaharia/Documents/Projects/Trading/HLAnalysis/logs/launchd.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/shreypaharia/Documents/Projects/Trading/HLAnalysis/logs/launchd.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

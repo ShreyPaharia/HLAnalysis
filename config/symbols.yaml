@@ -1,0 +1,32 @@
+subscriptions:
+  # Hyperliquid BTC perp
+  - venue: hyperliquid
+    product_type: perp
+    mechanism: clob
+    symbol: BTC
+    channels: [trades, book, bbo, mark, funding, oracle]
+
+  # HIP-4 outcome markets — symbol "*" auto-discovers all currently active markets
+  # via outcomeMeta (refreshed every 60s). When a market expires and a new one opens
+  # with a different encoding, the adapter automatically subscribes and emits
+  # outcome-discovered / outcome-rolled health events at the boundary.
+  - venue: hyperliquid
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book, bbo, mark]
+
+  # Binance USDT-margined BTC perp (reference + hedge venue).
+  # Note: liquidations stream is IP-restricted on Binance; mark/funding via REST poll.
+  - venue: binance
+    product_type: perp
+    mechanism: clob
+    symbol: BTCUSDT
+    channels: [trades, book, bbo, mark, funding]
+
+  # Binance BTC spot (reference price)
+  - venue: binance
+    product_type: spot
+    mechanism: clob
+    symbol: BTCUSDT
+    channels: [trades, book, bbo]
