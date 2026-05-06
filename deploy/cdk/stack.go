@@ -52,13 +52,21 @@ func NewHLRecorderStack(scope constructs.Construct, id string, props *HLRecorder
 		},
 	})
 
-	// Allow EC2 to read code from the deploy bucket
+	// Allow EC2 to read GitHub deploy key from SSM Parameter Store
 	role.AddToPolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
 		Effect:  awsiam.Effect_ALLOW,
-		Actions: jsii.Strings("s3:GetObject", "s3:ListBucket"),
+		Actions: jsii.Strings("ssm:GetParameter"),
 		Resources: jsii.Strings(
-			fmt.Sprintf("arn:aws:s3:::hl-recorder-deploy-%s", *props.Env.Account),
-			fmt.Sprintf("arn:aws:s3:::hl-recorder-deploy-%s/*", *props.Env.Account),
+			fmt.Sprintf("arn:aws:ssm:%s:%s:parameter/hl-recorder/*", *props.Env.Region, *props.Env.Account),
+		),
+	}))
+
+	// KMS decrypt for SecureString parameters
+	role.AddToPolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+		Effect:  awsiam.Effect_ALLOW,
+		Actions: jsii.Strings("kms:Decrypt"),
+		Resources: jsii.Strings(
+			fmt.Sprintf("arn:aws:kms:%s:%s:alias/aws/ssm", *props.Env.Region, *props.Env.Account),
 		),
 	}))
 
@@ -67,7 +75,7 @@ func NewHLRecorderStack(scope constructs.Construct, id string, props *HLRecorder
 		Shebang: jsii.String("#!/bin/bash -xe"),
 	})
 
-	repoURL := "https://github.com/shreypaharia/HLAnalysis.git" // Update if using different repo
+	repoURL := "git@github.com:ShreyPaharia/HLAnalysis.git"
 
 	userData.AddCommands(
 		// Wait for secondary volume to attach
@@ -98,15 +106,27 @@ func NewHLRecorderStack(scope constructs.Construct, id string, props *HLRecorder
 		// Install uv (fast Python package installer; installs to /root/.local/bin)
 		jsii.String("curl -LsSf https://astral.sh/uv/install.sh | sh"),
 
-		// Download code from S3 (uploaded by `make push-code` from local machine)
-		// Falls back to git clone if S3 bucket not configured
-		jsii.String(fmt.Sprintf(`if aws s3 ls s3://hl-recorder-deploy-%s/hl-recorder-code.tar.gz --region %s > /dev/null 2>&1; then
-  rm -rf /opt/hl-recorder && mkdir -p /opt/hl-recorder
-  aws s3 cp s3://hl-recorder-deploy-%s/hl-recorder-code.tar.gz /tmp/code.tar.gz --region %s
-  tar -xzf /tmp/code.tar.gz -C /opt/hl-recorder
-else
-  git clone %s /opt/hl-recorder
-fi`, *props.Env.Account, *props.Env.Region, *props.Env.Account, *props.Env.Region, repoURL)),
+		// Set up GitHub deploy key from SSM Parameter Store
+		jsii.String("mkdir -p /home/ec2-user/.ssh"),
+		jsii.String(fmt.Sprintf("aws ssm get-parameter --name /hl-recorder/github-deploy-key --with-decryption --region %s --query Parameter.Value --output text > /home/ec2-user/.ssh/github_deploy_key", *props.Env.Region)),
+		jsii.String("chmod 600 /home/ec2-user/.ssh/github_deploy_key"),
+		jsii.String(`cat > /home/ec2-user/.ssh/config << SSHEOF
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile /home/ec2-user/.ssh/github_deploy_key
+  IdentitiesOnly yes
+  StrictHostKeyChecking accept-new
+SSHEOF`),
+		jsii.String("chmod 600 /home/ec2-user/.ssh/config"),
+		jsii.String("chown -R ec2-user:ec2-user /home/ec2-user/.ssh"),
+
+		// Clone the repository as ec2-user
+		jsii.String("mkdir -p /opt/hl-recorder"),
+		jsii.String("chown ec2-user:ec2-user /opt/hl-recorder"),
+		jsii.String(fmt.Sprintf("sudo -u ec2-user git clone %s /tmp/hl-recorder-clone", repoURL)),
+		jsii.String("sudo -u ec2-user mv /tmp/hl-recorder-clone/.git /tmp/hl-recorder-clone/* /tmp/hl-recorder-clone/.[!.]* /opt/hl-recorder/ 2>/dev/null || true"),
+		jsii.String("rmdir /tmp/hl-recorder-clone 2>/dev/null || true"),
 
 		// Create virtual environment and install dependencies
 		jsii.String("/root/.local/bin/uv venv /opt/hl-recorder/.venv --python 3.12"),

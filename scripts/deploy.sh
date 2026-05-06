@@ -1,17 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-# Deploy hl-recorder: package code, push to S3, restart service on EC2 via SSM
-# Usage: ./scripts/deploy.sh
+# Deploy hl-recorder: git pull on EC2 and restart service via SSM.
+# Workflow: Push to GitHub locally, then run this script.
+#
+# Usage: ./scripts/deploy.sh [branch]
 
 STACK_NAME="HLRecorderStack"
 REGION="${AWS_REGION:-$(aws configure get region)}"
-ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-BUCKET="hl-recorder-deploy-${ACCOUNT}"
-
-echo "==> Account: $ACCOUNT"
-echo "==> Region:  $REGION"
-echo "==> Bucket:  $BUCKET"
+BRANCH="${1:-main}"
 
 INSTANCE_ID=$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
@@ -24,41 +21,40 @@ if [ -z "$INSTANCE_ID" ]; then
   exit 1
 fi
 
-echo "==> Instance: $INSTANCE_ID"
+# Show local commit being deployed
+LOCAL_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+LOCAL_STATUS=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
 
-# Ensure deploy bucket exists
-if ! aws s3 ls "s3://${BUCKET}" --region "$REGION" > /dev/null 2>&1; then
-  echo "==> Creating S3 deploy bucket..."
-  aws s3 mb "s3://${BUCKET}" --region "$REGION"
+echo "==> Region:        $REGION"
+echo "==> Instance:      $INSTANCE_ID"
+echo "==> Branch:        $BRANCH"
+echo "==> Local HEAD:    $LOCAL_COMMIT"
+if [ "$LOCAL_STATUS" -gt 0 ]; then
+  echo "==> WARNING: You have $LOCAL_STATUS uncommitted change(s). Push to GitHub first!"
 fi
 
-# Package code (excluding venv, data, logs, CDK output, git)
+# Verify GitHub is up to date
 echo ""
-echo "==> Packaging code..."
-TARBALL=$(mktemp -t hl-recorder-code.XXXXXX.tar.gz)
-tar --exclude='.venv' \
-    --exclude='data' \
-    --exclude='logs' \
-    --exclude='.git' \
-    --exclude='deploy/cdk/cdk.out' \
-    --exclude='deploy/cdk/cdk.context.json' \
-    --exclude='__pycache__' \
-    --exclude='.DS_Store' \
-    --exclude='*.pyc' \
-    -czf "$TARBALL" .
+echo "==> Checking remote..."
+git fetch origin "$BRANCH" --quiet
+REMOTE_COMMIT=$(git rev-parse --short "origin/$BRANCH")
+echo "==> Remote HEAD:   $REMOTE_COMMIT"
 
-SIZE=$(du -h "$TARBALL" | cut -f1)
-echo "  Size: $SIZE"
+if [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
+  echo ""
+  echo "WARNING: Local ($LOCAL_COMMIT) and remote ($REMOTE_COMMIT) differ."
+  echo "Run 'git push origin $BRANCH' to deploy your latest changes."
+  echo ""
+  read -p "Continue with remote $REMOTE_COMMIT? [y/N] " -n 1 -r
+  echo ""
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    exit 1
+  fi
+fi
 
-# Upload to S3
+# Pull and restart on EC2
 echo ""
-echo "==> Uploading to S3..."
-aws s3 cp "$TARBALL" "s3://${BUCKET}/hl-recorder-code.tar.gz" --region "$REGION"
-rm -f "$TARBALL"
-
-# Restart service via SSM (downloads new code, reinstalls, restarts)
-echo ""
-echo "==> Restarting service on EC2..."
+echo "==> Deploying on EC2..."
 COMMAND_ID=$(aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
   --region "$REGION" \
@@ -66,17 +62,16 @@ COMMAND_ID=$(aws ssm send-command \
   --parameters '{
     "commands": [
       "set -xe",
-      "rm -rf /opt/hl-recorder.new && mkdir -p /opt/hl-recorder.new",
-      "aws s3 cp s3://'"${BUCKET}"'/hl-recorder-code.tar.gz /tmp/code.tar.gz --region '"${REGION}"'",
-      "tar -xzf /tmp/code.tar.gz -C /opt/hl-recorder.new",
-      "rm -rf /opt/hl-recorder.bak && mv /opt/hl-recorder /opt/hl-recorder.bak 2>/dev/null || true",
-      "mv /opt/hl-recorder.new /opt/hl-recorder",
-      "/root/.local/bin/uv venv /opt/hl-recorder/.venv --python 3.12",
+      "cd /opt/hl-recorder",
+      "sudo -u ec2-user git fetch origin",
+      "sudo -u ec2-user git checkout '"$BRANCH"'",
+      "sudo -u ec2-user git reset --hard origin/'"$BRANCH"'",
       "/root/.local/bin/uv pip install --python /opt/hl-recorder/.venv/bin/python -e /opt/hl-recorder",
       "chown -R ec2-user:ec2-user /opt/hl-recorder",
       "systemctl restart hl-recorder.service",
       "sleep 3",
-      "systemctl status hl-recorder.service --no-pager"
+      "systemctl is-active hl-recorder.service",
+      "git -C /opt/hl-recorder log --oneline -1"
     ]
   }' \
   --query "Command.CommandId" \
@@ -106,7 +101,7 @@ if [ "$STATUS" = "Success" ]; then
     --instance-id "$INSTANCE_ID" \
     --region "$REGION" \
     --query "StandardOutputContent" \
-    --output text | tail -20
+    --output text | tail -10
 else
   echo "==> Command status: $STATUS"
   echo ""
