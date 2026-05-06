@@ -1,4 +1,4 @@
-.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy ssh-ec2 status logs query data-summary help
+.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy ssh-ec2 status logs query data-summary pull-data help
 
 # Stack name
 STACK_NAME=HLRecorderStack
@@ -127,6 +127,10 @@ logs:
 		--output text | xargs -I {} sh -c \
 		'sleep 3 && aws ssm get-command-invocation --command-id {} --instance-id '"$$INSTANCE_ID"' --query "StandardOutputContent" --output text'
 
+# Pull all archived parquet data from S3 to local ./data/
+pull-data:
+	@./scripts/pull-data.sh
+
 # Help
 help:
 	@echo "HLAnalysis Recorder - Deployment Commands"
@@ -146,6 +150,7 @@ help:
 	@echo "  logs              Tail last 100 lines of recorder logs"
 	@echo "  data-summary      Show event counts grouped by venue and event type"
 	@echo "  query Q=\"...\"     Run custom DuckDB query, e.g. Q=\"SELECT COUNT(*) FROM ...\""
+	@echo "  pull-data         Sync archived data from S3 to local ./data/ (incremental)"
 	@echo ""
 	@echo "Example workflow:"
 	@echo "  1. CDK_DEFAULT_REGION=ap-northeast-1 CDK_DEFAULT_ACCOUNT=473317027471 make cdk-bootstrap"
