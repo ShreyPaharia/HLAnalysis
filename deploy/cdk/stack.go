@@ -6,6 +6,7 @@ import (
 	"github.com/aws/aws-cdk-go/awscdk/v2"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsec2"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsiam"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awss3"
 	"github.com/aws/constructs-go/constructs/v10"
 	"github.com/aws/jsii-runtime-go"
 )
@@ -69,6 +70,34 @@ func NewHLRecorderStack(scope constructs.Construct, id string, props *HLRecorder
 			fmt.Sprintf("arn:aws:kms:%s:%s:alias/aws/ssm", *props.Env.Region, *props.Env.Account),
 		),
 	}))
+
+	// S3 archive bucket (RETAIN policy: cdk destroy never deletes recorded data)
+	archiveBucket := awss3.NewBucket(stack, jsii.String("ArchiveBucket"), &awss3.BucketProps{
+		BucketName:        jsii.String(fmt.Sprintf("hl-recorder-archive-%s", *props.Env.Account)),
+		BlockPublicAccess: awss3.BlockPublicAccess_BLOCK_ALL(),
+		Encryption:        awss3.BucketEncryption_S3_MANAGED,
+		Versioned:         jsii.Bool(false),
+		RemovalPolicy:     awscdk.RemovalPolicy_RETAIN,
+		LifecycleRules: &[]*awss3.LifecycleRule{
+			{
+				Id:      jsii.String("tiered-storage"),
+				Enabled: jsii.Bool(true),
+				Transitions: &[]*awss3.Transition{
+					{
+						StorageClass:    awss3.StorageClass_INFREQUENT_ACCESS(),
+						TransitionAfter: awscdk.Duration_Days(jsii.Number(30)),
+					},
+					{
+						StorageClass:    awss3.StorageClass_DEEP_ARCHIVE(),
+						TransitionAfter: awscdk.Duration_Days(jsii.Number(90)),
+					},
+				},
+			},
+		},
+	})
+
+	// Grant the EC2 role read/write access to the archive bucket
+	archiveBucket.GrantReadWrite(role, nil)
 
 	// User data script
 	userData := awsec2.UserData_ForLinux(&awsec2.LinuxUserDataOptions{
@@ -222,6 +251,12 @@ SERVICEEOF`),
 	awscdk.NewCfnOutput(stack, jsii.String("DataVolumeID"), &awscdk.CfnOutputProps{
 		Value:       dataVolume.VolumeId(),
 		Description: jsii.String("EBS data volume ID"),
+	})
+
+	awscdk.NewCfnOutput(stack, jsii.String("ArchiveBucketName"), &awscdk.CfnOutputProps{
+		Value:       archiveBucket.BucketName(),
+		Description: jsii.String("S3 bucket for archived parquet data"),
+		ExportName:  jsii.String("HLRecorderArchiveBucket"),
 	})
 
 	return stack
