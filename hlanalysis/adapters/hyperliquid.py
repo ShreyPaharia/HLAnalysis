@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 
 import requests
@@ -40,6 +41,14 @@ _STD_TO_HL: dict[str, str] = {
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 OUTCOME_REFRESH_INTERVAL_S = 60.0
 
+# Reconnect circuit-breaker: if we see this many reconnects within the window,
+# sleep a long cooldown instead of thrashing. Tripped during the 2026-05-06
+# 06:00 UTC HIP-4 settlement, where 478 reconnects in 30 min produced a 12-min
+# blackout right across the most-informative moment of the day.
+RECONNECT_WINDOW_S = 60.0
+RECONNECT_THRESHOLD = 8
+RECONNECT_COOLDOWN_S = 300.0
+
 
 class HyperliquidAdapter(VenueAdapter):
     venue = "hyperliquid"
@@ -67,24 +76,24 @@ class HyperliquidAdapter(VenueAdapter):
             else:
                 sym_to_sub[s.symbol] = s
 
-        # Initial wildcard expansion before WS connect.
-        for tmpl in wildcard_templates:
-            for expanded in self._expand_wildcard(tmpl):
-                sym_to_sub.setdefault(expanded.symbol, expanded)
-
         meta_seen: set[str] = set()
-        # Emit initial market_meta for any prediction_binary subs in scope.
-        if any(s.product_type == ProductType.PREDICTION_BINARY for s in sym_to_sub.values()):
-            for ev in self._fetch_outcome_meta_events(
-                [s for s in sym_to_sub.values() if s.product_type == ProductType.PREDICTION_BINARY],
-                meta_seen,
-            ):
-                yield ev
-
-        last_meta_refresh = time.monotonic()
+        last_meta_refresh = 0.0  # force expansion on first iteration
         backoff = 1.0
+        reconnect_times: deque[float] = deque(maxlen=RECONNECT_THRESHOLD + 1)
 
         while True:
+            # Re-expand wildcards before each (re)connect. Catches HIP-4 rolls that happened
+            # while we were disconnected: at the 06:00 UTC settlement boundary, the old
+            # outcomes (#30/#31) become invalid and new ones (#40/#41) activate, but the
+            # in-loop refresh only runs *after* a message arrives — and a stale subscription
+            # to a dead outcome may starve the loop entirely.
+            if wildcard_templates:
+                async for ev in self._sync_wildcards(
+                    wildcard_templates, sym_to_sub, meta_seen
+                ):
+                    yield ev
+                last_meta_refresh = time.monotonic()
+
             try:
                 async with websockets.connect(
                     self.WS_URL, ping_interval=20, ping_timeout=20, max_size=2**24
@@ -114,10 +123,31 @@ class HyperliquidAdapter(VenueAdapter):
                             ):
                                 yield ev
             except Exception as e:
-                log.warning("hyperliquid ws error: %s; backoff=%.1fs", e, backoff)
+                now = time.monotonic()
+                reconnect_times.append(now)
                 yield self._health("reconnect", str(e))
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
+                # Circuit-breaker: too many reconnects in a sliding window → long cooldown.
+                if (
+                    len(reconnect_times) >= RECONNECT_THRESHOLD
+                    and (now - reconnect_times[0]) < RECONNECT_WINDOW_S
+                ):
+                    log.critical(
+                        "hyperliquid: %d reconnects in %.0fs — cooling down %.0fs",
+                        len(reconnect_times),
+                        now - reconnect_times[0],
+                        RECONNECT_COOLDOWN_S,
+                    )
+                    yield self._health(
+                        "circuit-breaker",
+                        f"{len(reconnect_times)} reconnects in {now - reconnect_times[0]:.0f}s",
+                    )
+                    await asyncio.sleep(RECONNECT_COOLDOWN_S)
+                    reconnect_times.clear()
+                    backoff = 1.0
+                else:
+                    log.warning("hyperliquid ws error: %s; backoff=%.1fs", e, backoff)
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 30.0)
 
     async def _subscribe_for(
         self,
@@ -146,6 +176,43 @@ class HyperliquidAdapter(VenueAdapter):
                 )
             )
 
+    async def _sync_wildcards(
+        self,
+        templates: list[Subscription],
+        sym_to_sub: dict[str, Subscription],
+        meta_seen: set[str],
+    ) -> AsyncIterator[NormalizedEvent]:
+        """Pre-connect variant of _refresh_wildcards: expand active outcomes and prune dead
+        ones from sym_to_sub, but don't try to subscribe (no live ws yet)."""
+        active_now: dict[str, Subscription] = {}
+        for tmpl in templates:
+            for expanded in self._expand_wildcard(tmpl):
+                active_now[expanded.symbol] = expanded
+        if not active_now:
+            return  # outcomeMeta fetch failed; keep prior state
+
+        prev_outcome_syms = {
+            s for s, sub in sym_to_sub.items() if sub.product_type == ProductType.PREDICTION_BINARY
+        }
+        new_syms = set(active_now.keys()) - prev_outcome_syms
+        rolled_syms = prev_outcome_syms - set(active_now.keys())
+
+        for sym in sorted(new_syms):
+            sym_to_sub[sym] = active_now[sym]
+            yield self._health("outcome-discovered", sym)
+
+        for sym in sorted(rolled_syms):
+            yield self._health("outcome-rolled", sym)
+            # Drop from sym_to_sub so we don't re-subscribe to dead markets after reconnect;
+            # post-settlement HL silently drops these and may close the WS, causing thrash.
+            sym_to_sub.pop(sym, None)
+            meta_seen.discard(sym)
+
+        if new_syms:
+            new_subs = [active_now[s] for s in new_syms]
+            for ev in self._fetch_outcome_meta_events(new_subs, meta_seen):
+                yield ev
+
     async def _refresh_wildcards(
         self,
         ws: websockets.WebSocketClientProtocol,
@@ -159,6 +226,8 @@ class HyperliquidAdapter(VenueAdapter):
         for tmpl in templates:
             for expanded in self._expand_wildcard(tmpl):
                 active_now[expanded.symbol] = expanded
+        if not active_now:
+            return  # outcomeMeta fetch failed; keep prior state
 
         prev_outcome_syms = {
             s for s, sub in sym_to_sub.items() if sub.product_type == ProductType.PREDICTION_BINARY
@@ -173,10 +242,9 @@ class HyperliquidAdapter(VenueAdapter):
 
         for sym in sorted(rolled_syms):
             yield self._health("outcome-rolled", sym)
-            # Don't drop from sym_to_sub: any in-flight messages tagged with the old coin
-            # should still be tagged correctly. The outcome stops emitting after settlement.
+            sym_to_sub.pop(sym, None)
+            meta_seen.discard(sym)
 
-        # Emit market_meta only for newly discovered coins; existing ones already have it.
         if new_syms:
             new_subs = [active_now[s] for s in new_syms]
             for ev in self._fetch_outcome_meta_events(new_subs, meta_seen):
