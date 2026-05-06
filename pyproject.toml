@@ -13,6 +13,19 @@ dependencies = [
   "boto3>=1.35",
 ]
 
+[project.optional-dependencies]
+analysis = [
+  "jupyter>=1.1",
+  "ipykernel>=6.29",
+  "nbclient>=0.10",
+  "numpy>=2.0",
+  "pandas>=2.2",
+  "polars>=1.10",
+  "matplotlib>=3.9",
+  "scipy>=1.14",
+  "pytz>=2024.2",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
