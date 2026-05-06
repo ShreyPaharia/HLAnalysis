@@ -189,6 +189,72 @@ SERVICEEOF`),
 		jsii.String("systemctl daemon-reload"),
 		jsii.String("systemctl enable hl-recorder.service"),
 		jsii.String("systemctl start hl-recorder.service"),
+
+		jsii.String("mkdir -p /etc/hl-recorder"),
+		jsii.String(fmt.Sprintf(`cat > /etc/hl-recorder/env <<ENVEOF
+ARCHIVE_BUCKET=%s
+DATA_ROOT=/data
+DAYS_BACK=1
+RETENTION_DAYS=3
+ENVEOF`, *archiveBucket.BucketName())),
+		jsii.String("chmod 644 /etc/hl-recorder/env"),
+
+		jsii.String(`cat > /etc/systemd/system/hl-recorder-sync.service <<'SVCEOF'
+[Unit]
+Description=Sync recent /data partitions to S3
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ec2-user
+EnvironmentFile=/etc/hl-recorder/env
+ExecStart=/opt/hl-recorder/scripts/sync-to-s3.sh
+StandardOutput=journal
+StandardError=journal
+SVCEOF`),
+		jsii.String(`cat > /etc/systemd/system/hl-recorder-sync.timer <<'TIMEREOF'
+[Unit]
+Description=Hourly S3 sync of /data
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target
+TIMEREOF`),
+
+		jsii.String(`cat > /etc/systemd/system/hl-recorder-cleanup.service <<'SVCEOF'
+[Unit]
+Description=Daily full S3 sync + EBS cleanup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ec2-user
+EnvironmentFile=/etc/hl-recorder/env
+ExecStart=/opt/hl-recorder/scripts/cleanup-ebs.sh
+StandardOutput=journal
+StandardError=journal
+SVCEOF`),
+		jsii.String(`cat > /etc/systemd/system/hl-recorder-cleanup.timer <<'TIMEREOF'
+[Unit]
+Description=Daily EBS cleanup at 04:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMEREOF`),
+
+		jsii.String("systemctl daemon-reload"),
+		jsii.String("systemctl enable --now hl-recorder-sync.timer"),
+		jsii.String("systemctl enable --now hl-recorder-cleanup.timer"),
 	)
 
 	// Create EBS volume for data storage (10GB gp3)
