@@ -19,3 +19,6 @@ deploy/cdk/cdk.out/
 deploy/cdk/cdk.context.json
 deploy/cdk/go.sum
 deploy/cdk/hl-recorder-cdk
+
+# Local planning/spec docs (not for git history)
+docs/superpowers/
