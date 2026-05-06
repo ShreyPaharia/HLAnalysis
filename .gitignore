@@ -13,3 +13,9 @@ build/
 .mypy_cache/
 *.log
 logs/
+
+# CDK
+deploy/cdk/cdk.out/
+deploy/cdk/cdk.context.json
+deploy/cdk/go.sum
+deploy/cdk/hl-recorder-cdk
