@@ -179,7 +179,47 @@ df -h /data
 du -sh /data/venue=*
 ```
 
-The 10GB volume will fill in 1-2 months. Set up S3 archival before then (see plan for follow-up).
+### S3 Archival
+
+Data is automatically archived to S3 (`hl-recorder-archive-<account>` in `ap-northeast-1`)
+to prevent the 10 GB EBS volume from filling.
+
+**On EC2:**
+
+- `hl-recorder-sync.timer` runs hourly, pushes today + yesterday partitions to S3
+- `hl-recorder-cleanup.timer` runs daily at 04:00 UTC: full sync, then deletes EBS
+  partitions strictly older than `RETENTION_DAYS` (default `3`) that pass a
+  per-partition file-count check
+- Lifecycle: `Standard → Standard-IA (30d) → Deep Archive (90d)` keeps long-term
+  cost near zero
+
+Tune retention without redeploy:
+
+```bash
+make ssh-ec2
+sudo systemctl edit hl-recorder-cleanup.service   # add Environment=RETENTION_DAYS=7
+```
+
+Inspect timer state and recent runs:
+
+```bash
+sudo systemctl list-timers | grep hl-recorder
+sudo journalctl -u hl-recorder-sync.service -n 50
+sudo journalctl -u hl-recorder-cleanup.service -n 50
+```
+
+**On your laptop:**
+
+```bash
+make pull-data        # incremental aws s3 sync s3://<bucket>/ ./data/
+```
+
+First pull is bandwidth-heavy (current data ~6 GB); subsequent pulls only
+fetch new partitions. Egress to your laptop is free under the 100 GB/mo
+AWS free tier.
+
+Cost: ~$0.50/mo year 1, dropping to ~$0.10/mo steady-state once the lifecycle
+moves bulk data to Deep Archive.
 
 ## Troubleshooting
 

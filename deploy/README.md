@@ -170,7 +170,10 @@ sudo cat /var/log/cloud-init-output.log
 
 ### Disk full
 
-The 10GB volume will fill in 1-2 months. Add S3 sync before then (see plan for follow-up tasks).
+S3 archival runs automatically (`hl-recorder-sync.timer` hourly,
+`hl-recorder-cleanup.timer` daily). EBS keeps a rolling buffer of the
+last `RETENTION_DAYS` (default 3) days; older partitions are purged
+once verified in S3. See `DEPLOYMENT.md` for tuning.
 
 Check disk usage:
 
@@ -184,7 +187,7 @@ du -sh /data/venue=*
 
 - **Spot instance**: Edit `stack.go` to use spot, saves ~70% but risks data gaps
 - **Savings Plan**: 1-year commitment saves ~35%
-- **S3 archival**: Sync old data to S3, save ~$3/mo after 6 months (follow-up task)
+- **S3 archival**: Active by default (~$0.50/mo year 1; see DEPLOYMENT.md)
 
 ## Monitoring
 
