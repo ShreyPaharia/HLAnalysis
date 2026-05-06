@@ -71,7 +71,7 @@ COMMAND_ID=$(aws ssm send-command \
       "systemctl restart hl-recorder.service",
       "sleep 3",
       "systemctl is-active hl-recorder.service",
-      "git -C /opt/hl-recorder log --oneline -1"
+      "sudo -u ec2-user git -C /opt/hl-recorder log --oneline -1"
     ]
   }' \
   --query "Command.CommandId" \
