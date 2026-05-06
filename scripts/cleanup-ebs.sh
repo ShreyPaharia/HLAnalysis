@@ -5,6 +5,9 @@
 #
 # Required env: ARCHIVE_BUCKET
 # Optional env: DATA_ROOT (default /data), RETENTION_DAYS (default 3)
+# Test-only env: SKIP_SYNC=1 (skip the upfront full-sync), SKIP_S3_CHECK=1
+#                (skip S3 LIST verification, assume parity). Used by
+#                tests/scripts/test_cleanup_ebs.sh; never set in production.
 
 set -euo pipefail
 
@@ -41,7 +44,9 @@ while IFS= read -r partition; do
     continue
   fi
 
-  # Step 3: verify same file count exists in S3 before deleting locally
+  # Step 3: verify same file count exists in S3 before deleting locally.
+  # Assumes the recorder writes only *.parquet files (no _SUCCESS, _metadata,
+  # etc.); revisit this filter if the writer ever emits sidecar files.
   rel="${partition#"$DATA_ROOT"/}"
   local_count=$(find "$partition" -type f -name '*.parquet' | wc -l | tr -d ' ')
 

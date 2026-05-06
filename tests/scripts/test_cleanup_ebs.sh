@@ -21,7 +21,10 @@ make_partition() {
   echo "fixture" > "$part/hour=00/test.parquet"
 }
 
-for days in 0 1 2 4 10; do make_partition "$days"; done
+# Coverage: 0/1/2 well within retention, 3 is the boundary (== cutoff date,
+# must be kept), 4 is the first day past the boundary (must be deleted), 10
+# is well past retention.
+for days in 0 1 2 3 4 10; do make_partition "$days"; done
 
 # Override `date` for the cleanup script's own use (it also calls `date -u -d "N days ago"`).
 # If gdate exists, prepend a shim dir to PATH that aliases date->gdate.
@@ -43,7 +46,7 @@ SKIP_SYNC=1 \
 SKIP_S3_CHECK=1 \
 bash "$SCRIPT_DIR/scripts/cleanup-ebs.sh"
 
-KEPT_DAYS=(0 1 2)
+KEPT_DAYS=(0 1 2 3)
 GONE_DAYS=(4 10)
 
 fail=0

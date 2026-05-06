@@ -299,7 +299,8 @@ make cdk-destroy
 
 1. **Deploy now**: Run `make cdk-bootstrap && make cdk-deploy`
 2. **Monitor for 24h**: Check logs with `make logs`, verify data quality
-3. **Set up S3 sync**: Before disk fills (~1-2 months), add nightly S3 archival
-4. **Query data**: Use DuckDB to analyze recorded Parquet files
+3. **Tune retention if needed**: Default is `RETENTION_DAYS=3` on EBS; archived data lives in S3 indefinitely. Adjust via `sudo systemctl edit hl-recorder-cleanup.service` (see "S3 Archival" above).
+4. **Pull data locally**: Run `make pull-data` to mirror the archive bucket to `./data/` for analytics
+5. **Query data**: Use DuckDB to analyze recorded Parquet files
 
 See `deploy/README.md` for more details.
