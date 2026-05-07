@@ -6,16 +6,26 @@ subscriptions:
     symbol: BTC
     channels: [trades, book, bbo, mark, funding, oracle]
 
-  # HIP-4 outcome markets — symbol "*" auto-discovers all currently active markets
-  # via outcomeMeta (refreshed every 60s). When a market expires and a new one opens
-  # with a different encoding, the adapter automatically subscribes and emits
-  # outcome-discovered / outcome-rolled health events at the boundary.
-  # `mark` dropped: outcome coins have no activeAssetCtx → that subscription was a no-op.
+  # ── HIP-4 BTC binary ────────────────────────────────────────────────
   - venue: hyperliquid
     product_type: prediction_binary
     mechanism: clob
     symbol: "*"
     channels: [trades, book, bbo]
+    match:
+      underlying: BTC
+      class: priceBinary
+
+  # ── HIP-4 BTC priceBucket (3-way + fallback) ────────────────────────
+  # Same product_type, same wildcard, only `match` differs.
+  - venue: hyperliquid
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book, bbo]
+    match:
+      underlying: BTC
+      class: priceBucket
 
   # Hyperliquid spot BTC (UBTC/USDC, "@142" in spotMeta, displayed as BTC/USDC in UI).
   # Same-venue depth/liquidity reference for the HIP-4 strategy depth guard.

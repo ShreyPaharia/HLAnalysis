@@ -27,6 +27,11 @@ class Subscription(BaseModel):
     channels: tuple[str, ...] = ("trades",)
     # Static metadata (e.g. strike, expiry, settlement source for prediction markets).
     metadata: dict[str, Any] = {}
+    # Optional, only consulted for wildcard symbols. Each key is checked against
+    # the parsed outcomeMeta `description` fields (e.g. "underlying", "class", "period").
+    # Values can be a string (exact match) or a list (membership). All keys must
+    # match; missing key in description → no match. `match: None` ⇒ today's behaviour.
+    match: dict[str, str | list[str]] | None = None
 
 
 class RecorderConfig(BaseModel):

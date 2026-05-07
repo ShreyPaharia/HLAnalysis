@@ -60,8 +60,20 @@ def _parse_description(desc: str) -> dict[str, str]:
     return dict(p.split(":", 1) for p in (desc or "").split("|") if ":" in p)
 
 
-def _matches(rule: dict, fields: dict[str, str]) -> bool:
-    # Replaced in Task 5 with full implementation.
+def _matches(rule: dict[str, object], fields: dict[str, str]) -> bool:
+    """Return True iff every (key, value) in `rule` is satisfied by `fields`.
+    String value → exact match. List value → membership. Missing key → no match.
+    """
+    for key, want in rule.items():
+        got = fields.get(key)
+        if got is None:
+            return False
+        if isinstance(want, list):
+            if got not in want:
+                return False
+        else:
+            if got != want:
+                return False
     return True
 
 
@@ -286,6 +298,11 @@ class HyperliquidAdapter(VenueAdapter):
         out: list[Subscription] = []
         for o in data.get("outcomes", []):
             outcome_idx = o.get("outcome")
+            if outcome_idx is None:
+                continue
+            desc_fields = _parse_description(o.get("description", ""))
+            if template.match and not _matches(template.match, desc_fields):
+                continue
             for side_idx, _ in enumerate(o.get("sideSpecs", [])):
                 coin = f"#{10 * outcome_idx + side_idx}"
                 out.append(template.model_copy(update={"symbol": coin}))
