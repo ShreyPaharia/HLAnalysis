@@ -26,6 +26,7 @@ class EventType(str, Enum):
     FUNDING = "funding"
     MARK = "mark"
     ORACLE = "oracle"
+    OPEN_INTEREST = "open_interest"
     LIQUIDATION = "liquidation"
     MARKET_META = "market_meta"
     QUOTE_REQUEST = "quote_request"
@@ -119,6 +120,14 @@ class OracleEvent(_BaseEvent):
     oracle_px: float
 
 
+class OpenInterestEvent(_BaseEvent):
+    event_type: Literal["open_interest"] = "open_interest"
+    open_interest: float
+    day_ntl_vlm: float | None = None
+    prev_day_px: float | None = None
+    mid_px: float | None = None  # ctx-reported mid; not the bbo mid
+
+
 class LiquidationEvent(_BaseEvent):
     event_type: Literal["liquidation"] = "liquidation"
     price: float
@@ -168,6 +177,7 @@ NormalizedEvent = Annotated[
         FundingEvent,
         MarkEvent,
         OracleEvent,
+        OpenInterestEvent,
         LiquidationEvent,
         MarketMetaEvent,
         HealthEvent,

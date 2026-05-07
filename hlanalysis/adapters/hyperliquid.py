@@ -20,6 +20,7 @@ from ..events import (
     MarkEvent,
     Mechanism,
     NormalizedEvent,
+    OpenInterestEvent,
     OracleEvent,
     ProductType,
     TradeEvent,
@@ -378,6 +379,16 @@ class HyperliquidAdapter(VenueAdapter):
                 out.append(MarkEvent(**common, mark_px=float(ctx["markPx"])))
             if "oraclePx" in ctx:
                 out.append(OracleEvent(**common, oracle_px=float(ctx["oraclePx"])))
+            if "openInterest" in ctx:
+                out.append(
+                    OpenInterestEvent(
+                        **common,
+                        open_interest=float(ctx["openInterest"]),
+                        day_ntl_vlm=float(ctx["dayNtlVlm"]) if ctx.get("dayNtlVlm") is not None else None,
+                        prev_day_px=float(ctx["prevDayPx"]) if ctx.get("prevDayPx") is not None else None,
+                        mid_px=float(ctx["midPx"]) if ctx.get("midPx") is not None else None,
+                    )
+                )
 
         elif channel == "subscriptionResponse":
             out.append(self._health("subscribed", json.dumps(data) if data else ""))
