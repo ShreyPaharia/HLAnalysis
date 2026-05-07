@@ -23,6 +23,7 @@ from ..events import (
     OpenInterestEvent,
     OracleEvent,
     ProductType,
+    QuestionMetaEvent,
     TradeEvent,
 )
 from .base import VenueAdapter
@@ -49,6 +50,19 @@ OUTCOME_REFRESH_INTERVAL_S = 60.0
 RECONNECT_WINDOW_S = 60.0
 RECONNECT_THRESHOLD = 8
 RECONNECT_COOLDOWN_S = 300.0
+
+
+def _parse_description(desc: str) -> dict[str, str]:
+    """Parse HL outcomeMeta description like
+    'class:priceBucket|underlying:BTC|expiry:20260508-0600|priceThresholds:79303,82540|period:1d'
+    into {'class': 'priceBucket', 'underlying': 'BTC', ...}.
+    """
+    return dict(p.split(":", 1) for p in (desc or "").split("|") if ":" in p)
+
+
+def _matches(rule: dict, fields: dict[str, str]) -> bool:
+    # Replaced in Task 5 with full implementation.
+    return True
 
 
 class HyperliquidAdapter(VenueAdapter):
@@ -214,6 +228,11 @@ class HyperliquidAdapter(VenueAdapter):
             for ev in self._fetch_outcome_meta_events(new_subs, meta_seen):
                 yield ev
 
+        if not hasattr(self, "_meta_seen_questions"):
+            self._meta_seen_questions: dict[int, tuple[int, ...]] = {}
+        for ev in self._fetch_question_meta_events(templates, self._meta_seen_questions):
+            yield ev
+
     async def _refresh_wildcards(
         self,
         ws: websockets.WebSocketClientProtocol,
@@ -250,6 +269,11 @@ class HyperliquidAdapter(VenueAdapter):
             new_subs = [active_now[s] for s in new_syms]
             for ev in self._fetch_outcome_meta_events(new_subs, meta_seen):
                 yield ev
+
+        if not hasattr(self, "_meta_seen_questions"):
+            self._meta_seen_questions: dict[int, tuple[int, ...]] = {}
+        for ev in self._fetch_question_meta_events(templates, self._meta_seen_questions):
+            yield ev
 
     def _expand_wildcard(self, template: Subscription) -> list[Subscription]:
         try:
@@ -427,11 +451,7 @@ class HyperliquidAdapter(VenueAdapter):
                     continue
                 meta_seen.add(coin)
                 desc = o.get("description") or ""
-                fields = dict(
-                    p.split(":", 1)
-                    for p in desc.split("|")
-                    if ":" in p
-                )
+                fields = _parse_description(desc)
                 keys = ["outcome_idx", "side_idx", "side_name", "outcome_name"]
                 values = [
                     str(outcome_idx),
@@ -454,6 +474,70 @@ class HyperliquidAdapter(VenueAdapter):
                         values=values,
                     )
                 )
+        return out
+
+    def _fetch_question_meta_events(
+        self,
+        templates: list[Subscription],
+        meta_seen_questions: dict[int, tuple[int, ...]],
+        meta_payload: dict | None = None,
+    ) -> list[NormalizedEvent]:
+        """Emit QuestionMetaEvent on first sight of a question and again whenever
+        its `settledNamedOutcomes` tuple changes. `meta_seen_questions` maps
+        question_idx -> last-seen tuple(settledNamedOutcomes).
+
+        `meta_payload` lets a caller pass a pre-fetched outcomeMeta dict so we don't
+        double-fetch in the same poll cycle.
+        """
+        if meta_payload is None:
+            try:
+                r = requests.post(HL_INFO_URL, json={"type": "outcomeMeta"}, timeout=5)
+                r.raise_for_status()
+                meta_payload = r.json()
+            except Exception as e:
+                log.warning("outcomeMeta fetch failed (questions): %s", e)
+                return []
+
+        if not templates:
+            return []
+        tmpl = templates[0]
+        recv_ns = time.time_ns()
+        out: list[NormalizedEvent] = []
+        for q in meta_payload.get("questions", []) or []:
+            qidx = q.get("question")
+            if qidx is None:
+                continue
+            settled = tuple(q.get("settledNamedOutcomes") or [])
+            prev = meta_seen_questions.get(qidx)
+            if prev == settled:
+                continue
+            meta_seen_questions[qidx] = settled
+            desc = q.get("description") or ""
+            fields = _parse_description(desc)
+            tmpl_match = getattr(tmpl, "match", None)
+            if tmpl_match and not _matches(tmpl_match, fields):
+                continue
+            keys = ["question_name", "question_description"]
+            values = [str(q.get("name", "")), desc]
+            for k, v in fields.items():
+                keys.append(k)
+                values.append(v)
+            out.append(
+                QuestionMetaEvent(
+                    venue=self.venue,
+                    product_type=tmpl.product_type,
+                    mechanism=tmpl.mechanism,
+                    symbol=f"Q{qidx}",
+                    exchange_ts=recv_ns,
+                    local_recv_ts=recv_ns,
+                    question_idx=int(qidx),
+                    named_outcome_idxs=[int(x) for x in (q.get("namedOutcomes") or [])],
+                    fallback_outcome_idx=(int(q["fallbackOutcome"]) if q.get("fallbackOutcome") is not None else None),
+                    settled_named_outcome_idxs=[int(x) for x in settled],
+                    keys=keys,
+                    values=values,
+                )
+            )
         return out
 
     def _health(self, kind: str, detail: str) -> HealthEvent:

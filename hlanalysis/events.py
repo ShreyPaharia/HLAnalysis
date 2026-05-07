@@ -29,6 +29,7 @@ class EventType(str, Enum):
     OPEN_INTEREST = "open_interest"
     LIQUIDATION = "liquidation"
     MARKET_META = "market_meta"
+    QUESTION_META = "question_meta"
     QUOTE_REQUEST = "quote_request"
     QUOTE = "quote"
     AUCTION_OPEN = "auction_open"
@@ -143,6 +144,23 @@ class MarketMetaEvent(_BaseEvent):
     values: list[str]
 
 
+class QuestionMetaEvent(_BaseEvent):
+    event_type: Literal["question_meta"] = "question_meta"
+    # Question identifier from outcomeMeta. Stable per recurring question class.
+    question_idx: int
+    # Sibling outcomes (e.g., the 3 buckets of a priceBucket question).
+    named_outcome_idxs: list[int]
+    # Catch-all bucket if the truth doesn't match any named outcome.
+    fallback_outcome_idx: int | None = None
+    # Question-level settlement: outcome_idx values (joinable to MarketMetaEvent.outcome_idx).
+    # Empty before settlement; one element after. We re-emit this event when this changes.
+    settled_named_outcome_idxs: list[int] = Field(default_factory=list)
+    # Free-form parsed description (class, underlying, expiry, priceThresholds, period).
+    # Same parallel-arrays shape as MarketMetaEvent.
+    keys: list[str] = Field(default_factory=list)
+    values: list[str] = Field(default_factory=list)
+
+
 class HealthEvent(_BaseEvent):
     event_type: Literal["health"] = "health"
     kind: str  # "stall", "gap", "reconnect", "subscribed", ...
@@ -180,6 +198,7 @@ NormalizedEvent = Annotated[
         OpenInterestEvent,
         LiquidationEvent,
         MarketMetaEvent,
+        QuestionMetaEvent,
         HealthEvent,
         QuoteRequestEvent,
         QuoteEvent,
