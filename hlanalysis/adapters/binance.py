@@ -158,6 +158,11 @@ class BinanceAdapter(VenueAdapter):
         out: list[NormalizedEvent] = []
 
         # Spot bookTicker has no "e" field; identify by "u" + "b" + "a".
+        # Binance Spot's @bookTicker payload is {u, s, b, B, a, A} with NO timestamp
+        # field — neither E nor T. We therefore cannot record an exchange-side ts here;
+        # use 0 as an explicit "exchange ts unavailable" sentinel rather than copying
+        # recv_ns (which would silently masquerade as a real exchange ts and produce
+        # an apparent zero `local_recv_ts - exchange_ts` latency in analytics).
         if e is None and "b" in msg and "a" in msg and "s" in msg:
             sub = sym_to_sub.get(msg["s"].upper())
             if sub is None:
@@ -168,7 +173,7 @@ class BinanceAdapter(VenueAdapter):
                     product_type=sub.product_type,
                     mechanism=sub.mechanism,
                     symbol=msg["s"].upper(),
-                    exchange_ts=recv_ns,
+                    exchange_ts=0,  # not provided by Binance spot @bookTicker
                     local_recv_ts=recv_ns,
                     seq=int(msg.get("u", 0)),
                     bid_px=float(msg["b"]),
@@ -180,6 +185,8 @@ class BinanceAdapter(VenueAdapter):
             return out
 
         # Spot partial depth has no "e" but has lastUpdateId + bids/asks.
+        # Same caveat as spot @bookTicker: <symbol>@depth<levels>[@100ms] payload is
+        # {lastUpdateId, bids, asks} with no timestamp. exchange_ts=0 sentinel.
         if e is None and "lastUpdateId" in msg and "bids" in msg and "asks" in msg:
             # Spot depth doesn't carry a symbol — look it up from the active sub if there's
             # exactly one spot symbol; multi-symbol spot needs combined-stream URL form.
@@ -192,7 +199,7 @@ class BinanceAdapter(VenueAdapter):
                     product_type=sub.product_type,
                     mechanism=sub.mechanism,
                     symbol=sub.symbol.upper(),
-                    exchange_ts=recv_ns,
+                    exchange_ts=0,  # not provided by Binance spot partial-depth stream
                     local_recv_ts=recv_ns,
                     seq=int(msg["lastUpdateId"]),
                     bid_px=[float(b[0]) for b in msg["bids"]],

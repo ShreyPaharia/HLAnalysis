@@ -277,17 +277,27 @@ class HyperliquidAdapter(VenueAdapter):
         out: list[NormalizedEvent] = []
 
         if channel == "trades" and isinstance(data, list):
+            # HL's `trades` channel pushes batched messages AFTER block finalization.
+            # Each fill carries `time` = on-chain block time (ms), which is what HL
+            # treats as canonical (see WsTrade docs: "for a globally unique trade id,
+            # use (block_time, coin, tid)"). There is no message-level send timestamp
+            # in the WS payload, so we cannot distinguish ws-publish latency here —
+            # only block→recv latency, which empirically runs several seconds.
+            # We populate `block_ts` explicitly and keep `exchange_ts` set to the same
+            # value for backward compat with notebooks that compare across venues.
             for t in data:
                 sub = sym_to_sub.get(t.get("coin"))
                 if sub is None:
                     continue
+                block_ns = int(t["time"]) * 1_000_000
                 out.append(
                     TradeEvent(
                         venue=self.venue,
                         product_type=sub.product_type,
                         mechanism=sub.mechanism,
                         symbol=t["coin"],
-                        exchange_ts=int(t["time"]) * 1_000_000,
+                        exchange_ts=block_ns,
+                        block_ts=block_ns,
                         local_recv_ts=recv_ns,
                         price=float(t["px"]),
                         size=float(t["sz"]),

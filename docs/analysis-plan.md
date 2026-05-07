@@ -104,6 +104,18 @@ Both `exchange_ts` and `local_recv_ts` are recorded; the difference is
 informative even when noisy. Negative p50 latency means the local clock is
 behind the venue's clock — an NTP issue, not a network issue.
 
+**Per-venue `exchange_ts` semantics — read this before computing latencies:**
+
+| (venue, event)            | `exchange_ts` source                                  | Notes |
+| ------------------------- | ----------------------------------------------------- | ----- |
+| binance perp bbo / trade  | `T` field (event/trade time, ms)                      | Real exchange-side ts. ~62ms typical recv latency. |
+| binance spot bbo          | **0 (sentinel — not provided)**                       | `@bookTicker` payload has no ts field. Filter `WHERE exchange_ts > 0` before any latency calc. |
+| binance spot book         | **0 (sentinel — not provided)**                       | `@depth<N>` payload has no ts field. Same filter. |
+| binance spot trade        | `T` field (trade time, ms)                            | Real exchange-side ts. |
+| hyperliquid bbo / book    | `time` field (block time, ms)                         | Block-finality time, not ws send time. |
+| hyperliquid trade         | `time` field = **block time** (ms; mirrored to `block_ts`) | HL ships trades in batched ws messages several seconds AFTER block finalization. Median `local_recv_ts - exchange_ts` ~ 5s is real publishing lag, not network. Use `block_ts` when you need to be explicit you're talking about block time. |
+| hyperliquid activeAssetCtx (mark/funding/oracle) | `recv_ns` (no ts in ctx payload)            | Not a real exchange ts; `local_recv_ts - exchange_ts` ≈ 0. |
+
 ```sql
 SELECT
   venue, product_type, symbol, event,
@@ -111,7 +123,9 @@ SELECT
   approx_quantile((local_recv_ts - exchange_ts)/1e6, 0.95) AS p95_ms,
   approx_quantile((local_recv_ts - exchange_ts)/1e6, 0.99) AS p99_ms
 FROM read_parquet('data/**/*.parquet', hive_partitioning=true)
-WHERE event IN ('trade','bbo','book_snapshot') AND symbol != '*'
+WHERE event IN ('trade','bbo','book_snapshot')
+  AND symbol != '*'
+  AND exchange_ts > 0  -- exclude binance spot bbo/book where exchange_ts is sentinel
 GROUP BY 1,2,3,4
 ORDER BY 1,2,3,4;
 ```

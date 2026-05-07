@@ -44,8 +44,16 @@ class _BaseEvent(BaseModel):
     product_type: ProductType
     mechanism: Mechanism
     symbol: str
-    exchange_ts: int  # nanoseconds since epoch (best-effort from venue)
-    local_recv_ts: int  # nanoseconds since epoch, monotonic-ish from this host
+    # exchange_ts: nanoseconds since epoch, best-effort from the venue. Per-venue caveats:
+    #   - binance spot @bookTicker / partial-depth: no ts in payload → recorded as 0.
+    #   - binance perp @bookTicker / @depth* / @trade / @aggTrade: msg["T"] (trade/event ms).
+    #   - hyperliquid trade: data[i]["time"] = on-chain BLOCK time (NOT ws transport time).
+    #     HL's ws API does not expose a message-level send timestamp, and HL ships
+    #     trades in batches some seconds after block finalization. For HL trades, use
+    #     `block_ts` for explicit block semantics; `exchange_ts` is set to the same value.
+    #   - hyperliquid bbo / l2Book: data["time"] = block time at the BBO/book change.
+    exchange_ts: int
+    local_recv_ts: int  # nanoseconds since epoch, captured from time.time_ns() on this host
     seq: int | None = None
 
 
@@ -55,6 +63,13 @@ class TradeEvent(_BaseEvent):
     size: float
     side: Literal["buy", "sell", "unknown"]  # taker side
     trade_id: str | None = None
+    # On-chain block timestamp (ns since epoch). Currently set only for hyperliquid
+    # trades, where HL's ws `trades` channel timestamps each fill with the block-finality
+    # time of the matching block, not the time the message was sent over the wire. Other
+    # venues leave this null. Keep `exchange_ts` for backward-compat (it's populated to
+    # the same value on HL); use `block_ts` when you need to be explicit that this is
+    # block time vs transport time.
+    block_ts: int | None = None
 
 
 class BookSnapshotEvent(_BaseEvent):
