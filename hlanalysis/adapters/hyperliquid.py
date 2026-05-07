@@ -24,6 +24,7 @@ from ..events import (
     OracleEvent,
     ProductType,
     QuestionMetaEvent,
+    SettlementEvent,
     TradeEvent,
 )
 from .base import VenueAdapter
@@ -131,6 +132,15 @@ class HyperliquidAdapter(VenueAdapter):
                     for sub in sym_to_sub.values():
                         await self._subscribe_for(ws, sub, ws_subscribed)
 
+                    # HIP-4 outcome lifecycle stream. Replaces the 60s REST poll for
+                    # creation/settlement events. The startup _sync_wildcards above the
+                    # `async with` block still runs as a snapshot sync (covers events
+                    # missed during the disconnect).
+                    if wildcard_templates:
+                        await ws.send(
+                            json.dumps({"method": "subscribe", "subscription": {"type": "outcomeMetaUpdates"}})
+                        )
+
                     async for raw in ws:
                         recv_ns = time.time_ns()
                         try:
@@ -140,6 +150,17 @@ class HyperliquidAdapter(VenueAdapter):
                         for ev in self._handle(msg, recv_ns, sym_to_sub):
                             yield ev
 
+                        if (
+                            wildcard_templates
+                            and msg.get("channel") == "outcomeMetaUpdates"
+                            and isinstance(msg.get("data"), dict)
+                        ):
+                            async for ev in self._apply_outcome_update(
+                                ws, msg["data"], wildcard_templates, sym_to_sub, ws_subscribed, meta_seen
+                            ):
+                                yield ev
+
+                        # Keep the periodic poll as a safety net.
                         if (
                             wildcard_templates
                             and time.monotonic() - last_meta_refresh > OUTCOME_REFRESH_INTERVAL_S
@@ -308,6 +329,62 @@ class HyperliquidAdapter(VenueAdapter):
                 out.append(template.model_copy(update={"symbol": coin}))
         return out
 
+    async def _apply_outcome_update(
+        self,
+        ws: websockets.WebSocketClientProtocol,
+        data: dict,
+        templates: list[Subscription],
+        sym_to_sub: dict[str, Subscription],
+        ws_subscribed: set[tuple[str, str]],
+        meta_seen: set[str],
+    ) -> AsyncIterator[NormalizedEvent]:
+        """React to an outcomeMetaUpdates payload: dynamically (un)subscribe per-coin
+        streams and refresh outcome+question metadata. Runs after _handle() emits any
+        SettlementEvent, so consumers see settle → unsubscribe → meta-refresh order.
+        """
+        kind = data.get("kind")
+        outcome_idx = data.get("outcome")
+        if outcome_idx is None:
+            return
+
+        if kind == "outcomeCreated":
+            for tmpl in templates:
+                for expanded in self._expand_wildcard(tmpl):
+                    if expanded.symbol in sym_to_sub:
+                        continue
+                    sym_to_sub[expanded.symbol] = expanded
+                    yield self._health("outcome-discovered", expanded.symbol)
+                    await self._subscribe_for(ws, expanded, ws_subscribed)
+            new_subs = [s for s in sym_to_sub.values() if s.product_type == ProductType.PREDICTION_BINARY]
+            for ev in self._fetch_outcome_meta_events(new_subs, meta_seen):
+                yield ev
+            if not hasattr(self, "_meta_seen_questions"):
+                self._meta_seen_questions = {}
+            for ev in self._fetch_question_meta_events(templates, self._meta_seen_questions):
+                yield ev
+
+        elif kind == "outcomeSettled":
+            for side_idx in (0, 1):
+                coin = f"#{10 * int(outcome_idx) + side_idx}"
+                if coin not in sym_to_sub:
+                    continue
+                native_types = {_STD_TO_HL[ch] for ch in sym_to_sub[coin].channels if ch in _STD_TO_HL}
+                for native in native_types:
+                    key = (coin, native)
+                    if key in ws_subscribed:
+                        try:
+                            await ws.send(json.dumps({"method": "unsubscribe", "subscription": {"type": native, "coin": coin}}))
+                        except Exception as e:
+                            log.warning("hyperliquid: unsubscribe %s/%s failed: %s", coin, native, e)
+                        ws_subscribed.discard(key)
+                sym_to_sub.pop(coin, None)
+                meta_seen.discard(coin)
+                yield self._health("outcome-rolled", coin)
+            if not hasattr(self, "_meta_seen_questions"):
+                self._meta_seen_questions = {}
+            for ev in self._fetch_question_meta_events(templates, self._meta_seen_questions):
+                yield ev
+
     def _handle(
         self,
         msg: dict,
@@ -428,6 +505,40 @@ class HyperliquidAdapter(VenueAdapter):
                         day_ntl_vlm=float(ctx["dayNtlVlm"]) if ctx.get("dayNtlVlm") is not None else None,
                         prev_day_px=float(ctx["prevDayPx"]) if ctx.get("prevDayPx") is not None else None,
                         mid_px=float(ctx["midPx"]) if ctx.get("midPx") is not None else None,
+                    )
+                )
+
+        elif channel == "outcomeMetaUpdates" and isinstance(data, dict):
+            # Payload (HL docs):
+            #   { "kind": "outcomeCreated" | "outcomeSettled",
+            #     "outcome": <idx>, "settledSideIdx": <0|1>,
+            #     "settlePrice": "<float-as-str>" (optional),
+            #     "time": <ms> (block time), ... }
+            # Per-coin (un)subscribe is handled by the caller (needs live ws).
+            kind = data.get("kind")
+            outcome_idx = data.get("outcome")
+            if kind == "outcomeSettled" and outcome_idx is not None:
+                settled_side_idx = int(data.get("settledSideIdx", 0))
+                settle_ts_ns = int(data.get("time", 0)) * 1_000_000 if data.get("time") else recv_ns
+                settle_price_raw = data.get("settlePrice")
+                settle_price = float(settle_price_raw) if settle_price_raw is not None else None
+                winning_coin = f"#{10 * int(outcome_idx) + settled_side_idx}"
+                sub = sym_to_sub.get(winning_coin)
+                product_type = sub.product_type if sub else ProductType.PREDICTION_BINARY
+                mechanism = sub.mechanism if sub else Mechanism.CLOB
+                out.append(
+                    SettlementEvent(
+                        venue=self.venue,
+                        product_type=product_type,
+                        mechanism=mechanism,
+                        symbol=winning_coin,
+                        exchange_ts=settle_ts_ns,
+                        local_recv_ts=recv_ns,
+                        settled_side_idx=settled_side_idx,
+                        settle_price=settle_price,
+                        settle_ts=settle_ts_ns,
+                        keys=[],
+                        values=[],
                     )
                 )
 

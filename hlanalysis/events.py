@@ -37,6 +37,7 @@ class EventType(str, Enum):
     FILL = "fill"
     DEALER_STATE = "dealer_state"
     HEALTH = "health"
+    SETTLEMENT = "settlement"
 
 
 class _BaseEvent(BaseModel):
@@ -161,6 +162,15 @@ class QuestionMetaEvent(_BaseEvent):
     values: list[str] = Field(default_factory=list)
 
 
+class SettlementEvent(_BaseEvent):
+    event_type: Literal["settlement"] = "settlement"
+    settled_side_idx: int
+    settle_price: float | None = None
+    settle_ts: int
+    keys: list[str] = Field(default_factory=list)
+    values: list[str] = Field(default_factory=list)
+
+
 class HealthEvent(_BaseEvent):
     event_type: Literal["health"] = "health"
     kind: str  # "stall", "gap", "reconnect", "subscribed", ...
@@ -199,6 +209,7 @@ NormalizedEvent = Annotated[
         LiquidationEvent,
         MarketMetaEvent,
         QuestionMetaEvent,
+        SettlementEvent,
         HealthEvent,
         QuoteRequestEvent,
         QuoteEvent,
