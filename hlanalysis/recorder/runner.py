@@ -49,7 +49,10 @@ async def _flusher(writer: ParquetWriter, stop: asyncio.Event) -> None:
 
 async def run(config_path: Path, data_root: Path) -> None:
     config = load_config(config_path)
-    writer = ParquetWriter(data_root)
+    # 5 min time-trigger; per-key row cap stays at the writer default. Live small files
+    # are merged hourly by `scripts/compact-data.sh` (called from the S3 sync timer).
+    # Hard-crash data-loss bound: ~5 min.
+    writer = ParquetWriter(data_root, flush_interval_s=300.0)
 
     by_venue: dict[str, list[Subscription]] = defaultdict(list)
     for sub in config.subscriptions:
