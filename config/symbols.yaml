@@ -10,14 +10,22 @@ subscriptions:
   # via outcomeMeta (refreshed every 60s). When a market expires and a new one opens
   # with a different encoding, the adapter automatically subscribes and emits
   # outcome-discovered / outcome-rolled health events at the boundary.
+  # `mark` dropped: outcome coins have no activeAssetCtx → that subscription was a no-op.
   - venue: hyperliquid
     product_type: prediction_binary
     mechanism: clob
     symbol: "*"
+    channels: [trades, book, bbo]
+
+  # Hyperliquid spot BTC (UBTC/USDC, "@142" in spotMeta, displayed as BTC/USDC in UI).
+  # Same-venue depth/liquidity reference for the HIP-4 strategy depth guard.
+  - venue: hyperliquid
+    product_type: spot
+    mechanism: clob
+    symbol: "@142"
     channels: [trades, book, bbo, mark]
 
   # Binance USDT-margined BTC perp (reference + hedge venue).
-  # Note: liquidations stream is IP-restricted on Binance; mark/funding via REST poll.
   - venue: binance
     product_type: perp
     mechanism: clob
