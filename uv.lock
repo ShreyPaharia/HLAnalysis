@@ -775,6 +775,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "requests" },
     { name = "websockets" },
 ]
 
@@ -807,6 +808,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pytz", marker = "extra == 'analysis'", specifier = ">=2024.2" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "requests", specifier = ">=2.32" },
     { name = "scipy", marker = "extra == 'analysis'", specifier = ">=1.14" },
     { name = "websockets", specifier = ">=13.0" },
 ]

@@ -18,7 +18,7 @@ rm -f "$PIDFILE"
 
 nohup .venv/bin/python -m hlanalysis.recorder.main \
     --config config/symbols.yaml \
-    --data-root data \
+    --data-root data-local \
     --log-file logs/recorder.log \
     --log-level INFO \
     > logs/stdout.log 2>&1 &
