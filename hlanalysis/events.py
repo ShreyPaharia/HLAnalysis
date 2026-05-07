@@ -70,6 +70,13 @@ class TradeEvent(_BaseEvent):
     # the same value on HL); use `block_ts` when you need to be explicit that this is
     # block time vs transport time.
     block_ts: int | None = None
+    # HL-only: WsTrade.users = [buyer_address, seller_address]. Other venues null.
+    # Used for wallet-attribution / adverse-selection analysis (HIP-4 strategy P4).
+    buyer: str | None = None
+    seller: str | None = None
+    # HL-only: WsTrade.hash = L1 tx hash of the matching block. Useful for dedup
+    # across reconnects, since HL re-publishes recent trades after stream re-attach.
+    block_hash: str | None = None
 
 
 class BookSnapshotEvent(_BaseEvent):

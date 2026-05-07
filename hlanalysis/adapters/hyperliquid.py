@@ -290,6 +290,9 @@ class HyperliquidAdapter(VenueAdapter):
                 if sub is None:
                     continue
                 block_ns = int(t["time"]) * 1_000_000
+                users = t.get("users") or [None, None]
+                buyer = users[0] if len(users) > 0 else None
+                seller = users[1] if len(users) > 1 else None
                 out.append(
                     TradeEvent(
                         venue=self.venue,
@@ -303,6 +306,9 @@ class HyperliquidAdapter(VenueAdapter):
                         size=float(t["sz"]),
                         side="buy" if t.get("side") == "B" else "sell",
                         trade_id=str(t.get("tid", "")) or None,
+                        buyer=buyer,
+                        seller=seller,
+                        block_hash=t.get("hash"),
                     )
                 )
 
