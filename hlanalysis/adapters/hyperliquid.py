@@ -61,6 +61,24 @@ def _parse_description(desc: str) -> dict[str, str]:
     return dict(p.split(":", 1) for p in (desc or "").split("|") if ":" in p)
 
 
+def _outcome_to_question_fields(payload: dict) -> dict[int, dict[str, str]]:
+    """Build outcome_idx -> parsed-fields-of-its-owning-question, for outcomes
+    that participate in a multi-outcome question (named or fallback). Used so
+    bucket coins inherit `class`/`underlying` from the question for match-filter
+    purposes — HL only puts those fields on the question description, not on
+    the per-bucket outcome description.
+    """
+    result: dict[int, dict[str, str]] = {}
+    for q in payload.get("questions", []) or []:
+        fields = _parse_description(q.get("description", ""))
+        for o_idx in q.get("namedOutcomes") or []:
+            result[int(o_idx)] = fields
+        fb = q.get("fallbackOutcome")
+        if fb is not None:
+            result[int(fb)] = fields
+    return result
+
+
 def _matches(rule: dict[str, object], fields: dict[str, str]) -> bool:
     """Return True iff every (key, value) in `rule` is satisfied by `fields`.
     String value → exact match. List value → membership. Missing key → no match.
@@ -317,12 +335,19 @@ class HyperliquidAdapter(VenueAdapter):
             log.warning("outcomeMeta fetch failed: %s", e)
             return []
         out: list[Subscription] = []
+        # HIP-4 multi-outcome (priceBucket) questions put `class:`/`underlying:`
+        # on the *question* description; the bucket coins themselves carry only
+        # `index:N` or `other`. So an outcome's effective metadata for matching
+        # is the union of its owning question's fields + its own (own wins on key
+        # conflict, since per-coin description is more specific).
+        o2q = _outcome_to_question_fields(data)
         for o in data.get("outcomes", []):
             outcome_idx = o.get("outcome")
             if outcome_idx is None:
                 continue
-            desc_fields = _parse_description(o.get("description", ""))
-            if template.match and not _matches(template.match, desc_fields):
+            own_fields = _parse_description(o.get("description", ""))
+            effective = {**o2q.get(int(outcome_idx), {}), **own_fields}
+            if template.match and not _matches(template.match, effective):
                 continue
             for side_idx, _ in enumerate(o.get("sideSpecs", [])):
                 coin = f"#{10 * outcome_idx + side_idx}"
@@ -628,23 +653,31 @@ class HyperliquidAdapter(VenueAdapter):
 
         if not templates:
             return []
-        tmpl = templates[0]
         recv_ns = time.time_ns()
         out: list[NormalizedEvent] = []
         for q in meta_payload.get("questions", []) or []:
             qidx = q.get("question")
             if qidx is None:
                 continue
+            desc = q.get("description") or ""
+            fields = _parse_description(desc)
+            # Accept the question if any template's match passes (templates with
+            # no match accept everything). Filter check happens BEFORE the dedup
+            # state update, so a filter miss doesn't poison future emits.
+            matching_tmpl = next(
+                (
+                    t for t in templates
+                    if not getattr(t, "match", None) or _matches(t.match, fields)
+                ),
+                None,
+            )
+            if matching_tmpl is None:
+                continue
             settled = tuple(q.get("settledNamedOutcomes") or [])
             prev = meta_seen_questions.get(qidx)
             if prev == settled:
                 continue
             meta_seen_questions[qidx] = settled
-            desc = q.get("description") or ""
-            fields = _parse_description(desc)
-            tmpl_match = getattr(tmpl, "match", None)
-            if tmpl_match and not _matches(tmpl_match, fields):
-                continue
             keys = ["question_name", "question_description"]
             values = [str(q.get("name", "")), desc]
             for k, v in fields.items():
@@ -653,8 +686,8 @@ class HyperliquidAdapter(VenueAdapter):
             out.append(
                 QuestionMetaEvent(
                     venue=self.venue,
-                    product_type=tmpl.product_type,
-                    mechanism=tmpl.mechanism,
+                    product_type=matching_tmpl.product_type,
+                    mechanism=matching_tmpl.mechanism,
                     symbol=f"Q{qidx}",
                     exchange_ts=recv_ns,
                     local_recv_ts=recv_ns,
