@@ -4,7 +4,7 @@ from __future__ import annotations
 from hlanalysis.strategy.types import (
     Action, BookState, Position, QuestionView,
 )
-from hlanalysis.strategy.model_edge import ModelEdgeConfig, ModelEdgeStrategy
+from hlanalysis.strategy.model_edge import ModelEdgeConfig, ModelEdgeStrategy, _ANNUAL_SECONDS
 
 
 def _cfg(**overrides) -> ModelEdgeConfig:
@@ -131,3 +131,47 @@ def test_enters_no_when_p_model_far_below_market():
     )
     assert out.action == Action.ENTER
     assert out.intents[0].symbol == "NO"
+
+
+def test_p_model_matches_empirical_on_synthetic_gbm():
+    """Generate N GBM paths with known σ and check v2's p_model is close to empirical YES rate."""
+    import math
+    import numpy as np
+    rng = np.random.default_rng(42)
+    n_paths = 20_000
+    sigma_true = 0.6
+    tau_yr = 0.5
+    s0 = 100_000.0
+    strike = 101_000.0
+    # Sample terminal prices under GBM
+    z = rng.standard_normal(n_paths)
+    s_t = s0 * np.exp(-0.5 * sigma_true ** 2 * tau_yr + sigma_true * np.sqrt(tau_yr) * z)
+    empirical_p = float((s_t > strike).mean())
+
+    # Build recent_returns at 60s sampling such that σ_raw × annualization ≈ σ_true.
+    sample_dt_s = 60
+    n_samples = 240
+    sigma_raw = sigma_true / math.sqrt(_ANNUAL_SECONDS / sample_dt_s)
+    returns = tuple(rng.normal(loc=-0.5 * sigma_raw**2, scale=sigma_raw, size=n_samples).tolist())
+
+    s = ModelEdgeStrategy(_cfg(
+        vol_lookback_seconds=n_samples * sample_dt_s,
+        vol_sampling_dt_seconds=sample_dt_s,
+        vol_clip_min=0.0,
+        vol_clip_max=10.0,
+    ))
+    out = s.evaluate(
+        question=_q(strike=strike, expiry_ns=int(tau_yr * _ANNUAL_SECONDS * 1e9)),
+        books={"YES": BookState("YES", 0.0, 1, 1.0, 1, 0, 0),
+               "NO":  BookState("NO",  0.0, 1, 1.0, 1, 0, 0)},
+        reference_price=s0,
+        recent_returns=returns,
+        recent_volume_usd=10000.0,
+        position=None,
+        now_ns=0,
+    )
+    # Pull p_model out of diagnostics
+    diag = next(d for d in out.diagnostics if d.message == "edge")
+    fields = dict(diag.fields)
+    p_model = float(fields["p_model"])
+    assert abs(p_model - empirical_p) < 0.02, f"p_model={p_model} empirical={empirical_p}"

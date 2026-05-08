@@ -104,8 +104,9 @@ class ModelEdgeStrategy(Strategy):
             mu_eff = self.cfg.drift_blend * mu_ann
 
         # 4) p_model under GBM with optional drift
+        # d uses Itô-corrected GBM: ln(S/K) + (μ - ½σ²)τ — matching physical measure
         ln_sk = math.log(reference_price / question.strike)
-        d = (ln_sk + mu_eff * tau_yr) / (sigma * math.sqrt(tau_yr))
+        d = (ln_sk + (mu_eff - 0.5 * sigma ** 2) * tau_yr) / (sigma * math.sqrt(tau_yr))
         p_model = float(norm.cdf(d))
 
         # 5) Need both legs' asks to compute edges
