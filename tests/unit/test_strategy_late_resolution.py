@@ -263,3 +263,58 @@ def test_hold_when_position_already_held():
     )
     # No re-entry; exit logic runs separately (Task 6)
     assert d.action is not Action.ENTER
+
+
+def test_exit_signal_when_question_is_settled():
+    from hlanalysis.strategy.types import Position
+    now = 10_000_000_000_000
+    q = QuestionView(
+        question_idx=42, yes_symbol="@30", no_symbol="@31",
+        strike=80_000.0, expiry_ns=now - 1_000_000,
+        underlying="BTC", klass="priceBinary", period="1h",
+        settled=True, settled_side="yes",
+    )
+    books = {
+        "@30": _ref_book("@30", ask=1.0, bid=1.0, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.0, bid=0.0, ts_ns=now - 100),
+    }
+    pos = Position(
+        question_idx=q.question_idx, symbol="@30", qty=10.0, avg_entry=0.95,
+        stop_loss_price=0.855, last_update_ts_ns=now - 1_000_000,
+    )
+    d = LateResolutionStrategy(_cfg()).evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=pos, now_ns=now,
+    )
+    assert d.action is Action.EXIT
+    # Settlement-driven exit: zero intents — engine marks the position closed
+    # at the venue's settlement value, no order needed.
+    assert d.intents == ()
+
+
+def test_exit_intent_when_price_below_stop_loss():
+    from hlanalysis.strategy.types import Position
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(expiry_ns=expiry)
+    books = {
+        "@30": _ref_book("@30", ask=0.84, bid=0.83, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.16, bid=0.15, ts_ns=now - 100),
+    }
+    pos = Position(
+        question_idx=q.question_idx, symbol="@30", qty=10.0, avg_entry=0.95,
+        stop_loss_price=0.855, last_update_ts_ns=now - 1_000_000,
+    )
+    d = LateResolutionStrategy(_cfg()).evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=pos, now_ns=now,
+    )
+    assert d.action is Action.EXIT
+    assert len(d.intents) == 1
+    intent = d.intents[0]
+    assert intent.symbol == "@30"
+    assert intent.side == "sell"
+    assert intent.reduce_only is True
+    assert intent.time_in_force == "ioc"
