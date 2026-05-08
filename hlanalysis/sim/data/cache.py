@@ -57,3 +57,6 @@ class Cache:
 
     def get_manifest(self, condition_id: str) -> dict:
         return self._load_manifest().get(condition_id, {})
+
+    def manifest_keys(self) -> list[str]:
+        return list(self._load_manifest().keys())

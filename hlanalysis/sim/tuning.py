@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import importlib
 import itertools
 import json
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -10,6 +13,7 @@ from hlanalysis.strategy.base import Strategy
 
 from .data.binance_klines import Kline
 from .data.schemas import PMMarket, PMTrade
+from .fills import FillModelConfig
 from .metrics import RunSummary, summarise_run
 from .runner import RunnerConfig, run_one_market
 from .walkforward import walk_forward_splits
@@ -84,3 +88,77 @@ def run_tuning(
                 }) + "\n")
                 f.flush()
                 yield cell
+
+
+def _resolve_dotted(name: str):
+    mod, _, attr = name.rpartition(".")
+    return getattr(importlib.import_module(mod), attr)
+
+
+def _run_one_split_for_params(args: tuple) -> dict:
+    (params, factory_dotted, train_jobs, test_jobs,
+     scanner_dt, fill_cfg_kwargs, half_spread, depth) = args
+    strategy_factory = _resolve_dotted(factory_dotted)
+    strat = strategy_factory(params)
+    fill_cfg = FillModelConfig(**fill_cfg_kwargs)
+    pnl_per_market: list[float] = []
+    n_trades = 0
+    for job in test_jobs:
+        rcfg = RunnerConfig(
+            scanner_interval_seconds=scanner_dt,
+            fill_model=fill_cfg,
+            synthetic_half_spread=half_spread,
+            synthetic_depth=depth,
+            day_open_btc=job.day_open_btc,
+        )
+        res = run_one_market(strat, job.market, job.klines, job.trades, rcfg)
+        pnl_per_market.append(res.realized_pnl_usd or 0.0)
+        n_trades += len(res.fills)
+    summary = summarise_run(pnl_per_market, n_trades=n_trades)
+    return {
+        "params": params,
+        "n_train": len(train_jobs), "n_test": len(test_jobs),
+        "summary": asdict(summary),
+        "train_ids": [j.market.condition_id for j in train_jobs],
+        "test_ids":  [j.market.condition_id for j in test_jobs],
+    }
+
+
+def run_tuning_parallel(
+    *,
+    grid: dict[str, list[Any]],
+    strategy_factory: Callable[[dict[str, Any]], Strategy],
+    runner_cfg_factory: Callable[[dict[str, Any]], RunnerConfig],
+    jobs: list[TuningJob],
+    train: int, test: int, step: int,
+    out_dir: Path, n_workers: int,
+) -> Iterator[dict]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    splits = list(walk_forward_splits(jobs, train=train, test=test, step=step, drop_short_tail=True))
+    factory_dotted = f"{strategy_factory.__module__}.{strategy_factory.__name__}"
+
+    base_rcfg = runner_cfg_factory({})
+    fc = base_rcfg.fill_model
+    fill_cfg_kwargs = {
+        "slippage_bps": fc.slippage_bps,
+        "fee_taker": fc.fee_taker,
+        "book_depth_assumption": fc.book_depth_assumption,
+    }
+
+    work = []
+    for params in iter_grid(grid):
+        for tr, te in splits:
+            work.append((
+                params, factory_dotted, tr, te,
+                base_rcfg.scanner_interval_seconds, fill_cfg_kwargs,
+                base_rcfg.synthetic_half_spread, base_rcfg.synthetic_depth,
+            ))
+
+    log_path = out_dir / "results.jsonl"
+    with log_path.open("a") as f, ProcessPoolExecutor(
+        max_workers=n_workers, mp_context=mp.get_context("spawn")
+    ) as ex:
+        for row in ex.map(_run_one_split_for_params, work):
+            f.write(json.dumps(row, default=str) + "\n")
+            f.flush()
+            yield row
