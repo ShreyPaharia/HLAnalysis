@@ -14,7 +14,10 @@ def build_v2_strategy_from_params(params: dict[str, Any]) -> ModelEdgeStrategy:
         vol_clip_max=float(params.get("vol_clip_max", 3.0)),
         edge_buffer=float(params["edge_buffer"]),
         fee_taker=float(params.get("fee_taker", 0.02)),
-        half_spread_assumption=float(params.get("half_spread_assumption", 0.005)),
+        # Default 0 because the sim's synthetic L2 already adds the half_spread to
+        # the ask. Subtracting it again would double-count crossing cost. Keep
+        # configurable for callers that feed real (mid-quoted) book data.
+        half_spread_assumption=float(params.get("half_spread_assumption", 0.0)),
         stop_loss_pct=(float(params["stop_loss_pct"]) if params["stop_loss_pct"] is not None else None),
         drift_lookback_seconds=drift_lb,
         drift_blend=float(params.get("drift_blend", 1.0 if drift_lb else 0.0)),

@@ -69,6 +69,7 @@ def run_one_market(
     events = list(build_event_stream(
         trades=trades, klines=klines,
         half_spread=cfg.synthetic_half_spread, depth=cfg.synthetic_depth,
+        yes_token_id=market.yes_token_id, no_token_id=market.no_token_id,
     ))
 
     stop_pct = _strategy_stop_loss_pct(strategy)
