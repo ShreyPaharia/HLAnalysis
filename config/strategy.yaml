@@ -1,0 +1,40 @@
+strategy:
+  name: late_resolution
+  paper_mode: true                      # Phase 1 default — explicit edit to go live
+
+  # Pattern-based allowlist; matches QuestionMetaEvent fields.
+  # Auto-applies across rollovers; blocklist for per-instance escape hatch.
+  allowlist:
+    - match:
+        class: priceBinary
+        underlying: BTC
+        period: 1h
+      max_position_usd: 100
+      stop_loss_pct: 10
+      tte_min_seconds: 60
+      tte_max_seconds: 1800
+      price_extreme_threshold: 0.95
+      distance_from_strike_usd_min: 200
+      vol_max: 0.5
+    # Add more class entries as new question classes are approved for trading
+
+  blocklist_question_idxs: []           # explicit per-instance exclusions
+
+  defaults:
+    match: {}
+    max_position_usd: 100
+    stop_loss_pct: 10
+    tte_min_seconds: 60
+    tte_max_seconds: 1800
+    price_extreme_threshold: 0.95
+    distance_from_strike_usd_min: 200
+    vol_max: 0.5
+
+  global:
+    max_total_inventory_usd: 500
+    max_concurrent_positions: 5
+    daily_loss_cap_usd: 200
+    max_strike_distance_pct: 10
+    min_recent_volume_usd: 1000
+    stale_data_halt_seconds: 5
+    reconcile_interval_seconds: 60

@@ -1,0 +1,12 @@
+deploy:
+  env: dev                              # dev | staging | prod
+  hl:
+    account_address: ${HL_ACCOUNT_ADDRESS}
+    api_secret_key: ${HL_API_SECRET_KEY}
+    base_url: https://api.hyperliquid.xyz
+  alerts:
+    telegram:
+      bot_token: ${TG_BOT_TOKEN}
+      chat_id: ${TG_CHAT_ID}
+  state_db_path: data/engine/state.db
+  kill_switch_path: data/engine/halt
