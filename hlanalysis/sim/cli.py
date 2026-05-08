@@ -212,7 +212,8 @@ def main() -> None:
     pr.add_argument("--cache-root", default="data/sim")
     pr.add_argument("--out-dir", required=True)
     pr.add_argument("--slippage-bps", type=float, default=5.0)
-    pr.add_argument("--fee-taker", type=float, default=0.02)
+    pr.add_argument("--fee-taker", type=float, default=0.0,
+                    help="Polymarket CLOB takers pay 0%; HL HIP-4 ~3-5bps")
     pr.add_argument("--half-spread", type=float, default=0.005)
     pr.add_argument("--depth", type=float, default=10000.0)
     pr.set_defaults(func=cmd_run)
@@ -225,7 +226,8 @@ def main() -> None:
     pt.add_argument("--run-id", required=True)
     pt.add_argument("--workers", type=int, default=4)
     pt.add_argument("--slippage-bps", type=float, default=5.0)
-    pt.add_argument("--fee-taker", type=float, default=0.02)
+    pt.add_argument("--fee-taker", type=float, default=0.0,
+                    help="Polymarket CLOB takers pay 0%; HL HIP-4 ~3-5bps")
     pt.add_argument("--half-spread", type=float, default=0.005)
     pt.add_argument("--depth", type=float, default=10000.0)
     pt.set_defaults(func=cmd_tune)

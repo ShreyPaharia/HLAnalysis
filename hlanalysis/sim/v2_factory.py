@@ -13,7 +13,9 @@ def build_v2_strategy_from_params(params: dict[str, Any]) -> ModelEdgeStrategy:
         vol_clip_min=float(params.get("vol_clip_min", 0.05)),
         vol_clip_max=float(params.get("vol_clip_max", 3.0)),
         edge_buffer=float(params["edge_buffer"]),
-        fee_taker=float(params.get("fee_taker", 0.02)),
+        # PM CLOB taker fee = 0% (since ~2024). Override per param dict for HL HIP-4
+        # or other venues with non-zero taker fees.
+        fee_taker=float(params.get("fee_taker", 0.0)),
         # Default 0 because the sim's synthetic L2 already adds the half_spread to
         # the ask. Subtracting it again would double-count crossing cost. Keep
         # configurable for callers that feed real (mid-quoted) book data.
