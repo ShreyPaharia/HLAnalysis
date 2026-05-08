@@ -49,8 +49,11 @@ def cmd_fetch(args: argparse.Namespace) -> None:
         if cache.read_trades(m.condition_id) and not args.refresh:
             continue
         trades = polymarket.fetch_trades(m.condition_id)
-        # Spec §4.1 per-market floor filter — skip illiquid markets
-        if len(trades) < args.min_trades or m.total_volume_usd < args.min_volume_usd:
+        # Spec §4.1 per-market floor filter — skip illiquid markets.
+        # Gamma's `volume` is sometimes 0 even for active markets (unreliable source),
+        # so only enforce the volume floor when Gamma actually reports a positive value.
+        vol_below_floor = (m.total_volume_usd > 0) and (m.total_volume_usd < args.min_volume_usd)
+        if len(trades) < args.min_trades or vol_below_floor:
             logger.info(
                 f"PM {m.condition_id}: skip (trades={len(trades)} vol=${m.total_volume_usd:.0f})"
             )

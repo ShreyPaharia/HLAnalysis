@@ -98,14 +98,28 @@ _PAGE_SIZE = 500
 
 
 def fetch_trades(condition_id: str) -> list[PMTrade]:
-    """Page through CLOB /trades for a single market and return parsed trades."""
+    """Page through CLOB /trades for a single market and return parsed trades.
+
+    PM data-api caps offset around ~3500 — beyond that it returns 400. Treat
+    that as end-of-data and warn; for our use case (24h binary markets) we
+    rarely exceed that, but very-active markets will lose the tail.
+    """
     out: list[PMTrade] = []
     offset = 0
     while True:
-        page = _http_get(
-            f"{_CLOB_DATA_BASE}/trades",
-            params={"market": condition_id, "limit": _PAGE_SIZE, "offset": offset},
-        )
+        try:
+            page = _http_get(
+                f"{_CLOB_DATA_BASE}/trades",
+                params={"market": condition_id, "limit": _PAGE_SIZE, "offset": offset},
+            )
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 400 and offset > 0:
+                logger.warning(
+                    f"PM trades pagination capped at offset={offset} for {condition_id} "
+                    f"(returned 400). Returning partial result."
+                )
+                break
+            raise
         if not page:
             break
         for row in page:
