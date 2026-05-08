@@ -1,0 +1,79 @@
+# tests/unit/test_engine_config.py
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from hlanalysis.engine.config import (
+    AllowlistEntry,
+    DeployConfig,
+    StrategyConfig,
+    load_deploy_config,
+    load_strategy_config,
+    match_question,
+)
+
+
+def test_load_strategy_yaml_from_repo():
+    cfg = load_strategy_config(Path("config/strategy.yaml"))
+    assert cfg.name == "late_resolution"
+    assert cfg.paper_mode is True
+    assert cfg.global_.max_total_inventory_usd == 500
+    assert cfg.global_.daily_loss_cap_usd == 200
+
+
+def test_allowlist_match_picks_first_matching_entry(tmp_path):
+    cfg = StrategyConfig(
+        name="late_resolution",
+        paper_mode=True,
+        allowlist=[
+            AllowlistEntry(
+                match={"class": "priceBinary", "underlying": "BTC", "period": "1h"},
+                max_position_usd=100, stop_loss_pct=10, tte_min_seconds=60,
+                tte_max_seconds=1800, price_extreme_threshold=0.95,
+                distance_from_strike_usd_min=200, vol_max=0.5,
+            ),
+        ],
+        blocklist_question_idxs=[],
+        defaults=AllowlistEntry(
+            match={}, max_position_usd=50, stop_loss_pct=10, tte_min_seconds=60,
+            tte_max_seconds=1800, price_extreme_threshold=0.95,
+            distance_from_strike_usd_min=200, vol_max=0.5,
+        ),
+        global_={"max_total_inventory_usd": 500, "max_concurrent_positions": 5,
+                 "daily_loss_cap_usd": 200, "max_strike_distance_pct": 10,
+                 "min_recent_volume_usd": 1000, "stale_data_halt_seconds": 5,
+                 "reconcile_interval_seconds": 60},
+    )
+    # Match: priceBinary BTC 1h
+    matched = match_question(cfg, question_idx=42, fields={"class": "priceBinary", "underlying": "BTC", "period": "1h"})
+    assert matched is not None
+    assert matched.max_position_usd == 100
+
+    # Blocklist override
+    cfg2 = cfg.model_copy(update={"blocklist_question_idxs": [42]})
+    assert match_question(cfg2, question_idx=42, fields={"class": "priceBinary", "underlying": "BTC", "period": "1h"}) is None
+
+    # No match → None (defaults are not auto-applied for unmatched classes)
+    assert match_question(cfg, question_idx=43, fields={"class": "priceBucket", "underlying": "ETH"}) is None
+
+
+def test_deploy_config_substitutes_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("HL_ACCOUNT_ADDRESS", "0xdeadbeef")
+    monkeypatch.setenv("HL_API_SECRET_KEY", "secret")
+    monkeypatch.setenv("TG_BOT_TOKEN", "tg-token")
+    monkeypatch.setenv("TG_CHAT_ID", "12345")
+    p = tmp_path / "deploy.yaml"
+    p.write_text(Path("config/deploy.yaml").read_text())
+    cfg = load_deploy_config(p)
+    assert cfg.hl.account_address == "0xdeadbeef"
+    assert cfg.alerts.telegram.bot_token == "tg-token"
+
+
+def test_deploy_config_missing_env_raises(monkeypatch, tmp_path):
+    monkeypatch.delenv("HL_ACCOUNT_ADDRESS", raising=False)
+    p = tmp_path / "deploy.yaml"
+    p.write_text(Path("config/deploy.yaml").read_text())
+    with pytest.raises(ValueError):
+        load_deploy_config(p)
