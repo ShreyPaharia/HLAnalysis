@@ -42,6 +42,28 @@ class TuningCellResult:
     summary: RunSummary
 
 
+def _cell_key(params: dict[str, Any], test_ids: list[str]) -> tuple:
+    """Stable key for resumability — identifies a (param tuple, OOS test set) cell."""
+    return (tuple(sorted(params.items())), tuple(test_ids))
+
+
+def _load_completed_cells(log_path: Path) -> set[tuple]:
+    if not log_path.exists():
+        return set()
+    completed: set[tuple] = set()
+    for line in log_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        params = row.get("params") or {}
+        test_ids = row.get("test_ids") or []
+        completed.add(_cell_key(params, test_ids))
+    return completed
+
+
 def run_tuning(
     *,
     grid: dict[str, list[Any]],
@@ -54,13 +76,18 @@ def run_tuning(
     out_dir: Path,
 ) -> Iterator[TuningCellResult]:
     out_dir.mkdir(parents=True, exist_ok=True)
+    # drop partial tail for uniform OOS window sizes (Sharpe stats stability)
     splits = list(walk_forward_splits(jobs, train=train, test=test, step=step, drop_short_tail=True))
     log_path = out_dir / "results.jsonl"
+    completed = _load_completed_cells(log_path)
     with log_path.open("a") as f:
         for params in iter_grid(grid):
             strat = strategy_factory(params)
             base_rcfg = runner_cfg_factory(params)
             for tr_jobs, te_jobs in splits:
+                test_ids = [j.market.condition_id for j in te_jobs]
+                if _cell_key(params, test_ids) in completed:
+                    continue
                 pnl_per_market: list[float] = []
                 n_trades = 0
                 for job in te_jobs:
@@ -84,6 +111,8 @@ def run_tuning(
                 f.write(json.dumps({
                     "params": params,
                     "n_train": len(tr_jobs), "n_test": len(te_jobs),
+                    "train_ids": cell.train_ids,
+                    "test_ids":  cell.test_ids,
                     "summary": asdict(summary),
                 }) + "\n")
                 f.flush()
@@ -145,16 +174,21 @@ def run_tuning_parallel(
         "book_depth_assumption": fc.book_depth_assumption,
     }
 
+    log_path = out_dir / "results.jsonl"
+    completed = _load_completed_cells(log_path)
+
     work = []
     for params in iter_grid(grid):
         for tr, te in splits:
+            test_ids = [j.market.condition_id for j in te]
+            if _cell_key(params, test_ids) in completed:
+                continue
             work.append((
                 params, factory_dotted, tr, te,
                 base_rcfg.scanner_interval_seconds, fill_cfg_kwargs,
                 base_rcfg.synthetic_half_spread, base_rcfg.synthetic_depth,
             ))
 
-    log_path = out_dir / "results.jsonl"
     with log_path.open("a") as f, ProcessPoolExecutor(
         max_workers=n_workers, mp_context=mp.get_context("spawn")
     ) as ex:

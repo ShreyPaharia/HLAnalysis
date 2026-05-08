@@ -7,7 +7,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .schemas import PMTrade
+from .schemas import PMMarket, PMTrade
 
 
 @dataclass(slots=True)
@@ -50,13 +50,30 @@ class Cache:
             return {}
         return json.loads(self._manifest_path.read_text())
 
-    def update_manifest(self, *, condition_id: str, n_rows: int, last_pull_ts_ns: int) -> None:
+    def update_manifest(
+        self,
+        *,
+        condition_id: str,
+        n_rows: int,
+        last_pull_ts_ns: int,
+        market: "PMMarket | None" = None,
+    ) -> None:
         m = self._load_manifest()
-        m[condition_id] = {"n_rows": n_rows, "last_pull_ts_ns": last_pull_ts_ns}
+        entry = {"n_rows": n_rows, "last_pull_ts_ns": last_pull_ts_ns}
+        if market is not None:
+            entry["market"] = market.model_dump()
+        m[condition_id] = entry
         self._manifest_path.write_text(json.dumps(m, indent=2))
 
     def get_manifest(self, condition_id: str) -> dict:
         return self._load_manifest().get(condition_id, {})
+
+    def get_market(self, condition_id: str) -> "PMMarket | None":
+        entry = self.get_manifest(condition_id)
+        raw = entry.get("market")
+        if not raw:
+            return None
+        return PMMarket(**raw)
 
     def manifest_keys(self) -> list[str]:
         return list(self._load_manifest().keys())

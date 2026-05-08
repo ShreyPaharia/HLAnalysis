@@ -30,15 +30,27 @@ class RunResult:
     diagnostics_count: int = 0
 
 
-def _strategy_stop_loss_pct(strategy: Strategy) -> float:
-    """Sim-only contract: v1/v2 strategies expose `cfg.stop_loss_pct`. None or
-    sentinel-large value disables the stop. Used to set Position.stop_loss_price
-    after a fill — the runner needs *some* stop level for stop-loss simulation.
+_STOP_DISABLED_SENTINEL = -1.0  # bid_px is always ≥ 0 for PM, so this never trips
+
+
+def _strategy_stop_loss_pct(strategy: Strategy) -> float | None:
+    """Sim-only contract: v1/v2 strategies expose `cfg.stop_loss_pct`. None
+    disables the stop. Returns None when disabled, else the percentage.
     """
     raw = getattr(getattr(strategy, "cfg", None), "stop_loss_pct", None)
     if raw is None:
-        return 1e9
+        return None
+    # v1 historically used a large sentinel float to mean "no stop"; treat the
+    # same as None so pure-Python None and the sentinel converge.
+    if float(raw) >= 1e8:
+        return None
     return float(raw)
+
+
+def _stop_price(fill_price: float, stop_pct: float | None) -> float:
+    if stop_pct is None:
+        return _STOP_DISABLED_SENTINEL
+    return max(0.0, fill_price * (1.0 - stop_pct / 100.0))
 
 
 def run_one_market(
@@ -48,7 +60,7 @@ def run_one_market(
     trades: list[PMTrade],
     cfg: RunnerConfig,
 ) -> RunResult:
-    state = SimMarketState(vol_sampling_dt_seconds=60)
+    state = SimMarketState()
     result = RunResult()
     pos: Position | None = None
     last_scan_ns = market.start_ts_ns
@@ -96,7 +108,7 @@ def run_one_market(
                 fill = simulate_fill(intent, book, cfg.fill_model)
                 if fill.size > 0:
                     result.fills.append(fill)
-                    stop_px = max(0.0, fill.price * (1.0 - stop_pct / 100.0))
+                    stop_px = _stop_price(fill.price, stop_pct)
                     pos = Position(
                         question_idx=qv.question_idx, symbol=intent.symbol,
                         qty=fill.size, avg_entry=fill.price,

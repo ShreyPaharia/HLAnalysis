@@ -13,7 +13,8 @@ from .synthetic_l2 import L2Snapshot
 
 @dataclass(slots=True)
 class SimMarketState:
-    vol_sampling_dt_seconds: int
+    """In-memory book + recent BTC log-returns. Strategies decide their own
+    sampling cadence; this just collects the inputs."""
     _books: dict[str, BookState] = None  # type: ignore[assignment]
     _kline_closes: deque = None          # type: ignore[assignment]
 

@@ -49,11 +49,21 @@ def cmd_fetch(args: argparse.Namespace) -> None:
         if cache.read_trades(m.condition_id) and not args.refresh:
             continue
         trades = polymarket.fetch_trades(m.condition_id)
+        # Spec §4.1 per-market floor filter — skip illiquid markets
+        if len(trades) < args.min_trades or m.total_volume_usd < args.min_volume_usd:
+            logger.info(
+                f"PM {m.condition_id}: skip (trades={len(trades)} vol=${m.total_volume_usd:.0f})"
+            )
+            continue
+        # Backfill n_trades from the actual fetched count and persist canonical metadata
+        # so the cache is self-contained for downstream loading.
+        m_persist = m.model_copy(update={"n_trades": len(trades)})
         cache.write_trades(m.condition_id, trades)
         cache.update_manifest(
             condition_id=m.condition_id,
             n_rows=len(trades),
             last_pull_ts_ns=int(datetime.now(timezone.utc).timestamp() * 1e9),
+            market=m_persist,
         )
         logger.info(f"PM {m.condition_id}: {len(trades)} trades")
     klines = fetch_klines(
@@ -83,17 +93,18 @@ def _load_jobs_from_cache(cache_root: Path) -> list[TuningJob]:
         trades = cache.read_trades(cond_id)
         if not trades:
             continue
-        ts_min = min(t.ts_ns for t in trades)
-        ts_max = max(t.ts_ns for t in trades)
-        token_ids = sorted({t.token_id for t in trades})
-        if len(token_ids) != 2:
+        m = cache.get_market(cond_id)
+        if m is None:
+            # Legacy cache without persisted metadata. Refuse to fabricate canonical
+            # YES/NO ordering from trades — sorted() doesn't match PM's clobTokenIds
+            # order, and an unknown outcome silently settles every position to 0.
+            # Re-fetch with `hl-sim fetch --refresh` to populate the manifest.
+            logger.warning(
+                f"PM {cond_id}: missing manifest metadata (legacy cache); skipping. "
+                f"Re-run `hl-sim fetch --refresh` to populate."
+            )
             continue
-        m = PMMarket(
-            condition_id=cond_id, yes_token_id=token_ids[0], no_token_id=token_ids[1],
-            start_ts_ns=ts_min, end_ts_ns=ts_max,
-            resolved_outcome="unknown", total_volume_usd=0.0, n_trades=len(trades),
-        )
-        market_klines = [k for k in klines if ts_min <= k.ts_ns <= ts_max]
+        market_klines = [k for k in klines if m.start_ts_ns <= k.ts_ns <= m.end_ts_ns]
         if not market_klines:
             continue
         jobs.append(TuningJob(
@@ -186,6 +197,10 @@ def main() -> None:
     pf.add_argument("--end", required=True)
     pf.add_argument("--cache-root", default="data/sim")
     pf.add_argument("--refresh", action="store_true")
+    pf.add_argument("--min-trades", type=int, default=30,
+                    help="Skip markets with fewer trades (spec §4.1 floor)")
+    pf.add_argument("--min-volume-usd", type=float, default=1000.0,
+                    help="Skip markets with notional volume below this (spec §4.1 floor)")
     pf.set_defaults(func=cmd_fetch)
 
     pr = sp.add_parser("run", help="Run one strategy config across cached markets")

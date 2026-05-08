@@ -135,12 +135,27 @@ def _parse_trade(row: dict) -> PMTrade | None:
 _CLOB_BASE = "https://clob.polymarket.com"
 
 
-def fetch_prices_history(token_id: str, interval: str = "1m") -> list[dict]:
-    """Return [{ts_ns: int, price: float}, ...] sorted by ts ascending."""
-    payload = _http_get(
-        f"{_CLOB_BASE}/prices-history",
-        params={"market": token_id, "interval": interval},
-    )
+_FIDELITY_FOR_INTERVAL = {"1m": 10, "5m": 10, "15m": 10, "1h": 60, "4h": 240, "1d": 1440}
+
+
+def fetch_prices_history(
+    token_id: str,
+    interval: str = "1m",
+    fidelity: int | None = None,
+) -> list[dict]:
+    """Return [{ts_ns: int, price: float}, ...] sorted by ts ascending.
+
+    PM CLOB requires `fidelity` for sub-hourly intervals (undocumented; empirically
+    needed for 1m). Defaults are picked to satisfy the API minimum per interval;
+    callers can override by passing `fidelity=N` explicitly.
+
+    Currently used only as a sparse-trade fallback; not wired into `cmd_fetch`.
+    """
+    params = {"market": token_id, "interval": interval}
+    fid = fidelity if fidelity is not None else _FIDELITY_FOR_INTERVAL.get(interval)
+    if fid is not None:
+        params["fidelity"] = fid
+    payload = _http_get(f"{_CLOB_BASE}/prices-history", params=params)
     history = payload.get("history") if isinstance(payload, dict) else []
     rows = [{"ts_ns": int(float(r["t"]) * 1e9), "price": float(r["p"])} for r in history]
     rows.sort(key=lambda r: r["ts_ns"])

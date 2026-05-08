@@ -1,4 +1,13 @@
 # hlanalysis/sim/hftbt_adapter.py
+"""Chronological event stream over PM trades + Binance klines.
+
+Named `hftbt_adapter` because the long-term plan (umbrella spec §9 Phase 2,
+this spec §5.3) is to drive the runner via `hftbacktest`. For taker-IOC against
+synthetic L2 derived from trades, the queue-position machinery in hftbacktest
+buys us nothing today — the merge below is functionally what we'd hand
+hftbacktest anyway. The dep stays in pyproject.toml for the HL HIP-4 swap;
+this module is the seam where that swap will land.
+"""
 from __future__ import annotations
 
 import heapq
