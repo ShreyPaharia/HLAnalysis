@@ -1,0 +1,175 @@
+from __future__ import annotations
+
+import math
+import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+import numpy as np
+
+from .base import Strategy
+from .types import (
+    Action,
+    BookState,
+    Decision,
+    Diagnostic,
+    OrderIntent,
+    Position,
+    QuestionView,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class LateResolutionConfig:
+    tte_min_seconds: int
+    tte_max_seconds: int
+    price_extreme_threshold: float    # winning-leg ask must be ≥ this (e.g. 0.95)
+    distance_from_strike_usd_min: float
+    vol_max: float                    # annualised stdev of log-returns ceiling
+    max_position_usd: float
+    stop_loss_pct: float              # absolute % drawdown at which the exit fires
+    max_strike_distance_pct: float    # reject if |strike − BTC|/BTC > this
+    min_recent_volume_usd: float
+    stale_data_halt_seconds: int
+
+
+class LateResolutionStrategy(Strategy):
+    """Phase 1 heuristic late-resolution arb on HIP-4 binaries.
+
+    Entry: TTE in window AND winning leg's ask ≥ extreme threshold AND
+           |strike − BTC| ≥ distance_min AND realized vol ≤ cap AND book health OK
+           AND no existing position on this question.
+    Side:  buy whichever leg BTC says wins, IOC at top-of-book ask.
+    Exit:  handled by separate `evaluate_exit()` (Task 6) — settlement is engine-driven,
+           stop-loss is enforced by risk gate continuously; strategy returns EXIT
+           only as a soft signal alongside the engine's hard stop.
+    """
+
+    name = "late_resolution"
+
+    def __init__(self, cfg: LateResolutionConfig) -> None:
+        self.cfg = cfg
+
+    def evaluate(
+        self,
+        *,
+        question: QuestionView,
+        books: Mapping[str, BookState],
+        reference_price: float,
+        recent_returns: tuple[float, ...],
+        recent_volume_usd: float,
+        position: Position | None,
+        now_ns: int,
+    ) -> Decision:
+        diags: list[Diagnostic] = []
+
+        if question.settled:
+            if position is not None:
+                # Settlement-driven exit: no order needed; engine resolves PnL via venue.
+                return Decision(
+                    action=Action.EXIT,
+                    intents=(),
+                    diagnostics=(Diagnostic("info", "exit_settlement"),),
+                )
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "settled"),))
+
+        if position is not None:
+            # Soft stop-loss signal. The risk gate is the authoritative enforcer
+            # (Plan 1B); we mirror it here so logging/diagnostics line up.
+            held_book = books.get(position.symbol)
+            if held_book is not None and held_book.bid_px is not None:
+                if held_book.bid_px <= position.stop_loss_price:
+                    intent = OrderIntent(
+                        question_idx=question.question_idx,
+                        symbol=position.symbol,
+                        side="sell" if position.qty > 0 else "buy",
+                        size=abs(position.qty),
+                        limit_price=held_book.bid_px,
+                        cloid=f"hla-{uuid.uuid4()}",
+                        time_in_force="ioc",
+                        reduce_only=True,
+                    )
+                    return Decision(
+                        action=Action.EXIT,
+                        intents=(intent,),
+                        diagnostics=(Diagnostic("warn", "exit_stop_loss"),),
+                    )
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "have_position"),))
+
+        # 1) TTE
+        tte_s = (question.expiry_ns - now_ns) / 1e9
+        if not (self.cfg.tte_min_seconds <= tte_s <= self.cfg.tte_max_seconds):
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tte_s:.0f}"),)),
+            ))
+
+        # 2) Pick winning side per BTC vs strike
+        if reference_price > question.strike:
+            win_symbol = question.yes_symbol
+        elif reference_price < question.strike:
+            win_symbol = question.no_symbol
+        else:
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "ref_at_strike"),))
+
+        win = books.get(win_symbol)
+        if win is None or win.ask_px is None or win.bid_px is None:
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_book"),))
+
+        # 3) Book health: not stale
+        stale_ns = self.cfg.stale_data_halt_seconds * 1_000_000_000
+        if now_ns - win.last_l2_ts_ns > stale_ns:
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "book_stale"),))
+
+        # 4) Winning leg must be near 1.0 (the discount-from-1 is our edge)
+        if win.ask_px < self.cfg.price_extreme_threshold:
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "not_extreme", (("ask", f"{win.ask_px:.3f}"),)),
+            ))
+
+        # 5) Distance from strike
+        distance_usd = abs(reference_price - question.strike)
+        if distance_usd < self.cfg.distance_from_strike_usd_min:
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "distance_below_min", (("dist", f"{distance_usd:.0f}"),)),
+            ))
+        # 5b) Engine-level safety: reject if BTC is absurdly far from strike (config's max_strike_distance_pct)
+        if reference_price > 0 and (distance_usd / reference_price) > (self.cfg.max_strike_distance_pct / 100.0):
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("warn", "distance_above_max"),
+            ))
+
+        # 6) Realized vol cap (sample stdev of log-returns; treat as raw, not annualised)
+        if len(recent_returns) < 2:
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "vol_insufficient_data"),))
+        vol = float(np.std(recent_returns, ddof=1))
+        if vol > self.cfg.vol_max:
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "vol_above_cap", (("vol", f"{vol:.4f}"),)),
+            ))
+
+        # 7) Recent-volume sanity (avoid dead questions)
+        if recent_volume_usd < self.cfg.min_recent_volume_usd:
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "low_volume", (("vol_usd", f"{recent_volume_usd:.0f}")),),
+            ))
+
+        # 8) Build the IOC intent. Size = max_position_usd / ask_px, taking entry
+        # cost as a proxy for notional. Risk gate caps this again.
+        size = max(0.0, math.floor((self.cfg.max_position_usd / win.ask_px) * 100) / 100)
+        if size <= 0:
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"),))
+
+        intent = OrderIntent(
+            question_idx=question.question_idx,
+            symbol=win_symbol,
+            side="buy",
+            size=size,
+            limit_price=win.ask_px,
+            cloid=f"hla-{uuid.uuid4()}",
+            time_in_force="ioc",
+        )
+        return Decision(
+            action=Action.ENTER,
+            intents=(intent,),
+            diagnostics=(Diagnostic("info", "entry"),),
+        )
