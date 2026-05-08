@@ -45,6 +45,9 @@ class SimMarketState:
     def apply_kline(self, k: Kline) -> None:
         self._kline_closes.append((k.ts_ns, k.close))
 
+    def latest_btc_close(self) -> float | None:
+        return self._kline_closes[-1][1] if self._kline_closes else None
+
     def recent_returns(self, *, now_ns: int, lookback_seconds: int) -> tuple[float, ...]:
         window_ns = lookback_seconds * 1_000_000_000
         cutoff = now_ns - window_ns
