@@ -78,5 +78,39 @@ class ModelEdgeStrategy(Strategy):
                 )
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "have_position"),))
 
-        # Entry logic in subsequent tasks
-        return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "skeleton"),))
+        # 1) τ in years
+        tau_yr = (question.expiry_ns - now_ns) / 1e9 / _ANNUAL_SECONDS
+        if tau_yr <= 0:
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "tau_nonpositive"),))
+
+        # 2) σ from recent_returns sliced to lookback; annualize and clip
+        n_keep = max(2, self.cfg.vol_lookback_seconds // self.cfg.vol_sampling_dt_seconds)
+        returns_window = recent_returns[-n_keep:]
+        if len(returns_window) < 2:
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "vol_insufficient_data"),))
+        sigma_raw = float(np.std(returns_window, ddof=1))
+        ann_factor = math.sqrt(_ANNUAL_SECONDS / float(self.cfg.vol_sampling_dt_seconds))
+        sigma = max(self.cfg.vol_clip_min, min(self.cfg.vol_clip_max, sigma_raw * ann_factor))
+        if sigma <= 0:
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "sigma_zero"),))
+
+        # 3) Drift μ
+        mu_eff = 0.0
+        if self.cfg.drift_lookback_seconds > 0 and self.cfg.drift_blend > 0:
+            n_drift = max(1, self.cfg.drift_lookback_seconds // self.cfg.vol_sampling_dt_seconds)
+            window = recent_returns[-n_drift:]
+            mu_per_sample = float(np.mean(window))
+            mu_ann = mu_per_sample * (_ANNUAL_SECONDS / float(self.cfg.vol_sampling_dt_seconds))
+            mu_eff = self.cfg.drift_blend * mu_ann
+
+        # Entry decision deferred to next task; HOLD with computed diagnostics for now.
+        return Decision(
+            action=Action.HOLD,
+            diagnostics=(
+                Diagnostic("info", "computed", (
+                    ("sigma", f"{sigma:.4f}"),
+                    ("tau_yr", f"{tau_yr:.6f}"),
+                    ("mu_eff", f"{mu_eff:.4f}"),
+                )),
+            ),
+        )

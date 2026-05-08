@@ -65,3 +65,20 @@ def test_exits_when_settled_with_position():
         now_ns=0,
     )
     assert out.action == Action.EXIT
+
+
+def test_holds_when_recent_returns_insufficient():
+    s = ModelEdgeStrategy(_cfg())
+    out = s.evaluate(
+        question=_q(),
+        books={"YES": BookState("YES", 0.4, 100, 0.5, 100, 0, 0),
+               "NO":  BookState("NO",  0.4, 100, 0.5, 100, 0, 0)},
+        reference_price=100_500.0,
+        recent_returns=(0.001,),  # only 1, sample stdev needs ≥ 2
+        recent_volume_usd=0,
+        position=None,
+        now_ns=0,
+    )
+    assert out.action == Action.HOLD
+    diag_msgs = [d.message for d in out.diagnostics]
+    assert "vol_insufficient_data" in diag_msgs
