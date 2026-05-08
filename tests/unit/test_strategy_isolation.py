@@ -30,7 +30,9 @@ FORBIDDEN_PREFIXES = {
     "sqlalchemy",
     "duckdb",
     "boto3",
-    "asyncio",  # strategy must be sync
+    "asyncio",
+    "hyperliquid",
+    "tenacity",
 }
 
 
