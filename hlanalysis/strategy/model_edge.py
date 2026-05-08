@@ -103,14 +103,54 @@ class ModelEdgeStrategy(Strategy):
             mu_ann = mu_per_sample * (_ANNUAL_SECONDS / float(self.cfg.vol_sampling_dt_seconds))
             mu_eff = self.cfg.drift_blend * mu_ann
 
-        # Entry decision deferred to next task; HOLD with computed diagnostics for now.
+        # 4) p_model under GBM with optional drift
+        ln_sk = math.log(reference_price / question.strike)
+        d = (ln_sk + mu_eff * tau_yr) / (sigma * math.sqrt(tau_yr))
+        p_model = float(norm.cdf(d))
+
+        # 5) Need both legs' asks to compute edges
+        yes = books.get(question.yes_symbol)
+        no_ = books.get(question.no_symbol)
+        if yes is None or yes.ask_px is None or no_ is None or no_.ask_px is None:
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_book"),))
+
+        edge_yes = p_model - yes.ask_px - self.cfg.fee_taker - self.cfg.half_spread_assumption
+        edge_no  = (1.0 - p_model) - no_.ask_px - self.cfg.fee_taker - self.cfg.half_spread_assumption
+
+        diag_common = Diagnostic("info", "edge", (
+            ("p_model", f"{p_model:.4f}"),
+            ("edge_yes", f"{edge_yes:.4f}"),
+            ("edge_no", f"{edge_no:.4f}"),
+            ("sigma", f"{sigma:.4f}"),
+            ("tau_yr", f"{tau_yr:.6f}"),
+            ("ln_sk", f"{ln_sk:.4f}"),
+        ))
+
+        if max(edge_yes, edge_no) <= self.cfg.edge_buffer:
+            return Decision(action=Action.HOLD, diagnostics=(diag_common,))
+
+        if edge_yes >= edge_no:
+            target_book = yes
+            target_symbol = question.yes_symbol
+        else:
+            target_book = no_
+            target_symbol = question.no_symbol
+
+        size = max(0.0, math.floor((self.cfg.max_position_usd / target_book.ask_px) * 100) / 100)
+        if size <= 0:
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"), diag_common))
+
+        intent = OrderIntent(
+            question_idx=question.question_idx,
+            symbol=target_symbol,
+            side="buy",
+            size=size,
+            limit_price=target_book.ask_px,
+            cloid=f"hla-{uuid.uuid4()}",
+            time_in_force="ioc",
+        )
         return Decision(
-            action=Action.HOLD,
-            diagnostics=(
-                Diagnostic("info", "computed", (
-                    ("sigma", f"{sigma:.4f}"),
-                    ("tau_yr", f"{tau_yr:.6f}"),
-                    ("mu_eff", f"{mu_eff:.4f}"),
-                )),
-            ),
+            action=Action.ENTER,
+            intents=(intent,),
+            diagnostics=(Diagnostic("info", "entry"), diag_common),
         )

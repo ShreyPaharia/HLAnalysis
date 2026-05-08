@@ -82,3 +82,52 @@ def test_holds_when_recent_returns_insufficient():
     assert out.action == Action.HOLD
     diag_msgs = [d.message for d in out.diagnostics]
     assert "vol_insufficient_data" in diag_msgs
+
+
+def test_enters_yes_when_p_model_far_above_market():
+    # BTC well above strike, low vol, market still pricing 0.6 → big YES edge
+    s = ModelEdgeStrategy(_cfg(edge_buffer=0.02, vol_clip_min=0.1))
+    out = s.evaluate(
+        question=_q(strike=100_000.0, expiry_ns=int(0.5 * 86_400 * 1e9)),
+        books={"YES": BookState("YES", 0.59, 100, 0.60, 100, 0, 0),
+               "NO":  BookState("NO",  0.39, 100, 0.40, 100, 0, 0)},
+        reference_price=110_000.0,             # +10% above strike
+        recent_returns=tuple([0.0001] * 60),    # very low vol
+        recent_volume_usd=10000.0,
+        position=None,
+        now_ns=0,
+    )
+    assert out.action == Action.ENTER
+    assert out.intents and out.intents[0].symbol == "YES"
+    assert out.intents[0].side == "buy"
+
+
+def test_holds_when_edge_below_buffer():
+    s = ModelEdgeStrategy(_cfg(edge_buffer=0.50))   # absurdly high buffer
+    out = s.evaluate(
+        question=_q(),
+        books={"YES": BookState("YES", 0.49, 100, 0.50, 100, 0, 0),
+               "NO":  BookState("NO",  0.49, 100, 0.50, 100, 0, 0)},
+        reference_price=100_500.0,
+        recent_returns=tuple([0.001] * 60),
+        recent_volume_usd=10000.0,
+        position=None,
+        now_ns=0,
+    )
+    assert out.action == Action.HOLD
+
+
+def test_enters_no_when_p_model_far_below_market():
+    s = ModelEdgeStrategy(_cfg(edge_buffer=0.02, vol_clip_min=0.1))
+    out = s.evaluate(
+        question=_q(strike=100_000.0, expiry_ns=int(0.5 * 86_400 * 1e9)),
+        books={"YES": BookState("YES", 0.59, 100, 0.60, 100, 0, 0),
+               "NO":  BookState("NO",  0.39, 100, 0.40, 100, 0, 0)},
+        reference_price=90_000.0,              # -10% below strike → NO wins
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=10000.0,
+        position=None,
+        now_ns=0,
+    )
+    assert out.action == Action.ENTER
+    assert out.intents[0].symbol == "NO"
