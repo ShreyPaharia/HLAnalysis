@@ -13,6 +13,7 @@ ALLOWED_DIRECT_PREFIXES = {
     "hlanalysis.strategy",
     "hlanalysis.events",
     "numpy",
+    "scipy",
     "pydantic",
 }
 
