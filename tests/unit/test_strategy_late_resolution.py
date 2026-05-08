@@ -25,3 +25,12 @@ def test_order_intent_signed_size_is_required():
     )
     assert intent.size > 0
     assert intent.side in ("buy", "sell")
+
+
+from hlanalysis.strategy.base import Strategy
+
+
+def test_strategy_abc_cannot_be_instantiated_directly():
+    import pytest as _p
+    with _p.raises(TypeError):
+        Strategy()  # type: ignore[abstract]
