@@ -1,0 +1,20 @@
+# Permissive grid to diagnose signal density. Lower edge_buffer thresholds, add drift.
+
+v2_grid:
+  vol_lookback_seconds: [3600, 14400, 43200]
+  edge_buffer: [0.0, 0.005, 0.01, 0.02, 0.05]
+  stop_loss_pct: [10, null]
+  drift_lookback_seconds: [0, 14400]
+  # 0.0 = no filter (consider both sides). 0.7 = bet only the side market
+  # favors at ≥70% mid. Null sweep dimension lets us A/B vs the no-filter case.
+  favorite_threshold: [0.0, 0.7]
+
+# v1 is left out — its winning-leg-near-1.0 gate is structurally wrong for
+# the 24h regime where mid-day mispricings live below 0.85. Re-cast as a
+# follow-up after we see what shape v2 finds.
+
+run:
+  train_markets: 30
+  test_markets: 10
+  step_markets: 10
+  max_workers: 8

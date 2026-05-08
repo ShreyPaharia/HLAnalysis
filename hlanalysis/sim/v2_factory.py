@@ -24,5 +24,6 @@ def build_v2_strategy_from_params(params: dict[str, Any]) -> ModelEdgeStrategy:
         drift_lookback_seconds=drift_lb,
         drift_blend=float(params.get("drift_blend", 1.0 if drift_lb else 0.0)),
         max_position_usd=float(params.get("max_position_usd", 100.0)),
+        favorite_threshold=float(params.get("favorite_threshold", 0.0)),
     )
     return ModelEdgeStrategy(cfg)

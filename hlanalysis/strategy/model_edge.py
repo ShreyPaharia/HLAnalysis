@@ -28,6 +28,10 @@ class ModelEdgeConfig:
     drift_lookback_seconds: int = 0
     drift_blend: float = 0.0
     max_position_usd: float = 100.0
+    # Favorite-only filter. 0.0 disables (consider both sides as before). At
+    # 0.7: only bet the side the market favors at ≥70%, skip mid-market noise
+    # (0.3 ≤ p ≤ 0.7). Mid is bid+ask)/2; if no clear favorite, HOLD.
+    favorite_threshold: float = 0.0
 
 
 _ANNUAL_SECONDS = 365.25 * 86400.0
@@ -117,6 +121,22 @@ class ModelEdgeStrategy(Strategy):
 
         edge_yes = p_model - yes.ask_px - self.cfg.fee_taker - self.cfg.half_spread_assumption
         edge_no  = (1.0 - p_model) - no_.ask_px - self.cfg.fee_taker - self.cfg.half_spread_assumption
+
+        # Favorite-only filter: market mid above threshold determines the only
+        # eligible side; mid-market markets (no clear favorite) are skipped.
+        if self.cfg.favorite_threshold > 0.0:
+            yes_mid = (yes.bid_px + yes.ask_px) / 2.0 if yes.bid_px is not None else yes.ask_px
+            no_mid  = (no_.bid_px + no_.ask_px) / 2.0 if no_.bid_px is not None else no_.ask_px
+            if yes_mid >= self.cfg.favorite_threshold:
+                edge_no = -1e9   # disable contrarian NO bet
+            elif no_mid >= self.cfg.favorite_threshold:
+                edge_yes = -1e9  # disable contrarian YES bet
+            else:
+                return Decision(action=Action.HOLD, diagnostics=(
+                    Diagnostic("info", "no_favorite", (
+                        ("yes_mid", f"{yes_mid:.3f}"), ("no_mid", f"{no_mid:.3f}"),
+                    )),
+                ))
 
         diag_common = Diagnostic("info", "edge", (
             ("p_model", f"{p_model:.4f}"),

@@ -33,6 +33,9 @@ def simulate_fill(intent: OrderIntent, book: BookState, cfg: FillModelConfig) ->
         if book.bid_px is None:
             return Fill(intent.cloid, intent.symbol, "sell", 0.0, 0.0, 0.0, partial=True)
         px = book.bid_px * (1.0 - cfg.slippage_bps / 1e4)
+    # Binary instruments pay [0, 1] at settlement; slippage above the cap is
+    # economically meaningless (you'd never pay $1.0005 for a $1 ceiling).
+    px = max(0.0, min(1.0, px))
     size = min(intent.size, cfg.book_depth_assumption)
     fee = px * size * cfg.fee_taker
     return Fill(intent.cloid, intent.symbol, intent.side, px, size, fee, partial=size < intent.size)
