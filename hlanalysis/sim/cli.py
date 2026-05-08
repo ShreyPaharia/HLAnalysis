@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -62,7 +63,7 @@ def cmd_fetch(args: argparse.Namespace) -> None:
     klines_dir = Path(args.cache_root) / "btc_klines"
     klines_dir.mkdir(parents=True, exist_ok=True)
     klines_path = klines_dir / f"{args.start}_to_{args.end}.json"
-    klines_path.write_text(json.dumps([k.__dict__ for k in klines]))
+    klines_path.write_text(json.dumps([asdict(k) for k in klines]))
     logger.info(f"BTC klines: {len(klines)} → {klines_path}")
 
 
