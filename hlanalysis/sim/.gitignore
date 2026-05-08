@@ -1,0 +1,3 @@
+# Allow all source files in sim/ including data/ subpackage
+!data/
+!data/**
