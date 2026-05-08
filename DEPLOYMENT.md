@@ -304,3 +304,29 @@ make cdk-destroy
 5. **Query data**: Use DuckDB to analyze recorded Parquet files
 
 See `deploy/README.md` for more details.
+
+## Engine — paper mode
+
+Phase 1 default. The engine runs every code path end-to-end except the actual REST POST is logged-only.
+
+```bash
+uv run hl-engine \
+  --strategy-config config/strategy.yaml \
+  --deploy-config config/deploy.yaml \
+  --symbols-config config/symbols.yaml
+```
+
+Required env vars (referenced by `config/deploy.yaml`):
+- `HL_ACCOUNT_ADDRESS`, `HL_API_SECRET_KEY`
+- `TG_BOT_TOKEN`, `TG_CHAT_ID`
+
+Kill switch: `touch data/engine/halt` to stop new entries (existing positions held).
+Restart drift: if the merge at startup detects ghost / orphan / position mismatch cases, the engine writes `data/engine/restart_blocked` and the scanner does not resume. Investigate, then `rm` the file and restart.
+
+## Going live (Phase 1, Week 2)
+
+1. Verify ≥ 1 observed allowlisted question's full lifecycle in paper mode.
+2. Edit `config/strategy.yaml`: set `paper_mode: false`.
+3. Confirm caps: `$100/position, $500 global, 5 concurrent, $200 daily-loss cap, 10% stop-loss`.
+4. Restart engine; watch Telegram for first entry/exit.
+5. If anything looks wrong: `touch data/engine/halt` immediately.
