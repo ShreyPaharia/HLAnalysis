@@ -83,9 +83,15 @@ chown root:root "$UNIT_FILE"
 systemctl daemon-reload
 systemctl enable hl-engine.service
 
-# Start (or restart) so the new unit is in effect. ExecStartPre will fetch
-# SSM secrets; if any are missing the service fails fast and the operator
-# can fix them and re-run this script.
+# systemd loads EnvironmentFile *before* ExecStartPre runs, so on first
+# install /etc/hl-engine/env doesn't exist yet and the unit refuses to
+# start ("Failed to load environment files"). Bootstrap by running the
+# fetch script once now — subsequent restarts let ExecStartPre refresh it.
+"$SECRETS_SCRIPT"
+
+# Start (or restart) so the new unit is in effect. ExecStartPre will refresh
+# SSM secrets on each restart; if any are missing the service fails fast and
+# the operator can fix them and re-run this script.
 if systemctl is-active --quiet hl-engine.service; then
   systemctl restart hl-engine.service
 else
