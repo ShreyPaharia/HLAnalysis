@@ -50,11 +50,11 @@ def _config_hash(config_summary: dict[str, Any]) -> str:
 # Per-market data extraction
 # ---------------------------------------------------------------------------
 
-def _load_fills_for_market(fills_dir: Path, condition_id: str) -> list[dict]:
-    """Load fills rows for a market from parquet; returns empty list if absent."""
+def _load_fills_for_market(fills_dir: Path, condition_id: str) -> dict[str, list]:
+    """Load fills for a market from parquet; returns column-oriented dict (pyarrow to_pydict), or empty dict if absent."""
     path = fills_dir / f"{condition_id}.parquet"
     if not path.exists():
-        return []
+        return {}
     table = pq.read_table(path)
     return table.to_pydict()
 
@@ -113,6 +113,7 @@ def _compute_market_row(
 
     # calibration_residual: per ENTER fill compute realized_pnl_per_dollar - entry_edge_chosen_side
     # then average across entries. null if no entry has entry_edge_chosen_side set (v1).
+    # v1/v2 guarantee at most one ENTER per market (HOLD-when-position rule); EXIT rows have entry_edge_chosen_side=None and are skipped here.
     enter_residuals: list[float] = []
     for i in trade_indices:
         edge = entry_edges[i]
@@ -212,7 +213,7 @@ def write_single_run_report(
     per_market_pnl: list[float],
     summary: RunSummary,
     # New optional context fields (C5+C14)
-    markets: list = (),
+    markets: list = (),  # tuple-as-default avoids mutable-default gotcha
     fills_dir: Optional[Path] = None,
     fee_taker: float = 0.0,
     slippage_bps: float = 0.0,
