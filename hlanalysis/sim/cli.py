@@ -154,6 +154,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         markets=markets, fills_dir=fills_dir,
         fee_taker=args.fee_taker, slippage_bps=args.slippage_bps,
         half_spread=args.half_spread,
+        diagnostics_dir=diag_dir,
+        klines_dir=Path(args.cache_root) / "btc_klines",
     )
     logger.info(f"Report → {out_dir}/report.md")
 
