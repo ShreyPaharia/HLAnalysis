@@ -15,6 +15,9 @@ build/
 *.log
 logs/
 
+# Local secrets — engine env file holds HL signing key
+.env.local
+
 # CDK
 deploy/cdk/cdk.out/
 deploy/cdk/cdk.context.json
