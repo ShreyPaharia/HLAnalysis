@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -112,7 +113,7 @@ class EngineRuntime:
             # 4) Spawn tasks
             alerts_sub = self.bus.subscribe()
             tasks = [
-                asyncio.create_task(self._ingest_loop()),
+                asyncio.create_task(self._ingest_loop(dal)),
                 asyncio.create_task(self._reconcile_loop(hl, dal)),
                 asyncio.create_task(self._continuous_checks_loop(dal, risk, router)),
                 asyncio.create_task(rules.run(alerts_sub)),
@@ -128,33 +129,36 @@ class EngineRuntime:
 
     # ---- task bodies ----
 
-    async def _ingest_loop(self) -> None:
+    async def _ingest_loop(self, dal: StateDAL) -> None:
         adapter = self.adapter_factory()
+        # In-process cache to avoid a DB hit on every QuestionMetaEvent;
+        # the SeenQuestion table is the source of truth across restarts.
         seen_questions: set[int] = set()
+        from ..events import QuestionMetaEvent
         try:
             async for ev in adapter.stream(self.subscriptions):
                 if self.stop_event.is_set():
                     return
                 self.market_state.apply(ev)
                 self.events_ingested += 1
-                # Surface first-sight of any question on the bus so alerts can
-                # notify on rollover. We snapshot AFTER apply() so the new
-                # QuestionView is visible.
-                if ev.__class__.__name__ == "QuestionMetaEvent":
-                    qidx = getattr(ev, "question_idx", None)
-                    if qidx is not None and qidx not in seen_questions:
+                if isinstance(ev, QuestionMetaEvent):
+                    qidx = ev.question_idx
+                    if qidx not in seen_questions:
                         seen_questions.add(qidx)
-                        qv = self.market_state.question(qidx)
-                        if qv is not None:
-                            from ..strategy.render import question_description
-                            await self.bus.publish(NewQuestion(
-                                ts_ns=self._now_ns(),
-                                question_idx=qidx,
-                                klass=qv.klass,
-                                description=question_description(qv),
-                                expiry_ns=qv.expiry_ns,
-                                leg_count=len(qv.leg_symbols),
-                            ))
+                        if not dal.has_seen_question(qidx):
+                            qv = self.market_state.question(qidx)
+                            if qv is not None:
+                                from ..strategy.render import question_description
+                                now_ns = self._now_ns()
+                                await self.bus.publish(NewQuestion(
+                                    ts_ns=now_ns,
+                                    question_idx=qidx,
+                                    klass=qv.klass,
+                                    description=question_description(qv),
+                                    expiry_ns=qv.expiry_ns,
+                                    leg_count=len(qv.leg_symbols),
+                                ))
+                                dal.mark_question_seen(qidx, now_ns=now_ns)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -221,8 +225,8 @@ class EngineRuntime:
                 )
                 for ev in res.drift_events:
                     await self.bus.publish(ev)
-                for cloid in res.orphans_to_cancel:
-                    hl.cancel(cloid=cloid, symbol="")  # symbol unused in paper; live tweak as needed
+                for cloid, symbol in res.orphans_to_cancel:
+                    hl.cancel(cloid=cloid, symbol=symbol)
                 self.last_reconcile_ns = now
             except Exception:
                 logger.exception("reconcile crashed")
@@ -275,7 +279,11 @@ class EngineRuntime:
                             question_idx=sp.question_idx, symbol=sp.symbol,
                             side="sell" if sp.qty > 0 else "buy",
                             size=abs(sp.qty), limit_price=b.bid_px,
-                            cloid=f"hla-stop-{sp.question_idx}-{now}",
+                            # Pure-uuid hex cloid; HLClient maps hla-{uuid} → 32-char
+                            # hex via Cloid.from_str. Earlier 'hla-stop-{q}-{ns}'
+                            # produced non-hex characters (s/t/o/p/-) and silently
+                            # crashed Cloid.from_str → stop-loss never sent in live.
+                            cloid=f"hla-{uuid.uuid4()}",
                             time_in_force="ioc", reduce_only=True,
                         )
                         # Inputs stub for the gate (size_invalid is the only check

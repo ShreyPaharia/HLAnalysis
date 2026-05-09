@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import time
 from typing import Protocol
+
+
+def _e(s: str) -> str:
+    """Escape an untrusted string for HTML-mode Telegram messages."""
+    return html.escape(s, quote=False)
 
 from loguru import logger
 
@@ -60,69 +66,68 @@ class AlertRules:
     def _format(self, ev: BusEvent) -> tuple[str | None, str] | None:
         match ev:
             case KillSwitchActivated():
-                return None, f"*KILL SWITCH ACTIVATED*\nPath: `{ev.path}`"
+                return None, f"<b>KILL SWITCH ACTIVATED</b>\nPath: <code>{_e(ev.path)}</code>"
             case DailyLossHalt():
                 return None, (
-                    f"*DAILY LOSS HALT*\n"
+                    f"<b>DAILY LOSS HALT</b>\n"
                     f"Realized: ${ev.realized_pnl:.2f} / Cap: ${ev.cap:.2f}"
                 )
             case StaleDataHalt():
                 return f"stale:{ev.symbol}", (
-                    f"*STALE DATA HALT* `{ev.symbol}` "
+                    f"<b>STALE DATA HALT</b> <code>{_e(ev.symbol)}</code> "
                     f"({ev.age_seconds:.1f}s)"
                 )
             case RiskHalt():
-                return f"halt:{ev.reason}", f"*RISK HALT* {ev.reason}"
+                return f"halt:{ev.reason}", f"<b>RISK HALT</b> {_e(ev.reason)}"
             case RiskVeto():
-                return f"veto:{ev.reason}", (
-                    f"_risk veto_ {ev.reason} "
-                    f"q={ev.question_idx} {ev.detail}"
+                # Include question_idx in the dedupe key so identical reasons
+                # on different questions don't collapse into one alert.
+                return f"veto:{ev.reason}:{ev.question_idx}", (
+                    f"<i>risk veto</i> {_e(ev.reason)} "
+                    f"q={ev.question_idx} {_e(str(ev.detail))}"
                 )
             case StopLossTriggered():
                 return None, (
-                    f"*STOP-LOSS* q={ev.question_idx} `{ev.symbol}` "
+                    f"<b>STOP-LOSS</b> q={ev.question_idx} <code>{_e(ev.symbol)}</code> "
                     f"qty={ev.qty} trigger=${ev.trigger_px:.4f}"
                 )
             case ReconcileDrift():
                 return None, (
-                    f"*DRIFT* {ev.case} cloid={ev.cloid} "
-                    f"q={ev.question_idx} {ev.detail}"
+                    f"<b>DRIFT</b> {_e(ev.case)} cloid={_e(ev.cloid)} "
+                    f"q={ev.question_idx} {_e(str(ev.detail))}"
                 )
             case Entry():
-                # Multi-line, no inline backticks on every field — Markdown
-                # formatting that renders cleanly in the Telegram client.
                 notional = ev.size * ev.price
-                lines = ["🟢 *ENTRY*"]
+                lines = ["🟢 <b>ENTRY</b>"]
                 if ev.question_description:
-                    lines.append(f"_{ev.question_description}_")
+                    lines.append(f"<i>{_e(ev.question_description)}</i>")
                 if ev.outcome_description:
-                    lines.append(f"*{ev.outcome_description}*")
+                    lines.append(f"<b>{_e(ev.outcome_description)}</b>")
                 lines.append(
                     f"{ev.side.upper()} {ev.size:g} @ ${ev.price:.4f}  "
                     f"(notional ${notional:,.2f})"
                 )
-                lines.append(f"`q={ev.question_idx}` `{ev.symbol}`")
-                return None, "\n".join(lines)
+                lines.append(f"<code>q={ev.question_idx}</code> <code>{_e(ev.symbol)}</code>")
+                # Dedup by cloid so reconciler-driven double-Entry collapses.
+                return f"entry:{ev.cloid}", "\n".join(lines)
             case Exit():
                 emoji = {"settlement": "🏁", "stop_loss": "🛑", "manual": "↩️"}.get(ev.reason, "🔚")
                 pnl_sign = "+" if ev.realized_pnl >= 0 else ""
-                lines = [f"{emoji} *EXIT* ({ev.reason})"]
+                lines = [f"{emoji} <b>EXIT</b> ({_e(ev.reason)})"]
                 if ev.question_description:
-                    lines.append(f"_{ev.question_description}_")
+                    lines.append(f"<i>{_e(ev.question_description)}</i>")
                 if ev.outcome_description:
-                    lines.append(f"*{ev.outcome_description}*")
+                    lines.append(f"<b>{_e(ev.outcome_description)}</b>")
                 lines.append(f"qty={ev.qty:g}  PnL={pnl_sign}${ev.realized_pnl:.2f}")
-                lines.append(f"`q={ev.question_idx}` `{ev.symbol}`")
-                return None, "\n".join(lines)
+                lines.append(f"<code>q={ev.question_idx}</code> <code>{_e(ev.symbol)}</code>")
+                return f"exit:{ev.question_idx}:{ev.reason}", "\n".join(lines)
             case NewQuestion():
-                lines = ["📣 *NEW MARKET*"]
+                lines = ["📣 <b>NEW MARKET</b>"]
                 if ev.description:
-                    lines.append(f"_{ev.description}_")
+                    lines.append(f"<i>{_e(ev.description)}</i>")
                 if ev.klass:
-                    lines.append(f"class={ev.klass}  legs={ev.leg_count}")
-                lines.append(f"`q={ev.question_idx}`")
-                # Dedup so we don't double-emit if the runtime restarts twice
-                # in the same minute (rare, but possible during deploys).
+                    lines.append(f"class={_e(ev.klass)}  legs={ev.leg_count}")
+                lines.append(f"<code>q={ev.question_idx}</code>")
                 return f"newq:{ev.question_idx}", "\n".join(lines)
             case _:
                 return None

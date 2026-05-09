@@ -694,7 +694,7 @@ class HyperliquidAdapter(VenueAdapter):
             fields = _parse_description(q.get("description") or "")
             current[int(qidx)] = (named, settled, fields)
 
-        def _settlement_for(outcome_idx: int, fields: dict[str, str]) -> SettlementEvent | None:
+        def _settlement_for(outcome_idx: int, fields: dict[str, str], *, first_sight: bool = False) -> SettlementEvent | None:
             matching_tmpl = next(
                 (t for t in templates
                  if not getattr(t, "match", None) or _matches(t.match, fields)),
@@ -702,6 +702,8 @@ class HyperliquidAdapter(VenueAdapter):
             )
             if matching_tmpl is None:
                 return None
+            keys = ["source"]
+            values = ["polled_first_sight" if first_sight else "polled_diff"]
             return SettlementEvent(
                 venue=self.venue,
                 product_type=matching_tmpl.product_type,
@@ -712,17 +714,28 @@ class HyperliquidAdapter(VenueAdapter):
                 settled_side_idx=0,
                 settle_price=None,
                 settle_ts=recv_ns,
-                keys=[],
-                values=[],
+                keys=keys,
+                values=values,
             )
 
         # Path (a): existing question with grown settledNamedOutcomes.
-        # Skip first sight — we don't know if a non-empty settledNamedOutcomes
-        # is from "just settled" or "settled long ago, we just connected." Both
-        # would re-emit retroactive settlements with the wrong timestamp.
+        # First-sight handling: if a question shows up settled on the FIRST poll
+        # (e.g. engine restart while a position is held on an outcome that
+        # settled during downtime), we MUST emit the settlement — otherwise the
+        # position is abandoned forever (engine never marks the question
+        # settled, so the strategy never returns EXIT). Tag with
+        # source=polled_first_sight so post-hoc analytics can distinguish
+        # "settled while we were watching" from "settled before we started."
         for qidx, (named, settled, fields) in current.items():
             prev = self._meta_snapshot.get(qidx)
             if prev is None:
+                # First sight: only emit if there are already-settled outcomes.
+                # An unsettled question on first sight just primes the snapshot.
+                first_sight_settled = set(settled)
+                for outcome_idx in first_sight_settled:
+                    ev = _settlement_for(outcome_idx, fields, first_sight=True)
+                    if ev is not None:
+                        out.append(ev)
                 continue
             newly_settled = set(settled) - set(prev["settled"])
             for outcome_idx in newly_settled:

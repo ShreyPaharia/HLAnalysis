@@ -89,13 +89,26 @@ def test_settlement_only_for_matched_template():
     assert out == []  # template doesn't match priceBinary
 
 
-def test_settlement_on_first_poll_does_not_fire():
-    """First call primes the snapshot — no diff to compute."""
+def test_settlement_on_first_poll_emits_already_settled():
+    """First-sight emit is REQUIRED for restart-with-already-settled-position
+    correctness. Without it, an engine restart while holding a settled
+    position would never see _mark_settled fire → position abandoned.
+    Tagged with source=polled_first_sight so analytics can distinguish."""
     a = _adapter()
     tmpl = [_btc_bucket_template()]
     out = a._detect_polled_settlements(
         tmpl, {"questions": [_question(1, [12, 13, 14], [13])]}
     )
-    # First call: nothing to diff against, so we log the state but don't emit.
-    # Acceptable as "primed".
+    assert len(out) == 1
+    assert out[0].symbol == "#130"
+    assert dict(zip(out[0].keys, out[0].values)) == {"source": "polled_first_sight"}
+
+
+def test_settlement_first_sight_unsettled_primes_only():
+    """Unsettled question on first sight just primes the snapshot — no emit."""
+    a = _adapter()
+    tmpl = [_btc_bucket_template()]
+    out = a._detect_polled_settlements(
+        tmpl, {"questions": [_question(1, [12, 13, 14], [])]}
+    )
     assert out == []

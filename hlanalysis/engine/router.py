@@ -74,7 +74,16 @@ class Router:
         self.dal.update_order_status(intent.cloid, status=ack.status,
                                       venue_oid=ack.venue_oid, now_ns=now_ns)
         # 4. If filled, update Position + emit Entry/Exit.
-        if ack.status == "filled" and ack.fill_size and ack.fill_price:
+        # Use `is not None` rather than truthy: a falsy 0.0 is a malformed ack
+        # that should be logged as a problem, not silently treated as 'no fill'
+        # which would create an unmanaged live position (DB filled, no Position).
+        if ack.status == "filled":
+            if ack.fill_size is None or ack.fill_price is None or ack.fill_size <= 0 or ack.fill_price <= 0:
+                logger.warning(
+                    "filled ack with missing/zero size or price; cloid={} size={} price={}",
+                    intent.cloid, ack.fill_size, ack.fill_price,
+                )
+                return
             await self._book_fill(intent, ack.fill_price, ack.fill_size, now_ns=now_ns, question=question)
 
     async def _book_fill(

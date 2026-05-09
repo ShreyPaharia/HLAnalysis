@@ -65,7 +65,7 @@ def test_venue_orphan_emits_drift_and_caller_cancels(dal):
     r = Reconciler(dal, fills_lookup=lambda _cloid: [])
     res = r.run(venue_open=venue_open, venue_state=ClearinghouseState(positions=(), account_value_usd=0), now_ns=2)
     assert any(d.case == "venue_orphan" and d.cloid == "hla-orphan" for d in res.drift_events)
-    assert "hla-orphan" in res.orphans_to_cancel
+    assert ("hla-orphan", "@30") in res.orphans_to_cancel
 
 
 def test_state_mismatch_hl_wins(dal):

@@ -17,7 +17,10 @@ CLOID_PREFIX = "hla-"
 @dataclass(frozen=True, slots=True)
 class ReconcileResult:
     drift_events: list[ReconcileDrift]
-    orphans_to_cancel: list[str]   # cloids the caller should defensively cancel
+    # (cloid, symbol) pairs the caller should defensively cancel. Symbol must be
+    # non-empty — HL's cancelByCloid rejects empty coin and the SDK silently
+    # reports outer status='ok' even when the per-cancel statuses[] failed.
+    orphans_to_cancel: list[tuple[str, str]]
 
 
 class Reconciler:
@@ -48,7 +51,7 @@ class Reconciler:
         now_ns: int,
     ) -> ReconcileResult:
         drift: list[ReconcileDrift] = []
-        orphans: list[str] = []
+        orphans: list[tuple[str, str]] = []
 
         # --- orders ---
         venue_by_cloid = {r.cloid: r for r in venue_open if r.cloid.startswith(CLOID_PREFIX)}
@@ -82,7 +85,7 @@ class Reconciler:
         for cloid, vo in venue_by_cloid.items():
             if cloid in local_live:
                 continue
-            orphans.append(cloid)
+            orphans.append((cloid, vo.symbol))
             drift.append(ReconcileDrift(
                 ts_ns=now_ns, case="venue_orphan", cloid=cloid,
                 detail={"symbol": vo.symbol},

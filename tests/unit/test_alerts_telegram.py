@@ -45,7 +45,7 @@ async def test_send_uses_correct_url_and_payload():
     payload = session.calls[0][1]
     assert payload["chat_id"] == "123"
     assert payload["text"] == "hello"
-    assert payload["parse_mode"] == "Markdown"
+    assert payload["parse_mode"] == "HTML"
 
 
 @pytest.mark.asyncio

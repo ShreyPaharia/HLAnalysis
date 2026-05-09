@@ -48,7 +48,14 @@ class Session_(SQLModel, table=True):
     session_id: str = Field(primary_key=True)
     started_ts_ns: int
     ended_ts_ns: int | None = None
-    halt_reason: str | None = None
+
+
+class SeenQuestion(SQLModel, table=True):
+    """Tracks question_idxs the engine has notified about. Persists across
+    restarts so NewQuestion alerts don't re-fire for already-known markets."""
+    __tablename__ = "seen_question"
+    question_idx: int = Field(primary_key=True)
+    first_seen_ts_ns: int
 
 
 # Public alias for tests / external users.
@@ -168,6 +175,16 @@ class StateDAL:
             p = s.get(Position, question_idx)
             if p is not None:
                 s.delete(p)
+                s.commit()
+
+    def has_seen_question(self, question_idx: int) -> bool:
+        with _Session(self._engine) as s:
+            return s.get(SeenQuestion, question_idx) is not None
+
+    def mark_question_seen(self, question_idx: int, *, now_ns: int) -> None:
+        with _Session(self._engine) as s:
+            if s.get(SeenQuestion, question_idx) is None:
+                s.add(SeenQuestion(question_idx=question_idx, first_seen_ts_ns=now_ns))
                 s.commit()
 
     # ---- fills ----

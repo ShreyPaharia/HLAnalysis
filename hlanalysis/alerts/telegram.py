@@ -36,10 +36,13 @@ class TelegramClient:
         self._timeout_s = request_timeout_s
 
     async def send(self, text: str, *, markdown: bool = True) -> bool:
+        # markdown=True now means HTML mode (stricter than legacy Markdown but
+        # has unambiguous escape semantics: only <, >, & need escaping). Renamed
+        # to keep the call sites compatible.
         payload = {
             "chat_id": self._chat_id,
             "text": text,
-            "parse_mode": "Markdown" if markdown else "HTML",
+            "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
         for attempt in range(self._max_retries + 1):
