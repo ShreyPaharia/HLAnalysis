@@ -32,6 +32,10 @@ class ModelEdgeConfig:
     # 0.7: only bet the side the market favors at ≥70%, skip mid-market noise
     # (0.3 ≤ p ≤ 0.7). Mid is bid+ask)/2; if no clear favorite, HOLD.
     favorite_threshold: float = 0.0
+    # TTE entry window (seconds). Hold to expiry, but only ENTER inside this band.
+    # Defaults preserve previous behavior (no constraint).
+    tte_min_seconds: int = 0           # skip entries when less than this remains
+    tte_max_seconds: int = 10**9       # skip entries when more than this remains
 
 
 _ANNUAL_SECONDS = 365.25 * 86400.0
@@ -82,10 +86,15 @@ class ModelEdgeStrategy(Strategy):
                 )
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "have_position"),))
 
-        # 1) τ in years
-        tau_yr = (question.expiry_ns - now_ns) / 1e9 / _ANNUAL_SECONDS
-        if tau_yr <= 0:
+        # 1) τ in years + entry-window gate
+        tau_s = (question.expiry_ns - now_ns) / 1e9
+        if tau_s <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "tau_nonpositive"),))
+        if not (self.cfg.tte_min_seconds <= tau_s <= self.cfg.tte_max_seconds):
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tau_s:.0f}"),)),
+            ))
+        tau_yr = tau_s / _ANNUAL_SECONDS
 
         # 2) σ from recent_returns sliced to lookback; annualize and clip
         n_keep = max(2, self.cfg.vol_lookback_seconds // self.cfg.vol_sampling_dt_seconds)

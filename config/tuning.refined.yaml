@@ -1,0 +1,26 @@
+# Refined grids — sweep the new entry-window thresholds, fix others at the
+# previous-best values to keep the grid focused.
+
+v1_grid:
+  tte_min_seconds: [0]
+  tte_max_seconds: [3600, 7200]            # last 1h and last 2h
+  price_extreme_threshold: [0.93, 0.95, 0.96, 0.97, 0.98]
+  price_extreme_max: [0.97, 0.98, 0.99, 1.00]
+  distance_from_strike_usd_min: [0]
+  vol_max: [100]
+  stop_loss_pct: [null]
+
+v2_grid:
+  vol_lookback_seconds: [3600, 14400]
+  edge_buffer: [0.02, 0.05]
+  stop_loss_pct: [null]
+  drift_lookback_seconds: [0, 14400]       # adding drift back into the sweep
+  favorite_threshold: [0.7]
+  tte_min_seconds: [0, 3600]               # skip last hour or not
+  tte_max_seconds: [86400, 43200, 21600, 10800]   # 24h, 12h, 6h, 3h windows
+
+run:
+  train_markets: 30
+  test_markets: 10
+  step_markets: 10
+  max_workers: 8

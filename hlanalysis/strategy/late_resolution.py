@@ -31,6 +31,10 @@ class LateResolutionConfig:
     max_strike_distance_pct: float    # reject if |strike − BTC|/BTC > this
     min_recent_volume_usd: float
     stale_data_halt_seconds: int
+    # Upper bound on entry ask. Histogram showed v1 entries at >0.99 contribute
+    # zero PnL after the [0,1] fill clamp — they pay $1 and settle $1. Default
+    # 1.0 disables the cap (existing behavior); set to ~0.99 to skip dead trades.
+    price_extreme_max: float = 1.0
 
 
 class LateResolutionStrategy(Strategy):
@@ -120,10 +124,14 @@ class LateResolutionStrategy(Strategy):
         if now_ns - win.last_l2_ts_ns > stale_ns:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "book_stale"),))
 
-        # 4) Winning leg must be near 1.0 (the discount-from-1 is our edge)
+        # 4) Winning leg must be in the [threshold, max] band
         if win.ask_px < self.cfg.price_extreme_threshold:
             return Decision(action=Action.HOLD, diagnostics=(
                 Diagnostic("info", "not_extreme", (("ask", f"{win.ask_px:.3f}"),)),
+            ))
+        if win.ask_px > self.cfg.price_extreme_max:
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "above_extreme_max", (("ask", f"{win.ask_px:.3f}"),)),
             ))
 
         # 5) Distance from strike

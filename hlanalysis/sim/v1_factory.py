@@ -17,5 +17,6 @@ def build_v1_strategy_from_params(params: dict[str, Any]) -> LateResolutionStrat
         max_strike_distance_pct=float(params.get("max_strike_distance_pct", 50.0)),
         min_recent_volume_usd=float(params.get("min_recent_volume_usd", 0.0)),
         stale_data_halt_seconds=int(params.get("stale_data_halt_seconds", 86400)),
+        price_extreme_max=float(params.get("price_extreme_max", 1.0)),
     )
     return LateResolutionStrategy(cfg)
