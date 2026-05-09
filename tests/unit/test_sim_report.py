@@ -142,8 +142,7 @@ def test_run_context_contains_data_range(tmp_path: Path):
         markets=markets,
     )
     text = (tmp_path / "report.md").read_text()
-    assert "2024-04-15" in text
-    assert "UTC" in text
+    assert "2024-04-15 UTC → 2025-05-09 UTC" in text
 
 
 def test_run_context_contains_fee_and_slippage(tmp_path: Path):
