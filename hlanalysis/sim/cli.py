@@ -135,6 +135,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     n_trades = 0
     diag_dir = out_dir / "diagnostics"
     fills_dir = out_dir / "fills"
+    markets = []
     for j in jobs:
         rcfg = RunnerConfig(
             scanner_interval_seconds=60, fill_model=fill_cfg,
@@ -145,10 +146,14 @@ def cmd_run(args: argparse.Namespace) -> None:
                              diagnostics_dir=diag_dir, fills_dir=fills_dir)
         pnl.append(res.realized_pnl_usd or 0.0)
         n_trades += len(res.fills)
+        markets.append(j.market)
     summary = summarise_run(pnl, n_trades=n_trades)
     write_single_run_report(
         out_dir=out_dir, strategy_name=args.strategy,
         config_summary=params, per_market_pnl=pnl, summary=summary,
+        markets=markets, fills_dir=fills_dir,
+        fee_taker=args.fee_taker, slippage_bps=args.slippage_bps,
+        half_spread=args.half_spread,
     )
     logger.info(f"Report → {out_dir}/report.md")
 
