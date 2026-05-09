@@ -224,6 +224,16 @@ class TestPlotCalibration:
         assert result is None
         assert not out_path.exists()
 
+    def test_plot_calibration_returns_none_when_fills_dir_missing(self, tmp_path: Path):
+        """When fills_dir does not exist, returns None without raising."""
+        fills_dir = tmp_path / "fills_nonexistent"
+        # Deliberately do NOT create fills_dir
+        assert not fills_dir.exists()
+        out_path = tmp_path / "calibration.html"
+        result = plot_calibration(fills_dir, out_path)
+        assert result is None
+        assert not out_path.exists()
+
     def test_v1_fills_no_entry_p_model_returns_none(self, tmp_path: Path):
         """v1 fills (entry_edge_chosen_side is None) produce no plot."""
         fills_dir = tmp_path / "fills"
@@ -270,24 +280,11 @@ class TestSyntheticGBMCalibration:
     ±0.01 of y=x at the central bins.
 
     Construction:
-    - Draw N fills with predicted edge e_i ~ Uniform(0.02, 0.18).
-    - For each fill, the true probability of winning is p_i = 0.5 + e_i.
-    - The position wins with probability p_i (outcome=1) else outcome=0.
-    - realized_pnl_per_dollar = outcome - entry_price, where entry_price = 1 - e_i
-      (we buy the token at price 1-e_i, and win $1 if won).
-    - So E[realized_pnl_per_dollar | e_i] = p_i - (1 - e_i) = 0.5 + e_i - 1 + e_i
-      = 2*e_i - 0.5 ... wait, let's re-derive correctly.
-
-    Re-derivation:
-    - We buy a YES token at price p_model = (1 - edge) on the NO side... actually
-      let's keep it simple: entry_edge_chosen_side = e, so the model says edge is e.
-    - The model says p_win = (market_price + e) or similar. For the test, we just
-      want: E[realized_pnl_per_dollar] = e at each edge level.
-    - realized_pnl_per_dollar = realized_pnl_at_settle / (price * size)
+    - entry_edge_chosen_side = e ~ Uniform(0.01, 0.20) for each fill.
     - Set price=1.0, size=1.0 so realized_pnl_per_dollar = realized_pnl_at_settle.
-    - Set E[realized_pnl_at_settle | edge=e] = e exactly.
-    - Draw: realized_pnl_at_settle = e + noise, where E[noise] = 0.
-    - Use ±1 Bernoulli noise with amplitude sqrt(e*(1-e)) to mimic binary outcome.
+    - Set E[realized_pnl_at_settle | edge=e] = e exactly by drawing
+      realized_pnl_at_settle = e + eps, eps ~ N(0, 0.1^2).
+    - With N=5000, the binned-mean curve should track y=x within ±0.01 at central bins.
     """
 
     def test_binned_mean_within_tolerance_of_y_equals_x(self):
