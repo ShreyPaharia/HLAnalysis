@@ -2988,6 +2988,579 @@ else:
 ]
 
 
+
+# ---------------------------------------------------------------------------
+# 11 — HIP-4 settlement event study
+# ---------------------------------------------------------------------------
+P_HIP4_SETTLEMENT_EVENT_STUDY = [
+    (
+        "md",
+        """
+# 11 — HIP-4 settlement event study
+
+**What this notebook answers**
+
+- Does the YES-leg mid-price path in the final hour before expiry carry a
+  detectable directional signal? (**H5**: *settlement micro-structure differs
+  in the final hour*)
+- At TTE = 60 / 30 / 10 / 5 / 1 minute, if `yes_mid >= 0.95`, what fraction
+  of those cases actually resolved YES?  This is the empirical hit-rate of the
+  v1-style `price_extreme_threshold` heuristic — the primary AC2 deliverable.
+
+**Hypothesis tested: H5** — *Late-hour micro-structure carries directional
+information: the yes-mid trajectory in the final 60 minutes differs
+systematically between YES-winners and NO-winners.*
+
+**How this informs v1's `price_extreme_threshold`**
+
+The v1 strategy enters a YES position when `yes_mid >= price_extreme_threshold`
+at some TTE before expiry.  If the empirical hit rate at threshold = 0.95 is
+materially above 0.95, the market is *mis-pricing* near-certainty and there is
+edge.  If the hit rate is ≤ 0.95, the threshold is at most calibrated — the
+strategy earns the spread but not an additional probability premium.
+
+> **Data note** — the recorder does not yet emit a dedicated `event=settlement`
+> partition.  Settled questions are discovered from `market_meta` rows (which
+> include `expiry` in their key/value payload) combined with the mark-price
+> signal at expiry (mark → 0 for the YES leg means NO won; mark → 1 means YES
+> won).  Results below are labelled "informational" when N < 5 settled
+> questions exist in the window.
+""",
+    ),
+    (
+        "code",
+        """
+from hlanalysis.analysis import duck, glob_for, load_df, set_mpl_defaults, fmt_ts
+from hlanalysis.analysis import book
+import pandas as pd, numpy as np, matplotlib.pyplot as plt
+import datetime
+
+set_mpl_defaults()
+con = duck()
+
+# --- tuneable parameters ---------------------------------------------------
+WINDOW_S   = 3600        # final hour before expiry
+THRESHOLD  = 0.95        # v1-style "near 1" cutoff for YES win heuristic
+RESAMPLE_MS = 10_000     # 10 s grid → 360 points per hour
+TTE_CHECKPOINTS_MIN = [60, 30, 10, 5, 1]  # AC2 TTE bucket list (minutes)
+N_BOOT      = 2000       # bootstrap iterations for CI (used if N >= 10)
+RNG         = np.random.default_rng(seed=42)
+
+print(f"window          : {WINDOW_S // 60} min ({WINDOW_S} s) before expiry")
+print(f"resample grid   : {RESAMPLE_MS // 1000} s  →  {WINDOW_S * 1000 // RESAMPLE_MS} grid points / question")
+print(f"threshold       : YES mid >= {THRESHOLD}")
+print(f"TTE checkpoints : {TTE_CHECKPOINTS_MIN} minutes")
+""",
+    ),
+    (
+        "md",
+        """
+## §1 Discover settled questions in the recorder window
+
+The recorder stores per-market metadata in `event=market_meta` rows.
+Each binary yes-leg row carries an `expiry` field (format `YYYYMMDD-HHMM`).
+We identify **settled** questions as those whose expiry timestamp falls
+**within or before** the recorder's data window, restricting to `priceBinary`
+class (the canonical HIP-4 binary).
+
+Settlement outcome is inferred from the mark price on the YES leg at or just
+after expiry: `mark ≈ 0 → NO won`, `mark ≈ 1 → YES won`.
+""",
+    ),
+    (
+        "code",
+        """
+# Step 1: parse market_meta to extract (yes_symbol, outcome_idx, expiry_ns) tuples.
+g_meta = glob_for(venue='hyperliquid', product_type='prediction_binary', event='market_meta')
+try:
+    meta_raw = con.execute(f'''
+        SELECT DISTINCT symbol, keys, values
+        FROM read_parquet('{g_meta}', hive_partitioning=true)
+    ''').df()
+except Exception as e:
+    meta_raw = pd.DataFrame(columns=['symbol','keys','values'])
+    print(f"WARNING: could not read market_meta — {e}")
+
+def kv_get(keys_list, values_list, key):
+    \"\"\"Extract a value from parallel key/value lists; returns None if absent.\"\"\"
+    try:
+        idx = keys_list.index(key)
+        return values_list[idx]
+    except ValueError:
+        return None
+
+rows = []
+for _, r in meta_raw.iterrows():
+    keys   = r['keys']   if isinstance(r['keys'],   list) else []
+    values = r['values'] if isinstance(r['values'], list) else []
+    side_name  = kv_get(keys, values, 'side_name')
+    cls        = kv_get(keys, values, 'class')
+    expiry_str = kv_get(keys, values, 'expiry')
+    out_idx    = kv_get(keys, values, 'outcome_idx')
+    if side_name != 'Yes' or cls != 'priceBinary' or expiry_str is None:
+        continue
+    try:
+        expiry_dt = datetime.datetime.strptime(expiry_str, '%Y%m%d-%H%M').replace(
+            tzinfo=datetime.timezone.utc)
+        expiry_ns = int(expiry_dt.timestamp() * 1e9)
+    except ValueError:
+        continue
+    rows.append({
+        'yes_symbol': r['symbol'],
+        'outcome_idx': int(out_idx) if out_idx is not None else None,
+        'expiry_str':  expiry_str,
+        'expiry_ns':   expiry_ns,
+    })
+
+market_df = pd.DataFrame(rows).drop_duplicates('yes_symbol').reset_index(drop=True)
+print(f"priceBinary YES symbols found: {len(market_df)}")
+print(market_df[['yes_symbol','outcome_idx','expiry_str']].to_string(index=False))
+""",
+    ),
+    (
+        "code",
+        """
+# Step 2: determine recorder window bounds.
+g_all_bbo = glob_for(venue='hyperliquid', product_type='prediction_binary', event='bbo')
+try:
+    bounds = con.execute(f'''
+        SELECT min(local_recv_ts) AS t0, max(local_recv_ts) AS t1
+        FROM read_parquet('{g_all_bbo}', hive_partitioning=true)
+    ''').fetchone()
+    REC_T0, REC_T1 = int(bounds[0]), int(bounds[1])
+except Exception:
+    REC_T0, REC_T1 = 0, 0
+    print("WARNING: no prediction_binary BBO data found.")
+
+print(f"Recorder window : {fmt_ts(REC_T0)} → {fmt_ts(REC_T1)}")
+
+# Step 3: filter to questions whose expiry is within the recorder window
+# (i.e., we captured data up to the expiry).
+settled_mask = market_df['expiry_ns'].between(REC_T0, REC_T1)
+settled_df   = market_df[settled_mask].copy().reset_index(drop=True)
+print(f"Questions with expiry inside recorder window: {len(settled_df)}")
+if settled_df.empty:
+    print()
+    print("INFO: No fully-captured settlement cycles found yet.")
+    print("      Re-run this notebook after the recorder has captured at least one expiry.")
+else:
+    print(settled_df[['yes_symbol','expiry_str']].to_string(index=False))
+""",
+    ),
+    (
+        "md",
+        """
+## §2 Map each settled question to YES/NO legs and infer outcome
+
+For each settled question:
+- The YES leg symbol is taken directly from market_meta (`side_name = 'Yes'`).
+- The NO leg is the YES symbol with the last digit flipped from even to odd
+  (`#{N*10}` → `#{N*10+1}`).
+- Settlement outcome is inferred from the mark price on the YES leg at or just
+  after expiry: `mark_px < 0.5` → NO won; `mark_px >= 0.5` → YES won.
+""",
+    ),
+    (
+        "code",
+        """
+def no_symbol_from_yes(yes_sym: str) -> str:
+    \"\"\"Derive the NO-leg symbol from the YES-leg symbol.
+    YES: #{outcome_idx * 10}  e.g. #40
+    NO : #{outcome_idx * 10 + 1}  e.g. #41
+    \"\"\"
+    num = int(yes_sym.lstrip('#'))
+    return f'#{num + 1}'
+
+def infer_outcome(con, yes_sym: str, expiry_ns: int) -> str | None:
+    \"\"\"Return 'YES' or 'NO' based on mark price at expiry; None if no data.\"\"\"
+    g = glob_for(venue='hyperliquid', product_type='prediction_binary',
+                 event='mark', symbol=yes_sym)
+    try:
+        row = con.execute(f'''
+            SELECT mark_px FROM read_parquet('{g}', hive_partitioning=true)
+            WHERE local_recv_ts >= {expiry_ns}
+            ORDER BY local_recv_ts LIMIT 1
+        ''').fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    return 'YES' if float(row[0]) >= 0.5 else 'NO'
+
+if not settled_df.empty:
+    settled_df['no_symbol'] = settled_df['yes_symbol'].map(no_symbol_from_yes)
+    settled_df['outcome']   = settled_df.apply(
+        lambda r: infer_outcome(con, r['yes_symbol'], r['expiry_ns']), axis=1)
+    settled_df = settled_df[settled_df['outcome'].notna()].reset_index(drop=True)
+
+    print(f"Settled questions with outcome inferred: {len(settled_df)}")
+    print(settled_df[['yes_symbol','no_symbol','expiry_str','outcome']].to_string(index=False))
+else:
+    settled_df['no_symbol'] = pd.Series(dtype=str)
+    settled_df['outcome']   = pd.Series(dtype=str)
+    print("No settled questions — skipping outcome inference.")
+
+N_SETTLED = len(settled_df)
+if N_SETTLED == 0:
+    print("\\nAll subsequent sections will produce empty outputs.")
+elif N_SETTLED < 5:
+    print(f"\\nINFO: only {N_SETTLED} settled question(s) — "
+          "results are informational (not statistically meaningful).")
+else:
+    print(f"\\n{N_SETTLED} questions available for event study.")
+""",
+    ),
+    (
+        "md",
+        """
+## §3 YES-mid trajectory in the final hour, aligned on T = expiry
+
+For each settled question we:
+1. Call `book.mid_path(...)` on the YES-leg BBO over `[expiry - 3600s, expiry]`
+   with a 10-second resample grid (360 grid points per question).
+2. Re-index by **TTE = seconds-to-expiry** (positive, decreasing toward 0).
+3. Stack all questions into a matrix, then compute mean ± IQR by outcome.
+
+Plot: faint per-question lines (alpha=0.3) + bold mean ± IQR per outcome.
+Red = YES winners, Blue = NO winners.
+""",
+    ),
+    (
+        "code",
+        """
+yes_mid_by_q = {}   # {yes_symbol: pd.Series indexed by TTE_s (float)}
+
+for _, row in settled_df.iterrows():
+    sym        = row['yes_symbol']
+    expiry_ns  = int(row['expiry_ns'])
+    start_ns   = expiry_ns - WINDOW_S * int(1e9)
+
+    try:
+        mp = book.mid_path(
+            con,
+            venue='hyperliquid',
+            product_type='prediction_binary',
+            symbol=sym,
+            start_ns=start_ns,
+            end_ns=expiry_ns,
+            resample_ms=RESAMPLE_MS,
+        )
+    except Exception as e:
+        print(f"WARNING: mid_path failed for {sym}: {e}")
+        continue
+
+    if mp.empty or mp['mid'].notna().sum() < 10:
+        print(f"WARNING: insufficient mid data for {sym} in final {WINDOW_S//60} min")
+        continue
+
+    # Convert ts_ns → TTE_s (seconds to expiry, positive; 0 = at expiry)
+    mp['tte_s'] = (expiry_ns - mp['ts_ns']) / 1e9
+    mp = mp.set_index('tte_s')['mid'].sort_index(ascending=False)  # TTE high→low
+    yes_mid_by_q[sym] = mp
+    print(f"  {sym}: {mp.notna().sum()} / {len(mp)} grid points populated  "
+          f"(final mid={mp.iloc[0]:.4f})")
+
+print(f"\\nQuestions with usable mid-path data: {len(yes_mid_by_q)} / {N_SETTLED}")
+""",
+    ),
+    (
+        "code",
+        """
+if not yes_mid_by_q:
+    print("No mid-path data — skipping trajectory plot.")
+else:
+    # Split by outcome
+    yes_winners = [sym for _, row in settled_df.iterrows()
+                   if row['outcome'] == 'YES' and row['yes_symbol'] in yes_mid_by_q
+                   for sym in [row['yes_symbol']]]
+    no_winners  = [sym for _, row in settled_df.iterrows()
+                   if row['outcome'] == 'NO'  and row['yes_symbol'] in yes_mid_by_q
+                   for sym in [row['yes_symbol']]]
+
+    # Build aggregate DataFrame per outcome bucket
+    def _agg(syms, label):
+        if not syms:
+            return None, label
+        mat = pd.concat([yes_mid_by_q[s].rename(s) for s in syms], axis=1)
+        # common TTE index (union)
+        mat = mat.sort_index(ascending=False)
+        return mat, label
+
+    mat_yes, _ = _agg(yes_winners, 'YES')
+    mat_no,  _ = _agg(no_winners,  'NO')
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+
+    def _plot_group(mat, color, label):
+        if mat is None:
+            return
+        tte_min = mat.index / 60.0   # convert TTE s → TTE min for x-axis
+        for col in mat.columns:
+            ax.plot(tte_min, mat[col].values, color=color, alpha=0.3, lw=0.8)
+        mean_mid = mat.mean(axis=1)
+        q25      = mat.quantile(0.25, axis=1)
+        q75      = mat.quantile(0.75, axis=1)
+        ax.plot(tte_min, mean_mid, color=color, lw=2.0,
+                label=f'{label} (n={mat.shape[1]}, mean)')
+        ax.fill_between(tte_min, q25, q75, color=color, alpha=0.15, label=f'{label} IQR')
+
+    _plot_group(mat_yes, 'C3', 'YES won')
+    _plot_group(mat_no,  'C0', 'NO won')
+
+    ax.axhline(THRESHOLD, color='k', ls='--', lw=0.9, label=f'threshold={THRESHOLD}')
+    ax.set_xlabel('TTE (minutes before expiry)')
+    ax.set_ylabel('YES-leg mid-price')
+    ax.set_title('YES-mid trajectory in final hour  —  aligned on T = expiry', loc='left')
+    # x-axis: 60 min on left, 0 on right
+    ax.set_xlim(WINDOW_S / 60, 0)
+    xticks = [60, 45, 30, 15, 10, 5, 1, 0]
+    ax.set_xticks([x for x in xticks if x <= WINDOW_S / 60])
+    ax.set_xticklabels([f'{x} min' for x in xticks if x <= WINDOW_S / 60])
+    ax.legend(fontsize=8)
+    plt.tight_layout(); plt.show()
+""",
+    ),
+    (
+        "md",
+        """
+## §4 First-crossing-0.95 distribution  (v1 hit-rate study)
+
+For each settled question, find the **latest TTE** (furthest from expiry) at
+which `yes_mid >= THRESHOLD` first crossed upward.  Bucketed by outcome.
+
+This answers: *"At what point in the final hour does YES mid first reach 0.95,
+and does it stay there?"* — the raw signal behind the v1 heuristic.
+""",
+    ),
+    (
+        "code",
+        """
+crossing_records = []  # list of {yes_symbol, outcome, first_crossing_tte_s}
+
+for _, row in settled_df.iterrows():
+    sym     = row['yes_symbol']
+    outcome = row['outcome']
+    if sym not in yes_mid_by_q:
+        continue
+    series = yes_mid_by_q[sym]   # indexed by TTE_s (descending: 3600 → 0)
+    # Find the *earliest* TTE (highest TTE value, i.e. furthest from expiry)
+    # at which mid >= THRESHOLD.
+    above = series[series >= THRESHOLD]
+    first_tte = float(above.index.max()) if not above.empty else None  # None = never crossed
+    crossing_records.append({
+        'yes_symbol':          sym,
+        'outcome':             outcome,
+        'first_crossing_tte_s': first_tte,
+    })
+
+cross_df = pd.DataFrame(crossing_records)
+print(cross_df.to_string(index=False))
+
+n_crossed_yes = cross_df[(cross_df.outcome=='YES') & cross_df.first_crossing_tte_s.notna()].shape[0]
+n_crossed_no  = cross_df[(cross_df.outcome=='NO')  & cross_df.first_crossing_tte_s.notna()].shape[0]
+n_never       = cross_df[cross_df.first_crossing_tte_s.isna()].shape[0]
+print(f"\\nCrossed >= {THRESHOLD}: {n_crossed_yes} YES-winners, {n_crossed_no} NO-winners")
+print(f"Never crossed {THRESHOLD}: {n_never} question(s)")
+""",
+    ),
+    (
+        "code",
+        """
+if cross_df.empty or cross_df.first_crossing_tte_s.notna().sum() == 0:
+    print("No crossing data — skipping §4 distribution plot.")
+else:
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharey=False)
+
+    for ax, outcome, color in zip(axes, ['YES','NO'], ['C3','C0']):
+        sub = cross_df[(cross_df.outcome == outcome) &
+                       cross_df.first_crossing_tte_s.notna()]['first_crossing_tte_s'] / 60.0
+        if sub.empty:
+            ax.text(0.5, 0.5, f'No {outcome} winners\\ncrossed threshold',
+                    ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(f'{outcome} winners: first crossing of {THRESHOLD} (n=0)')
+            continue
+        bins = np.linspace(0, WINDOW_S / 60, 30)
+        ax.hist(sub, bins=bins, color=color, alpha=0.75, edgecolor='none')
+        ax.set_xlabel('TTE at first crossing (minutes)')
+        ax.set_ylabel('count')
+        ax.set_title(f'{outcome} winners: first crossing of {THRESHOLD}  (n={len(sub)})')
+        ax.invert_xaxis()   # 60 min on left, 0 on right (matches trajectory chart)
+
+    fig.suptitle(f'Distribution of TTE at first yes_mid >= {THRESHOLD}')
+    plt.tight_layout(); plt.show()
+""",
+    ),
+    (
+        "md",
+        """
+## §5 v1-style hit-rate at TTE = 60 / 30 / 10 / 5 / 1 minute
+
+**AC2 deliverable.**
+
+For each TTE checkpoint:
+- Look up `yes_mid` for each settled question at that TTE (nearest grid point).
+- Count questions where `yes_mid >= THRESHOLD`.
+- Of those, count how many actually resolved YES.
+- Hit rate = `n_winners_among_those / n_at_threshold`.
+
+A hit rate materially above `THRESHOLD` implies the market is under-pricing
+near-certainty → edge for the v1 strategy.  At or below `THRESHOLD` → the
+heuristic is calibrated (no extra premium available via the binary alone).
+""",
+    ),
+    (
+        "code",
+        """
+def mid_at_tte(series: pd.Series, tte_s: float, tol_s: float = 30.0) -> float | None:
+    \"\"\"Look up yes_mid at TTE = tte_s (seconds) ± tol_s from the pre-built series.
+    Returns None if no grid point within tolerance is populated.
+    \"\"\"
+    if series is None or series.empty:
+        return None
+    # series is indexed by TTE_s (positive, high → low)
+    nearest_idx = (series.index - tte_s).abs().idxmin()
+    if abs(nearest_idx - tte_s) > tol_s:
+        return None
+    val = series.loc[nearest_idx]
+    return float(val) if pd.notna(val) else None
+
+hit_rate_rows = []
+for tte_min in TTE_CHECKPOINTS_MIN:
+    tte_s = tte_min * 60.0
+    n_above = 0
+    n_yes_won = 0
+    n_questions = 0
+    for _, row in settled_df.iterrows():
+        sym = row['yes_symbol']
+        if sym not in yes_mid_by_q:
+            continue
+        n_questions += 1
+        mid_val = mid_at_tte(yes_mid_by_q[sym], tte_s)
+        if mid_val is not None and mid_val >= THRESHOLD:
+            n_above += 1
+            if row['outcome'] == 'YES':
+                n_yes_won += 1
+    hit_rate = n_yes_won / n_above if n_above > 0 else float('nan')
+    hit_rate_rows.append({
+        'TTE_min':          tte_min,
+        'n_questions':      n_questions,
+        'n_above_threshold': n_above,
+        'n_winners':        n_yes_won,
+        'hit_rate':         hit_rate,
+    })
+
+hit_df = pd.DataFrame(hit_rate_rows)
+print("v1-style hit-rate table (AC2 deliverable)")
+print("=" * 58)
+header = f"{'TTE':>6}  {'n_Q':>4}  {'n_above':>7}  {'n_win':>6}  {'hit_rate':>9}"
+print(header)
+print("-" * 58)
+for _, hr in hit_df.iterrows():
+    hr_str = f"{hr.hit_rate:.3f}" if not np.isnan(hr.hit_rate) else "  n/a "
+    print(f"{int(hr.TTE_min):>4}min  {int(hr.n_questions):>4}  "
+          f"{int(hr.n_above_threshold):>7}  {int(hr.n_winners):>6}  {hr_str:>9}")
+print("=" * 58)
+if N_SETTLED < 5:
+    print(f"\\nINFO: N={N_SETTLED} settled question(s) — figures are informational only.")
+""",
+    ),
+    (
+        "code",
+        """
+# Bootstrap CI on hit_rate (only if N >= 10 settled questions)
+if N_SETTLED >= 10 and not hit_df.empty:
+    print("\\nBootstrap 95% CI on hit_rate (n_boot={N_BOOT}):")
+    for _, hr in hit_df.iterrows():
+        tte_s = hr.TTE_min * 60.0
+        outcomes_above = []
+        for _, row in settled_df.iterrows():
+            sym = row['yes_symbol']
+            if sym not in yes_mid_by_q:
+                continue
+            mid_val = mid_at_tte(yes_mid_by_q[sym], tte_s)
+            if mid_val is not None and mid_val >= THRESHOLD:
+                outcomes_above.append(1 if row['outcome'] == 'YES' else 0)
+        if len(outcomes_above) < 2:
+            print(f"  TTE={int(hr.TTE_min)}min: n_above={len(outcomes_above)} — too few for CI")
+            continue
+        arr   = np.array(outcomes_above)
+        boots = [RNG.choice(arr, size=len(arr), replace=True).mean()
+                 for _ in range(N_BOOT)]
+        lo, hi = np.quantile(boots, [0.025, 0.975])
+        print(f"  TTE={int(hr.TTE_min):>2}min: hit_rate={arr.mean():.3f}  "
+              f"95% CI [{lo:.3f}, {hi:.3f}]")
+else:
+    if N_SETTLED < 10:
+        print(f"Bootstrap CI skipped (N={N_SETTLED} < 10 — need >= 10 settled questions).")
+""",
+    ),
+    (
+        "md",
+        """
+## §6 Discussion: is the v1 heuristic calibrated or over-confident?
+
+The key comparison is `hit_rate − THRESHOLD` at each TTE checkpoint.
+
+- **hit_rate > THRESHOLD**: the market is *under-pricing* late-resolution —
+  buying YES when `yes_mid >= 0.95` yields better-than-95% win rate.
+  This is genuine edge for v1.
+- **hit_rate ≈ THRESHOLD**: the heuristic is calibrated.  The strategy earns
+  the spread (passive liquidity provision) but no extra probability premium.
+- **hit_rate < THRESHOLD**: the market is *over-pricing* certainty — the
+  heuristic is over-confident and will lose on its extreme bets.
+""",
+    ),
+    (
+        "code",
+        """
+print(f"Calibration check: hit_rate − {THRESHOLD}")
+print("-" * 40)
+for _, hr in hit_df.iterrows():
+    diff = hr.hit_rate - THRESHOLD if not np.isnan(hr.hit_rate) else float('nan')
+    flag = ""
+    if not np.isnan(diff):
+        if diff > 0.02:
+            flag = "  ← edge (above threshold)"
+        elif diff < -0.02:
+            flag = "  ← over-confident"
+        else:
+            flag = "  ← calibrated"
+    diff_str = f"{diff:+.3f}" if not np.isnan(diff) else "   n/a"
+    print(f"  TTE={int(hr.TTE_min):>2}min  Δ={diff_str}{flag}")
+
+if N_SETTLED < 5:
+    print()
+    print(f"NOTE: Based on N={N_SETTLED} settled question(s).  Increase sample "
+          "before drawing conclusions.")
+""",
+    ),
+    (
+        "md",
+        """
+## Strategy hypotheses
+
+- **Supports H5**: late-hour micro-structure carries directional information —
+  inspect the §3 trajectory chart to confirm YES-winners and NO-winners
+  diverge in the final 30 minutes.  The v1-style hit-rate table (§5) provides
+  the empirical win probability at each TTE checkpoint (fill in: *at TTE=X min,
+  yes_mid above 0.95 wins Y% of the time*).
+
+- **Rules out H5**: if the §5 hit rate at every TTE is ≤ 0.95, the heuristic
+  is at most calibrated — no extra edge from the binary price extreme alone.
+  In that case the strategy must rely on the *joint* signal (price extreme AND
+  distance-from-strike) described in the next probe.
+
+- **Next probe**: condition on `|BTC_mark − strike|` from notebook 05/06's
+  fair-value framework.  The v1 heuristic gates on price extreme AND
+  distance-from-strike; eyeballing only price extreme misses the joint
+  structure.  With more settlement cycles (recorder running ≥ 30 days), repeat
+  this study at daily frequency and test a logistic regression:
+  `P(YES | yes_mid, TTE, |mark − strike|)`.
+""",
+    ),
+]
+
+
 def main() -> None:
     # Notebooks that use the generic HYPOTHESIS_FOOTER appended at the end.
     notebooks_with_generic_footer = {
@@ -3010,6 +3583,7 @@ def main() -> None:
     notebooks_custom_footer = {
         "08-hip4-markouts.ipynb": P_HIP4_MARKOUTS,
         "09-hip4-perp-leadlag.ipynb": P_HIP4_PERP_LEADLAG,
+        "11-hip4-settlement-eventstudy.ipynb": P_HIP4_SETTLEMENT_EVENT_STUDY,
     }
     for name, cells in notebooks_custom_footer.items():
         nb = _build(cells)
