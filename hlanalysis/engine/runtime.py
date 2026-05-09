@@ -22,7 +22,7 @@ from .reconcile import Reconciler
 from .restart_drift import RestartDriftGate
 from .risk import RiskGate
 from .risk_events import (
-    DailyLossHalt, KillSwitchActivated, StaleDataHalt, StopLossTriggered,
+    DailyLossHalt, KillSwitchActivated, NewQuestion, StaleDataHalt, StopLossTriggered,
 )
 from .router import Router
 from .scanner import Scanner
@@ -130,12 +130,31 @@ class EngineRuntime:
 
     async def _ingest_loop(self) -> None:
         adapter = self.adapter_factory()
+        seen_questions: set[int] = set()
         try:
             async for ev in adapter.stream(self.subscriptions):
                 if self.stop_event.is_set():
                     return
                 self.market_state.apply(ev)
                 self.events_ingested += 1
+                # Surface first-sight of any question on the bus so alerts can
+                # notify on rollover. We snapshot AFTER apply() so the new
+                # QuestionView is visible.
+                if ev.__class__.__name__ == "QuestionMetaEvent":
+                    qidx = getattr(ev, "question_idx", None)
+                    if qidx is not None and qidx not in seen_questions:
+                        seen_questions.add(qidx)
+                        qv = self.market_state.question(qidx)
+                        if qv is not None:
+                            from ..strategy.render import question_description
+                            await self.bus.publish(NewQuestion(
+                                ts_ns=self._now_ns(),
+                                question_idx=qidx,
+                                klass=qv.klass,
+                                description=question_description(qv),
+                                expiry_ns=qv.expiry_ns,
+                                leg_count=len(qv.leg_symbols),
+                            ))
         except asyncio.CancelledError:
             raise
         except Exception:

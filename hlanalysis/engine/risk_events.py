@@ -78,10 +78,21 @@ class Exit(_Base):
     outcome_description: str = ""
 
 
+class NewQuestion(_Base):
+    """Fired the first time the engine sees a question_idx in a QuestionMetaEvent.
+    Used for rollover/new-market alerts on Telegram."""
+    kind: Literal["new_question"] = "new_question"
+    question_idx: int
+    klass: str = ""
+    description: str = ""
+    expiry_ns: int = 0
+    leg_count: int = 0
+
+
 BusEvent = Annotated[
     Union[
         RiskVeto, RiskHalt, StopLossTriggered, DailyLossHalt, StaleDataHalt,
-        KillSwitchActivated, ReconcileDrift, Entry, Exit,
+        KillSwitchActivated, ReconcileDrift, Entry, Exit, NewQuestion,
     ],
     Field(discriminator="kind"),
 ]

@@ -8,8 +8,8 @@ from loguru import logger
 
 from ..engine.event_bus import EventBus
 from ..engine.risk_events import (
-    BusEvent, DailyLossHalt, Entry, Exit, KillSwitchActivated, ReconcileDrift,
-    RiskHalt, RiskVeto, StaleDataHalt, StopLossTriggered,
+    BusEvent, DailyLossHalt, Entry, Exit, KillSwitchActivated, NewQuestion,
+    ReconcileDrift, RiskHalt, RiskVeto, StaleDataHalt, StopLossTriggered,
 )
 
 
@@ -114,5 +114,15 @@ class AlertRules:
                 lines.append(f"qty={ev.qty:g}  PnL={pnl_sign}${ev.realized_pnl:.2f}")
                 lines.append(f"`q={ev.question_idx}` `{ev.symbol}`")
                 return None, "\n".join(lines)
+            case NewQuestion():
+                lines = ["📣 *NEW MARKET*"]
+                if ev.description:
+                    lines.append(f"_{ev.description}_")
+                if ev.klass:
+                    lines.append(f"class={ev.klass}  legs={ev.leg_count}")
+                lines.append(f"`q={ev.question_idx}`")
+                # Dedup so we don't double-emit if the runtime restarts twice
+                # in the same minute (rare, but possible during deploys).
+                return f"newq:{ev.question_idx}", "\n".join(lines)
             case _:
                 return None
