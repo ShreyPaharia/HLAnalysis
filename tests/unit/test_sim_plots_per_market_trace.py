@@ -63,6 +63,7 @@ _FILLS_SCHEMA = pa.schema([
     pa.field("entry_sigma",             pa.float64()),
     pa.field("entry_tau_yr",            pa.float64()),
     pa.field("realized_pnl_at_settle",  pa.float64()),
+    pa.field("resolved_outcome",        pa.string()),
 ])
 
 
@@ -171,6 +172,7 @@ def _enter_fill(
         entry_sigma=0.4,
         entry_tau_yr=0.003,
         realized_pnl_at_settle=0.0,
+        resolved_outcome=None,
     )
 
 
@@ -179,6 +181,7 @@ def _settle_fill(
     ts_ns: int = _SETTLE_TS_NS,
     condition_id: str = "mkt_abc",
     outcome_price: float = 1.0,  # 1.0 = YES won, 0.0 = NO won
+    resolved_outcome: Optional[str] = None,
 ) -> dict:
     return dict(
         cloid="settle",
@@ -195,6 +198,7 @@ def _settle_fill(
         entry_sigma=None,
         entry_tau_yr=None,
         realized_pnl_at_settle=48.0,
+        resolved_outcome=resolved_outcome,
     )
 
 
@@ -318,21 +322,24 @@ class TestHtmlContents:
         ]
         fill_rows = [
             _enter_fill(ts_ns=_ENTRY_TS_NS, condition_id=condition_id),
-            _settle_fill(ts_ns=_SETTLE_TS_NS, condition_id=condition_id, outcome_price=1.0),
+            _settle_fill(ts_ns=_SETTLE_TS_NS, condition_id=condition_id,
+                         outcome_price=1.0, resolved_outcome="yes"),
         ]
         return _make_run_dir(tmp_path, condition_id, diag_rows, fill_rows)
 
     def test_html_contains_entry_timestamp(self, tmp_path: Path):
-        """HTML must contain the entry timestamp as a datetime string."""
+        """HTML must contain the full entry timestamp (HH:MM:SS) as a datetime string."""
         run_dir = self._build_run(tmp_path)
         out_path = tmp_path / "trace.html"
         plot_market_trace("mkt_abc", run_dir, out_path)
         content = out_path.read_text()
-        # _ns_to_dt_str converts to ISO datetime; check the date portion is present
+        # _ns_to_dt_str converts to ISO datetime with time component; check HH:MM:SS present
         entry_dt_str = _ns_to_dt_str(_ENTRY_TS_NS)
-        # At minimum the year-month-day portion should appear in the serialised JSON
-        assert entry_dt_str[:10] in content, (
-            f"Entry date '{entry_dt_str[:10]}' not found in HTML output"
+        # Assert the full timestamp (at least up to seconds, e.g. "2023-11-14T23:13:20")
+        # is present in the serialised HTML/JSON blob — not just the date portion
+        timestamp_prefix = entry_dt_str[:19]  # "YYYY-MM-DDTHH:MM:SS"
+        assert timestamp_prefix in content, (
+            f"Entry timestamp '{timestamp_prefix}' not found in HTML output"
         )
 
     def test_html_contains_settlement_annotation(self, tmp_path: Path):
@@ -344,11 +351,12 @@ class TestHtmlContents:
         assert "settled YES" in content, "Settlement annotation 'settled YES' not found in HTML"
 
     def test_html_contains_settlement_no_annotation(self, tmp_path: Path):
-        """HTML must contain 'settled NO' when outcome_price=0.0."""
+        """HTML must contain 'settled NO' when resolved_outcome='no'."""
         diag_rows = [_diag_row(ts_ns=_BASE_TS_NS, condition_id="mkt_no")]
         fill_rows = [
             _enter_fill(ts_ns=_ENTRY_TS_NS, condition_id="mkt_no"),
-            _settle_fill(ts_ns=_SETTLE_TS_NS, condition_id="mkt_no", outcome_price=0.0),
+            _settle_fill(ts_ns=_SETTLE_TS_NS, condition_id="mkt_no",
+                         outcome_price=0.0, resolved_outcome="no"),
         ]
         run_dir = _make_run_dir(tmp_path, "mkt_no", diag_rows, fill_rows)
         out_path = tmp_path / "trace_no.html"
@@ -532,3 +540,143 @@ class TestCmdTrace:
 
         assert len(captured) == 1
         assert captured[0] == run_dir / "traces" / "some_id.html"
+
+
+# ---------------------------------------------------------------------------
+# Regression: NO-leg position with price=1.0 settle row must label "settled NO"
+# Bug: without resolved_outcome, price=1.0 was inferred as "settled YES" even
+# when the held position was on NO (which also wins at price=1.0).
+# ---------------------------------------------------------------------------
+
+class TestSettleOutcomeFromResolvedOutcome:
+    """Regression tests for the settle-label bug.
+
+    When a strategy buys NO and NO wins, runner.py sets settle_px=1.0
+    (the held leg won). The old code inferred settle_outcome from price:
+    price >= 0.5 → "YES", which is wrong. The fix reads resolved_outcome
+    from the fills parquet settle row instead.
+    """
+
+    def _build_no_leg_run(
+        self,
+        tmp_path: Path,
+        resolved_outcome: str,
+        outcome_price: float,
+    ) -> Path:
+        """Build a run where strategy entered NO side and market settled."""
+        condition_id = "mkt_no_leg"
+        diag_rows = [
+            _diag_row(ts_ns=_BASE_TS_NS, condition_id=condition_id),
+            _diag_row(ts_ns=_ENTRY_TS_NS, condition_id=condition_id, action="enter"),
+        ]
+        fill_rows = [
+            # ENTER on NO side (buy NO token)
+            _enter_fill(ts_ns=_ENTRY_TS_NS, condition_id=condition_id,
+                        side="buy", price=0.38),
+            # Settle: price=1.0 because NO won (held leg wins), resolved_outcome="no"
+            _settle_fill(
+                ts_ns=_SETTLE_TS_NS,
+                condition_id=condition_id,
+                outcome_price=outcome_price,
+                resolved_outcome=resolved_outcome,
+            ),
+        ]
+        return _make_run_dir(tmp_path, condition_id, diag_rows, fill_rows)
+
+    def test_no_leg_wins_label_is_settled_no(self, tmp_path: Path):
+        """When NO won (resolved_outcome='no'), label must be 'settled NO', NOT 'settled YES'.
+
+        Regression: the old price-based inference (price=1.0 → 'YES') was wrong
+        when the held position was on NO and NO won.
+        """
+        run_dir = self._build_no_leg_run(
+            tmp_path, resolved_outcome="no", outcome_price=1.0
+        )
+        out_path = tmp_path / "trace_no_leg.html"
+        plot_market_trace("mkt_no_leg", run_dir, out_path)
+        content = out_path.read_text()
+        assert "settled NO" in content, (
+            "Expected 'settled NO' when NO won (resolved_outcome='no'), "
+            f"even though settle price=1.0 — old code wrongly labelled it 'settled YES'"
+        )
+        assert "settled YES" not in content, (
+            "Should NOT contain 'settled YES' when resolved_outcome='no'"
+        )
+
+    def test_yes_leg_wins_label_is_settled_yes(self, tmp_path: Path):
+        """When YES won (resolved_outcome='yes'), label must be 'settled YES'."""
+        run_dir = self._build_no_leg_run(
+            tmp_path, resolved_outcome="yes", outcome_price=1.0
+        )
+        out_path = tmp_path / "trace_yes_leg.html"
+        plot_market_trace("mkt_no_leg", run_dir, out_path)
+        content = out_path.read_text()
+        assert "settled YES" in content, (
+            "Expected 'settled YES' when YES won (resolved_outcome='yes')"
+        )
+        assert "settled NO" not in content, (
+            "Should NOT contain 'settled NO' when resolved_outcome='yes'"
+        )
+
+    def test_unknown_outcome_label_is_settled_no_side(self, tmp_path: Path):
+        """When resolved_outcome='unknown', label must be plain 'settled' (no side)."""
+        run_dir = self._build_no_leg_run(
+            tmp_path, resolved_outcome="unknown", outcome_price=1.0
+        )
+        out_path = tmp_path / "trace_unknown.html"
+        plot_market_trace("mkt_no_leg", run_dir, out_path)
+        content = out_path.read_text()
+        # The label "settled" should appear, but NOT "settled YES" or "settled NO"
+        assert "settled YES" not in content, "Should NOT contain 'settled YES' for unknown outcome"
+        assert "settled NO" not in content, "Should NOT contain 'settled NO' for unknown outcome"
+
+    def test_null_resolved_outcome_falls_back_to_plain_settled(self, tmp_path: Path):
+        """When resolved_outcome is null (old parquet without column), label is plain 'settled'."""
+        # Write fills WITHOUT resolved_outcome column (simulates old parquet schema)
+        condition_id = "mkt_null_ro"
+        old_fills_schema = pa.schema([
+            pa.field("cloid",                   pa.string()),
+            pa.field("ts_ns",                   pa.int64()),
+            pa.field("side",                    pa.string()),
+            pa.field("price",                   pa.float64()),
+            pa.field("size",                    pa.float64()),
+            pa.field("fee",                     pa.float64()),
+            pa.field("condition_id",            pa.string()),
+            pa.field("question_idx",            pa.int64()),
+            pa.field("symbol",                  pa.string()),
+            pa.field("entry_p_model",           pa.float64()),
+            pa.field("entry_edge_chosen_side",  pa.float64()),
+            pa.field("entry_sigma",             pa.float64()),
+            pa.field("entry_tau_yr",            pa.float64()),
+            pa.field("realized_pnl_at_settle",  pa.float64()),
+        ])
+        run_dir = tmp_path / "run_null_ro"
+        diag_path = run_dir / "diagnostics" / f"{condition_id}.parquet"
+        diag_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_diagnostics(diag_path, [_diag_row(ts_ns=_BASE_TS_NS, condition_id=condition_id)])
+
+        # Write fills without resolved_outcome column (old schema)
+        fills_path = run_dir / "fills" / f"{condition_id}.parquet"
+        fills_path.parent.mkdir(parents=True, exist_ok=True)
+        fills_row = {
+            "cloid": "settle", "ts_ns": _SETTLE_TS_NS, "side": "sell",
+            "price": 1.0, "size": 100.0, "fee": 0.0,
+            "condition_id": condition_id, "question_idx": 0, "symbol": "@0",
+            "entry_p_model": None, "entry_edge_chosen_side": None,
+            "entry_sigma": None, "entry_tau_yr": None, "realized_pnl_at_settle": 48.0,
+        }
+        cols: dict = {f.name: [] for f in old_fills_schema}
+        for f in old_fills_schema:
+            cols[f.name].append(fills_row.get(f.name))
+        arrays = {
+            name: pa.array(vals, type=old_fills_schema.field(name).type)
+            for name, vals in cols.items()
+        }
+        pq.write_table(pa.table(arrays, schema=old_fills_schema), fills_path)
+
+        out_path = tmp_path / "trace_null_ro.html"
+        plot_market_trace(condition_id, run_dir, out_path)
+        content = out_path.read_text()
+        # With no resolved_outcome column, should not label a specific side
+        assert "settled YES" not in content, "Should NOT use price heuristic for missing column"
+        assert "settled NO" not in content, "Should NOT use price heuristic for missing column"

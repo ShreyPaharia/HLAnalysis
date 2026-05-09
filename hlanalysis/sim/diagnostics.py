@@ -65,6 +65,7 @@ FILLS_SCHEMA = pa.schema([
     pa.field("entry_sigma",             pa.float64()),
     pa.field("entry_tau_yr",            pa.float64()),
     pa.field("realized_pnl_at_settle",  pa.float64()),
+    pa.field("resolved_outcome",        pa.string()),
 ])
 
 # Fields emitted by ModelEdgeStrategy's "edge" diagnostic
@@ -104,6 +105,9 @@ class FillRow:
     ``entry_*`` fields are populated for ENTER fills from the DiagnosticRow
     that was built at the same evaluate() call. They are None for EXIT and
     settlement fills. ``realized_pnl_at_settle`` is always non-null.
+
+    ``resolved_outcome`` is populated only on the settle synthetic row:
+    "yes" / "no" / "unknown". It is None for all non-settle fills.
     """
     cloid: str
     ts_ns: int
@@ -119,6 +123,7 @@ class FillRow:
     entry_sigma: Optional[float]
     entry_tau_yr: Optional[float]
     realized_pnl_at_settle: float
+    resolved_outcome: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +251,7 @@ def write_fills(rows: list[FillRow], path: Path) -> None:
         "entry_sigma":            pa.array([r.entry_sigma for r in rows],            type=pa.float64()),
         "entry_tau_yr":           pa.array([r.entry_tau_yr for r in rows],           type=pa.float64()),
         "realized_pnl_at_settle": pa.array([r.realized_pnl_at_settle for r in rows], type=pa.float64()),
+        "resolved_outcome":       pa.array([r.resolved_outcome for r in rows],       type=pa.string()),
     }
     table = pa.table(arrays, schema=FILLS_SCHEMA)
     pq.write_table(table, path)

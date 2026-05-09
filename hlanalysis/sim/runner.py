@@ -191,6 +191,13 @@ def run_one_market(
         result.fills.append(settle_fill)
         fill_ts["settle"] = market.end_ts_ns
         fill_question_idx["settle"] = pos.question_idx
+        # Persist the resolved outcome explicitly on the settle row so plotters
+        # can label the settlement correctly regardless of settle_px value.
+        # (price=1.0 means "held leg won" — but the held leg can be NO.)
+        if fills_dir is not None:
+            fill_meta["settle"] = {
+                "resolved_outcome": market.resolved_outcome or "unknown",
+            }
         pos = None
 
     # Compute total position P&L for the market run: sum of all fill cash flows.
@@ -234,6 +241,7 @@ def run_one_market(
                 entry_sigma=meta.get("entry_sigma"),
                 entry_tau_yr=meta.get("entry_tau_yr"),
                 realized_pnl_at_settle=pnl_at_settle,
+                resolved_outcome=meta.get("resolved_outcome"),
             ))
         write_fills(fill_rows, fills_dir / f"{market.condition_id}.parquet")
 
