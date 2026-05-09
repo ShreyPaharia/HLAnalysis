@@ -41,7 +41,7 @@ class _FakeAdapter(VenueAdapter):
             venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
             mechanism=Mechanism.CLOB, symbol="qmeta",
             exchange_ts=now - 60_000_000_000, local_recv_ts=now - 60_000_000_000,
-            question_idx=42, named_outcome_idxs=[30, 31],
+            question_idx=42, named_outcome_idxs=[3],
             keys=["class", "underlying", "period", "expiry", "strike"],
             values=["priceBinary", "BTC", "1h", expiry_str, "80000"],
         )
@@ -55,13 +55,13 @@ class _FakeAdapter(VenueAdapter):
             )
         yield BboEvent(
             venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="@30",
+            mechanism=Mechanism.CLOB, symbol="#30",
             exchange_ts=now, local_recv_ts=now,
             bid_px=0.95, bid_sz=10.0, ask_px=0.96, ask_sz=10.0,
         )
         yield BboEvent(
             venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="@31",
+            mechanism=Mechanism.CLOB, symbol="#31",
             exchange_ts=now, local_recv_ts=now,
             bid_px=0.04, bid_sz=10.0, ask_px=0.05, ask_sz=10.0,
         )
@@ -70,7 +70,7 @@ class _FakeAdapter(VenueAdapter):
         # Settlement
         yield SettlementEvent(
             venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="@30",
+            mechanism=Mechanism.CLOB, symbol="#30",
             exchange_ts=now + 2_000_000_000, local_recv_ts=now + 2_000_000_000,
             settled_side_idx=30, settle_price=1.0, settle_ts=now + 2_000_000_000,
         )

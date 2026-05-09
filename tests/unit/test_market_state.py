@@ -22,8 +22,8 @@ def _bbo(symbol: str, bid: float, ask: float, ts: int = 1) -> BboEvent:
 
 def test_bbo_updates_book_state():
     ms = MarketState()
-    ms.apply(_bbo("@30", 0.94, 0.95, ts=1_000_000_000))
-    bs = ms.book("@30")
+    ms.apply(_bbo("#30", 0.94, 0.95, ts=1_000_000_000))
+    bs = ms.book("#30")
     assert bs is not None
     assert bs.bid_px == 0.94 and bs.ask_px == 0.95
     assert bs.last_l2_ts_ns == 1_000_000_000
@@ -35,7 +35,7 @@ def test_question_registry_built_from_question_meta():
         venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
         mechanism=Mechanism.CLOB, symbol="qmeta",
         exchange_ts=1, local_recv_ts=1,
-        question_idx=42, named_outcome_idxs=[30, 31],
+        question_idx=42, named_outcome_idxs=[3],
         keys=["class", "underlying", "period", "expiry", "strike"],
         values=["priceBinary", "BTC", "1h", "20260508-1200", "80000"],
     )
@@ -45,9 +45,8 @@ def test_question_registry_built_from_question_meta():
     assert q.underlying == "BTC"
     assert q.klass == "priceBinary"
     assert q.strike == 80_000.0
-    assert q.yes_symbol in {"@30", "@31"}
-    assert q.no_symbol in {"@30", "@31"}
-    assert q.yes_symbol != q.no_symbol
+    assert q.yes_symbol == "#30"
+    assert q.no_symbol == "#31"
 
 
 def test_settlement_marks_question_settled():
@@ -56,14 +55,14 @@ def test_settlement_marks_question_settled():
         venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
         mechanism=Mechanism.CLOB, symbol="qmeta",
         exchange_ts=1, local_recv_ts=1,
-        question_idx=42, named_outcome_idxs=[30, 31],
+        question_idx=42, named_outcome_idxs=[3],
         keys=["class", "underlying", "period", "expiry", "strike"],
         values=["priceBinary", "BTC", "1h", "20260508-1200", "80000"],
     )
     ms.apply(qm)
     s = SettlementEvent(
         venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="@30",
+        mechanism=Mechanism.CLOB, symbol="#30",
         exchange_ts=2, local_recv_ts=2,
         settled_side_idx=30, settle_price=1.0, settle_ts=2,
     )
@@ -92,11 +91,11 @@ def test_recent_volume_usd_sums_recent_trades():
     for i, sz in enumerate([1.0, 2.0, 3.0]):
         ms.apply(TradeEvent(
             venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="@30",
+            mechanism=Mechanism.CLOB, symbol="#30",
             exchange_ts=now + i, local_recv_ts=now + i,
             price=0.95, size=sz, side="buy",
         ))
     # All inside the window
-    assert math.isclose(ms.recent_volume_usd("@30", now=now + 5), (1 + 2 + 3) * 0.95)
+    assert math.isclose(ms.recent_volume_usd("#30", now=now + 5), (1 + 2 + 3) * 0.95)
     # Outside window → 0
-    assert ms.recent_volume_usd("@30", now=now + 10**11) == 0.0
+    assert ms.recent_volume_usd("#30", now=now + 10**11) == 0.0

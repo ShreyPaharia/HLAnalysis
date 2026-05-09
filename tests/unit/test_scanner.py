@@ -48,7 +48,7 @@ def _seed_market(now_ns: int) -> MarketState:
         venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
         mechanism=Mechanism.CLOB, symbol="qmeta",
         exchange_ts=now_ns - 60_000_000_000, local_recv_ts=now_ns - 60_000_000_000,
-        question_idx=42, named_outcome_idxs=[30, 31],
+        question_idx=42, named_outcome_idxs=[3],
         keys=["class", "underlying", "period", "expiry", "strike"],
         values=["priceBinary", "BTC", "1h", expiry_str, "80000"],
     ))
@@ -60,13 +60,13 @@ def _seed_market(now_ns: int) -> MarketState:
         ))
     ms.apply(BboEvent(
         venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="@30",
+        mechanism=Mechanism.CLOB, symbol="#30",
         exchange_ts=now_ns, local_recv_ts=now_ns,
         bid_px=0.95, bid_sz=10.0, ask_px=0.96, ask_sz=10.0,
     ))
     ms.apply(BboEvent(
         venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="@31",
+        mechanism=Mechanism.CLOB, symbol="#31",
         exchange_ts=now_ns, local_recv_ts=now_ns,
         bid_px=0.04, bid_sz=10.0, ask_px=0.05, ask_sz=10.0,
     ))
