@@ -47,6 +47,11 @@ class EngineRuntime:
     bus: EventBus = field(default_factory=EventBus)
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
     last_reconcile_ns: int = 0
+    heartbeat_interval_s: float = 30.0
+    # Observability counters — reset to 0 at process start, monotonic thereafter.
+    events_ingested: int = 0
+    scans_completed: int = 0
+    decisions_emitted: int = 0  # non-HOLD decisions handed to the router
 
     async def run(self) -> None:
         # 1) Build collaborators
@@ -111,6 +116,7 @@ class EngineRuntime:
                 asyncio.create_task(self._reconcile_loop(hl, dal)),
                 asyncio.create_task(self._continuous_checks_loop(dal, risk, router)),
                 asyncio.create_task(rules.run(alerts_sub)),
+                asyncio.create_task(self._heartbeat_loop(dal)),
             ]
             if not drift_res.blocked:
                 tasks.append(asyncio.create_task(self._scan_loop(scanner, router)))
@@ -129,6 +135,7 @@ class EngineRuntime:
                 if self.stop_event.is_set():
                     return
                 self.market_state.apply(ev)
+                self.events_ingested += 1
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -140,10 +147,44 @@ class EngineRuntime:
                 now = self._now_ns()
                 scanner.last_reconcile_ns = self.last_reconcile_ns
                 for sd in scanner.scan(now_ns=now):
+                    self.decisions_emitted += 1
                     await router.handle(sd.decision, inputs=sd.inputs, now_ns=now)
+                self.scans_completed += 1
             except Exception:
                 logger.exception("scan tick crashed")
             await self._sleep_or_stop(1.0)
+
+    async def _heartbeat_loop(self, dal: StateDAL) -> None:
+        """Periodic visibility into engine health. Without this the engine is
+        silent on calm markets (strategy gates filter out almost everything;
+        adapter doesn't log INFO during normal flow). One line every N seconds
+        is the cheapest way to confirm the loops are alive."""
+        prev_events = 0
+        prev_scans = 0
+        while not self.stop_event.is_set():
+            await self._sleep_or_stop(self.heartbeat_interval_s)
+            if self.stop_event.is_set():
+                return
+            try:
+                btc_mark = self.market_state.last_mark("BTC")
+                n_questions = len(self.market_state.all_questions())
+                n_positions = len(dal.all_positions())
+                n_live = len(dal.live_orders())
+                d_events = self.events_ingested - prev_events
+                d_scans = self.scans_completed - prev_scans
+                prev_events = self.events_ingested
+                prev_scans = self.scans_completed
+                logger.info(
+                    "heartbeat events={} (+{}) scans={} (+{}) decisions={} | "
+                    "btc={} questions={} positions={} live_orders={}",
+                    self.events_ingested, d_events,
+                    self.scans_completed, d_scans,
+                    self.decisions_emitted,
+                    f"${btc_mark:.2f}" if btc_mark else "none",
+                    n_questions, n_positions, n_live,
+                )
+            except Exception:
+                logger.exception("heartbeat crashed")
 
     async def _reconcile_loop(self, hl: HLClient, dal: StateDAL) -> None:
         interval = self.strategy_cfg.global_.reconcile_interval_seconds
@@ -250,9 +291,18 @@ class EngineRuntime:
 
                 # Stale-data halt is per-trade; we also surface it as an alert here.
                 # Iterate held position legs (avoids spam on unsubscribed markets).
+                # Skip legs whose underlying question has settled — the venue
+                # legitimately stops quoting once a market is resolved, and the
+                # close happens on the SettlementEvent path (router._close_settled).
                 if positions_db:
-                    books_only_held = {p.symbol: self.market_state.book(p.symbol)
-                                        for p in positions_db}
+                    settled_qidxs = {
+                        q.question_idx for q in self.market_state.all_questions() if q.settled
+                    }
+                    held_symbols = {
+                        p.symbol for p in positions_db
+                        if p.question_idx not in settled_qidxs
+                    }
+                    books_only_held = {sym: self.market_state.book(sym) for sym in held_symbols}
                     books_only_held = {s: b for s, b in books_only_held.items() if b is not None}
                     for sym in risk.stale_books(books_only_held, now_ns=now):
                         b = books_only_held[sym]

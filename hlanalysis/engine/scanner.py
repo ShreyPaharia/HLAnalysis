@@ -65,27 +65,31 @@ class Scanner:
             fields = {"class": q.klass, "underlying": q.underlying, "period": q.period}
             if match_question(self.cfg, question_idx=q.question_idx, fields=fields) is None:
                 continue
-            yes_book = self.ms.book(q.yes_symbol)
-            no_book = self.ms.book(q.no_symbol)
-            if yes_book is None and no_book is None:
-                continue
+            # Multi-outcome support: feed every leg of the question to the
+            # strategy so it can decide across all sides (priceBucket has 6 legs;
+            # priceBinary has 2). Skip the question if no leg has a book yet.
+            leg_syms = q.leg_symbols or (
+                (q.yes_symbol, q.no_symbol) if q.yes_symbol else ()
+            )
             books: dict[str, BookState] = {}
-            if yes_book is not None:
-                books[q.yes_symbol] = yes_book
-            if no_book is not None:
-                books[q.no_symbol] = no_book
+            for sym in leg_syms:
+                b = self.ms.book(sym)
+                if b is not None:
+                    books[sym] = b
+            if not books:
+                continue
 
             db_pos = positions_by_q.get(q.question_idx)
             strat_pos = self._db_pos_to_strategy(db_pos) if db_pos else None
+            volume_total = sum(
+                self.ms.recent_volume_usd(sym, now=now_ns) for sym in leg_syms
+            )
             decision = self.strategy.evaluate(
                 question=q,
                 books=books,
                 reference_price=ref,
                 recent_returns=self.ms.recent_returns(self.ref_symbol, n=32),
-                recent_volume_usd=(
-                    self.ms.recent_volume_usd(q.yes_symbol, now=now_ns)
-                    + self.ms.recent_volume_usd(q.no_symbol, now=now_ns)
-                ),
+                recent_volume_usd=volume_total,
                 position=strat_pos,
                 now_ns=now_ns,
             )
@@ -100,10 +104,7 @@ class Scanner:
                     question_fields=fields,
                     reference_price=ref,
                     book=target,
-                    recent_volume_usd=(
-                        self.ms.recent_volume_usd(q.yes_symbol, now=now_ns)
-                        + self.ms.recent_volume_usd(q.no_symbol, now=now_ns)
-                    ),
+                    recent_volume_usd=volume_total,
                     positions=all_positions_strategy,
                     live_orders_total_notional=live_notional,
                     realized_pnl_today=realized_today,

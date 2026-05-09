@@ -110,17 +110,26 @@ class LateResolutionStrategy(Strategy):
         # 2) Pick the leg with the best ask in [threshold, max] across all legs
         # of this question. Generalises to multi-outcome (priceBucket): we follow
         # market consensus per-leg rather than mapping a single strike.
+        # For non-binary classes (priceBucket etc.) we restrict to YES legs only
+        # — buying NO of one bucket is structurally betting against a single
+        # bucket, but it's the SAME exposure as a combination of other YES legs
+        # at worse prices. YES-only avoids that redundancy.
         legs = question.leg_symbols or (
             (question.yes_symbol, question.no_symbol) if question.yes_symbol else ()
         )
         if not legs:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_legs"),))
+        eligible: tuple[str, ...]
+        if question.klass == "priceBinary":
+            eligible = legs  # both YES (idx 0) and NO (idx 1) tradable
+        else:
+            eligible = tuple(legs[i] for i in range(0, len(legs), 2))  # YES legs only
 
         stale_ns = self.cfg.stale_data_halt_seconds * 1_000_000_000
         best_symbol: str | None = None
         best_book: BookState | None = None
         best_ask = -1.0
-        for sym in legs:
+        for sym in eligible:
             b = books.get(sym)
             if b is None or b.ask_px is None or b.bid_px is None:
                 continue

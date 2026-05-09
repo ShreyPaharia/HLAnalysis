@@ -144,12 +144,22 @@ class MarketState:
         )
 
     def _mark_settled(self, ev: SettlementEvent) -> None:
-        # SettlementEvent.symbol is one leg; flip the matching question's settled flag.
+        # SettlementEvent.symbol is one leg; find the question whose leg_symbols
+        # contains it and mark it settled. Multi-outcome (priceBucket) has up to
+        # 6 legs; the binary 2-leg shorthand fails for those.
         for idx, q in list(self._questions.items()):
-            if ev.symbol in (q.yes_symbol, q.no_symbol):
-                side = "yes" if ev.symbol == q.yes_symbol else "no"
-                # Use dataclasses.replace since QuestionView is a frozen dataclass
-                self._questions[idx] = dataclasses.replace(q, settled=True, settled_side=side)
+            legs = q.leg_symbols or (
+                (q.yes_symbol, q.no_symbol) if q.yes_symbol else ()
+            )
+            if ev.symbol not in legs:
+                continue
+            leg_idx = legs.index(ev.symbol)
+            # side_idx 0 = YES, 1 = NO (per HL coin convention #{10*o + s}).
+            # For non-binary questions, "side" is informational only — settled_side
+            # tells the strategy whether the held leg won, which it derives by
+            # comparing the position's symbol to the settled symbol elsewhere.
+            side: str = "yes" if leg_idx % 2 == 0 else "no"
+            self._questions[idx] = dataclasses.replace(q, settled=True, settled_side=side)
 
     @staticmethod
     def _parse_expiry_ns(expiry: str) -> int:
