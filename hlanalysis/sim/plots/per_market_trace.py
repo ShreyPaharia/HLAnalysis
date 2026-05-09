@@ -18,7 +18,9 @@ Colour conventions
 - BUY fill marker:     green  (#4caf50)
 - SELL fill marker:    red    (#f44336)
 - Settlement line/annotation:  #9c27b0 (purple) — labelled "settled YES"
-  or "settled NO" based on the settlement price (1.0 → YES, 0.0 → NO).
+  or "settled NO" based on the ``resolved_outcome`` field of the settle row
+  in fills.parquet ("yes" → "settled YES", "no" → "settled NO").
+  Falls back to plain "settled" when the field is absent or "unknown".
 
 Note: stop-loss horizontal line is intentionally deferred. The stop level is
 not stored in fills.parquet, and reading the strategy config from disk would
@@ -134,6 +136,7 @@ def plot_market_trace(
     fill_cloid_col = fills.get("cloid", [])
     fill_side_col = fills.get("side", [])
     fill_price_col = fills.get("price", [])
+    fill_resolved_outcome_col = fills.get("resolved_outcome", [])
 
     # Separate entry/exit fills from the settlement synthetic
     buy_times: list[str] = []
@@ -155,11 +158,18 @@ def plot_market_trace(
 
         if cloid == "settle":
             settle_time = dt_str
-            # price=1.0 → YES won; price=0.0 → NO won
-            if price is not None:
-                settle_outcome = "YES" if float(price) >= 0.5 else "NO"
+            # Read the explicit resolved_outcome stored on the settle row.
+            # Mapping: "yes" → "YES", "no" → "NO", anything else → no side label.
+            # Falls back gracefully when the column is absent (old parquet schema)
+            # or the value is None/"unknown".
+            ro = fill_resolved_outcome_col[i] if i < len(fill_resolved_outcome_col) else None
+            if ro == "yes":
+                settle_outcome = "YES"
+            elif ro == "no":
+                settle_outcome = "NO"
             else:
-                settle_outcome = "?"
+                # "unknown", None, or missing column — don't infer from price
+                settle_outcome = None
         else:
             # Regular fill: colour by side (buy=green, sell=red)
             if side == "buy":
