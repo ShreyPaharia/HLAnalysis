@@ -83,6 +83,12 @@ class QuestionView:
     settled: bool = False
     settled_side: Literal["yes", "no", "unknown"] | None = None
     leg_symbols: tuple[str, ...] = ()
+    # Display fields from QuestionMetaEvent, used by alerts/reports for human
+    # readable rendering. `name` is HL's question name (e.g. "Recurring").
+    # `kv` mirrors QuestionMetaEvent.keys/values pairs (description fields like
+    # priceThresholds, targetPrice, expiry, etc.).
+    name: str = ""
+    kv: tuple[tuple[str, str], ...] = ()
 
 
 __all__ = [

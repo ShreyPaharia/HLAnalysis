@@ -89,14 +89,30 @@ class AlertRules:
                     f"q={ev.question_idx} {ev.detail}"
                 )
             case Entry():
-                return None, (
-                    f"*ENTRY* q={ev.question_idx} `{ev.symbol}` {ev.side} "
-                    f"sz={ev.size} @ {ev.price:.4f}"
+                # Multi-line, no inline backticks on every field — Markdown
+                # formatting that renders cleanly in the Telegram client.
+                notional = ev.size * ev.price
+                lines = ["🟢 *ENTRY*"]
+                if ev.question_description:
+                    lines.append(f"_{ev.question_description}_")
+                if ev.outcome_description:
+                    lines.append(f"*{ev.outcome_description}*")
+                lines.append(
+                    f"{ev.side.upper()} {ev.size:g} @ ${ev.price:.4f}  "
+                    f"(notional ${notional:,.2f})"
                 )
+                lines.append(f"`q={ev.question_idx}` `{ev.symbol}`")
+                return None, "\n".join(lines)
             case Exit():
-                return None, (
-                    f"*EXIT* q={ev.question_idx} `{ev.symbol}` qty={ev.qty} "
-                    f"PnL=${ev.realized_pnl:.2f} ({ev.reason})"
-                )
+                emoji = {"settlement": "🏁", "stop_loss": "🛑", "manual": "↩️"}.get(ev.reason, "🔚")
+                pnl_sign = "+" if ev.realized_pnl >= 0 else ""
+                lines = [f"{emoji} *EXIT* ({ev.reason})"]
+                if ev.question_description:
+                    lines.append(f"_{ev.question_description}_")
+                if ev.outcome_description:
+                    lines.append(f"*{ev.outcome_description}*")
+                lines.append(f"qty={ev.qty:g}  PnL={pnl_sign}${ev.realized_pnl:.2f}")
+                lines.append(f"`q={ev.question_idx}` `{ev.symbol}`")
+                return None, "\n".join(lines)
             case _:
                 return None

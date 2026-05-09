@@ -9,7 +9,8 @@ from .hl_client import HLClient, PlaceRequest
 from .risk import RiskGate, RiskInputs
 from .risk_events import Entry, Exit, RiskVeto
 from .state import OpenOrder, Position, StateDAL
-from ..strategy.types import Action, Decision, OrderIntent
+from ..strategy.render import outcome_description, question_description
+from ..strategy.types import Action, Decision, OrderIntent, QuestionView
 
 
 class Router:
@@ -50,12 +51,12 @@ class Router:
                     intent.cloid, verdict.reason, verdict.detail,
                 )
                 continue
-            await self._place(intent, now_ns=now_ns, decision=decision)
+            await self._place(intent, now_ns=now_ns, decision=decision, question=inputs.question)
         # Settlement-driven EXIT with no intents: book the close locally.
         if decision.action is Action.EXIT and not decision.intents:
-            await self._close_settled(inputs.question.question_idx, now_ns=now_ns)
+            await self._close_settled(inputs.question.question_idx, now_ns=now_ns, question=inputs.question)
 
-    async def _place(self, intent: OrderIntent, *, now_ns: int, decision: Decision) -> None:
+    async def _place(self, intent: OrderIntent, *, now_ns: int, decision: Decision, question: QuestionView | None = None) -> None:
         # 1. Persist pending row before the network call (spec §5.5 idempotency).
         self.dal.upsert_order(OpenOrder(
             cloid=intent.cloid, venue_oid=None, question_idx=intent.question_idx,
@@ -74,11 +75,14 @@ class Router:
                                       venue_oid=ack.venue_oid, now_ns=now_ns)
         # 4. If filled, update Position + emit Entry/Exit.
         if ack.status == "filled" and ack.fill_size and ack.fill_price:
-            await self._book_fill(intent, ack.fill_price, ack.fill_size, now_ns=now_ns)
+            await self._book_fill(intent, ack.fill_price, ack.fill_size, now_ns=now_ns, question=question)
 
     async def _book_fill(
         self, intent: OrderIntent, price: float, size: float, *, now_ns: int,
+        question: QuestionView | None = None,
     ) -> None:
+        q_desc = question_description(question) if question else ""
+        o_desc = outcome_description(question, intent.symbol) if question else ""
         existing = self.dal.get_position(intent.question_idx)
         signed = size if intent.side == "buy" else -size
         if existing is None:
@@ -94,6 +98,7 @@ class Router:
                 ts_ns=now_ns, cloid=intent.cloid,
                 question_idx=intent.question_idx, symbol=intent.symbol,
                 side=intent.side, size=size, price=price,
+                question_description=q_desc, outcome_description=o_desc,
             ))
         else:
             new_qty = existing.qty + signed
@@ -106,6 +111,7 @@ class Router:
                     symbol=intent.symbol, qty=existing.qty,
                     realized_pnl=realized + existing.realized_pnl,
                     reason="stop_loss" if intent.reduce_only else "manual",
+                    question_description=q_desc, outcome_description=o_desc,
                 ))
             else:
                 avg = (existing.qty * existing.avg_entry + signed * price) / new_qty if new_qty else 0.0
@@ -115,14 +121,17 @@ class Router:
                     last_update_ts_ns=now_ns, stop_loss_price=existing.stop_loss_price,
                 ))
 
-    async def _close_settled(self, question_idx: int, *, now_ns: int) -> None:
+    async def _close_settled(self, question_idx: int, *, now_ns: int, question: QuestionView | None = None) -> None:
         p = self.dal.get_position(question_idx)
         if p is None:
             return
         # Settlement: caller has already confirmed the question settled. We
         # simply delete the local position; venue truth handles PnL.
         self.dal.delete_position(question_idx)
+        q_desc = question_description(question) if question else ""
+        o_desc = outcome_description(question, p.symbol) if question else ""
         await self.bus.publish(Exit(
             ts_ns=now_ns, question_idx=question_idx, symbol=p.symbol,
             qty=p.qty, realized_pnl=p.realized_pnl, reason="settlement",
+            question_description=q_desc, outcome_description=o_desc,
         ))

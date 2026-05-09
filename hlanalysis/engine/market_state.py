@@ -119,6 +119,14 @@ class MarketState:
         settled_side: str | None = None
         if existing and existing.settled and existing.settled_side:
             settled_side = existing.settled_side
+        # Mirror keys/values pairs onto QuestionView for downstream rendering
+        # (alerts, reports). Skip the bulky question_description so the tuple
+        # stays compact.
+        kv_pairs = tuple(
+            (k, v) for k, v in zip(ev.keys, ev.values, strict=False)
+            if k != "question_description"
+        )
+        question_name = kv.get("question_name", "")
         self._questions[ev.question_idx] = QuestionView(
             question_idx=ev.question_idx,
             yes_symbol=yes_symbol,
@@ -131,6 +139,8 @@ class MarketState:
             settled=settled,
             settled_side=settled_side,
             leg_symbols=leg_symbols,
+            name=question_name,
+            kv=kv_pairs,
         )
 
     def _mark_settled(self, ev: SettlementEvent) -> None:

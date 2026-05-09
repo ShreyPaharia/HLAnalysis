@@ -63,6 +63,8 @@ class Entry(_Base):
     side: Literal["buy", "sell"]
     size: float
     price: float
+    question_description: str = ""
+    outcome_description: str = ""
 
 
 class Exit(_Base):
@@ -72,6 +74,8 @@ class Exit(_Base):
     qty: float
     realized_pnl: float
     reason: Literal["settlement", "stop_loss", "manual"]
+    question_description: str = ""
+    outcome_description: str = ""
 
 
 BusEvent = Annotated[
