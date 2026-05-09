@@ -122,20 +122,22 @@ class HLClient:
         100000150). Pull live outcomeMeta and register a mapping for every
         side of every active outcome so the engine can place IOC orders
         through the standard SDK path.
+
+        Note: Exchange has its OWN Info instance (Exchange.info, distinct
+        from the Info we instantiate here). Both must be patched — the
+        Exchange one is what bulk_orders / cancel use to resolve coin→asset.
         """
-        if self._info is None:
-            return
         try:
             import requests
             r = requests.post(
-                self._exchange.base_url.rstrip("/") + "/info"
-                if self._exchange else "https://api.hyperliquid.xyz/info",
+                "https://api.hyperliquid.xyz/info",
                 json={"type": "outcomeMeta"}, timeout=5,
             )
             r.raise_for_status()
             data = r.json()
         except Exception:
             return  # Best-effort; engine will retry on next reconnect
+        targets = [t for t in (self._info, getattr(self._exchange, "info", None)) if t is not None]
         for o in data.get("outcomes", []) or []:
             outcome_idx = o.get("outcome")
             if outcome_idx is None:
@@ -144,10 +146,11 @@ class HLClient:
                 n = 10 * int(outcome_idx) + side_idx
                 coin = f"#{n}"
                 asset_id = 100_000_000 + n
-                self._info.coin_to_asset[coin] = asset_id
-                self._info.name_to_coin[coin] = coin
-                # HIP-4 sizes appear integer-quantised; szDecimals=0.
-                self._info.asset_to_sz_decimals[asset_id] = 0
+                for info in targets:
+                    info.coin_to_asset[coin] = asset_id
+                    info.name_to_coin[coin] = coin
+                    # HIP-4 sizes appear integer-quantised; szDecimals=0.
+                    info.asset_to_sz_decimals[asset_id] = 0
 
     # ---- write path ----
 
@@ -228,13 +231,21 @@ class HLClient:
     def _live_place(self, req: PlaceRequest) -> OrderAck:
         try:
             assert self._exchange is not None
-            # SDK signature differs across versions; this is the contract we
-            # rely on. Tweak as needed when the SDK is locked.
+            # SDK expects cloid as a Cloid object (32-byte hex). Accept both
+            # 0x-prefixed hex and our internal 'hla-{uuid}' format and adapt.
+            from hyperliquid.utils.types import Cloid  # type: ignore[import-not-found]
+            cloid_str = req.cloid
+            if not cloid_str.startswith("0x"):
+                # Map 'hla-<uuid>' (or any non-hex prefix) to a 32-char hex by
+                # taking the trailing hex digits — uuid4 hex is 32 chars.
+                hex_only = cloid_str.replace("hla-", "").replace("-", "")[:32]
+                cloid_str = f"0x{hex_only.zfill(32)}"
+            cloid_obj = Cloid.from_str(cloid_str)
             resp = self._exchange.order(
                 req.symbol, req.side == "buy", req.size, req.price,
                 {"limit": {"tif": "Ioc" if req.time_in_force == "ioc" else "Gtc"}},
                 reduce_only=req.reduce_only,
-                cloid=req.cloid,
+                cloid=cloid_obj,
             )
         except ConnectionError:
             raise
@@ -266,8 +277,11 @@ class HLClient:
     )
     def _live_cancel(self, *, cloid: str, symbol: str) -> bool:
         assert self._exchange is not None
+        from hyperliquid.utils.types import Cloid  # type: ignore[import-not-found]
+        cloid_str = cloid if cloid.startswith("0x") else f"0x{cloid.replace('hla-', '').replace('-', '')[:32].zfill(32)}"
+        cloid_obj = Cloid.from_str(cloid_str)
         try:
-            resp = self._exchange.cancel_by_cloid(symbol, cloid)
+            resp = self._exchange.cancel_by_cloid(symbol, cloid_obj)
         except ConnectionError:
             raise
         except Exception as e:
