@@ -2123,8 +2123,360 @@ Four candidate strategies, scored on (i) capital efficiency on a $1k bankroll, (
 ]
 
 
+# ---------------------------------------------------------------------------
+# 08 — HIP-4 markouts (trade-flow information content)
+# ---------------------------------------------------------------------------
+P_HIP4_MARKOUTS = [
+    (
+        "md",
+        """
+# 08 — HIP-4 markouts (trade-flow information content)
+
+**What this notebook answers**
+
+Does aggressor-initiated flow on HIP-4 binary markets carry directional information?
+
+Specifically, we measure how much the mid-price moves **in the direction of the aggressor**
+(buy → mid goes up; sell → mid goes down) over horizons of 1 s, 5 s, 30 s and 60 s.
+If mean markout exceeds the round-trip cost (~10–15 bps, established in `00-overview.md §3.4`),
+informed flow is present and passive provision has negative expected value unless the
+entry model correctly screens for it.
+
+**Hypothesis tested:** H1 — HIP-4 trade flow carries directional information.
+
+Sign convention (from `analysis/markouts.py`):
+- `markout_h_{N}s = (mid_{t+N} − mid_t) × sign(aggressor_side)` where `buy → +1, sell → −1`.
+- Positive = informed (mid moved the right way); negative = uninformed / noise.
+""",
+    ),
+    (
+        "code",
+        """
+from hlanalysis.analysis import duck, glob_for, load_df, set_mpl_defaults, fmt_ts
+from hlanalysis.analysis import markouts
+import pandas as pd, numpy as np, matplotlib.pyplot as plt
+
+set_mpl_defaults()
+con = duck()
+
+# Reproducible bootstrap seed
+RNG = np.random.default_rng(seed=0)
+
+HORIZONS_S = (1, 5, 30, 60)
+ROUND_TRIP_BPS = 12.0   # midpoint of 10–15 bps from overview §3.4
+
+def bootstrap_mean_ci(x, n_boot=1000, alpha=0.05, rng=RNG):
+    \"\"\"Return (mean, lo, hi) bootstrap 95% CI.  Seed fixed via rng for reproducibility.\"\"\"
+    x = np.asarray(x, dtype=float)
+    x = x[~np.isnan(x)]
+    if len(x) < 2:
+        return (np.nan, np.nan, np.nan)
+    boots = [rng.choice(x, size=len(x), replace=True).mean() for _ in range(n_boot)]
+    return (float(x.mean()), float(np.quantile(boots, alpha / 2)), float(np.quantile(boots, 1 - alpha / 2)))
+
+print("helpers loaded; round-trip cost assumption:", ROUND_TRIP_BPS, "bps")
+""",
+    ),
+    (
+        "md",
+        """
+## §1 Discover HIP-4 binary symbols in the data window
+
+List every `prediction_binary` trade symbol with its row count and time span.
+We iterate over all symbols with sufficient trades for a meaningful markout study.
+""",
+    ),
+    (
+        "code",
+        """
+sym_df = load_df(f'''
+    SELECT symbol,
+           count(*)                                          AS n_trades,
+           min(local_recv_ts)                               AS t0_ns,
+           max(local_recv_ts)                               AS t1_ns,
+           sum(CASE WHEN side = 'unknown' THEN 1 ELSE 0 END) AS unknown_side_count
+    FROM read_parquet(
+            '{glob_for(venue="hyperliquid", product_type="prediction_binary", event="trade")}',
+            hive_partitioning=true
+         )
+    GROUP BY symbol
+    ORDER BY n_trades DESC
+''')
+sym_df['t0'] = sym_df.t0_ns.map(fmt_ts)
+sym_df['t1'] = sym_df.t1_ns.map(fmt_ts)
+sym_df['unknown_pct'] = 100.0 * sym_df.unknown_side_count / sym_df.n_trades.clip(lower=1)
+print(sym_df[['symbol','n_trades','unknown_pct','t0','t1']].to_string(index=False))
+""",
+    ),
+    (
+        "code",
+        """
+# Symbols to include: all with >= 10 aggressed (non-unknown) trades.
+# If most side values are 'unknown', the markout study is a no-op — flag that.
+MIN_TRADES = 10
+eligible = sym_df[sym_df.n_trades >= MIN_TRADES].copy()
+if eligible.empty:
+    print("WARNING: no HIP-4 trade symbols with enough data yet.")
+    SYMBOLS = []
+elif eligible.unknown_pct.mean() > 90:
+    print("WARNING: > 90% of trades have side='unknown'. "
+          "Markout study will be mostly empty — flag this as a finding.")
+    SYMBOLS = eligible.symbol.tolist()
+else:
+    SYMBOLS = eligible.symbol.tolist()
+    print(f"Study symbols ({len(SYMBOLS)}): {SYMBOLS}")
+    print(f"Mean unknown-side pct across study symbols: {eligible.unknown_pct.mean():.1f}%")
+""",
+    ),
+    (
+        "md",
+        """
+## §2 Compute markouts per symbol over the available window
+
+For each symbol, call `markouts.trade_markouts(con, venue='hyperliquid',
+product_type='prediction_binary', symbol=sym, ...)`.  Results are concatenated
+into a single DataFrame; each row is one aggressed trade.
+""",
+    ),
+    (
+        "code",
+        """
+all_frames = []
+for sym in SYMBOLS:
+    row = sym_df[sym_df.symbol == sym].iloc[0]
+    t0, t1 = int(row.t0_ns), int(row.t1_ns)
+    df = markouts.trade_markouts(
+        con,
+        venue='hyperliquid',
+        product_type='prediction_binary',
+        symbol=sym,
+        start_ns=t0,
+        end_ns=t1,
+        horizons_s=HORIZONS_S,
+    )
+    df['symbol'] = sym
+    all_frames.append(df)
+    print(f"  {sym}: {len(df):,} aggressed trades  "
+          f"(NaN mid_at_trade: {df.mid_at_trade.isna().sum()})")
+
+if all_frames:
+    mdf = pd.concat(all_frames, ignore_index=True)
+    # Convert markout columns from price units to bps (relative to mid_at_trade).
+    # bps = markout_price / mid_at_trade * 10_000
+    # Rows where mid_at_trade is NaN already have NaN markout, so this is safe.
+    for h in HORIZONS_S:
+        col = f"markout_h_{h}s"
+        if col in mdf.columns:
+            mdf[f"markout_h_{h}s"] = mdf[col] / mdf['mid_at_trade'] * 1e4
+    print(f"\\nTotal rows: {len(mdf):,}  |  symbols: {mdf.symbol.nunique()}")
+    print(mdf[['symbol','aggressor_side','size']].groupby('symbol')
+            .agg(n=('size','count'), buy_n=('aggressor_side', lambda x: (x=='buy').sum()),
+                 sell_n=('aggressor_side', lambda x: (x=='sell').sum())).to_string())
+else:
+    mdf = pd.DataFrame()
+    print("No aggressed trades found — markout table is empty.")
+""",
+    ),
+    (
+        "md",
+        """
+## §3 Markout distributions by aggressor side
+
+Histogram of `markout_h_60s` split by aggressor side.  The vertical dashed line
+marks the assumed round-trip cost (12 bps).  A distribution whose bulk lies to the
+right of the line indicates the average aggressor earns more than they pay in fees —
+i.e. informed flow.
+""",
+    ),
+    (
+        "code",
+        """
+if mdf.empty:
+    print("No data — skipping §3 plots.")
+else:
+    col_h = f"markout_h_{HORIZONS_S[-1]}s"   # 60s is the headline horizon
+    clean = mdf.dropna(subset=[col_h])
+
+    sides = sorted(clean.aggressor_side.unique())
+    fig, axes = plt.subplots(1, len(sides), figsize=(5.5 * len(sides), 4), sharey=False)
+    if len(sides) == 1:
+        axes = [axes]
+
+    for ax, side in zip(axes, sides):
+        vals = clean.loc[clean.aggressor_side == side, col_h].values
+        # clip at 1st/99th percentile for legibility
+        lo, hi = np.nanpercentile(vals, 1), np.nanpercentile(vals, 99)
+        ax.hist(vals.clip(lo, hi), bins=60, color='C0' if side == 'buy' else 'C3',
+                alpha=0.75, edgecolor='none')
+        mean_val = float(np.nanmean(vals))
+        ax.axvline(0,                  color='black', lw=0.8, ls='--', label='zero')
+        ax.axvline(ROUND_TRIP_BPS,     color='green', lw=1.0, ls='--', label=f'round-trip cost ({ROUND_TRIP_BPS:.0f} bps)')
+        ax.axvline(-ROUND_TRIP_BPS,    color='green', lw=1.0, ls='--')
+        ax.axvline(mean_val,           color='C1',    lw=1.2, ls='-',  label=f'mean = {mean_val:.2f} bps')
+        ax.set_xlabel('markout (bps)'); ax.set_ylabel('count')
+        ax.set_title(f'Aggressor side: {side}  (n={len(vals):,})')
+        ax.legend(fontsize=8)
+
+    fig.suptitle(f'HIP-4 markout distribution at +{HORIZONS_S[-1]}s  (all symbols)')
+    plt.tight_layout(); plt.show()
+""",
+    ),
+    (
+        "code",
+        """
+# Tiled by horizon: 2×2 grid for all four horizons, side='buy' only (or first available)
+if mdf.empty:
+    print("No data — skipping horizon tile.")
+else:
+    side_focus = 'buy' if 'buy' in mdf.aggressor_side.values else mdf.aggressor_side.iloc[0]
+    sub = mdf[mdf.aggressor_side == side_focus]
+
+    fig, axes = plt.subplots(2, 2, figsize=(11, 7), sharey=False)
+    for ax, h in zip(axes.flat, HORIZONS_S):
+        col = f"markout_h_{h}s"
+        if col not in sub.columns:
+            ax.set_visible(False); continue
+        vals = sub[col].dropna().values
+        if len(vals) == 0:
+            ax.set_title(f'+{h}s  (no data)'); continue
+        lo, hi = np.nanpercentile(vals, 1), np.nanpercentile(vals, 99)
+        ax.hist(vals.clip(lo, hi), bins=50, color='C0', alpha=0.75, edgecolor='none')
+        m, ci_lo, ci_hi = bootstrap_mean_ci(vals)
+        ax.axvline(m,               color='C1', lw=1.2, ls='-',  label=f'mean {m:.2f} bps')
+        ax.axvline(ROUND_TRIP_BPS,  color='green', lw=0.9, ls='--', label=f'RT cost {ROUND_TRIP_BPS:.0f} bps')
+        ax.axvline(-ROUND_TRIP_BPS, color='green', lw=0.9, ls='--')
+        ax.set_title(f'+{h}s  (n={len(vals):,}  95%CI=[{ci_lo:.2f},{ci_hi:.2f}])')
+        ax.set_xlabel('markout (bps)'); ax.legend(fontsize=7)
+
+    fig.suptitle(f'HIP-4 markout distributions by horizon — aggressor_side={side_focus}')
+    plt.tight_layout(); plt.show()
+""",
+    ),
+    (
+        "md",
+        """
+## §4 Markouts by trade size bucket
+
+Does the signal scale with size?  We bucket trades into quartiles by `size`, then
+tabulate mean markout + bootstrap 95% CI per (side × size_bucket × horizon).
+
+**This table is the primary AC2 deliverable.**
+""",
+    ),
+    (
+        "code",
+        """
+if mdf.empty:
+    print("No data — skipping size-bucket analysis.")
+else:
+    # Assign size quartile labels
+    mdf['size_bucket'] = pd.qcut(mdf['size'], q=4, labels=['Q1 (small)', 'Q2', 'Q3', 'Q4 (large)'], duplicates='drop')
+
+    rows = []
+    for side in sorted(mdf.aggressor_side.unique()):
+        for bucket in mdf['size_bucket'].cat.categories:
+            sub = mdf[(mdf.aggressor_side == side) & (mdf['size_bucket'] == bucket)]
+            for h in HORIZONS_S:
+                col = f"markout_h_{h}s"
+                if col not in sub.columns:
+                    continue
+                vals = sub[col].dropna().values
+                n = len(vals)
+                if n == 0:
+                    rows.append({'side': side, 'size_bucket': bucket, 'horizon_s': h,
+                                 'n': 0, 'mean_bps': np.nan, 'ci_lo': np.nan, 'ci_hi': np.nan})
+                    continue
+                mean_v, ci_lo, ci_hi = bootstrap_mean_ci(vals)
+                rows.append({'side': side, 'size_bucket': str(bucket), 'horizon_s': h,
+                             'n': n, 'mean_bps': round(mean_v, 3),
+                             'ci_lo': round(ci_lo, 3), 'ci_hi': round(ci_hi, 3)})
+
+    summary = pd.DataFrame(rows)
+    print("Mean markout (bps) by side × size_bucket × horizon (bootstrap 95% CI, seed=0):")
+    print(summary.to_string(index=False))
+    summary
+""",
+    ),
+    (
+        "code",
+        """
+# Heatmap: mean markout at each horizon for buy-side, by size bucket
+if mdf.empty or 'size_bucket' not in mdf.columns:
+    print("No data.")
+else:
+    for side in sorted(mdf.aggressor_side.unique()):
+        sub = summary[summary.side == side].copy()
+        if sub.empty: continue
+        pivot = sub.pivot_table(index='size_bucket', columns='horizon_s', values='mean_bps')
+        fig, ax = plt.subplots(figsize=(8, 3.5))
+        im = ax.imshow(pivot.values, aspect='auto', cmap='RdYlGn',
+                       vmin=-ROUND_TRIP_BPS, vmax=ROUND_TRIP_BPS)
+        ax.set_xticks(range(len(pivot.columns))); ax.set_xticklabels([f'+{c}s' for c in pivot.columns])
+        ax.set_yticks(range(len(pivot.index)));  ax.set_yticklabels(pivot.index)
+        ax.set_xlabel('horizon'); ax.set_ylabel('size bucket')
+        ax.set_title(f'Mean markout (bps) — {side} aggressor  (green > round-trip cost)')
+        plt.colorbar(im, ax=ax, label='mean markout (bps)')
+        for i, row_vals in enumerate(pivot.values):
+            for j, v in enumerate(row_vals):
+                if not np.isnan(v):
+                    ax.text(j, i, f'{v:.1f}', ha='center', va='center', fontsize=9,
+                            color='white' if abs(v) > ROUND_TRIP_BPS * 0.6 else 'black')
+        plt.tight_layout(); plt.show()
+""",
+    ),
+    (
+        "md",
+        """
+## §5 Decision: does the mean markout exceed the round-trip cost?
+
+Net markout = mean_markout_bps − ROUND_TRIP_BPS.
+
+- **Positive net markout** at a (side, bucket, horizon) cell → informed flow at that slice;
+  passive provision at that slice is adversely selected.
+- **Negative net markout** across all cells → flow is uninformed; providing liquidity is
+  viable (you earn the spread and lose nothing on adverse selection).
+
+Round-trip cost: **12 bps** midpoint of 10–15 bps range (from `00-overview.md §3.4`).
+""",
+    ),
+    (
+        "code",
+        """
+if mdf.empty or summary.empty:
+    print("No data — verdict not computable.")
+else:
+    verdict = summary.copy()
+    verdict['net_markout_bps'] = verdict['mean_bps'] - ROUND_TRIP_BPS
+    verdict['verdict'] = np.where(
+        verdict['mean_bps'].isna(), 'no data',
+        np.where(verdict['net_markout_bps'] > 0, 'INFORMED (> RT cost)', 'uninformed (< RT cost)')
+    )
+    print(f"Round-trip cost assumption: {ROUND_TRIP_BPS} bps")
+    print()
+    print(verdict[['side','size_bucket','horizon_s','n','mean_bps','net_markout_bps','verdict']]
+          .to_string(index=False))
+""",
+    ),
+    (
+        "md",
+        """
+## Strategy hypotheses
+
+- **Supports:** H1: HIP-4 trade flow carries directional info — (fill in from §3 chart whether
+  mean markout is positive at any meaningful horizon, and reference which size bucket shows the
+  strongest signal).
+- **Rules out:** H1: (fill in if every bucket × horizon has mean markout below round-trip cost —
+  i.e. `net_markout_bps < 0` throughout the verdict table).
+- **Next probe:** lead-lag with BTC perp (notebook 09) and a stop-loss-conditioned variant —
+  does flow signal survive when filtered by perp move direction?
+""",
+    ),
+]
+
+
 def main() -> None:
-    notebooks = {
+    # Notebooks that use the generic HYPOTHESIS_FOOTER appended at the end.
+    notebooks_with_generic_footer = {
         "01-data-quality.ipynb": P0,
         "02-cross-venue-basis.ipynb": P1,
         "03-microstructure.ipynb": P2,
@@ -2133,12 +2485,23 @@ def main() -> None:
         "06-hip4-pricing-from-perp.ipynb": P6,
         "07-binary-late-yes-strategy.ipynb": P7,
     }
-    for name, cells in notebooks.items():
+    for name, cells in notebooks_with_generic_footer.items():
         nb = _build([*cells, HYPOTHESIS_FOOTER])
         path = OUT / name
         with path.open("w") as f:
             nbf.write(nb, f)
         print(f"wrote {path.relative_to(REPO)}  ({len(cells) + 1} cells, +footer)")
+
+    # Notebooks with a custom footer already embedded in their cell list.
+    notebooks_custom_footer = {
+        "08-hip4-markouts.ipynb": P_HIP4_MARKOUTS,
+    }
+    for name, cells in notebooks_custom_footer.items():
+        nb = _build(cells)
+        path = OUT / name
+        with path.open("w") as f:
+            nbf.write(nb, f)
+        print(f"wrote {path.relative_to(REPO)}  ({len(cells)} cells)")
 
 
 if __name__ == "__main__":
