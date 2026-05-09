@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from hlanalysis.strategy.base import Strategy
 from hlanalysis.strategy.types import Action, Position
 
 from .data.binance_klines import Kline
 from .data.schemas import PMMarket, PMTrade
+from .diagnostics import DiagnosticRow, build_row, write_diagnostics
 from .fills import Fill, FillModelConfig, simulate_fill
 from .hftbt_adapter import EventKind, build_event_stream
 from .market_state import SimMarketState
@@ -59,12 +61,15 @@ def run_one_market(
     klines: list[Kline],
     trades: list[PMTrade],
     cfg: RunnerConfig,
+    *,
+    diagnostics_dir: Path | None = None,
 ) -> RunResult:
     state = SimMarketState()
     result = RunResult()
     pos: Position | None = None
     last_scan_ns = market.start_ts_ns
     scan_interval_ns = cfg.scanner_interval_seconds * 1_000_000_000
+    diag_rows: list[DiagnosticRow] = []
 
     events = list(build_event_stream(
         trades=trades, klines=klines,
@@ -102,6 +107,22 @@ def run_one_market(
         result.n_decisions += 1
         result.diagnostics_count += len(decision.diagnostics)
 
+        # Collect diagnostics row (only when a diagnostics_dir was requested)
+        if diagnostics_dir is not None:
+            yes_book = books.get(market.yes_token_id)
+            no_book = books.get(market.no_token_id)
+            diag_rows.append(build_row(
+                ts_ns=ev.ts_ns,
+                condition_id=market.condition_id,
+                question_idx=qv.question_idx,
+                decision=decision,
+                ref_price=float(ref_close),
+                yes_bid=yes_book.bid_px if yes_book is not None else None,
+                yes_ask=yes_book.ask_px if yes_book is not None else None,
+                no_bid=no_book.bid_px if no_book is not None else None,
+                no_ask=no_book.ask_px if no_book is not None else None,
+            ))
+
         if decision.action == Action.ENTER and decision.intents:
             intent = decision.intents[0]
             book = state.book(intent.symbol)
@@ -124,6 +145,10 @@ def run_one_market(
                     result.fills.append(fill)
                     pos = None
         last_scan_ns = ev.ts_ns
+
+    # Write diagnostics parquet for this market (after event loop, before return)
+    if diagnostics_dir is not None and diag_rows:
+        write_diagnostics(diag_rows, diagnostics_dir / f"{market.condition_id}.parquet")
 
     if pos is not None:
         is_yes_pos = pos.symbol == market.yes_token_id
