@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from hlanalysis.sim.plots._common import save_fig
+
 
 def plot_equity_curve(
     per_market_pnl: list[float],
@@ -48,6 +50,4 @@ def plot_equity_curve(
         yaxis_title="PnL $",
     )
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_html(str(out_path))
-    return out_path
+    return save_fig(fig, out_path)

@@ -531,8 +531,107 @@ class TestMissingKlines:
 
 
 # ---------------------------------------------------------------------------
+# TC6b: Bisect regression — klines that extend past end_ts_ns are ignored
+# ---------------------------------------------------------------------------
+
+class TestBisectLookup:
+    """_realized_abs_logret must handle a non-pre-filtered klines list correctly.
+
+    This is the regression test that proves the bisect fix isn't fragile: even
+    when the full klines list includes rows whose ts_ns > end_ts_ns, the result
+    is identical to passing only the window-relevant klines.
+    """
+
+    def test_klines_past_end_do_not_affect_result(self, tmp_path: Path):
+        """Extra klines after end_ts_ns are invisible to bisect lookup."""
+        from hlanalysis.sim.plots.vol_realized import _realized_abs_logret
+
+        start_ns = int(1_700_000_000 * 1e9)
+        end_ns = start_ns + int(24 * 3600 * 1e9)
+
+        open_price = 48_000.0
+        close_price = 50_400.0
+        expected_rlr = abs(math.log(close_price / open_price))
+
+        # klines list containing:
+        # - one at exactly start_ns  (open lookup target)
+        # - one at exactly end_ns    (close lookup target)
+        # - two AFTER end_ns         (should be ignored)
+        klines = [
+            _kline_dict(start_ns,                          open_price,  open_price),
+            _kline_dict(end_ns,                            close_price, close_price),
+            _kline_dict(end_ns + int(1 * 3600 * 1e9),     55_000.0,    55_000.0),
+            _kline_dict(end_ns + int(25 * 3600 * 1e9),    60_000.0,    60_000.0),
+        ]
+        # List is already sorted; pass it unsorted to prove sort-stability
+        import random as _random
+        shuffled = list(klines)
+        _random.shuffle(shuffled)
+        # _realized_abs_logret requires a sorted list — sort it as _load_all_klines would
+        shuffled.sort(key=lambda k: k["ts_ns"])
+
+        result = _realized_abs_logret(shuffled, start_ns, end_ns)
+        assert result is not None
+        assert abs(result - expected_rlr) < 1e-12, (
+            f"bisect result {result} != expected {expected_rlr}"
+        )
+
+    def test_compute_points_with_unfiltered_klines(self, tmp_path: Path):
+        """_compute_vol_realized_points gives correct result when klines extend
+        well beyond the market window (regression: old forward-scan was fragile)."""
+        diag_dir = tmp_path / "diagnostics"
+        klines_dir = tmp_path / "klines"
+
+        start_ns = int(1_700_000_000 * 1e9)
+        end_ns = start_ns + int(24 * 3600 * 1e9)
+        market = _FakeMarket("cid_bisect", start_ns, end_ns)
+
+        open_price = 52_000.0
+        close_price = 49_400.0
+        expected_rlr = abs(math.log(close_price / open_price))
+
+        _make_diagnostics_parquet(diag_dir / "cid_bisect.parquet", [
+            _diag_row(
+                condition_id="cid_bisect",
+                ts_ns=start_ns + int(1e9),
+                action="enter",
+                sigma=0.75,
+                tau_yr=6.0 * 3600 / _SECS_PER_YEAR,
+            ),
+        ])
+
+        # klines extend 3 days past end_ns — these extra rows must not pollute
+        # the close_val bisect result.
+        extra_klines = [
+            _kline_dict(end_ns + int(d * 24 * 3600 * 1e9), 99_000.0 + d * 100, 99_000.0 + d * 100)
+            for d in range(1, 4)
+        ]
+        all_klines = [
+            _kline_dict(start_ns, open_price,  open_price),
+            _kline_dict(end_ns,   close_price, close_price),
+            *extra_klines,
+        ]
+        _make_klines_json(klines_dir / "klines.json", all_klines)
+
+        points = _compute_vol_realized_points(diag_dir, klines_dir, [market])
+        assert len(points) == 1
+        assert abs(points[0][0] - 0.75) < 1e-9
+        assert abs(points[0][1] - expected_rlr) < 1e-12, (
+            f"expected {expected_rlr}, got {points[0][1]}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # TC7: Report integration — vol_realized.html link in report.md
 # ---------------------------------------------------------------------------
+
+@dataclass
+class _FakeMarketWithOutcome:
+    condition_id: str
+    resolved_outcome: str
+    start_ts_ns: int
+    end_ts_ns: int
+
 
 class TestReportIntegration:
     """Verify write_single_run_report links vol_realized.html when data present."""
@@ -561,15 +660,7 @@ class TestReportIntegration:
             cid = f"cid_{i}"
             start_ns = base_ns + i * day_ns
             end_ns = start_ns + day_ns
-            # Use _FakeMarket from test_sim_report.py pattern (dataclass with resolved_outcome)
-            @dataclass
-            class FakeM:
-                condition_id: str
-                resolved_outcome: str
-                start_ts_ns: int
-                end_ts_ns: int
-
-            markets.append(FakeM(
+            markets.append(_FakeMarketWithOutcome(
                 condition_id=cid,
                 resolved_outcome="yes",
                 start_ts_ns=start_ns,
@@ -622,14 +713,7 @@ class TestReportIntegration:
         base_ns = int(1_700_000_000 * 1e9)
         day_ns = int(24 * 3600 * 1e9)
 
-        @dataclass
-        class FakeM:
-            condition_id: str
-            resolved_outcome: str
-            start_ts_ns: int
-            end_ts_ns: int
-
-        market = FakeM(
+        market = _FakeMarketWithOutcome(
             condition_id="cid_v1",
             resolved_outcome="yes",
             start_ts_ns=base_ns,
@@ -666,14 +750,7 @@ class TestReportIntegration:
         """report.md does NOT link vol_realized.html when diagnostics_dir/klines_dir not passed."""
         from hlanalysis.sim.report import write_single_run_report
 
-        @dataclass
-        class FakeM:
-            condition_id: str
-            resolved_outcome: str
-            start_ts_ns: int
-            end_ts_ns: int
-
-        market = FakeM(
+        market = _FakeMarketWithOutcome(
             condition_id="cid_x",
             resolved_outcome="yes",
             start_ts_ns=int(1e18),
