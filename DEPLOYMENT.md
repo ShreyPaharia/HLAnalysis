@@ -323,6 +323,37 @@ Required env vars (referenced by `config/deploy.yaml`):
 Kill switch: `touch data/engine/halt` to stop new entries (existing positions held).
 Restart drift: if the merge at startup detects ghost / orphan / position mismatch cases, the engine writes `data/engine/restart_blocked` and the scanner does not resume. Investigate, then `rm` the file and restart.
 
+## Installing the engine on EC2
+
+The recorder's user-data installs `hl-engine.service` automatically on a fresh CDK deploy. For an already-running box (or after editing the unit content / rotating SSM secrets), apply the change without a CDK redeploy:
+
+```bash
+# 1. Push your branch first — the installer pulls fresh code on the box.
+git push origin <branch>
+
+# 2. Pre-stage SSM secrets (one-time; SecureStrings encrypted with alias/aws/ssm).
+aws ssm put-parameter --name /hl-engine/account-address --value '0x...' --type String --region ap-northeast-1
+aws ssm put-parameter --name /hl-engine/api-secret-key  --value '0x...' --type SecureString --region ap-northeast-1
+aws ssm put-parameter --name /hl-engine/tg-bot-token    --value '...'   --type SecureString --region ap-northeast-1
+aws ssm put-parameter --name /hl-engine/tg-chat-id      --value '...'   --type String --region ap-northeast-1
+
+# 3. Install the unit on the live box (idempotent — re-run anytime).
+make install-engine-on-ec2
+
+# 4. From here on, regular deploys work.
+make deploy-engine
+```
+
+`scripts/install-engine-systemd.sh` writes `/etc/systemd/system/hl-engine.service` and runs `daemon-reload + enable --now`. The unit's `ExecStartPre=+/opt/hl-recorder/scripts/fetch-engine-secrets.sh` re-pulls SSM on every restart, so rotated secrets land via `make deploy-engine` — no installer re-run needed.
+
+Confirm health:
+
+```bash
+make engine-status
+```
+
+Look for: `active (running)`, no `restart_blocked` flag, journal lines showing `paper_mode=true` on first start.
+
 ## Going live (Phase 1, Week 2)
 
 1. Verify ≥ 1 observed allowlisted question's full lifecycle in paper mode.
