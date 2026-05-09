@@ -281,8 +281,22 @@ class HyperliquidAdapter(VenueAdapter):
 
         if not hasattr(self, "_meta_seen_questions"):
             self._meta_seen_questions: dict[int, tuple[int, ...]] = {}
-        for ev in self._fetch_question_meta_events(templates, self._meta_seen_questions):
+        # Re-fetch once and reuse for both meta + settlement diffing to avoid
+        # double-fetching against HL's info endpoint.
+        try:
+            r = requests.post(HL_INFO_URL, json={"type": "outcomeMeta"}, timeout=5)
+            r.raise_for_status()
+            payload = r.json()
+        except Exception as e:
+            log.warning("outcomeMeta fetch failed (settle-diff): %s", e)
+            payload = None
+        for ev in self._fetch_question_meta_events(
+            templates, self._meta_seen_questions, meta_payload=payload
+        ):
             yield ev
+        if payload is not None:
+            for ev in self._detect_polled_settlements(templates, payload):
+                yield ev
 
     async def _refresh_wildcards(
         self,
@@ -323,8 +337,20 @@ class HyperliquidAdapter(VenueAdapter):
 
         if not hasattr(self, "_meta_seen_questions"):
             self._meta_seen_questions: dict[int, tuple[int, ...]] = {}
-        for ev in self._fetch_question_meta_events(templates, self._meta_seen_questions):
+        try:
+            r = requests.post(HL_INFO_URL, json={"type": "outcomeMeta"}, timeout=5)
+            r.raise_for_status()
+            payload = r.json()
+        except Exception as e:
+            log.warning("outcomeMeta fetch failed (settle-diff refresh): %s", e)
+            payload = None
+        for ev in self._fetch_question_meta_events(
+            templates, self._meta_seen_questions, meta_payload=payload
+        ):
             yield ev
+        if payload is not None:
+            for ev in self._detect_polled_settlements(templates, payload):
+                yield ev
 
     def _expand_wildcard(self, template: Subscription) -> list[Subscription]:
         try:
@@ -627,6 +653,105 @@ class HyperliquidAdapter(VenueAdapter):
                         values=values,
                     )
                 )
+        return out
+
+    def _detect_polled_settlements(
+        self,
+        templates: list[Subscription],
+        meta_payload: dict,
+    ) -> list[NormalizedEvent]:
+        """Diff current outcomeMeta against last-known snapshot to emit a
+        SettlementEvent per newly-settled outcome.
+
+        HL appears not to push `outcomeSettled` on the `outcomeMetaUpdates` WS
+        channel reliably (recorder data shows zero pushed settlements across
+        many cycles). Two sources of evidence we DO see in the polled meta:
+
+          (a) An existing question's `settledNamedOutcomes` list grew.
+          (b) A question that was active disappeared from `questions[]`
+              entirely — common at rollover when HL retires the cycle.
+
+        We track previous snapshots per question_idx and emit one
+        SettlementEvent per newly-settled outcome, with symbol set to the YES
+        leg coin (`#{10*outcome_idx + 0}`). MarketState._mark_settled walks
+        the full leg_symbols on the matching question, so any leg coin
+        identifies the question — picking YES is just a convention.
+        """
+        if not hasattr(self, "_meta_snapshot"):
+            # qidx → {"named": tuple[int,...], "settled": tuple[int,...]}
+            self._meta_snapshot: dict[int, dict[str, tuple[int, ...]]] = {}
+
+        recv_ns = time.time_ns()
+        out: list[NormalizedEvent] = []
+        # Map qidx → fields dict so we can pick a matching template.
+        current: dict[int, tuple[tuple[int, ...], tuple[int, ...], dict[str, str]]] = {}
+        for q in meta_payload.get("questions", []) or []:
+            qidx = q.get("question")
+            if qidx is None:
+                continue
+            named = tuple(int(x) for x in (q.get("namedOutcomes") or []))
+            settled = tuple(int(x) for x in (q.get("settledNamedOutcomes") or []))
+            fields = _parse_description(q.get("description") or "")
+            current[int(qidx)] = (named, settled, fields)
+
+        def _settlement_for(outcome_idx: int, fields: dict[str, str]) -> SettlementEvent | None:
+            matching_tmpl = next(
+                (t for t in templates
+                 if not getattr(t, "match", None) or _matches(t.match, fields)),
+                None,
+            )
+            if matching_tmpl is None:
+                return None
+            return SettlementEvent(
+                venue=self.venue,
+                product_type=matching_tmpl.product_type,
+                mechanism=matching_tmpl.mechanism,
+                symbol=f"#{10 * outcome_idx + 0}",  # YES leg by convention
+                exchange_ts=recv_ns,
+                local_recv_ts=recv_ns,
+                settled_side_idx=0,
+                settle_price=None,
+                settle_ts=recv_ns,
+                keys=[],
+                values=[],
+            )
+
+        # Path (a): existing question with grown settledNamedOutcomes.
+        # Skip first sight — we don't know if a non-empty settledNamedOutcomes
+        # is from "just settled" or "settled long ago, we just connected." Both
+        # would re-emit retroactive settlements with the wrong timestamp.
+        for qidx, (named, settled, fields) in current.items():
+            prev = self._meta_snapshot.get(qidx)
+            if prev is None:
+                continue
+            newly_settled = set(settled) - set(prev["settled"])
+            for outcome_idx in newly_settled:
+                ev = _settlement_for(outcome_idx, fields)
+                if ev is not None:
+                    out.append(ev)
+
+        # Path (b): question disappeared from questions[] — emit settlement for
+        # any of its outcomes not previously seen as settled.
+        for qidx, prev in list(self._meta_snapshot.items()):
+            if qidx in current:
+                continue
+            unsettled_at_disappear = set(prev["named"]) - set(prev["settled"])
+            for outcome_idx in unsettled_at_disappear:
+                # We've lost the fields dict on disappearance; reuse last
+                # snapshot's fields if we kept it. Stored `fields_last` for this
+                # case.
+                fields = prev.get("fields") or {}
+                ev = _settlement_for(outcome_idx, fields)
+                if ev is not None:
+                    out.append(ev)
+            # Remove the disappeared question from the snapshot so we don't
+            # re-emit on every poll.
+            del self._meta_snapshot[qidx]
+
+        # Update snapshot for next poll.
+        for qidx, (named, settled, fields) in current.items():
+            self._meta_snapshot[qidx] = {"named": named, "settled": settled, "fields": fields}
+
         return out
 
     def _fetch_question_meta_events(
