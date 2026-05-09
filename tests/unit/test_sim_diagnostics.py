@@ -825,3 +825,164 @@ class TestRunnerFillsDir:
             # no fills_dir arg → defaults to None
         )
         assert not (tmp_path / "fills").exists()
+
+
+# ---------------------------------------------------------------------------
+# Regression: realized_pnl_at_settle must be position-level P&L, not per-fill cash
+# Spec §5.3 step 2: realized_pnl_per_dollar = realized_pnl_at_settle / (entry_price * size)
+# ---------------------------------------------------------------------------
+
+class TestRealizedPnlAtSettleIsPositionPnl:
+    """Regression test for the spec §5.3 bug.
+
+    The ENTER fill row's realized_pnl_at_settle must hold the position-level
+    P&L realized at market settlement (i.e. what the whole position made),
+    NOT the per-fill cash contribution (cash outflow at entry time).
+
+    Setup:
+      - v2 strategy that always enters immediately (edge_buffer=-1.0, fee=0)
+      - known entry price derived from the synthetic L2 (ask_px from _trades())
+      - market settles YES, so settle_px = 1.0
+      - no EXIT fill — position held to settlement
+
+    Expected:
+      entry_price  = ask_px with slippage = 0.6 * (1 + 5/10000) = 0.6003
+      size         = min(intent_size, book_depth_assumption)
+      fee_paid     = entry_price * size * fee_taker  (fee_taker=0.0 → fee=0)
+      expected_pnl = (1.0 - entry_price) * size - fee_paid
+
+    The ENTER row's realized_pnl_at_settle must equal expected_pnl (not the
+    cash outflow -(entry_price * size + fee)).
+    """
+
+    def _build_run(self, tmp_path: Path):
+        """Run a market with known inputs; return (fills_table, rows, entry_price, size, fee_paid).
+
+        The strategy (edge_buffer=-1.0) enters the NO side when given YES bid=0.6/ask=0.605,
+        NO bid=0.4/ask=0.405 (the NO ask is cheaper so has higher apparent edge). The market
+        is set to resolved_outcome="no" so the NO buy wins and settle_px=1.0, giving a
+        winning position P&L = (1.0 - entry_price) * size - fee_paid.
+        """
+        market = PMMarket(
+            condition_id="0xpnl_regression",
+            yes_token_id="Y",
+            no_token_id="N",
+            start_ts_ns=0,
+            end_ts_ns=86_400_000_000_000,
+            resolved_outcome="no",   # NO buy wins → settle_px = 1.0
+            total_volume_usd=10_000.0,
+            n_trades=100,
+        )
+        # Klines: enough to warm vol lookback (600s = 10 klines at 60s each)
+        klines = _klines(120)
+        # Trades: YES at 0.6, NO at 0.4; strategy with edge_buffer=-1.0 will enter NO
+        trades = [
+            PMTrade(ts_ns=10 * 60_000_000_000, token_id="Y", side="buy", price=0.6, size=100),
+            PMTrade(ts_ns=10 * 60_000_000_000 + 1, token_id="N", side="buy", price=0.4, size=100),
+        ]
+        # Strategy: enters as aggressively as possible, zero fee to keep math clean
+        strat = ModelEdgeStrategy(
+            ModelEdgeConfig(
+                vol_lookback_seconds=600,
+                vol_sampling_dt_seconds=60,
+                vol_clip_min=0.01,
+                vol_clip_max=5.0,
+                edge_buffer=-1.0,   # always enter
+                fee_taker=0.0,      # zero fee makes expected_pnl unambiguous
+                half_spread_assumption=0.0,
+                stop_loss_pct=None,
+                max_position_usd=100.0,
+            )
+        )
+        # FillModel: slippage_bps=5, fee_taker=0.0, depth=100 (controls fill size)
+        fill_model = FillModelConfig(slippage_bps=5.0, fee_taker=0.0, book_depth_assumption=100.0)
+        cfg = RunnerConfig(
+            scanner_interval_seconds=60,
+            fill_model=fill_model,
+            synthetic_half_spread=0.005,
+            synthetic_depth=100.0,
+            day_open_btc=100_000.0,
+        )
+        fills_dir = tmp_path / "fills"
+        run_one_market(strat, market, klines, trades, cfg, fills_dir=fills_dir)
+        table = pq.read_table(fills_dir / "0xpnl_regression.parquet")
+        rows = table.to_pylist()
+        enter_rows = [r for r in rows if r["cloid"] != "settle"]
+        assert len(enter_rows) >= 1, f"Expected at least one ENTER fill, got rows: {rows}"
+        enter = enter_rows[0]
+        entry_price = enter["price"]
+        size = enter["size"]
+        fee_paid = enter["fee"]
+        return table, rows, entry_price, size, fee_paid
+
+    def test_enter_row_realized_pnl_is_not_cash_outflow(self, tmp_path: Path):
+        """The ENTER row must NOT hold the cash outflow -(entry_price * size + fee).
+
+        This is the 'confirm fail' assertion against the buggy behavior.
+        With the fix applied, this assertion also passes since the value should be
+        the position P&L which is positive for a winning trade, never ≈ -1.
+        """
+        table, rows, entry_price, size, fee_paid = self._build_run(tmp_path)
+        enter = [r for r in rows if r["cloid"] != "settle"][0]
+        pnl = enter["realized_pnl_at_settle"]
+        # The bug: cash outflow ≈ -(entry_price * size + fee) ≈ -60.03 for a 100-unit buy at 0.6003
+        # The correct value: (1.0 - entry_price) * size - fee ≈ +39.97
+        # Assert the value is NOT approximately equal to the cash outflow
+        bad_value = -(entry_price * size + fee_paid)
+        assert abs(pnl - bad_value) > 1.0, (
+            f"realized_pnl_at_settle={pnl:.6f} looks like the per-fill cash outflow "
+            f"{bad_value:.6f} — must be position P&L instead"
+        )
+
+    def test_enter_row_realized_pnl_equals_position_pnl(self, tmp_path: Path):
+        """The ENTER row must hold the position-level P&L: (1.0 - entry_price)*size - fee."""
+        table, rows, entry_price, size, fee_paid = self._build_run(tmp_path)
+        enter = [r for r in rows if r["cloid"] != "settle"][0]
+        pnl = enter["realized_pnl_at_settle"]
+        # For a YES buy held to settlement (wins), settle_px=1.0:
+        # position_pnl = (1.0 - entry_price) * size - fee_paid
+        expected_pnl = (1.0 - entry_price) * size - fee_paid
+        assert abs(pnl - expected_pnl) < 1e-9, (
+            f"realized_pnl_at_settle={pnl:.6f} expected={expected_pnl:.6f} "
+            f"(entry_price={entry_price}, size={size}, fee={fee_paid})"
+        )
+
+    def test_calibration_y_value_meaningful(self, tmp_path: Path):
+        """Spec §5.3: realized_pnl_per_dollar = realized_pnl_at_settle / (entry_price * size)
+        is the calibration scatter y-axis. For a winning binary buy it equals
+        (1 - entry_price) / entry_price (return per dollar invested). The old bug
+        stored the cash outflow, yielding ≈ -1 for every buy regardless of outcome.
+        The correct value is > 0 for a winning trade and >= -1 always (binary can
+        only lose at most the notional). Note: values > 1 are valid when entry < 0.5.
+        """
+        table, rows, entry_price, size, fee_paid = self._build_run(tmp_path)
+        enter = [r for r in rows if r["cloid"] != "settle"][0]
+        pnl = enter["realized_pnl_at_settle"]
+        notional = entry_price * size
+        realized_pnl_per_dollar = pnl / notional
+        # Winning trade (NO bought at ~0.405, settles YES→1.0, fee=0) must be > 0
+        assert realized_pnl_per_dollar > 0, (
+            f"Winning trade must have positive realized_pnl_per_dollar, "
+            f"got {realized_pnl_per_dollar:.6f} — old bug stores cash outflow yielding ≈ -1"
+        )
+        # Can never lose more than the notional on a binary instrument
+        assert realized_pnl_per_dollar >= -1.0, (
+            f"realized_pnl_per_dollar={realized_pnl_per_dollar:.6f} below -1 — impossible for binary"
+        )
+        # Numeric check against the exact expected return per notional dollar (fee=0)
+        expected_return = (1.0 - entry_price) / entry_price
+        assert abs(realized_pnl_per_dollar - expected_return) < 1e-9, (
+            f"realized_pnl_per_dollar={realized_pnl_per_dollar:.6f} "
+            f"expected={expected_return:.6f}"
+        )
+
+    def test_settle_row_realized_pnl_equals_total_market_pnl(self, tmp_path: Path):
+        """The settle row's realized_pnl_at_settle equals the total market P&L (same as ENTER row)."""
+        table, rows, entry_price, size, fee_paid = self._build_run(tmp_path)
+        enter = [r for r in rows if r["cloid"] != "settle"][0]
+        settle = [r for r in rows if r["cloid"] == "settle"][0]
+        # Both should equal the total market P&L
+        assert abs(settle["realized_pnl_at_settle"] - enter["realized_pnl_at_settle"]) < 1e-9, (
+            f"settle pnl={settle['realized_pnl_at_settle']:.6f} != "
+            f"enter pnl={enter['realized_pnl_at_settle']:.6f}"
+        )
