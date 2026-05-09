@@ -1,14 +1,54 @@
 #!/bin/bash
 set -euo pipefail
 
-# Deploy hl-recorder: git pull on EC2 and restart service via SSM.
+# Deploy code: git pull on EC2 and restart service(s) via SSM.
 # Workflow: Push to GitHub locally, then run this script.
 #
-# Usage: ./scripts/deploy.sh [branch]
+# Usage:
+#   ./scripts/deploy.sh                          # both services, main branch
+#   ./scripts/deploy.sh my-branch                # both services, my-branch
+#   ./scripts/deploy.sh --service recorder       # recorder only, main
+#   ./scripts/deploy.sh --service engine         # engine only, main
+#   ./scripts/deploy.sh --service engine my-br   # engine only, my-br
+#
+# Restarting the engine triggers its restart-drift gate (spec §5.5). If any
+# ghost/orphan/position-mismatch fires at startup, the engine writes
+# /data/engine/restart_blocked and the scanner stays suspended. SSH in and
+# investigate before clearing the flag.
 
 STACK_NAME="HLRecorderStack"
 REGION="${AWS_REGION:-$(aws configure get region)}"
-BRANCH="${1:-main}"
+SERVICE="both"
+BRANCH="main"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --service)
+      SERVICE="${2:?--service requires recorder|engine|both}"
+      shift 2
+      ;;
+    --service=*)
+      SERVICE="${1#--service=}"
+      shift
+      ;;
+    -h|--help)
+      sed -n '4,18p' "$0"
+      exit 0
+      ;;
+    *)
+      BRANCH="$1"
+      shift
+      ;;
+  esac
+done
+
+case "$SERVICE" in
+  recorder|engine|both) ;;
+  *)
+    echo "ERROR: --service must be one of: recorder, engine, both (got: $SERVICE)"
+    exit 1
+    ;;
+esac
 
 INSTANCE_ID=$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
@@ -28,6 +68,7 @@ LOCAL_STATUS=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
 echo "==> Region:        $REGION"
 echo "==> Instance:      $INSTANCE_ID"
 echo "==> Branch:        $BRANCH"
+echo "==> Service(s):    $SERVICE"
 echo "==> Local HEAD:    $LOCAL_COMMIT"
 if [ "$LOCAL_STATUS" -gt 0 ]; then
   echo "==> WARNING: You have $LOCAL_STATUS uncommitted change(s). Push to GitHub first!"
@@ -52,6 +93,21 @@ if [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
   fi
 fi
 
+# Build the per-service restart block. Recorder restarts always print fast;
+# engine restarts run the §5.5 restart-drift gate which can take a few seconds
+# longer to settle, so we sleep 5 instead of 3 before is-active.
+case "$SERVICE" in
+  recorder)
+    RESTART_BLOCK='"systemctl restart hl-recorder.service","sleep 3","systemctl is-active hl-recorder.service"'
+    ;;
+  engine)
+    RESTART_BLOCK='"systemctl restart hl-engine.service","sleep 5","systemctl is-active hl-engine.service","journalctl -u hl-engine.service -n 30 --no-pager"'
+    ;;
+  both)
+    RESTART_BLOCK='"systemctl restart hl-recorder.service","sleep 3","systemctl is-active hl-recorder.service","systemctl restart hl-engine.service","sleep 5","systemctl is-active hl-engine.service","journalctl -u hl-engine.service -n 30 --no-pager"'
+    ;;
+esac
+
 # Pull and restart on EC2
 echo ""
 echo "==> Deploying on EC2..."
@@ -68,9 +124,7 @@ COMMAND_ID=$(aws ssm send-command \
       "sudo -u ec2-user git reset --hard origin/'"$BRANCH"'",
       "/root/.local/bin/uv pip install --python /opt/hl-recorder/.venv/bin/python -e /opt/hl-recorder",
       "chown -R ec2-user:ec2-user /opt/hl-recorder",
-      "systemctl restart hl-recorder.service",
-      "sleep 3",
-      "systemctl is-active hl-recorder.service",
+      '"$RESTART_BLOCK"',
       "sudo -u ec2-user git -C /opt/hl-recorder log --oneline -1"
     ]
   }' \

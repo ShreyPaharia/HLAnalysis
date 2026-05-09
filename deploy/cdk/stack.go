@@ -53,12 +53,14 @@ func NewHLRecorderStack(scope constructs.Construct, id string, props *HLRecorder
 		},
 	})
 
-	// Allow EC2 to read GitHub deploy key from SSM Parameter Store
+	// Allow EC2 to read GitHub deploy key + engine secrets from SSM Parameter Store.
+	// Engine secrets (HL signing key, Telegram token) live under /hl-engine/*.
 	role.AddToPolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
 		Effect:  awsiam.Effect_ALLOW,
-		Actions: jsii.Strings("ssm:GetParameter"),
+		Actions: jsii.Strings("ssm:GetParameter", "ssm:GetParameters"),
 		Resources: jsii.Strings(
 			fmt.Sprintf("arn:aws:ssm:%s:%s:parameter/hl-recorder/*", *props.Env.Region, *props.Env.Account),
+			fmt.Sprintf("arn:aws:ssm:%s:%s:parameter/hl-engine/*", *props.Env.Region, *props.Env.Account),
 		),
 	}))
 
@@ -129,6 +131,17 @@ func NewHLRecorderStack(scope constructs.Construct, id string, props *HLRecorder
 		jsii.String("mkdir -p /data/logs"),
 		jsii.String("chown -R ec2-user:ec2-user /data"),
 
+		// 1GB swap file on the data volume. t4g.micro has 1GB RAM; recorder +
+		// engine co-locate here and a peak (parquet flush + WS reconnect +
+		// scanner tick) can briefly exceed RAM. Swap absorbs that without OOM.
+		// `swappiness=10` keeps the kernel from preferring swap for cold pages
+		// during normal operation — it's strictly a safety net.
+		jsii.String("if [ ! -f /data/swapfile ]; then fallocate -l 1G /data/swapfile && chmod 600 /data/swapfile && mkswap /data/swapfile; fi"),
+		jsii.String("swapon /data/swapfile || true"),
+		jsii.String("grep -q '/data/swapfile' /etc/fstab || echo '/data/swapfile none swap sw 0 0' >> /etc/fstab"),
+		jsii.String("sysctl -w vm.swappiness=10"),
+		jsii.String("grep -q '^vm.swappiness' /etc/sysctl.conf || echo 'vm.swappiness=10' >> /etc/sysctl.conf"),
+
 		// Install Python 3.12, git, and development tools
 		jsii.String("dnf install -y python3.12 python3.12-pip git gcc python3.12-devel"),
 
@@ -164,7 +177,12 @@ SSHEOF`),
 		// Set ownership for ec2-user
 		jsii.String("chown -R ec2-user:ec2-user /opt/hl-recorder"),
 
-		// Create systemd service
+		// Create systemd service.
+		// Resource limits chosen to give the recorder priority for memory (it's
+		// load-bearing for replay/calibration data) while ceding CPU to the
+		// engine when both contend (engine has latency-sensitive stop-loss path).
+		// MemoryMax + OOMScoreAdjust=-500 means the kernel kills the engine,
+		// not the recorder, if Python ever leaks. See deploy/README.md.
 		jsii.String(`cat > /etc/systemd/system/hl-recorder.service << 'SERVICEEOF'
 [Unit]
 Description=Hyperliquid Market Data Recorder
@@ -180,6 +198,9 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 Environment="PYTHONUNBUFFERED=1"
+MemoryMax=512M
+CPUWeight=50
+OOMScoreAdjust=-500
 
 [Install]
 WantedBy=multi-user.target
@@ -255,6 +276,93 @@ TIMEREOF`),
 		jsii.String("systemctl daemon-reload"),
 		jsii.String("systemctl enable --now hl-recorder-sync.timer"),
 		jsii.String("systemctl enable --now hl-recorder-cleanup.timer"),
+
+		// ── hl-engine: MM engine sibling service ──────────────────────────────
+		// Ships paper-mode by default. Operator flips paper_mode=false in
+		// config/strategy.yaml (committed + deployed) when ready to go live.
+
+		// Engine state directory on the data volume.
+		jsii.String("mkdir -p /data/engine /data/logs"),
+		jsii.String("chown -R ec2-user:ec2-user /data/engine"),
+
+		// Pull engine secrets from SSM into a 0600 env file.
+		// Provision these parameters before deploying:
+		//   /hl-engine/account-address (String)
+		//   /hl-engine/api-secret-key  (SecureString, kms/ssm alias)
+		//   /hl-engine/tg-bot-token    (SecureString)
+		//   /hl-engine/tg-chat-id      (String)
+		jsii.String("mkdir -p /etc/hl-engine"),
+		jsii.String(fmt.Sprintf(`set +x
+HL_ACCOUNT_ADDRESS=$(aws ssm get-parameter --name /hl-engine/account-address --region %s --query Parameter.Value --output text 2>/dev/null || echo "")
+HL_API_SECRET_KEY=$(aws ssm get-parameter --name /hl-engine/api-secret-key --with-decryption --region %s --query Parameter.Value --output text 2>/dev/null || echo "")
+TG_BOT_TOKEN=$(aws ssm get-parameter --name /hl-engine/tg-bot-token --with-decryption --region %s --query Parameter.Value --output text 2>/dev/null || echo "")
+TG_CHAT_ID=$(aws ssm get-parameter --name /hl-engine/tg-chat-id --region %s --query Parameter.Value --output text 2>/dev/null || echo "")
+cat > /etc/hl-engine/env <<ENVEOF
+HL_ACCOUNT_ADDRESS=${HL_ACCOUNT_ADDRESS}
+HL_API_SECRET_KEY=${HL_API_SECRET_KEY}
+TG_BOT_TOKEN=${TG_BOT_TOKEN}
+TG_CHAT_ID=${TG_CHAT_ID}
+PYTHONUNBUFFERED=1
+ENVEOF
+set -x`, *props.Env.Region, *props.Env.Region, *props.Env.Region, *props.Env.Region)),
+		jsii.String("chmod 600 /etc/hl-engine/env"),
+		jsii.String("chown root:root /etc/hl-engine/env"),
+
+		// Override deploy.yaml with absolute paths for /data; the in-repo
+		// config/deploy.yaml is the dev template (relative paths).
+		jsii.String(`cat > /etc/hl-engine/deploy.yaml <<DEPLOYEOF
+deploy:
+  env: prod
+  hl:
+    account_address: \${HL_ACCOUNT_ADDRESS}
+    api_secret_key: \${HL_API_SECRET_KEY}
+    base_url: https://api.hyperliquid.xyz
+  alerts:
+    telegram:
+      bot_token: \${TG_BOT_TOKEN}
+      chat_id: \${TG_CHAT_ID}
+  state_db_path: /data/engine/state.db
+  kill_switch_path: /data/engine/halt
+DEPLOYEOF`),
+		jsii.String("chmod 644 /etc/hl-engine/deploy.yaml"),
+
+		// Engine systemd unit. Same ec2-user, same venv as the recorder, but
+		// strict resource limits + a positive OOMScoreAdjust so the kernel
+		// reaches for the engine first under memory pressure.
+		jsii.String(`cat > /etc/systemd/system/hl-engine.service <<'SERVICEEOF'
+[Unit]
+Description=Hyperliquid MM Engine (Phase 1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/opt/hl-recorder
+EnvironmentFile=/etc/hl-engine/env
+ExecStart=/opt/hl-recorder/.venv/bin/hl-engine \
+  --strategy-config /opt/hl-recorder/config/strategy.yaml \
+  --deploy-config /etc/hl-engine/deploy.yaml \
+  --symbols-config /opt/hl-recorder/config/symbols.yaml \
+  --log-level INFO
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+MemoryMax=384M
+CPUWeight=200
+OOMScoreAdjust=500
+ReadWritePaths=/data/engine /data/logs
+
+[Install]
+WantedBy=multi-user.target
+SERVICEEOF`),
+
+		jsii.String("systemctl daemon-reload"),
+		// Enable but DO NOT start until the operator confirms strategy.yaml
+		// (paper_mode + caps) is correct and SSM secrets are populated. After
+		// the first hand-confirmed boot, you can switch to enable --now.
+		jsii.String("systemctl enable hl-engine.service"),
 	)
 
 	// Create EBS volume for data storage (10GB gp3)
@@ -265,7 +373,13 @@ TIMEREOF`),
 		RemovalPolicy:    awscdk.RemovalPolicy_SNAPSHOT,
 	})
 
-	// EC2 Instance
+	// EC2 Instance.
+	// t4g.micro (1GB RAM) — recorder + engine co-locate. Steady-state RAM is
+	// ~250MB recorder + ~250MB engine + ~200MB OS, which fits, but peaks
+	// (parquet flush colliding with a WS reconnect storm or settlement burst)
+	// can spike. A 1GB swap file (configured below in user-data) absorbs
+	// these peaks; it only ever gets touched under pressure. Bump to
+	// t4g.small if `vmstat 60` shows sustained `si`/`so` > 0.
 	instance := awsec2.NewInstance(stack, jsii.String("HLRecorderInstance"), &awsec2.InstanceProps{
 		InstanceType: awsec2.NewInstanceType(jsii.String("t4g.micro")), // ARM/Graviton - 1GB RAM
 		MachineImage: awsec2.MachineImage_LatestAmazonLinux2023(&awsec2.AmazonLinux2023ImageSsmParameterProps{

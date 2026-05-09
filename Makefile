@@ -1,4 +1,4 @@
-.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy ssh-ec2 status logs query data-summary pull-data help
+.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy deploy-recorder deploy-engine engine-local ssh-ec2 status engine-status logs engine-logs query data-summary pull-data help
 
 # Stack name
 STACK_NAME=HLRecorderStack
@@ -35,9 +35,42 @@ cdk-destroy:
 
 # --- Deployment ---
 
-# Deploy code changes to EC2 (git pull + restart service)
+# Deploy code changes to EC2 (git pull + restart service(s))
+# Default: restarts both recorder + engine. Use deploy-recorder or
+# deploy-engine to scope to one service.
 deploy:
 	./scripts/deploy.sh
+
+deploy-recorder:
+	./scripts/deploy.sh --service recorder
+
+# Restarting the engine triggers its §5.5 restart-drift gate. If any
+# ghost/orphan/position-mismatch fires, the engine writes
+# /data/engine/restart_blocked and the scanner stays suspended until you SSH
+# in, investigate, and `rm` the flag.
+deploy-engine:
+	./scripts/deploy.sh --service engine
+
+# Run the engine locally against your dev .env.local. Loads env vars
+# (HL_*, TG_*) from .env.local, then invokes hl-engine with the in-repo
+# config files. paper_mode=true (the strategy.yaml default) means no real
+# orders fire. Ctrl-C for graceful shutdown.
+engine-local:
+	@if [ ! -f .env.local ]; then \
+		echo "ERROR: .env.local not found. Copy from .env.local.example:"; \
+		echo "  cp .env.local.example .env.local && chmod 600 .env.local"; \
+		exit 1; \
+	fi
+	@if [ "$$(stat -f '%A' .env.local 2>/dev/null || stat -c '%a' .env.local)" != "600" ]; then \
+		echo "WARN: .env.local is not 0600 — fixing"; \
+		chmod 600 .env.local; \
+	fi
+	set -a; . ./.env.local; set +a; \
+	uv run hl-engine \
+		--strategy-config config/strategy.yaml \
+		--deploy-config config/deploy.yaml \
+		--symbols-config config/symbols.yaml \
+		--log-level INFO
 
 # --- Remote Access & Monitoring ---
 
@@ -109,6 +142,42 @@ query:
 	aws ssm get-command-invocation --command-id "$$CMD_ID" --instance-id "$$INSTANCE_ID" \
 		--query "StandardOutputContent" --output text
 
+# Engine status: systemd state + last 30 journal lines + restart-drift flag
+engine-status:
+	@INSTANCE_ID=$$(aws cloudformation describe-stacks --stack-name $(STACK_NAME) \
+		--query "Stacks[0].Outputs[?ExportName=='HLRecorderInstanceID'].OutputValue" \
+		--output text) && \
+	if [ -z "$$INSTANCE_ID" ]; then \
+		echo "ERROR: Could not fetch instance ID. Is the stack deployed?"; \
+		exit 1; \
+	fi && \
+	echo "Fetching engine status from $$INSTANCE_ID..." && \
+	aws ssm send-command \
+		--instance-ids "$$INSTANCE_ID" \
+		--document-name "AWS-RunShellScript" \
+		--parameters 'commands=["systemctl status hl-engine.service --no-pager", "echo", "echo === restart_blocked flag ===", "ls -la /data/engine/restart_blocked 2>/dev/null || echo none", "echo", "echo === halt flag ===", "ls -la /data/engine/halt 2>/dev/null || echo none", "echo", "echo === recent journal ===", "journalctl -u hl-engine.service -n 30 --no-pager"]' \
+		--query "Command.CommandId" \
+		--output text | xargs -I {} sh -c \
+		'sleep 3 && aws ssm get-command-invocation --command-id {} --instance-id '"$$INSTANCE_ID"' --query "StandardOutputContent" --output text'
+
+# Tail engine journal
+engine-logs:
+	@INSTANCE_ID=$$(aws cloudformation describe-stacks --stack-name $(STACK_NAME) \
+		--query "Stacks[0].Outputs[?ExportName=='HLRecorderInstanceID'].OutputValue" \
+		--output text) && \
+	if [ -z "$$INSTANCE_ID" ]; then \
+		echo "ERROR: Could not fetch instance ID. Is the stack deployed?"; \
+		exit 1; \
+	fi && \
+	echo "Fetching engine logs from $$INSTANCE_ID..." && \
+	aws ssm send-command \
+		--instance-ids "$$INSTANCE_ID" \
+		--document-name "AWS-RunShellScript" \
+		--parameters 'commands=["journalctl -u hl-engine.service -n 200 --no-pager"]' \
+		--query "Command.CommandId" \
+		--output text | xargs -I {} sh -c \
+		'sleep 3 && aws ssm get-command-invocation --command-id {} --instance-id '"$$INSTANCE_ID"' --query "StandardOutputContent" --output text'
+
 # Tail logs from the recorder
 logs:
 	@INSTANCE_ID=$$(aws cloudformation describe-stacks --stack-name $(STACK_NAME) \
@@ -142,12 +211,19 @@ help:
 	@echo "  cdk-destroy       Tear down infrastructure (WARNING: destroys EC2, snapshots EBS)"
 	@echo ""
 	@echo "Deployment:"
-	@echo "  deploy            Deploy code changes (git pull + restart service on EC2)"
+	@echo "  deploy            Deploy code + restart BOTH recorder and engine"
+	@echo "  deploy-recorder   Deploy code + restart recorder only"
+	@echo "  deploy-engine     Deploy code + restart engine only (triggers §5.5 drift gate)"
+	@echo ""
+	@echo "Local dev:"
+	@echo "  engine-local      Run engine on this machine in paper mode (loads .env.local)"
 	@echo ""
 	@echo "Monitoring:"
 	@echo "  ssh-ec2           Start SSM session to EC2 instance"
 	@echo "  status            Check recorder service status + last 20 log lines"
 	@echo "  logs              Tail last 100 lines of recorder logs"
+	@echo "  engine-status     Check engine service + restart_blocked / halt flags + journal"
+	@echo "  engine-logs       Tail last 200 lines of engine journal"
 	@echo "  data-summary      Show event counts grouped by venue and event type"
 	@echo "  query Q=\"...\"     Run custom DuckDB query, e.g. Q=\"SELECT COUNT(*) FROM ...\""
 	@echo "  pull-data         Sync archived data from S3 to local ./data/ (incremental)"
