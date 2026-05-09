@@ -130,6 +130,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         slippage_bps=args.slippage_bps, fee_taker=args.fee_taker,
         book_depth_assumption=args.depth,
     )
+    out_dir = Path(args.out_dir)
     pnl: list[float] = []
     n_trades = 0
     diag_dir = out_dir / "diagnostics"
@@ -144,7 +145,6 @@ def cmd_run(args: argparse.Namespace) -> None:
         pnl.append(res.realized_pnl_usd or 0.0)
         n_trades += len(res.fills)
     summary = summarise_run(pnl, n_trades=n_trades)
-    out_dir = Path(args.out_dir)
     write_single_run_report(
         out_dir=out_dir, strategy_name=args.strategy,
         config_summary=params, per_market_pnl=pnl, summary=summary,

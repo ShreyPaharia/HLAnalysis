@@ -5,6 +5,8 @@ TDD: written before implementation. Run with:
 """
 from __future__ import annotations
 
+import argparse
+import json
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -326,3 +328,65 @@ class TestRunnerDiagnosticsDir:
         for r in rows:
             assert r["p_model"] is None
             assert r["sigma"] is None
+
+
+# ---------------------------------------------------------------------------
+# Regression: cmd_run must not raise NameError (out_dir assigned before use)
+# ---------------------------------------------------------------------------
+
+class TestCmdRunOutDirOrdering:
+    """Regression for: diag_dir = out_dir / "diagnostics" appearing before
+    out_dir = Path(args.out_dir) in cmd_run, causing NameError on any non-empty
+    job list.  Introduced in commit feat(sim): persist per-decision diagnostics.
+    """
+
+    def test_cmd_run_no_name_error(self, tmp_path: Path, monkeypatch):
+        """cmd_run must not raise NameError when called with a non-empty job list."""
+        from hlanalysis.sim import cli
+        from hlanalysis.sim.cli import cmd_run
+        from hlanalysis.sim.tuning import TuningJob
+
+        # Build a minimal valid config file the CLI expects to read.
+        config_path = tmp_path / "params.json"
+        config_path.write_text(json.dumps({
+            "tte_min_seconds": 3600,
+            "tte_max_seconds": 86400,
+            "price_extreme_threshold": 0.9,
+            "distance_from_strike_usd_min": 100.0,
+            "vol_max": 999.0,
+            "max_position_usd": 100.0,
+            "stop_loss_pct": 10.0,
+            "max_strike_distance_pct": 0.5,
+            "min_recent_volume_usd": 0.0,
+            "stale_data_halt_seconds": 86400,
+        }))
+
+        out_dir = tmp_path / "out"
+
+        # Build a stub job list so cmd_run doesn't bail on "no jobs".
+        market = _market(condition_id="0xreg1")
+        klines = _klines()
+        trades = _trades()
+        stub_jobs = [TuningJob(
+            market=market,
+            klines=klines,
+            trades=trades,
+            day_open_btc=100_000.0,
+        )]
+
+        # Patch _load_jobs_from_cache so no real filesystem cache is needed.
+        monkeypatch.setattr(cli, "_load_jobs_from_cache", lambda _: stub_jobs)
+
+        args = argparse.Namespace(
+            cache_root=str(tmp_path / "cache"),
+            strategy="v1",
+            config=str(config_path),
+            out_dir=str(out_dir),
+            slippage_bps=5.0,
+            fee_taker=0.0,
+            half_spread=0.005,
+            depth=10_000.0,
+        )
+
+        # Should not raise NameError (or any error).
+        cmd_run(args)
