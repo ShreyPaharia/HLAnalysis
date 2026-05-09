@@ -64,33 +64,86 @@ def _gamma_event_to_pmmarket(event: dict) -> PMMarket | None:
     )
 
 
-def discover_btc_updown_markets(date_iso_list: list[str]) -> list[PMMarket]:
-    """Discover BTC daily Up/Down markets for given ISO dates (YYYY-MM-DD).
+_BTC_UPDOWN_SERIES_SLUG = "btc-up-or-down-daily"
+_SERIES_PAGE_LIMIT = 500
 
-    For each date, query Gamma's /events with the canonical slug, parse, return
-    PMMarket rows. Caller filters for liquidity later.
+
+def _fetch_series_events(series_slug: str) -> list[dict]:
+    """Paginate Gamma `/events?series_slug=...&closed=true`. Returns raw event dicts.
+
+    Each call uses the documented `limit`/`offset` pair; loop terminates when a
+    short page comes back. We only ask for `closed=true` since the backtester
+    needs resolved markets — open events have no outcome to settle against.
     """
-    results: list[PMMarket] = []
-    for date_iso in date_iso_list:
-        slug = _slug_for_date(date_iso)
+    out: list[dict] = []
+    offset = 0
+    while True:
         try:
-            payload = _http_get(f"{_GAMMA_BASE}/events", params={"slug": slug})
+            page = _http_get(
+                f"{_GAMMA_BASE}/events",
+                params={
+                    "series_slug": series_slug,
+                    "closed": "true",
+                    "limit": _SERIES_PAGE_LIMIT,
+                    "offset": offset,
+                },
+            )
         except Exception as e:
-            logger.warning(f"PM gamma fetch failed for {slug}: {e}")
+            logger.warning(f"PM gamma series fetch failed at offset={offset}: {e}")
+            break
+        if not isinstance(page, list) or not page:
+            break
+        out.extend(page)
+        if len(page) < _SERIES_PAGE_LIMIT:
+            break
+        offset += _SERIES_PAGE_LIMIT
+    return out
+
+
+def _event_in_window(ev: dict, start_iso: str, end_iso: str) -> bool:
+    """True iff event.endDate (resolution time) is in [start_iso, end_iso).
+
+    `start_iso` and `end_iso` are date-only `YYYY-MM-DD`. Compare lexicographically
+    against the prefix of an ISO timestamp — works because ISO-8601 sorts naturally.
+    """
+    end = ev.get("endDate") or ""
+    if len(end) < 10:
+        return False
+    return start_iso <= end[:10] < end_iso
+
+
+def discover_btc_updown_markets(start_iso: str, end_iso: str) -> list[PMMarket]:
+    """Discover BTC daily Up/Down markets resolving in [start_iso, end_iso).
+
+    Pulls the canonical PM `btc-up-or-down-daily` series (single source of truth
+    for the daily binary) and filters client-side by `endDate`. Replaces the
+    earlier per-date slug lookup, which silently missed all markets before
+    2026-03-13 because PM changed the slug convention then.
+
+    Caller (cmd_fetch) is responsible for spec §4.1 liquidity floors — this
+    function reports counts but does not drop on volume/n_trades.
+
+    Args:
+        start_iso: inclusive lower bound, "YYYY-MM-DD".
+        end_iso:   exclusive upper bound, "YYYY-MM-DD".
+    """
+    raw = _fetch_series_events(_BTC_UPDOWN_SERIES_SLUG)
+    in_window = [ev for ev in raw if _event_in_window(ev, start_iso, end_iso)]
+    parsed: list[PMMarket] = []
+    dropped = 0
+    for ev in in_window:
+        m = _gamma_event_to_pmmarket(ev)
+        if m is None:
+            dropped += 1
             continue
-        events = payload if isinstance(payload, list) else [payload]
-        for ev in events:
-            m = _gamma_event_to_pmmarket(ev)
-            if m is not None:
-                results.append(m)
-    return results
-
-
-def _slug_for_date(date_iso: str) -> str:
-    """Map 2026-05-09 → bitcoin-up-or-down-on-may-9-2026 (PM's slug convention)."""
-    dt = datetime.fromisoformat(date_iso)
-    month = dt.strftime("%B").lower()
-    return f"bitcoin-up-or-down-on-{month}-{dt.day}-{dt.year}"
+        parsed.append(m)
+    n_resolved = sum(1 for m in parsed if m.resolved_outcome != "unknown")
+    logger.info(
+        f"PM discovery: series_total={len(raw)} "
+        f"in_window=[{start_iso},{end_iso})={len(in_window)} "
+        f"parsed={len(parsed)} resolved={n_resolved} drop_parse={dropped}"
+    )
+    return parsed
 
 
 _CLOB_DATA_BASE = "https://data-api.polymarket.com"

@@ -1,0 +1,74 @@
+[
+  {
+    "title": "Bitcoin Up or Down on May 10?",
+    "startDate": "2025-05-08T15:04:35.632513Z",
+    "slug": "bitcoin-up-or-down-on-may-10",
+    "id": "24120",
+    "closed": true,
+    "endDate": "2025-05-10T12:00:00Z",
+    "archived": false,
+    "seriesSlug": "btc-up-or-down-daily",
+    "markets": [
+      {
+        "slug": "bitcoin-up-or-down-on-may-10",
+        "outcomes": "[\"Up\", \"Down\"]",
+        "id": "542621",
+        "startDate": "2025-05-08T15:03:58.541519Z",
+        "clobTokenIds": "[\"9737633529222264558685904081981156207755674367050862946728717756623528769372\", \"32586910322096019877098607565284811585594214979515208106224055099584944035620\"]",
+        "closed": true,
+        "volume": "981925.481797",
+        "endDate": "2025-05-10T12:00:00Z",
+        "conditionId": "0x26488495c3eabd30158bb1fc7f5fe7ee608da96bc22c6595acdb774b80b4f09e",
+        "outcomePrices": "[\"1\", \"0\"]"
+      }
+    ]
+  },
+  {
+    "title": "Bitcoin Up or Down on October 7?",
+    "startDate": "2025-10-05T16:05:47.541319Z",
+    "slug": "bitcoin-up-or-down-on-october-7",
+    "id": "54520",
+    "closed": true,
+    "endDate": "2025-10-07T16:00:00Z",
+    "archived": false,
+    "seriesSlug": "btc-up-or-down-daily",
+    "markets": [
+      {
+        "slug": "bitcoin-up-or-down-on-october-7",
+        "outcomes": "[\"Up\", \"Down\"]",
+        "id": "622376",
+        "startDate": "2025-10-05T16:02:30.822488Z",
+        "clobTokenIds": "[\"100867667352946964956110048955367473968242790046227347082269317195733409828524\", \"97672601213586136998687953506187603867832063509643366510103295082157354200241\"]",
+        "closed": true,
+        "volume": "461050.693825",
+        "endDate": "2025-10-07T16:00:00Z",
+        "conditionId": "0x8cb9bcf319bd8f8e0411678e1eefd8bb3dfa7924f50afbd4de14134b2abf7a68",
+        "outcomePrices": "[\"0\", \"1\"]"
+      }
+    ]
+  },
+  {
+    "title": "Bitcoin Up or Down on May 8?",
+    "startDate": "2026-05-06T16:06:59.048314Z",
+    "slug": "bitcoin-up-or-down-on-may-8-2026",
+    "id": "455571",
+    "closed": true,
+    "endDate": "2026-05-08T16:00:00Z",
+    "archived": false,
+    "seriesSlug": "btc-up-or-down-daily",
+    "markets": [
+      {
+        "slug": "bitcoin-up-or-down-on-may-8-2026",
+        "outcomes": "[\"Up\", \"Down\"]",
+        "id": "2175538",
+        "startDate": "2026-05-06T16:04:09.673053Z",
+        "clobTokenIds": "[\"104580602155868672384283264983432544450833404831137223127290715269303634709028\", \"7244688131519973468837492067755719853789564748767875601324042190976916967656\"]",
+        "closed": true,
+        "volume": "423208.09041399986",
+        "endDate": "2026-05-08T16:00:00Z",
+        "conditionId": "0xd3ca3fd896eef3e8392d5c1a0644df1af3e2db7a15294830178473c84b701edb",
+        "outcomePrices": "[\"1\", \"0\"]"
+      }
+    ]
+  }
+]

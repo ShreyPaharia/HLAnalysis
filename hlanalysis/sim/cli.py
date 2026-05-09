@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from loguru import logger
@@ -37,13 +37,8 @@ def cmd_fetch(args: argparse.Namespace) -> None:
     cache = Cache(root=Path(args.cache_root))
     start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
     end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc)
-    days: list[str] = []
-    cur = start
-    while cur < end:
-        days.append(cur.strftime("%Y-%m-%d"))
-        cur += timedelta(days=1)
-    logger.info(f"Fetching {len(days)} days from PM Gamma + Binance")
-    markets = polymarket.discover_btc_updown_markets(days)
+    logger.info(f"Fetching PM markets resolving in [{args.start}, {args.end}) + Binance klines")
+    markets = polymarket.discover_btc_updown_markets(args.start, args.end)
     logger.info(f"Found {len(markets)} candidate markets")
     for m in markets:
         if cache.read_trades(m.condition_id) and not args.refresh:
