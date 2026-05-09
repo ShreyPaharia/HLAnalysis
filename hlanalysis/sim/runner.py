@@ -193,35 +193,32 @@ def run_one_market(
         fill_question_idx["settle"] = pos.question_idx
         pos = None
 
-    # Compute per-fill realized PnL at settlement and build fills parquet rows.
-    # Running cumulative: buys subtract notional, sells add it.
+    # Compute total position P&L for the market run: sum of all fill cash flows.
+    # Buys subtract notional+fee (cash out); sells add notional-fee (cash in).
+    # This total is the realized position P&L once the market fully settles.
     realized = 0.0
-    per_fill_contrib: list[float] = []
     for f in result.fills:
         notional = f.price * f.size
         if f.side == "buy":
-            contrib = -(notional + f.fee)
+            realized += -(notional + f.fee)
         else:
-            contrib = notional - f.fee
-        per_fill_contrib.append(contrib)
-        realized += contrib
+            realized += notional - f.fee
     result.realized_pnl_usd = realized
 
     if fills_dir is not None:
-        # Derive per-fill realized_pnl_at_settle.
-        # For non-settlement fills: their contribution is their cash outflow/inflow.
-        # For the settle fill: the total market PnL (so readers see end-state).
-        # Simpler and more useful: store per-fill contribution for normal fills,
-        # and overall market PnL for the settle row (as specified in the task desc).
+        # realized_pnl_at_settle on every fill row (ENTER, EXIT, and settle synthetic)
+        # holds the total position P&L for the market — i.e. what the whole position
+        # made once it resolved. This is what spec §5.3 requires for the calibration
+        # y-axis: realized_pnl_per_dollar = realized_pnl_at_settle / (entry_price * size).
+        # Storing the per-fill cash contribution here (the old, buggy behavior) would
+        # yield ≈ -1 for every buy, making the scatter meaningless.
         fill_rows: list[FillRow] = []
-        for i, f in enumerate(result.fills):
+        for f in result.fills:
             ts = fill_ts.get(f.cloid, market.end_ts_ns)
             meta = fill_meta.get(f.cloid, {})
             q_idx = fill_question_idx.get(f.cloid, 0)
-            if f.cloid == "settle":
-                pnl_at_settle = realized  # total market pnl
-            else:
-                pnl_at_settle = per_fill_contrib[i]
+            # All rows (ENTER, EXIT, settle) get the same total market P&L.
+            pnl_at_settle = realized
             fill_rows.append(FillRow(
                 cloid=f.cloid,
                 ts_ns=ts,
