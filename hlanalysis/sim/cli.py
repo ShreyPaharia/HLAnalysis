@@ -132,13 +132,15 @@ def cmd_run(args: argparse.Namespace) -> None:
     )
     pnl: list[float] = []
     n_trades = 0
+    diag_dir = out_dir / "diagnostics"
     for j in jobs:
         rcfg = RunnerConfig(
             scanner_interval_seconds=60, fill_model=fill_cfg,
             synthetic_half_spread=args.half_spread, synthetic_depth=args.depth,
             day_open_btc=j.day_open_btc,
         )
-        res = run_one_market(strat, j.market, j.klines, j.trades, rcfg)
+        res = run_one_market(strat, j.market, j.klines, j.trades, rcfg,
+                             diagnostics_dir=diag_dir)
         pnl.append(res.realized_pnl_usd or 0.0)
         n_trades += len(res.fills)
     summary = summarise_run(pnl, n_trades=n_trades)
