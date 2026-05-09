@@ -231,6 +231,12 @@ class HLClient:
     def _live_place(self, req: PlaceRequest) -> OrderAck:
         try:
             assert self._exchange is not None
+            # HL rejects reduce_only on HIP-4 (treated as spot): "Reduce-only is
+            # invalid for spot trading." The strategy uses reduce_only=True on
+            # stop-loss exits; for HIP-4 we strip that flag and rely on the
+            # router's position bookkeeping (which verifies sell size doesn't
+            # exceed held qty before submitting).
+            req_reduce_only = req.reduce_only and not req.symbol.startswith("#")
             # SDK expects cloid as a Cloid object (32-byte hex). Accept both
             # 0x-prefixed hex and our internal 'hla-{uuid}' format and adapt.
             from hyperliquid.utils.types import Cloid  # type: ignore[import-not-found]
@@ -244,7 +250,7 @@ class HLClient:
             resp = self._exchange.order(
                 req.symbol, req.side == "buy", req.size, req.price,
                 {"limit": {"tif": "Ioc" if req.time_in_force == "ioc" else "Gtc"}},
-                reduce_only=req.reduce_only,
+                reduce_only=req_reduce_only,
                 cloid=cloid_obj,
             )
         except ConnectionError:
