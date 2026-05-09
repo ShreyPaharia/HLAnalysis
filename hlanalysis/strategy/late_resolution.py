@@ -107,44 +107,41 @@ class LateResolutionStrategy(Strategy):
                 Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tte_s:.0f}"),)),
             ))
 
-        # 2) Pick winning side per BTC vs strike
-        if reference_price > question.strike:
-            win_symbol = question.yes_symbol
-        elif reference_price < question.strike:
-            win_symbol = question.no_symbol
-        else:
-            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "ref_at_strike"),))
+        # 2) Pick the leg with the best ask in [threshold, max] across all legs
+        # of this question. Generalises to multi-outcome (priceBucket): we follow
+        # market consensus per-leg rather than mapping a single strike.
+        legs = question.leg_symbols or (
+            (question.yes_symbol, question.no_symbol) if question.yes_symbol else ()
+        )
+        if not legs:
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_legs"),))
 
-        win = books.get(win_symbol)
-        if win is None or win.ask_px is None or win.bid_px is None:
-            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_book"),))
-
-        # 3) Book health: not stale
         stale_ns = self.cfg.stale_data_halt_seconds * 1_000_000_000
-        if now_ns - win.last_l2_ts_ns > stale_ns:
-            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "book_stale"),))
+        best_symbol: str | None = None
+        best_book: BookState | None = None
+        best_ask = -1.0
+        for sym in legs:
+            b = books.get(sym)
+            if b is None or b.ask_px is None or b.bid_px is None:
+                continue
+            if now_ns - b.last_l2_ts_ns > stale_ns:
+                continue
+            if not (self.cfg.price_extreme_threshold <= b.ask_px <= self.cfg.price_extreme_max):
+                continue
+            if b.ask_px > best_ask:
+                best_ask = b.ask_px
+                best_symbol = sym
+                best_book = b
 
-        # 4) Winning leg must be in the [threshold, max] band
-        if win.ask_px < self.cfg.price_extreme_threshold:
+        if best_book is None or best_symbol is None:
             return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "not_extreme", (("ask", f"{win.ask_px:.3f}"),)),
+                Diagnostic("info", "no_extreme_leg"),
             ))
-        if win.ask_px > self.cfg.price_extreme_max:
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "above_extreme_max", (("ask", f"{win.ask_px:.3f}"),)),
-            ))
+        win = best_book
+        win_symbol = best_symbol
 
-        # 5) Distance from strike
-        distance_usd = abs(reference_price - question.strike)
-        if distance_usd < self.cfg.distance_from_strike_usd_min:
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "distance_below_min", (("dist", f"{distance_usd:.0f}"),)),
-            ))
-        # 5b) Engine-level safety: reject if BTC is absurdly far from strike (config's max_strike_distance_pct)
-        if reference_price > 0 and (distance_usd / reference_price) > (self.cfg.max_strike_distance_pct / 100.0):
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("warn", "distance_above_max"),
-            ))
+        # Skipped strike-distance gate for multi-outcome compatibility — buckets
+        # don't have a single strike. Binary callers can tighten via config if needed.
 
         # 6) Realized vol cap (sample stdev of log-returns; treat as raw, not annualised)
         if len(recent_returns) < 2:

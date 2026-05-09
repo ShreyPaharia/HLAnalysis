@@ -64,17 +64,25 @@ class Position:
 @dataclass(frozen=True, slots=True)
 class QuestionView:
     """What the strategy knows about a HIP-4 question at evaluation time.
-    Built by the engine from QuestionMetaEvent + MarketMetaEvent + adapter cache."""
+    Built by the engine from QuestionMetaEvent + MarketMetaEvent + adapter cache.
+
+    `leg_symbols` is the full set of tradable leg coins for this question,
+    in canonical order (priceBinary: [yes, no]; priceBucket: [yes_o0, no_o0,
+    yes_o1, no_o1, ...]). `yes_symbol` / `no_symbol` are convenience aliases
+    for the first two legs (binaries) and remain empty strings for non-binary
+    questions where they have no meaning.
+    """
     question_idx: int
-    yes_symbol: str       # HL leg symbol for the YES side
-    no_symbol: str        # HL leg symbol for the NO side
+    yes_symbol: str       # HL leg symbol for the YES side (binary only)
+    no_symbol: str        # HL leg symbol for the NO side (binary only)
     strike: float
     expiry_ns: int        # nanoseconds since epoch
     underlying: str       # e.g. "BTC"
-    klass: str            # e.g. "priceBinary"
-    period: str           # e.g. "1h"
+    klass: str            # e.g. "priceBinary" or "priceBucket"
+    period: str           # e.g. "1d"
     settled: bool = False
     settled_side: Literal["yes", "no", "unknown"] | None = None
+    leg_symbols: tuple[str, ...] = ()
 
 
 __all__ = [

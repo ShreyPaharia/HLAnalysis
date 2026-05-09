@@ -17,6 +17,17 @@ strategy:
       price_extreme_threshold: 0.95
       distance_from_strike_usd_min: 0
       vol_max: 100
+    # priceBucket — same per-leg consensus rule across all bucket legs.
+    - match:
+        class: priceBucket
+        underlying: BTC
+      max_position_usd: 100
+      stop_loss_pct: 10
+      tte_min_seconds: 0
+      tte_max_seconds: 3600
+      price_extreme_threshold: 0.95
+      distance_from_strike_usd_min: 0
+      vol_max: 100
     # Add more class entries as new question classes are approved for trading
 
   blocklist_question_idxs: []           # explicit per-instance exclusions

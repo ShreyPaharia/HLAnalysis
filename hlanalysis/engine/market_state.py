@@ -106,10 +106,14 @@ class MarketState:
         expiry_ns = self._parse_expiry_ns(kv.get("expiry", ""))
         # HL HIP-4 emits L2/trades keyed by f"#{10*outcome_idx + side_idx}" where
         # side_idx=0 is YES and side_idx=1 is NO (see adapters/hyperliquid.py).
-        # The earlier `@{outcome_idx}` form was a stub and never matches a live book.
+        # priceBinary: 1 outcome × 2 sides → 2 legs ([yes, no]).
+        # priceBucket: N outcomes × 2 sides → 2N legs interleaved.
         outcomes = sorted(ev.named_outcome_idxs)
-        yes_symbol = f"#{10 * outcomes[0] + 0}" if outcomes else ""
-        no_symbol = f"#{10 * outcomes[0] + 1}" if outcomes else ""
+        leg_symbols = tuple(
+            f"#{10 * o + s}" for o in outcomes for s in (0, 1)
+        )
+        yes_symbol = leg_symbols[0] if leg_symbols else ""
+        no_symbol = leg_symbols[1] if len(leg_symbols) >= 2 else ""
         existing = self._questions.get(ev.question_idx)
         settled = bool(ev.settled_named_outcome_idxs) if not (existing and existing.settled) else True
         settled_side: str | None = None
@@ -126,6 +130,7 @@ class MarketState:
             period=kv.get("period", ""),
             settled=settled,
             settled_side=settled_side,
+            leg_symbols=leg_symbols,
         )
 
     def _mark_settled(self, ev: SettlementEvent) -> None:

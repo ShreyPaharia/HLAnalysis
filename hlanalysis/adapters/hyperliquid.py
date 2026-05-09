@@ -655,6 +655,14 @@ class HyperliquidAdapter(VenueAdapter):
             return []
         recv_ns = time.time_ns()
         out: list[NormalizedEvent] = []
+        # Track which outcome_idxs are already covered by an explicit question
+        # (named or fallback) so we don't double-emit when synthesizing.
+        covered_outcomes: set[int] = set()
+        for q in meta_payload.get("questions", []) or []:
+            for x in (q.get("namedOutcomes") or []):
+                covered_outcomes.add(int(x))
+            if q.get("fallbackOutcome") is not None:
+                covered_outcomes.add(int(q["fallbackOutcome"]))
         for q in meta_payload.get("questions", []) or []:
             qidx = q.get("question")
             if qidx is None:
@@ -695,6 +703,63 @@ class HyperliquidAdapter(VenueAdapter):
                     named_outcome_idxs=[int(x) for x in (q.get("namedOutcomes") or [])],
                     fallback_outcome_idx=(int(q["fallbackOutcome"]) if q.get("fallbackOutcome") is not None else None),
                     settled_named_outcome_idxs=[int(x) for x in settled],
+                    keys=keys,
+                    values=values,
+                )
+            )
+
+        # Synthesize a QuestionMetaEvent for each priceBinary outcome that's
+        # tradable on the venue but not packaged into any HL `question` struct.
+        # (HL exposes binary outcomes via outcomeMeta.outcomes even when they're
+        # not grouped under a multi-outcome question.) Use a high-offset synthetic
+        # question_idx to avoid colliding with HL-assigned question numbers.
+        SYNTH_QIDX_OFFSET = 1_000_000
+        for o in meta_payload.get("outcomes", []) or []:
+            outcome_idx = o.get("outcome")
+            if outcome_idx is None or int(outcome_idx) in covered_outcomes:
+                continue
+            sides = o.get("sideSpecs", []) or []
+            if len(sides) != 2:
+                continue  # Only synthesize for binary (YES/NO) outcomes
+            desc = o.get("description") or ""
+            fields = _parse_description(desc)
+            if fields.get("class") != "priceBinary":
+                continue
+            matching_tmpl = next(
+                (t for t in templates
+                 if not getattr(t, "match", None) or _matches(t.match, fields)),
+                None,
+            )
+            if matching_tmpl is None:
+                continue
+            synth_qidx = SYNTH_QIDX_OFFSET + int(outcome_idx)
+            settled = ()  # outcomeMeta doesn't expose per-outcome settled here;
+                          # SettlementEvents come through outcomeSettled updates.
+            prev = meta_seen_questions.get(synth_qidx)
+            if prev == settled:
+                continue
+            meta_seen_questions[synth_qidx] = settled
+            keys = ["question_name", "question_description"]
+            values = [str(o.get("name", "")), desc]
+            for k, v in fields.items():
+                keys.append(k)
+                values.append(v)
+            # Re-key strike from priceBinary's `targetPrice`.
+            if "targetPrice" in fields and "strike" not in fields:
+                keys.append("strike")
+                values.append(fields["targetPrice"])
+            out.append(
+                QuestionMetaEvent(
+                    venue=self.venue,
+                    product_type=matching_tmpl.product_type,
+                    mechanism=matching_tmpl.mechanism,
+                    symbol=f"Q{synth_qidx}",
+                    exchange_ts=recv_ns,
+                    local_recv_ts=recv_ns,
+                    question_idx=synth_qidx,
+                    named_outcome_idxs=[int(outcome_idx)],
+                    fallback_outcome_idx=None,
+                    settled_named_outcome_idxs=[],
                     keys=keys,
                     values=values,
                 )
