@@ -119,38 +119,27 @@ class HLClient:
         SDK v0.23.0 only knows perp + spot assets; HIP-4 coins (`#N`) raise
         KeyError in `Info.name_to_asset`. Encoding observed from a UI-placed
         trade: asset_id = 100_000_000 + N for coin `#N` (e.g. #150 →
-        100000150). Pull live outcomeMeta and register a mapping for every
-        side of every active outcome so the engine can place IOC orders
-        through the standard SDK path.
+        100000150). The encoding is deterministic, so pre-register a wide
+        range up-front — survives rollover without a refresh.
+
+        Range covers `#0..#9999` (1000 outcomes × 2 sides) which is years of
+        HIP-4 rollovers given current cycle cadence. Tiny memory footprint
+        (~10k dict entries × 3 dicts × 2 Info instances = ~60k entries).
 
         Note: Exchange has its OWN Info instance (Exchange.info, distinct
-        from the Info we instantiate here). Both must be patched — the
-        Exchange one is what bulk_orders / cancel use to resolve coin→asset.
+        from the Info we instantiate here). Both must be patched.
         """
-        try:
-            import requests
-            r = requests.post(
-                "https://api.hyperliquid.xyz/info",
-                json={"type": "outcomeMeta"}, timeout=5,
-            )
-            r.raise_for_status()
-            data = r.json()
-        except Exception:
-            return  # Best-effort; engine will retry on next reconnect
         targets = [t for t in (self._info, getattr(self._exchange, "info", None)) if t is not None]
-        for o in data.get("outcomes", []) or []:
-            outcome_idx = o.get("outcome")
-            if outcome_idx is None:
-                continue
-            for side_idx in range(len(o.get("sideSpecs", []) or [])):
-                n = 10 * int(outcome_idx) + side_idx
-                coin = f"#{n}"
-                asset_id = 100_000_000 + n
-                for info in targets:
-                    info.coin_to_asset[coin] = asset_id
-                    info.name_to_coin[coin] = coin
-                    # HIP-4 sizes appear integer-quantised; szDecimals=0.
-                    info.asset_to_sz_decimals[asset_id] = 0
+        if not targets:
+            return
+        for n in range(10000):  # #0..#9999
+            coin = f"#{n}"
+            asset_id = 100_000_000 + n
+            for info in targets:
+                info.coin_to_asset[coin] = asset_id
+                info.name_to_coin[coin] = coin
+                # HIP-4 sizes appear integer-quantised; szDecimals=0.
+                info.asset_to_sz_decimals[asset_id] = 0
 
     # ---- write path ----
 
