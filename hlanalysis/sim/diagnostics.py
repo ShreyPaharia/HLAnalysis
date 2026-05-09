@@ -1,10 +1,14 @@
 # hlanalysis/sim/diagnostics.py
-"""Per-decision diagnostic rows persisted to parquet.
+"""Per-decision diagnostic rows and per-fill rows persisted to parquet.
 
-One row is written for every call to strategy.evaluate(). Model-specific
-fields (p_model, sigma, tau_yr, ln_sk, edge_yes, edge_no) are parsed out of
-the v2 ``Diagnostic("info", "edge", fields=(...))`` tuple; they are left as
-None for v1 and any strategy whose diagnostics don't carry those fields.
+One DiagnosticRow is written for every call to strategy.evaluate(). Model-
+specific fields (p_model, sigma, tau_yr, ln_sk, edge_yes, edge_no) are parsed
+out of the v2 ``Diagnostic("info", "edge", fields=(...))`` tuple; they are
+left as None for v1 and any strategy whose diagnostics don't carry those fields.
+
+One FillRow is written for every simulated fill (ENTER, EXIT, or settlement).
+ENTER fills carry ``entry_*`` fields linked to the decision that triggered them;
+EXIT and settlement fills have those fields as None.
 """
 from __future__ import annotations
 
@@ -19,7 +23,7 @@ from hlanalysis.strategy.types import Decision
 
 
 # ---------------------------------------------------------------------------
-# Schema
+# Diagnostics schema
 # ---------------------------------------------------------------------------
 
 DIAGNOSTICS_SCHEMA = pa.schema([
@@ -39,6 +43,28 @@ DIAGNOSTICS_SCHEMA = pa.schema([
     pa.field("yes_ask",      pa.float64()),
     pa.field("no_bid",       pa.float64()),
     pa.field("no_ask",       pa.float64()),
+])
+
+
+# ---------------------------------------------------------------------------
+# Fills schema
+# ---------------------------------------------------------------------------
+
+FILLS_SCHEMA = pa.schema([
+    pa.field("cloid",                   pa.string()),
+    pa.field("ts_ns",                   pa.int64()),
+    pa.field("side",                    pa.string()),
+    pa.field("price",                   pa.float64()),
+    pa.field("size",                    pa.float64()),
+    pa.field("fee",                     pa.float64()),
+    pa.field("condition_id",            pa.string()),
+    pa.field("question_idx",            pa.int64()),
+    pa.field("symbol",                  pa.string()),
+    pa.field("entry_p_model",           pa.float64()),
+    pa.field("entry_edge_chosen_side",  pa.float64()),
+    pa.field("entry_sigma",             pa.float64()),
+    pa.field("entry_tau_yr",            pa.float64()),
+    pa.field("realized_pnl_at_settle",  pa.float64()),
 ])
 
 # Fields emitted by ModelEdgeStrategy's "edge" diagnostic
@@ -69,6 +95,30 @@ class DiagnosticRow:
     yes_ask: Optional[float]
     no_bid: Optional[float]
     no_ask: Optional[float]
+
+
+@dataclass(slots=True)
+class FillRow:
+    """One row in fills.parquet — one per simulated fill.
+
+    ``entry_*`` fields are populated for ENTER fills from the DiagnosticRow
+    that was built at the same evaluate() call. They are None for EXIT and
+    settlement fills. ``realized_pnl_at_settle`` is always non-null.
+    """
+    cloid: str
+    ts_ns: int
+    side: str                           # "buy" | "sell"
+    price: float
+    size: float
+    fee: float
+    condition_id: str
+    question_idx: int
+    symbol: str
+    entry_p_model: Optional[float]
+    entry_edge_chosen_side: Optional[float]
+    entry_sigma: Optional[float]
+    entry_tau_yr: Optional[float]
+    realized_pnl_at_settle: float
 
 
 # ---------------------------------------------------------------------------
@@ -170,9 +220,43 @@ def write_diagnostics(rows: list[DiagnosticRow], path: Path) -> None:
     pq.write_table(table, path)
 
 
+def write_fills(rows: list[FillRow], path: Path) -> None:
+    """Write *rows* to *path* as a parquet file, creating parent dirs as needed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        table = pa.table(
+            {f.name: pa.array([], type=f.type) for f in FILLS_SCHEMA},
+            schema=FILLS_SCHEMA,
+        )
+        pq.write_table(table, path)
+        return
+
+    arrays = {
+        "cloid":                  pa.array([r.cloid for r in rows],                  type=pa.string()),
+        "ts_ns":                  pa.array([r.ts_ns for r in rows],                  type=pa.int64()),
+        "side":                   pa.array([r.side for r in rows],                   type=pa.string()),
+        "price":                  pa.array([r.price for r in rows],                  type=pa.float64()),
+        "size":                   pa.array([r.size for r in rows],                   type=pa.float64()),
+        "fee":                    pa.array([r.fee for r in rows],                    type=pa.float64()),
+        "condition_id":           pa.array([r.condition_id for r in rows],           type=pa.string()),
+        "question_idx":           pa.array([r.question_idx for r in rows],           type=pa.int64()),
+        "symbol":                 pa.array([r.symbol for r in rows],                 type=pa.string()),
+        "entry_p_model":          pa.array([r.entry_p_model for r in rows],          type=pa.float64()),
+        "entry_edge_chosen_side": pa.array([r.entry_edge_chosen_side for r in rows], type=pa.float64()),
+        "entry_sigma":            pa.array([r.entry_sigma for r in rows],            type=pa.float64()),
+        "entry_tau_yr":           pa.array([r.entry_tau_yr for r in rows],           type=pa.float64()),
+        "realized_pnl_at_settle": pa.array([r.realized_pnl_at_settle for r in rows], type=pa.float64()),
+    }
+    table = pa.table(arrays, schema=FILLS_SCHEMA)
+    pq.write_table(table, path)
+
+
 __all__ = [
     "DIAGNOSTICS_SCHEMA",
     "DiagnosticRow",
     "build_row",
     "write_diagnostics",
+    "FILLS_SCHEMA",
+    "FillRow",
+    "write_fills",
 ]
