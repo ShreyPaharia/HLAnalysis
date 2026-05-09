@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Any, Optional, Protocol
 
 import pyarrow.parquet as pq
-import plotly.graph_objects as go
 
 from .metrics import RunSummary
 from .plots.calibration import plot_calibration
+from .plots.equity_curve import plot_equity_curve
 
 
 # ---------------------------------------------------------------------------
@@ -222,15 +222,8 @@ def write_single_run_report(
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Equity curve HTML (unchanged behaviour)
-    cumulative = []
-    running = 0.0
-    for r in per_market_pnl:
-        running += r
-        cumulative.append(running)
-    fig = go.Figure(go.Scatter(y=cumulative, mode="lines", name="cumulative PnL"))
-    fig.update_layout(title=f"{strategy_name} — equity curve", xaxis_title="market #", yaxis_title="PnL $")
-    fig.write_html(str(out_dir / "equity_curve.html"))
+    # Equity curve HTML
+    plot_equity_curve(per_market_pnl, strategy_name, out_dir / "equity_curve.html")
 
     # Run context section
     run_ctx = _format_run_context(
@@ -254,7 +247,7 @@ def write_single_run_report(
     if fills_dir is not None:
         calib_path = plot_calibration(fills_dir, out_dir / "calibration.html")
         if calib_path is not None:
-            calibration_section = "## Calibration\n\nSee `calibration.html`.\n\n"
+            calibration_section = "## Calibration\n\n[calibration.html](calibration.html)\n\n"
 
     # Assemble markdown
     md = out_dir / "report.md"
@@ -269,7 +262,7 @@ def write_single_run_report(
         f"- Sharpe (annualized 365): {summary.sharpe:.3f}\n"
         f"- hit rate: {summary.hit_rate:.2%}\n"
         f"- max drawdown: ${summary.max_drawdown_usd:,.2f}\n\n"
-        "## Equity curve\n\nSee `equity_curve.html`.\n\n"
+        "## Equity curve\n\n[equity_curve.html](equity_curve.html)\n\n"
         + calibration_section
         + per_market_section
     )
