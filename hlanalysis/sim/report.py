@@ -11,6 +11,7 @@ import pyarrow.parquet as pq
 from .metrics import RunSummary
 from .plots.calibration import plot_calibration
 from .plots.equity_curve import plot_equity_curve
+from .plots.vol_realized import plot_vol_realized
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +220,9 @@ def write_single_run_report(
     fee_taker: float = 0.0,
     slippage_bps: float = 0.0,
     half_spread: float = 0.0,
+    # C4: σ vs realized scatter inputs
+    diagnostics_dir: Optional[Path] = None,
+    klines_dir: Optional[Path] = None,
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -249,6 +253,15 @@ def write_single_run_report(
         if calib_path is not None:
             calibration_section = "## Calibration\n\n[calibration.html](calibration.html)\n\n"
 
+    # Vol vs realized scatter (C4: v2 only; skip when dirs are None or no valid σ)
+    vol_realized_section = ""
+    if diagnostics_dir is not None and klines_dir is not None and markets:
+        vr_path = plot_vol_realized(
+            diagnostics_dir, klines_dir, list(markets), out_dir / "vol_realized.html"
+        )
+        if vr_path is not None:
+            vol_realized_section = "## Vol vs realized\n\n[vol_realized.html](vol_realized.html)\n\n"
+
     # Assemble markdown
     md = out_dir / "report.md"
     md.write_text(
@@ -264,6 +277,7 @@ def write_single_run_report(
         f"- max drawdown: ${summary.max_drawdown_usd:,.2f}\n\n"
         "## Equity curve\n\n[equity_curve.html](equity_curve.html)\n\n"
         + calibration_section
+        + vol_realized_section
         + per_market_section
     )
     return md
