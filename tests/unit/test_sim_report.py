@@ -76,6 +76,7 @@ def test_single_run_report_writes_markdown_and_plot(tmp_path: Path):
         config_summary={"edge_buffer": 0.02, "stop_loss_pct": 10},
         per_market_pnl=[1, -0.5, 2, 0, 1.5, -1, 0.8, 1.1, -0.3, 0.4],
         summary=s,
+        markets=[],
     )
     assert (tmp_path / "report.md").exists()
     assert (tmp_path / "equity_curve.html").exists()
@@ -361,6 +362,7 @@ def test_existing_summary_fields_preserved(tmp_path: Path):
         config_summary={"edge_buffer": 0.02},
         per_market_pnl=[1.0, -0.5, 2.0],
         summary=s,
+        markets=[],
     )
     text = (tmp_path / "report.md").read_text()
     assert "## Summary" in text

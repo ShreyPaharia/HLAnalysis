@@ -212,7 +212,7 @@ def write_single_run_report(
     per_market_pnl: list[float],
     summary: RunSummary,
     # New optional context fields (C5+C14)
-    markets: Optional[list] = None,
+    markets: list = (),
     fills_dir: Optional[Path] = None,
     fee_taker: float = 0.0,
     slippage_bps: float = 0.0,
@@ -241,25 +241,10 @@ def write_single_run_report(
     )
 
     # Per-market table
-    if markets is not None:
-        market_rows = [
-            _compute_market_row(m, pnl, fills_dir)
-            for m, pnl in zip(markets, per_market_pnl)
-        ]
-    else:
-        # No markets metadata supplied: synthetic rows from pnl list only
-        market_rows = [
-            {
-                "condition_id": f"market_{i}",
-                "outcome": "unknown",
-                "n_trades": 0,
-                "first_entry_ts": None,
-                "last_exit_ts": None,
-                "realized_pnl_usd": pnl,
-                "calibration_residual": None,
-            }
-            for i, pnl in enumerate(per_market_pnl)
-        ]
+    market_rows = [
+        _compute_market_row(m, pnl, fills_dir)
+        for m, pnl in zip(markets, per_market_pnl)
+    ]
     per_market_section = _format_per_market_table(market_rows)
 
     # Assemble markdown
