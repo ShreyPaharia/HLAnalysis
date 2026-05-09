@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 import plotly.graph_objects as go
 
 from .metrics import RunSummary
+from .plots.calibration import plot_calibration
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +249,13 @@ def write_single_run_report(
     ]
     per_market_section = _format_per_market_table(market_rows)
 
+    # Calibration plot (v2 only: skip when fills_dir is None or no v2 fills)
+    calibration_section = ""
+    if fills_dir is not None:
+        calib_path = plot_calibration(fills_dir, out_dir / "calibration.html")
+        if calib_path is not None:
+            calibration_section = "## Calibration\n\nSee `calibration.html`.\n\n"
+
     # Assemble markdown
     md = out_dir / "report.md"
     md.write_text(
@@ -262,6 +270,7 @@ def write_single_run_report(
         f"- hit rate: {summary.hit_rate:.2%}\n"
         f"- max drawdown: ${summary.max_drawdown_usd:,.2f}\n\n"
         "## Equity curve\n\nSee `equity_curve.html`.\n\n"
+        + calibration_section
         + per_market_section
     )
     return md
