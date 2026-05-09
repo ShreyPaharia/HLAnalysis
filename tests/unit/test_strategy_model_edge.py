@@ -133,6 +133,42 @@ def test_enters_no_when_p_model_far_below_market():
     assert out.intents[0].symbol == "NO"
 
 
+def test_tau_yr_precision_roundtrip_short_tte():
+    """tau_yr must survive a parquet string round-trip with relative error < 1e-6
+    at short TTE (5 minutes), where :.6f would truncate ~5% of the value.
+    ModelEdgeStrategy uses :.12f for tau_yr to achieve sub-ppm precision.
+    """
+    import math
+    from hlanalysis.sim.diagnostics import _parse_edge_fields
+    from hlanalysis.strategy.types import BookState, Decision, Diagnostic
+
+    tte_s = 5 * 60  # 300 seconds
+    tau_yr_true = tte_s / _ANNUAL_SECONDS  # ≈ 9.506e-6
+
+    # Build a synthetic Decision whose "edge" diagnostic carries tau_yr
+    # formatted the way ModelEdgeStrategy now formats it (:.12f).
+    diag = Diagnostic("info", "edge", (
+        ("p_model", f"{0.55:.4f}"),
+        ("edge_yes", f"{0.03:.4f}"),
+        ("edge_no", f"{-0.1:.4f}"),
+        ("sigma", f"{0.8:.4f}"),
+        ("tau_yr", f"{tau_yr_true:.12f}"),
+        ("ln_sk", f"{0.001:.4f}"),
+    ))
+
+    class _FakeDecision:
+        diagnostics = (diag,)
+
+    parsed = _parse_edge_fields(_FakeDecision())
+    tau_yr_parsed = parsed["tau_yr"]
+    assert tau_yr_parsed is not None
+    rel_err = abs(tau_yr_parsed - tau_yr_true) / tau_yr_true
+    assert rel_err < 1e-6, (
+        f"tau_yr round-trip relative error {rel_err:.2e} >= 1e-6 "
+        f"(true={tau_yr_true:.10f}, parsed={tau_yr_parsed:.10f})"
+    )
+
+
 def test_p_model_matches_empirical_on_synthetic_gbm():
     """Generate N GBM paths with known σ and check v2's p_model is close to empirical YES rate."""
     import math

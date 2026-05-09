@@ -152,7 +152,7 @@ class ModelEdgeStrategy(Strategy):
             ("edge_yes", f"{edge_yes:.4f}"),
             ("edge_no", f"{edge_no:.4f}"),
             ("sigma", f"{sigma:.4f}"),
-            ("tau_yr", f"{tau_yr:.6f}"),
+            ("tau_yr", f"{tau_yr:.12f}"),
             ("ln_sk", f"{ln_sk:.4f}"),
         ))
 
