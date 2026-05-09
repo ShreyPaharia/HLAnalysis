@@ -2474,6 +2474,520 @@ else:
 ]
 
 
+# ---------------------------------------------------------------------------
+# 09 — HIP-4 vs BTC perp lead-lag
+# ---------------------------------------------------------------------------
+P_HIP4_PERP_LEADLAG = [
+    (
+        "md",
+        """
+# 09 — HIP-4 vs BTC perp lead-lag
+
+**What this notebook answers**
+
+Does the HIP-4 binary mid-price **lag** BTC perp moves?  If perp drives HIP-4,
+there is a window between the perp print and the HIP-4 BBO update during which a
+reactive strategy can trade HIP-4 before its price catches up.
+
+**Hypothesis tested: H2** — *HIP-4 mid lags BTC perp moves.*
+
+Sign convention for CCF (`cross_correlation`):
+- `lag > 0` → perp's **past** predicts HIP-4's **present** (perp leads HIP-4).
+- `lag = 0` → contemporaneous.
+- `lag < 0` → HIP-4's past predicts perp's present (HIP-4 leads perp).
+
+A positive peak at a positive lag supports H2.
+""",
+    ),
+    (
+        "code",
+        """
+from hlanalysis.analysis import duck, glob_for, load_df, set_mpl_defaults, fmt_ts
+from hlanalysis.analysis import microstructure
+import pandas as pd, numpy as np, matplotlib.pyplot as plt
+
+set_mpl_defaults()
+con = duck()
+
+# --- tuneable parameters ------------------------------------------------
+RESAMPLE_MS  = 100       # grid spacing; bump to 250/500 if HIP-4 is too sparse
+MAX_LAG_S    = 10        # CCF window ±10 s
+SLIDE_WIN_S  = 3600      # sliding-window size (1 h)
+SIG_THRESH   = 0.02      # |ccf| threshold for "actionable" lag
+Z_THRESH     = 2.0       # minimum z-score for significance claim
+ROUND_TRIP_BPS = 12.0    # from overview §3.4
+
+MAX_LAG_STEPS = int(MAX_LAG_S * 1000 / RESAMPLE_MS)   # e.g. 100 steps at 100 ms
+
+print(f"grid: {RESAMPLE_MS} ms   CCF window: ±{MAX_LAG_S} s ({MAX_LAG_STEPS} steps)")
+print(f"round-trip cost: {ROUND_TRIP_BPS} bps")
+""",
+    ),
+    (
+        "md",
+        """
+## §1 Discover active HIP-4 binary symbols
+
+List every `prediction_binary` BBO symbol sorted by BBO update count.
+We pick the **yes-side** symbol from the most active question pair as the
+HIP-4 series.  (By parity `no_mid ≈ 1 − yes_mid`, so yes alone captures the
+full signal.)
+""",
+    ),
+    (
+        "code",
+        """
+bbo_sym = load_df(f'''
+    SELECT symbol,
+           count(*)               AS n_bbo,
+           min(local_recv_ts)     AS t0_ns,
+           max(local_recv_ts)     AS t1_ns
+    FROM read_parquet(
+            '{glob_for(venue="hyperliquid", product_type="prediction_binary", event="bbo")}',
+            hive_partitioning=true
+         )
+    WHERE bid_px > 0 AND ask_px > 0
+    GROUP BY symbol
+    ORDER BY n_bbo DESC
+''')
+if not bbo_sym.empty:
+    bbo_sym['t0'] = bbo_sym.t0_ns.map(fmt_ts)
+    bbo_sym['t1'] = bbo_sym.t1_ns.map(fmt_ts)
+    print(bbo_sym[['symbol','n_bbo','t0','t1']].to_string(index=False))
+else:
+    print("WARNING: no HIP-4 BBO data found.")
+""",
+    ),
+    (
+        "code",
+        """
+# Pick the most-active symbol as the HIP-4 series.
+# Prefer a '#yes' suffix (odd-numbered) or just take the top row.
+if bbo_sym.empty:
+    HIP4_SYM = None
+    STUDY_T0  = None
+    STUDY_T1  = None
+    print("No HIP-4 symbols — remainder of notebook will produce empty outputs.")
+else:
+    # Heuristic: odd-numbered asset IDs are the YES side on HL HIP-4 markets.
+    # Try to find a symbol whose integer suffix is odd; fall back to top row.
+    def _num(s):
+        return int(s.lstrip('#')) if s.lstrip('#').isdigit() else -1
+    yes_candidates = bbo_sym[bbo_sym.symbol.map(lambda s: _num(s) % 2 == 1)]
+    if not yes_candidates.empty:
+        top = yes_candidates.iloc[0]
+    else:
+        top = bbo_sym.iloc[0]
+
+    HIP4_SYM = top.symbol
+    # Study window: overlap of HIP-4 and perp windows.
+    # We'll refine in §2 once we load both streams.
+    STUDY_T0  = int(top.t0_ns)
+    STUDY_T1  = int(top.t1_ns)
+    print(f"HIP-4 series : {HIP4_SYM}")
+    print(f"Available window: {fmt_ts(STUDY_T0)} → {fmt_ts(STUDY_T1)}")
+    print(f"BBO count in window: {int(top.n_bbo):,}")
+""",
+    ),
+    (
+        "md",
+        """
+## §2 Resampled returns at {RESAMPLE_MS} ms
+
+Build a `RESAMPLE_MS`-ms log-return grid for both HIP-4 yes and HL BTC perp.
+HIP-4 BBO updates ~50×/min (overview §3.1), so most grid points will be NaN
+for HIP-4 — that is expected.  `cross_correlation` handles NaNs by pairwise
+listwise drop when computing Pearson correlation.
+
+We use `local_recv_ts` throughout (no exchange_ts alignment needed within the
+same venue — both streams land on the same recorder host).
+""",
+    ),
+    (
+        "code",
+        """
+if HIP4_SYM is None:
+    hip4_ret = pd.DataFrame(columns=['ts_ns', 'log_return'])
+    perp_ret  = pd.DataFrame(columns=['ts_ns', 'log_return'])
+    print("Skipped — no HIP-4 symbol selected.")
+else:
+    # Narrow study window to the intersection of HIP-4 and perp availability.
+    perp_bounds = load_df(f'''
+        SELECT min(local_recv_ts) AS t0, max(local_recv_ts) AS t1
+        FROM read_parquet(
+                '{glob_for(venue="hyperliquid", product_type="perp", event="bbo", symbol="BTC")}',
+                hive_partitioning=true
+             )
+        WHERE bid_px > 0 AND ask_px > 0
+    ''')
+    if perp_bounds.empty or perp_bounds.t0.iloc[0] is None:
+        print("WARNING: no HL BTC perp BBO data.")
+        T0 = STUDY_T0; T1 = STUDY_T1
+    else:
+        T0 = int(max(STUDY_T0, int(perp_bounds.t0.iloc[0])))
+        T1 = int(min(STUDY_T1, int(perp_bounds.t1.iloc[0])))
+
+    print(f"Study window: {fmt_ts(T0)} → {fmt_ts(T1)}")
+    window_h = (T1 - T0) / 1e9 / 3600
+    print(f"Duration: {window_h:.2f} h   grid points (at {RESAMPLE_MS} ms): "
+          f"{int((T1 - T0) / 1e6 / RESAMPLE_MS):,}")
+
+    hip4_ret = microstructure.returns_resampled(
+        con,
+        venue='hyperliquid',
+        product_type='prediction_binary',
+        symbol=HIP4_SYM,
+        start_ns=T0,
+        end_ns=T1,
+        dt_ms=RESAMPLE_MS,
+    )
+    perp_ret = microstructure.returns_resampled(
+        con,
+        venue='hyperliquid',
+        product_type='perp',
+        symbol='BTC',
+        start_ns=T0,
+        end_ns=T1,
+        dt_ms=RESAMPLE_MS,
+    )
+    hip4_non_nan = hip4_ret.log_return.notna().sum()
+    perp_non_nan = perp_ret.log_return.notna().sum()
+    total = len(hip4_ret)
+    print(f"\\nHIP-4 non-NaN returns : {hip4_non_nan:,} / {total:,}  "
+          f"({100*hip4_non_nan/max(total,1):.1f}%)")
+    print(f"Perp  non-NaN returns : {perp_non_nan:,} / {total:,}  "
+          f"({100*perp_non_nan/max(total,1):.1f}%)")
+    print()
+    # If HIP-4 grid is too sparse, suggest bumping RESAMPLE_MS.
+    if hip4_non_nan / max(total, 1) < 0.02:
+        print("INFO: HIP-4 fill rate < 2% at this grid resolution.")
+        print("      Consider bumping RESAMPLE_MS to 250 or 500.")
+""",
+    ),
+    (
+        "md",
+        """
+## §3 Per-venue latency adjustment
+
+Overview §3.6 records that the HL perp transport latency from this IP is ~225 ms
+and the HIP-4 stream lands on the same recorder host.  Both streams are from
+**Hyperliquid** (same exchange WebSocket infrastructure), so the per-stream
+`local_recv_ts − exchange_ts` skews should be nearly identical.
+
+We compute the median skew for each stream.  If they differ by > 100 ms we shift
+one stream's timestamps before computing returns, otherwise we document that no
+adjustment is needed.
+""",
+    ),
+    (
+        "code",
+        """
+def median_skew_ms(venue, product_type, symbol, t0_ns, t1_ns):
+    \"\"\"Return median (local_recv_ts − exchange_ts) in ms for BBO events.\"\"\"
+    g = glob_for(venue=venue, product_type=product_type, event='bbo', symbol=symbol)
+    df = load_df(f'''
+        SELECT (local_recv_ts - exchange_ts) / 1e6 AS skew_ms
+        FROM read_parquet('{g}', hive_partitioning=true)
+        WHERE local_recv_ts BETWEEN {t0_ns} AND {t1_ns}
+          AND bid_px > 0 AND ask_px > 0
+    ''')
+    if df.empty:
+        return float('nan')
+    return float(df.skew_ms.median())
+
+if HIP4_SYM is None:
+    print("Skipped — no symbols.")
+else:
+    skew_hip4 = median_skew_ms('hyperliquid', 'prediction_binary', HIP4_SYM, T0, T1)
+    skew_perp = median_skew_ms('hyperliquid', 'perp', 'BTC', T0, T1)
+    delta_ms   = abs(skew_hip4 - skew_perp)
+
+    print(f"HIP-4 median skew : {skew_hip4:.1f} ms")
+    print(f"Perp  median skew : {skew_perp:.1f} ms")
+    print(f"Delta             : {delta_ms:.1f} ms")
+
+    if delta_ms > 100:
+        print("\\nWARNING: skew delta > 100 ms — applying ts adjustment.")
+        print("Adjusting HIP-4 ts by the delta before return computation.")
+        APPLY_TS_ADJUST = True
+    else:
+        print(f"\\nSkew delta = {delta_ms:.1f} ms < 100 ms → no ts adjustment needed.")
+        APPLY_TS_ADJUST = False
+""",
+    ),
+    (
+        "md",
+        """
+## §4 Cross-correlation at ±10 s
+
+We compute the CCF between HIP-4 yes-mid log-returns and HL BTC perp log-returns
+at all integer lags in [−`MAX_LAG_STEPS`, +`MAX_LAG_STEPS`].
+
+The CCF may be noisy because HIP-4 log-returns are mostly zero (price rarely
+updates at the 100 ms tick).  The z-score `z = ccf × √N_pairs` (where N_pairs is
+the number of non-NaN overlapping rows used) gauges whether a peak is statistically
+meaningful.
+
+**Significance threshold used:** |ccf| > {SIG_THRESH} **and** z > {Z_THRESH}.
+""",
+    ),
+    (
+        "code",
+        """
+if HIP4_SYM is None or hip4_ret.empty or perp_ret.empty:
+    print("Skipped — missing data.")
+    ccf_df = pd.DataFrame(columns=['lag', 'ccf'])
+    PEAK_LAG_MS = None
+    PEAK_CCF    = None
+    PEAK_Z      = None
+else:
+    # Align the two return series by row index (they share the same ts_ns grid).
+    x = hip4_ret['log_return'].copy()   # HIP-4 is "x"
+    y = perp_ret['log_return'].copy()   # Perp  is "y"
+
+    # Count non-NaN overlap (used for z-score denominator).
+    overlap_mask = x.notna() & y.notna()
+    N_pairs = int(overlap_mask.sum())
+    print(f"Non-NaN overlapping pairs: {N_pairs:,} of {len(x):,}")
+
+    if N_pairs < MAX_LAG_STEPS * 2 + 10:
+        print(f"WARNING: only {N_pairs} overlapping non-NaN pairs — CCF unreliable.")
+        print("Consider increasing RESAMPLE_MS or narrowing window.")
+
+    # Replace NaN with 0 for CCF (sparse binary returns: zero = no price change,
+    # which is the typical state; this preserves the correlation structure while
+    # satisfying the max_lag constraint).
+    x_filled = x.fillna(0.0)
+    y_filled = y.fillna(0.0)
+
+    ccf_df = microstructure.cross_correlation(x_filled, y_filled, max_lag=MAX_LAG_STEPS)
+
+    # --- compute peak and z-score ---
+    peak_idx  = ccf_df['ccf'].abs().idxmax()
+    PEAK_LAG_MS  = int(ccf_df.loc[peak_idx, 'lag']) * RESAMPLE_MS
+    PEAK_CCF     = float(ccf_df.loc[peak_idx, 'ccf'])
+    PEAK_Z       = PEAK_CCF * np.sqrt(max(N_pairs, 1))
+
+    print(f"\\nPeak CCF : lag = {PEAK_LAG_MS:+d} ms,  ccf = {PEAK_CCF:.4f},  "
+          f"z = {PEAK_Z:.2f}")
+    print(f"  (lag > 0 → perp leads HIP-4)")
+
+    # --- plot ---
+    lag_ms = ccf_df['lag'].values * RESAMPLE_MS
+    fig, ax = plt.subplots(figsize=(11, 4))
+    ax.bar(lag_ms, ccf_df['ccf'].values, width=RESAMPLE_MS * 0.8, color='C0', alpha=0.75)
+    ax.axvline(0, color='black', lw=0.8, ls='--')
+
+    # Significance band: ±1/√N_pairs (Bartlett's approximate 95% CI)
+    if N_pairs > 0:
+        ci_band = 1.96 / np.sqrt(N_pairs)
+        ax.axhline( ci_band, color='grey', lw=0.8, ls=':', label=f'95% CI (Bartlett) ±{ci_band:.4f}')
+        ax.axhline(-ci_band, color='grey', lw=0.8, ls=':')
+
+    # Annotate peak
+    ax.axvline(PEAK_LAG_MS, color='C3', lw=1.2, ls='--',
+               label=f'peak: lag={PEAK_LAG_MS:+d} ms, ccf={PEAK_CCF:.4f}, z={PEAK_Z:.2f}')
+
+    ax.set_xlabel(f'lag (ms)  —  lag > 0 ⇒ perp past predicts HIP-4 present')
+    ax.set_ylabel('CCF (Pearson)')
+    ax.set_title(f'HIP-4 ({HIP4_SYM}) vs BTC perp mid log-returns  '
+                 f'CCF at ±{MAX_LAG_S} s  (grid = {RESAMPLE_MS} ms)')
+    ax.legend(fontsize=8)
+    plt.tight_layout(); plt.show()
+""",
+    ),
+    (
+        "md",
+        """
+## §5 Sliding 1-hour windows — is the lag stable?
+
+We split the study window into `SLIDE_WIN_S`-second bins and compute the CCF peak
+lag and peak CCF value for each bin.  A stable lead-lag relationship that persists
+across time suggests a structural relationship; an unstable one suggests the CCF
+peak in §4 is noise.
+""",
+    ),
+    (
+        "code",
+        """
+if HIP4_SYM is None or hip4_ret.empty or perp_ret.empty:
+    print("Skipped — missing data.")
+else:
+    step_ns     = SLIDE_WIN_S * 1_000_000_000
+    window_bins = list(range(T0, T1, step_ns))
+
+    slide_rows = []
+    for wb_t0 in window_bins:
+        wb_t1 = wb_t0 + step_ns
+        # Slice to this window using ts_ns column.
+        mask = (hip4_ret['ts_ns'] >= wb_t0) & (hip4_ret['ts_ns'] < wb_t1)
+        xw = hip4_ret.loc[mask, 'log_return'].fillna(0.0).reset_index(drop=True)
+        yw = perp_ret.loc[mask, 'log_return'].fillna(0.0).reset_index(drop=True)
+
+        n_pairs_w = int(((hip4_ret.loc[mask, 'log_return'].notna()) &
+                         (perp_ret.loc[mask, 'log_return'].notna())).sum())
+
+        if len(xw) <= MAX_LAG_STEPS * 2 + 2 or n_pairs_w < 5:
+            slide_rows.append({
+                'window_t0': wb_t0,
+                'window_label': fmt_ts(wb_t0),
+                'peak_lag_ms': np.nan,
+                'peak_ccf': np.nan,
+                'n_pairs': n_pairs_w,
+            })
+            continue
+
+        try:
+            ccf_w = microstructure.cross_correlation(xw, yw, max_lag=MAX_LAG_STEPS)
+        except ValueError:
+            slide_rows.append({
+                'window_t0': wb_t0,
+                'window_label': fmt_ts(wb_t0),
+                'peak_lag_ms': np.nan,
+                'peak_ccf': np.nan,
+                'n_pairs': n_pairs_w,
+            })
+            continue
+
+        pk_idx     = ccf_w['ccf'].abs().idxmax()
+        pk_lag_ms  = int(ccf_w.loc[pk_idx, 'lag']) * RESAMPLE_MS
+        pk_ccf     = float(ccf_w.loc[pk_idx, 'ccf'])
+        slide_rows.append({
+            'window_t0': wb_t0,
+            'window_label': fmt_ts(wb_t0),
+            'peak_lag_ms': pk_lag_ms,
+            'peak_ccf': pk_ccf,
+            'n_pairs': n_pairs_w,
+        })
+
+    slide_df = pd.DataFrame(slide_rows)
+    print(slide_df[['window_label','n_pairs','peak_lag_ms','peak_ccf']].to_string(index=False))
+""",
+    ),
+    (
+        "code",
+        """
+if HIP4_SYM is None or not slide_rows:
+    print("Skipped — missing data.")
+else:
+    valid = slide_df.dropna(subset=['peak_lag_ms', 'peak_ccf'])
+    if valid.empty:
+        print("All sliding windows had insufficient data.")
+    else:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
+
+        x_pos = range(len(valid))
+        ax1.bar(x_pos, valid['peak_lag_ms'], color='C0', alpha=0.75)
+        ax1.axhline(0, color='black', lw=0.6)
+        ax1.set_ylabel('peak lag (ms)')
+        ax1.set_title('Sliding 1-h windows: peak CCF lag (positive = perp leads HIP-4)')
+
+        ax2.bar(x_pos, valid['peak_ccf'].abs(), color='C1', alpha=0.75)
+        ax2.set_ylabel('|peak CCF|')
+        ax2.set_title('Sliding 1-h windows: peak |CCF| value')
+        ax2.set_xticks(list(x_pos))
+        ax2.set_xticklabels(valid['window_label'].tolist(), rotation=45, ha='right', fontsize=7)
+
+        plt.tight_layout(); plt.show()
+
+        # Stability summary
+        lag_std = valid['peak_lag_ms'].std()
+        lag_med = valid['peak_lag_ms'].median()
+        print(f"\\nPeak lag across windows — median: {lag_med:.0f} ms,  "
+              f"std: {lag_std:.0f} ms  (n_windows={len(valid)})")
+        if lag_std < abs(lag_med) * 0.5 and len(valid) >= 3:
+            print("Lag appears STABLE (std < 50% of median).")
+        else:
+            print("Lag appears UNSTABLE or has too few windows to judge.")
+""",
+    ),
+    (
+        "md",
+        """
+## §6 Decision: is the lag large enough to exploit?
+
+A reactive strategy can profit from the lead-lag if:
+1. **Statistical significance**: |ccf| > threshold **and** z > {Z_THRESH}.
+2. **Actionable magnitude**: peak lag > the order-entry round-trip latency
+   (our host → HL matching engine → fill confirmation; assume ≥ 50 ms best-case
+   from the EC2 co-location setup).
+3. **Economic viability**: the expected mid-move during the lag window must
+   exceed the round-trip cost ({ROUND_TRIP_BPS} bps).
+""",
+    ),
+    (
+        "code",
+        """
+if HIP4_SYM is None or PEAK_LAG_MS is None:
+    print("No CCF computed — skipping decision cell.")
+else:
+    # --- significance ---
+    is_significant = (abs(PEAK_CCF) >= SIG_THRESH) and (abs(PEAK_Z) >= Z_THRESH)
+
+    # Actionable lag: largest lag where |ccf| > SIG_THRESH and z > Z_THRESH
+    N_full = int(((hip4_ret['log_return'].notna()) & (perp_ret['log_return'].notna())).sum())
+    ccf_df['z'] = ccf_df['ccf'] * np.sqrt(max(N_full, 1))
+    actionable = ccf_df[(ccf_df['ccf'].abs() >= SIG_THRESH) & (ccf_df['z'].abs() >= Z_THRESH)]
+    if actionable.empty:
+        actionable_lag_ms = 0
+    else:
+        actionable_lag_ms = int(actionable['lag'].abs().max()) * RESAMPLE_MS
+
+    # Approximate mid-move during the actionable window.
+    # Use perp 1-min realised vol as a rough proxy for expected move per lag.
+    perp_1min_vol = float(perp_ret['log_return'].std()) * np.sqrt(600 / (RESAMPLE_MS / 1000))
+    expected_move_bps = perp_1min_vol * 1e4 * abs(PEAK_CCF)
+
+    print("=" * 60)
+    print(f"Significance:       {'YES' if is_significant else 'NO'}")
+    print(f"  |ccf| = {abs(PEAK_CCF):.4f}  (threshold {SIG_THRESH})")
+    print(f"  z     = {abs(PEAK_Z):.2f}    (threshold {Z_THRESH})")
+    print(f"Peak lag:           {PEAK_LAG_MS:+d} ms")
+    print(f"Actionable lag:     {actionable_lag_ms} ms "
+          f"(window where |ccf|≥{SIG_THRESH} & z≥{Z_THRESH})")
+    print(f"Expected mid-move:  ~{expected_move_bps:.2f} bps over lag window")
+    print(f"Round-trip cost:    {ROUND_TRIP_BPS} bps")
+    print()
+
+    if not is_significant:
+        print("VERDICT: CCF peak is NOT statistically significant at the chosen thresholds.")
+        print("H2 is NEITHER supported NOR ruled out with current data volume.")
+    elif actionable_lag_ms <= 50:
+        print("VERDICT: Lag is statistically significant but likely sub-execution-latency.")
+        print("H2 is UNLIKELY to be exploitable given execution round-trip ≥ 50 ms.")
+    elif expected_move_bps < ROUND_TRIP_BPS:
+        print("VERDICT: Lag is significant and long enough, but expected move < round-trip cost.")
+        print("H2 MAY be valid but the edge is insufficient to cover fees at current vol.")
+    else:
+        print("VERDICT: Lag is significant, long enough, and expected move > round-trip cost.")
+        print("H2 SUPPORTS a reactive strategy — validate with live limit-order sim.")
+    print("=" * 60)
+""",
+    ),
+    (
+        "md",
+        """
+## Strategy hypotheses
+
+- **Supports H2**: HIP-4 mid lags BTC perp — at peak lag of `PEAK_LAG_MS` ms,
+  ccf of `PEAK_CCF` (see §4 chart).  The lag is stable across 1-h windows if §5
+  shows low std of peak lag.  A reactive strategy enters HIP-4 after observing a
+  perp directional move within the actionable window.
+
+- **Rules out H2**: if the §4 CCF peak is below the significance threshold
+  (|ccf| < {SIG_THRESH} or z < {Z_THRESH}), or if the peak lag is ≤ 50 ms
+  (within execution round-trip), the lag is not exploitable with this data.
+
+- **Next probe**: condition the lead-lag on perp move magnitude — does HIP-4 lag
+  faster after large perp moves?  Also: repeat across all active HIP-4 question
+  pairs and across the full multi-day window to test whether the relationship is
+  structural or per-question noise (§5 sliding-window stability chart is the
+  starting point).
+""",
+    ),
+]
+
+
 def main() -> None:
     # Notebooks that use the generic HYPOTHESIS_FOOTER appended at the end.
     notebooks_with_generic_footer = {
@@ -2495,6 +3009,7 @@ def main() -> None:
     # Notebooks with a custom footer already embedded in their cell list.
     notebooks_custom_footer = {
         "08-hip4-markouts.ipynb": P_HIP4_MARKOUTS,
+        "09-hip4-perp-leadlag.ipynb": P_HIP4_PERP_LEADLAG,
     }
     for name, cells in notebooks_custom_footer.items():
         nb = _build(cells)
