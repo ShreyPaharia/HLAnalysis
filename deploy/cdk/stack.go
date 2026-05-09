@@ -280,89 +280,17 @@ TIMEREOF`),
 		// ── hl-engine: MM engine sibling service ──────────────────────────────
 		// Ships paper-mode by default. Operator flips paper_mode=false in
 		// config/strategy.yaml (committed + deployed) when ready to go live.
-
-		// Engine state directory on the data volume.
-		jsii.String("mkdir -p /data/engine /data/logs"),
-		jsii.String("chown -R ec2-user:ec2-user /data/engine"),
-
-		// Pull engine secrets from SSM into a 0600 env file.
-		// Provision these parameters before deploying:
+		//
+		// The unit + secrets-fetch logic live in scripts/install-engine-systemd.sh
+		// and scripts/fetch-engine-secrets.sh so the same content can be applied
+		// to a long-lived box via SSM (see `make install-engine-on-ec2`) without
+		// a CDK redeploy. SSM parameters required:
 		//   /hl-engine/account-address (String)
 		//   /hl-engine/api-secret-key  (SecureString, kms/ssm alias)
 		//   /hl-engine/tg-bot-token    (SecureString)
 		//   /hl-engine/tg-chat-id      (String)
-		jsii.String("mkdir -p /etc/hl-engine"),
-		jsii.String(fmt.Sprintf(`set +x
-HL_ACCOUNT_ADDRESS=$(aws ssm get-parameter --name /hl-engine/account-address --region %s --query Parameter.Value --output text 2>/dev/null || echo "")
-HL_API_SECRET_KEY=$(aws ssm get-parameter --name /hl-engine/api-secret-key --with-decryption --region %s --query Parameter.Value --output text 2>/dev/null || echo "")
-TG_BOT_TOKEN=$(aws ssm get-parameter --name /hl-engine/tg-bot-token --with-decryption --region %s --query Parameter.Value --output text 2>/dev/null || echo "")
-TG_CHAT_ID=$(aws ssm get-parameter --name /hl-engine/tg-chat-id --region %s --query Parameter.Value --output text 2>/dev/null || echo "")
-cat > /etc/hl-engine/env <<ENVEOF
-HL_ACCOUNT_ADDRESS=${HL_ACCOUNT_ADDRESS}
-HL_API_SECRET_KEY=${HL_API_SECRET_KEY}
-TG_BOT_TOKEN=${TG_BOT_TOKEN}
-TG_CHAT_ID=${TG_CHAT_ID}
-PYTHONUNBUFFERED=1
-ENVEOF
-set -x`, *props.Env.Region, *props.Env.Region, *props.Env.Region, *props.Env.Region)),
-		jsii.String("chmod 600 /etc/hl-engine/env"),
-		jsii.String("chown root:root /etc/hl-engine/env"),
-
-		// Override deploy.yaml with absolute paths for /data; the in-repo
-		// config/deploy.yaml is the dev template (relative paths).
-		jsii.String(`cat > /etc/hl-engine/deploy.yaml <<DEPLOYEOF
-deploy:
-  env: prod
-  hl:
-    account_address: \${HL_ACCOUNT_ADDRESS}
-    api_secret_key: \${HL_API_SECRET_KEY}
-    base_url: https://api.hyperliquid.xyz
-  alerts:
-    telegram:
-      bot_token: \${TG_BOT_TOKEN}
-      chat_id: \${TG_CHAT_ID}
-  state_db_path: /data/engine/state.db
-  kill_switch_path: /data/engine/halt
-DEPLOYEOF`),
-		jsii.String("chmod 644 /etc/hl-engine/deploy.yaml"),
-
-		// Engine systemd unit. Same ec2-user, same venv as the recorder, but
-		// strict resource limits + a positive OOMScoreAdjust so the kernel
-		// reaches for the engine first under memory pressure.
-		jsii.String(`cat > /etc/systemd/system/hl-engine.service <<'SERVICEEOF'
-[Unit]
-Description=Hyperliquid MM Engine (Phase 1)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=ec2-user
-WorkingDirectory=/opt/hl-recorder
-EnvironmentFile=/etc/hl-engine/env
-ExecStart=/opt/hl-recorder/.venv/bin/hl-engine \
-  --strategy-config /opt/hl-recorder/config/strategy.yaml \
-  --deploy-config /etc/hl-engine/deploy.yaml \
-  --symbols-config /opt/hl-recorder/config/symbols.yaml \
-  --log-level INFO
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-MemoryMax=384M
-CPUWeight=200
-OOMScoreAdjust=500
-ReadWritePaths=/data/engine /data/logs
-
-[Install]
-WantedBy=multi-user.target
-SERVICEEOF`),
-
-		jsii.String("systemctl daemon-reload"),
-		// Enable but DO NOT start until the operator confirms strategy.yaml
-		// (paper_mode + caps) is correct and SSM secrets are populated. After
-		// the first hand-confirmed boot, you can switch to enable --now.
-		jsii.String("systemctl enable hl-engine.service"),
+		// The IAM role above already grants ssm:GetParameter on /hl-engine/*.
+		jsii.String("bash /opt/hl-recorder/scripts/install-engine-systemd.sh"),
 	)
 
 	// Create EBS volume for data storage (10GB gp3)

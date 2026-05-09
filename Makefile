@@ -1,4 +1,4 @@
-.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy deploy-recorder deploy-engine engine-local ssh-ec2 status engine-status logs engine-logs query data-summary pull-data help
+.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy deploy-recorder deploy-engine engine-local install-engine-on-ec2 ssh-ec2 status engine-status logs engine-logs query data-summary pull-data help
 
 # Stack name
 STACK_NAME=HLRecorderStack
@@ -46,10 +46,43 @@ deploy-recorder:
 
 # Restarting the engine triggers its §5.5 restart-drift gate. If any
 # ghost/orphan/position-mismatch fires, the engine writes
-# /data/engine/restart_blocked and the scanner stays suspended until you SSH
+# data/engine/restart_blocked and the scanner stays suspended until you SSH
 # in, investigate, and `rm` the flag.
 deploy-engine:
 	./scripts/deploy.sh --service engine
+
+# Install or refresh /etc/systemd/system/hl-engine.service on the live box.
+# Use this after pushing a new branch that changes the unit content or after
+# rotating SSM secrets. Pulls latest code first (so the unit's ExecStartPre
+# can find the up-to-date scripts/fetch-engine-secrets.sh), then runs the
+# installer as root via SSM. After this, `make deploy` works.
+install-engine-on-ec2:
+	@INSTANCE_ID=$$(aws cloudformation describe-stacks --stack-name $(STACK_NAME) \
+		--query "Stacks[0].Outputs[?ExportName=='HLRecorderInstanceID'].OutputValue" \
+		--output text) && \
+	if [ -z "$$INSTANCE_ID" ]; then \
+		echo "ERROR: Could not fetch instance ID. Is the stack deployed?"; \
+		exit 1; \
+	fi && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	echo "==> Installing hl-engine.service on $$INSTANCE_ID from branch $$BRANCH..." && \
+	CMD_ID=$$(aws ssm send-command \
+		--instance-ids "$$INSTANCE_ID" \
+		--document-name "AWS-RunShellScript" \
+		--parameters '{"commands":[ \
+			"set -xe", \
+			"cd /opt/hl-recorder", \
+			"sudo -u ec2-user git fetch origin", \
+			"sudo -u ec2-user git checkout '"$$BRANCH"'", \
+			"sudo -u ec2-user git reset --hard origin/'"$$BRANCH"'", \
+			"chmod +x /opt/hl-recorder/scripts/fetch-engine-secrets.sh /opt/hl-recorder/scripts/install-engine-systemd.sh", \
+			"bash /opt/hl-recorder/scripts/install-engine-systemd.sh" \
+		]}' \
+		--query "Command.CommandId" --output text) && \
+	echo "  Command ID: $$CMD_ID" && \
+	sleep 8 && \
+	aws ssm get-command-invocation --command-id "$$CMD_ID" --instance-id "$$INSTANCE_ID" \
+		--query "[Status, StandardOutputContent, StandardErrorContent]" --output text
 
 # Run the engine locally against your dev .env.local. Loads env vars
 # (HL_*, TG_*) from .env.local, then invokes hl-engine with the in-repo
@@ -214,6 +247,7 @@ help:
 	@echo "  deploy            Deploy code + restart BOTH recorder and engine"
 	@echo "  deploy-recorder   Deploy code + restart recorder only"
 	@echo "  deploy-engine     Deploy code + restart engine only (triggers §5.5 drift gate)"
+	@echo "  install-engine-on-ec2  (Re)install /etc/systemd/system/hl-engine.service on the live box"
 	@echo ""
 	@echo "Local dev:"
 	@echo "  engine-local      Run engine on this machine in paper mode (loads .env.local)"
