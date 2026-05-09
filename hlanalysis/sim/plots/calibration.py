@@ -23,6 +23,8 @@ from typing import Optional
 
 import pyarrow.parquet as pq
 
+from hlanalysis.sim.plots._common import save_fig
+
 
 # ---------------------------------------------------------------------------
 # Pure computation helper (testable without plotly)
@@ -181,6 +183,4 @@ def plot_calibration(fills_dir: Path, out_path: Path) -> Optional[Path]:
         hovermode="closest",
     )
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_html(str(out_path))
-    return out_path
+    return save_fig(fig, out_path)

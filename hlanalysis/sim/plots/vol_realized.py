@@ -5,26 +5,31 @@ of BTC for each market evaluated by the strategy.
 
 Public API
 ----------
-plot_vol_realized(diagnostics_dir, klines_dir, markets, out_path) -> Path | None
+plot_vol_realized(diagnostics_dir, klines_dir, markets, out_path,
+                  tte_min_seconds, tte_max_seconds) -> Path | None
     For each market: resolve the entry-time σ from the diagnostics parquet,
     pair with the realized 24h |log-return| computed from the kline cache,
     produce an interactive scatter with the σ·√τ reference line, write HTML to
     *out_path*, and return *out_path*. Returns None (writes no file) if no
     market has a valid σ (e.g. v1 run or empty diagnostics).
 
-_compute_vol_realized_points(diagnostics_dir, klines_dir, markets)
+_compute_vol_realized_points(diagnostics_dir, klines_dir, markets,
+                              tte_min_seconds, tte_max_seconds)
     Pure helper exposed for unit testing.  Returns a list of
     ``(sigma, realized_abs_logret)`` tuples — one per market that has a valid σ
     and a valid realized return.  Skips markets with no klines or all-null σ.
 """
 from __future__ import annotations
 
+import bisect
 import json
 import math
 from pathlib import Path
 from typing import Optional, Protocol
 
 import pyarrow.parquet as pq
+
+from hlanalysis.sim.plots._common import save_fig
 
 
 # ---------------------------------------------------------------------------
@@ -39,11 +44,12 @@ class _MarketLike(Protocol):
 
 # ---------------------------------------------------------------------------
 # Entry-window midpoint TTE (seconds) — matches v2 strategy defaults
+# Defaults for tte_min_seconds / tte_max_seconds kwargs below.
 # ---------------------------------------------------------------------------
 
-_TTE_MIN_SECONDS: float = 14_400.0    # 4h
-_TTE_MAX_SECONDS: float = 86_400.0    # 24h
-_TTE_MID_SECONDS: float = (_TTE_MIN_SECONDS + _TTE_MAX_SECONDS) / 2.0  # 14h
+_DEFAULT_TTE_MIN_SECONDS: float = 14_400.0    # 4h
+_DEFAULT_TTE_MAX_SECONDS: float = 86_400.0    # 24h
+_TTE_MID_SECONDS: float = (_DEFAULT_TTE_MIN_SECONDS + _DEFAULT_TTE_MAX_SECONDS) / 2.0  # 14h
 
 _SECS_PER_YEAR: float = 365.25 * 24.0 * 3600.0
 _TTE_MID_YR: float = _TTE_MID_SECONDS / _SECS_PER_YEAR
@@ -132,32 +138,35 @@ def _realized_abs_logret(
 ) -> Optional[float]:
     """Compute |log(close_at_end / open_at_start)| from kline records.
 
-    open_at_start: ``open`` of the kline whose ts_ns is closest to and ≤ start_ts_ns.
-    close_at_end:  ``close`` of the kline whose ts_ns is closest to and ≤ end_ts_ns.
+    Accepts the full sorted klines list (unsifted); does bisect-based lookup
+    internally so callers need not pre-filter.
+
+    open_at_start: ``open`` of the kline whose ts_ns is the largest value ≤ start_ts_ns.
+    close_at_end:  ``close`` of the kline whose ts_ns is the largest value ≤ end_ts_ns.
 
     Returns None if no suitable klines are found.
     """
     if not klines:
         return None
 
-    # Find the kline whose ts_ns is the largest value ≤ start_ts_ns
-    open_val: Optional[float] = None
-    for k in klines:
-        if k["ts_ns"] <= start_ts_ns:
-            open_val = float(k["open"])
-        else:
-            break
+    # Build a sorted list of ts_ns values for bisect.
+    # klines is already sorted by ts_ns (guaranteed by _load_all_klines).
+    ts_list = [k["ts_ns"] for k in klines]
 
-    # Find the kline whose ts_ns is the largest value ≤ end_ts_ns
-    close_val: Optional[float] = None
-    for k in klines:
-        if k["ts_ns"] <= end_ts_ns:
-            close_val = float(k["close"])
-        else:
-            break
-
-    if open_val is None or close_val is None:
+    # Find the largest kline index whose ts_ns <= start_ts_ns
+    # bisect_right gives us the insertion point after all equal values, so
+    # idx-1 is the last index with ts_ns <= start_ts_ns.
+    idx_open = bisect.bisect_right(ts_list, start_ts_ns) - 1
+    if idx_open < 0:
         return None
+    open_val = float(klines[idx_open]["open"])
+
+    # Find the largest kline index whose ts_ns <= end_ts_ns
+    idx_close = bisect.bisect_right(ts_list, end_ts_ns) - 1
+    if idx_close < 0:
+        return None
+    close_val = float(klines[idx_close]["close"])
+
     if open_val <= 0.0 or close_val <= 0.0:
         return None
 
@@ -172,6 +181,8 @@ def _compute_vol_realized_points(
     diagnostics_dir: Path,
     klines_dir: Path,
     markets: list,
+    tte_min_seconds: int = 14_400,
+    tte_max_seconds: int = 86_400,
 ) -> list[tuple[float, float]]:
     """Return list of (sigma, realized_abs_logret) for each valid market.
 
@@ -180,6 +191,15 @@ def _compute_vol_realized_points(
     - The kline cache has at least one kline at or before both start_ts_ns and end_ts_ns.
 
     Markets that fail either condition are silently skipped.
+
+    Parameters
+    ----------
+    tte_min_seconds:
+        Minimum TTE for the entry window in seconds.
+        Default 14_400 (4h) matches v2's current config.
+    tte_max_seconds:
+        Maximum TTE for the entry window in seconds.
+        Default 86_400 (24h) matches v2's current config.
     """
     all_klines = _load_all_klines(klines_dir)
 
@@ -191,10 +211,9 @@ def _compute_vol_realized_points(
         if sigma is None:
             continue
 
-        # Filter klines to the market window (±1 kline outside for boundary lookups)
-        # For efficiency, use a small window around [start, end]
-        market_klines = [k for k in all_klines if k["ts_ns"] <= m.end_ts_ns]
-        rlr = _realized_abs_logret(market_klines, m.start_ts_ns, m.end_ts_ns)
+        # Pass the full sorted klines list; _realized_abs_logret handles
+        # boundary lookup via bisect — no pre-filtering needed.
+        rlr = _realized_abs_logret(all_klines, m.start_ts_ns, m.end_ts_ns)
         if rlr is None:
             continue
 
@@ -212,6 +231,8 @@ def plot_vol_realized(
     klines_dir: Path,
     markets: list,
     out_path: Path,
+    tte_min_seconds: int = 14_400,
+    tte_max_seconds: int = 86_400,
 ) -> Optional[Path]:
     """Build and write the σ vs realized 24h |log-return| scatter.
 
@@ -225,8 +246,21 @@ def plot_vol_realized(
     Returns *out_path* on success, or None when no market has a valid σ (v1
     run, empty diagnostics, or no matching klines).  Never raises on missing
     files.
+
+    Parameters
+    ----------
+    tte_min_seconds:
+        Minimum TTE for the entry window in seconds.
+        Default 14_400 (4h) matches v2's current config.
+    tte_max_seconds:
+        Maximum TTE for the entry window in seconds.
+        Default 86_400 (24h) matches v2's current config.
     """
-    points = _compute_vol_realized_points(diagnostics_dir, klines_dir, markets)
+    points = _compute_vol_realized_points(
+        diagnostics_dir, klines_dir, markets,
+        tte_min_seconds=tte_min_seconds,
+        tte_max_seconds=tte_max_seconds,
+    )
     if not points:
         return None
 
@@ -274,6 +308,4 @@ def plot_vol_realized(
         hovermode="closest",
     )
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_html(str(out_path))
-    return out_path
+    return save_fig(fig, out_path)
