@@ -111,6 +111,43 @@ class HLClient:
                 # any live call will fail at the SDK level.
                 pass
             self._info = Info(base_url=base_url, skip_ws=True)
+            self._patch_info_for_hip4()
+
+    def _patch_info_for_hip4(self) -> None:
+        """Inject HIP-4 outcome legs into the SDK's coin↔asset map.
+
+        SDK v0.23.0 only knows perp + spot assets; HIP-4 coins (`#N`) raise
+        KeyError in `Info.name_to_asset`. Encoding observed from a UI-placed
+        trade: asset_id = 100_000_000 + N for coin `#N` (e.g. #150 →
+        100000150). Pull live outcomeMeta and register a mapping for every
+        side of every active outcome so the engine can place IOC orders
+        through the standard SDK path.
+        """
+        if self._info is None:
+            return
+        try:
+            import requests
+            r = requests.post(
+                self._exchange.base_url.rstrip("/") + "/info"
+                if self._exchange else "https://api.hyperliquid.xyz/info",
+                json={"type": "outcomeMeta"}, timeout=5,
+            )
+            r.raise_for_status()
+            data = r.json()
+        except Exception:
+            return  # Best-effort; engine will retry on next reconnect
+        for o in data.get("outcomes", []) or []:
+            outcome_idx = o.get("outcome")
+            if outcome_idx is None:
+                continue
+            for side_idx in range(len(o.get("sideSpecs", []) or [])):
+                n = 10 * int(outcome_idx) + side_idx
+                coin = f"#{n}"
+                asset_id = 100_000_000 + n
+                self._info.coin_to_asset[coin] = asset_id
+                self._info.name_to_coin[coin] = coin
+                # HIP-4 sizes appear integer-quantised; szDecimals=0.
+                self._info.asset_to_sz_decimals[asset_id] = 0
 
     # ---- write path ----
 
