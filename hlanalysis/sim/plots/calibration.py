@@ -88,6 +88,9 @@ def plot_calibration(fills_dir: Path, out_path: Path) -> Optional[Path]:
     Returns *out_path* on success, or ``None`` if there are no eligible ENTER
     rows (v1 run, or empty fills).  Never raises on missing / empty parquet.
     """
+    if not fills_dir.exists():
+        return None
+
     predicted_edges: list[float] = []
     realized_per_dollar: list[float] = []
 
