@@ -294,6 +294,45 @@ class TestRunnerDiagnosticsDir:
             assert r["sigma"] is not None, "ENTER row missing sigma"
             assert r["tau_yr"] is not None, "ENTER row missing tau_yr"
 
+    def test_runner_zero_scan_events_writes_empty_parquet(self, tmp_path: Path):
+        """A market that produces zero scan events must still write a zero-row
+        parquet with the correct schema when diagnostics_dir is set.
+
+        We force zero scans by setting scanner_interval_seconds larger than the
+        entire event stream duration (klines only span 60 minutes).
+        """
+        import pyarrow.parquet as pq
+        from hlanalysis.sim.diagnostics import DIAGNOSTICS_SCHEMA
+
+        market = _market(condition_id="0xzero_scans")
+        diag_dir = tmp_path / "diagnostics_zero"
+        # scanner_interval_seconds > total kline span → no scan fires
+        cfg = RunnerConfig(
+            scanner_interval_seconds=7200,  # 2 hours; klines only cover 60 min
+            fill_model=FillModelConfig(
+                slippage_bps=5.0, fee_taker=0.02, book_depth_assumption=10_000.0
+            ),
+            synthetic_half_spread=0.005,
+            synthetic_depth=10_000.0,
+            day_open_btc=100_000.0,
+        )
+        result = run_one_market(
+            _v2_strategy(),
+            market,
+            _klines(),
+            _trades(),
+            cfg,
+            diagnostics_dir=diag_dir,
+        )
+        assert result.n_decisions == 0, "Expected zero decisions with 2h scan interval"
+        expected_path = diag_dir / "0xzero_scans.parquet"
+        assert expected_path.exists(), "Zero-scan market must still produce a parquet file"
+        table = pq.read_table(expected_path)
+        assert table.num_rows == 0, f"Expected 0 rows, got {table.num_rows}"
+        # Schema must match DIAGNOSTICS_SCHEMA
+        for field in DIAGNOSTICS_SCHEMA:
+            assert field.name in table.schema.names, f"Missing column: {field.name}"
+
     def test_runner_v1_strategy_parquet_no_crash(self, tmp_path: Path):
         """v1 strategy: diagnostics still written; model fields are None (no crash)."""
         from hlanalysis.sim.v1_factory import build_v1_strategy_from_params

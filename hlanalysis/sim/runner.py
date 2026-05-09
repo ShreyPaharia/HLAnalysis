@@ -29,7 +29,6 @@ class RunResult:
     fills: list[Fill] = field(default_factory=list)
     n_decisions: int = 0
     realized_pnl_usd: float | None = None
-    diagnostics_count: int = 0
 
 
 _STOP_DISABLED_SENTINEL = -1.0  # bid_px is always ≥ 0 for PM, so this never trips
@@ -105,7 +104,6 @@ def run_one_market(
             position=pos, now_ns=ev.ts_ns,
         )
         result.n_decisions += 1
-        result.diagnostics_count += len(decision.diagnostics)
 
         # Collect diagnostics row (only when a diagnostics_dir was requested)
         if diagnostics_dir is not None:
@@ -146,8 +144,7 @@ def run_one_market(
                     pos = None
         last_scan_ns = ev.ts_ns
 
-    # Write diagnostics parquet for this market (after event loop, before return)
-    if diagnostics_dir is not None and diag_rows:
+    if diagnostics_dir is not None:
         write_diagnostics(diag_rows, diagnostics_dir / f"{market.condition_id}.parquet")
 
     if pos is not None:
