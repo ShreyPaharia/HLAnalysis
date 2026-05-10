@@ -5,16 +5,21 @@ strategy:
   # Pattern-based allowlist; matches QuestionMetaEvent fields.
   # Auto-applies across rollovers; blocklist for per-instance escape hatch.
   allowlist:
-    # 24h regime: enter only inside the last hour, winning leg ≥0.95.
-    # Period filter removed because HL HIP-4 markets are 24h, not 1h.
+    # 24h regime: enter inside the last 2h, winning leg ∈ [0.90, 0.995], with
+    # joint vol+distance safety gate. Calibrated on PM BTC daily Up/Down (May
+    # 2025 – May 2026): full-year $560 PnL, holdout $131, Sharpe 1.76, hit 74%.
+    # See sim configs/v1-safety-best.json and runs/v1-safety-best-fixed-full-2026-05-10/.
     - match:
         class: priceBinary
         underlying: BTC
       max_position_usd: 100
       stop_loss_pct: 10
       tte_min_seconds: 0
-      tte_max_seconds: 3600
-      price_extreme_threshold: 0.95
+      tte_max_seconds: 7200
+      price_extreme_threshold: 0.90
+      price_extreme_max: 0.995
+      min_safety_d: 1.5
+      vol_lookback_seconds: 3600
       distance_from_strike_usd_min: 0
       vol_max: 100
     # priceBucket — same per-leg consensus rule across all bucket legs.
@@ -24,8 +29,11 @@ strategy:
       max_position_usd: 100
       stop_loss_pct: 10
       tte_min_seconds: 0
-      tte_max_seconds: 3600
-      price_extreme_threshold: 0.95
+      tte_max_seconds: 7200
+      price_extreme_threshold: 0.90
+      price_extreme_max: 0.995
+      min_safety_d: 1.5
+      vol_lookback_seconds: 3600
       distance_from_strike_usd_min: 0
       vol_max: 100
     # Add more class entries as new question classes are approved for trading
@@ -37,8 +45,11 @@ strategy:
     max_position_usd: 100
     stop_loss_pct: 10
     tte_min_seconds: 0
-    tte_max_seconds: 3600
-    price_extreme_threshold: 0.95
+    tte_max_seconds: 7200
+    price_extreme_threshold: 0.90
+    price_extreme_max: 0.995
+    min_safety_d: 1.5
+    vol_lookback_seconds: 3600
     distance_from_strike_usd_min: 0
     vol_max: 100
 

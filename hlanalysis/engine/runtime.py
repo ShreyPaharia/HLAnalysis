@@ -35,6 +35,28 @@ from ..strategy.late_resolution import (
 )
 
 
+def build_late_resolution_config(cfg: StrategyConfig) -> LateResolutionConfig:
+    """Build the strategy runtime config from a loaded StrategyConfig.
+
+    Shared by EngineRuntime (live) and replay CLI. `getattr` defaults let
+    older YAMLs without the safety-gate fields keep loading.
+    """
+    d = cfg.defaults
+    return LateResolutionConfig(
+        tte_min_seconds=d.tte_min_seconds, tte_max_seconds=d.tte_max_seconds,
+        price_extreme_threshold=d.price_extreme_threshold,
+        distance_from_strike_usd_min=d.distance_from_strike_usd_min,
+        vol_max=d.vol_max, max_position_usd=d.max_position_usd,
+        stop_loss_pct=d.stop_loss_pct,
+        max_strike_distance_pct=cfg.global_.max_strike_distance_pct,
+        min_recent_volume_usd=cfg.global_.min_recent_volume_usd,
+        stale_data_halt_seconds=cfg.global_.stale_data_halt_seconds,
+        price_extreme_max=getattr(d, "price_extreme_max", 1.0),
+        min_safety_d=getattr(d, "min_safety_d", 0.0),
+        vol_lookback_seconds=getattr(d, "vol_lookback_seconds", 1800),
+    )
+
+
 @dataclass
 class EngineRuntime:
     strategy_cfg: StrategyConfig
@@ -70,17 +92,7 @@ class EngineRuntime:
             router = Router(dal=dal, gate=risk, bus=self.bus, hl=hl)
 
             # Strategy runtime config from the matched defaults entry
-            d = self.strategy_cfg.defaults
-            rcfg = LateResolutionConfig(
-                tte_min_seconds=d.tte_min_seconds, tte_max_seconds=d.tte_max_seconds,
-                price_extreme_threshold=d.price_extreme_threshold,
-                distance_from_strike_usd_min=d.distance_from_strike_usd_min,
-                vol_max=d.vol_max, max_position_usd=d.max_position_usd,
-                stop_loss_pct=d.stop_loss_pct,
-                max_strike_distance_pct=self.strategy_cfg.global_.max_strike_distance_pct,
-                min_recent_volume_usd=self.strategy_cfg.global_.min_recent_volume_usd,
-                stale_data_halt_seconds=self.strategy_cfg.global_.stale_data_halt_seconds,
-            )
+            rcfg = build_late_resolution_config(self.strategy_cfg)
             strategy = LateResolutionStrategy(rcfg)
 
             # 2) Restart-drift gate
