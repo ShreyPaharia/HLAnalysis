@@ -202,12 +202,15 @@ class LateResolutionStrategy(Strategy):
         if size <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"),))
 
+        # limit_price = price_extreme_max so realized fills never exceed the cap
+        # even after slippage; sim caps fill at limit, the engine's risk gate uses
+        # the same number as its hard upper bound on entry cost.
         intent = OrderIntent(
             question_idx=question.question_idx,
             symbol=win_symbol,
             side="buy",
             size=size,
-            limit_price=win.ask_px,
+            limit_price=self.cfg.price_extreme_max,
             cloid=f"hla-{uuid.uuid4()}",
             time_in_force="ioc",
         )
