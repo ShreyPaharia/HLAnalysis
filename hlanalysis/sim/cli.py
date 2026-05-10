@@ -113,11 +113,21 @@ def _load_jobs_from_cache(cache_root: Path) -> list[TuningJob]:
     return jobs
 
 
+def _slice_jobs(jobs: list[TuningJob], skip: int, limit: int | None) -> list[TuningJob]:
+    """Chronological train/holdout slicing. `skip` drops earliest N; `limit` caps remainder."""
+    sliced = jobs[skip:]
+    if limit is not None:
+        sliced = sliced[:limit]
+    return sliced
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     jobs = _load_jobs_from_cache(Path(args.cache_root))
     if not jobs:
         logger.error("No jobs in cache; run `hl-sim fetch` first.")
         return
+    jobs = _slice_jobs(jobs, args.skip_markets, args.max_markets)
+    logger.info(f"Running on {len(jobs)} markets (skip={args.skip_markets}, max={args.max_markets})")
     factory = _factory_for(args.strategy)
     params = json.loads(Path(args.config).read_text())
     strat = factory(params)
@@ -150,6 +160,11 @@ def cmd_tune(args: argparse.Namespace) -> None:
     jobs = _load_jobs_from_cache(Path(args.cache_root))
     if not jobs:
         logger.error("No jobs in cache; run `hl-sim fetch` first.")
+        return
+    jobs = _slice_jobs(jobs, args.skip_markets, args.max_markets)
+    logger.info(f"Tuning on {len(jobs)} markets (skip={args.skip_markets}, max={args.max_markets})")
+    if not jobs:
+        logger.error("Empty job slice after skip/max filtering.")
         return
     tcfg = load_tuning_yaml(Path(args.grid))
     grid = tcfg.v2_grid if args.strategy == "v2" else tcfg.v1_grid
@@ -211,6 +226,10 @@ def main() -> None:
                     help="Polymarket CLOB takers pay 0%; HL HIP-4 ~3-5bps")
     pr.add_argument("--half-spread", type=float, default=0.005)
     pr.add_argument("--depth", type=float, default=10000.0)
+    pr.add_argument("--skip-markets", type=int, default=0,
+                    help="Drop the first N markets chronologically (for holdout slicing).")
+    pr.add_argument("--max-markets", type=int, default=None,
+                    help="Cap to first N markets after skip (for train/holdout slicing).")
     pr.set_defaults(func=cmd_run)
 
     pt = sp.add_parser("tune", help="Grid + walk-forward tuning")
@@ -225,6 +244,10 @@ def main() -> None:
                     help="Polymarket CLOB takers pay 0%; HL HIP-4 ~3-5bps")
     pt.add_argument("--half-spread", type=float, default=0.005)
     pt.add_argument("--depth", type=float, default=10000.0)
+    pt.add_argument("--skip-markets", type=int, default=0,
+                    help="Drop the first N markets chronologically (for holdout slicing).")
+    pt.add_argument("--max-markets", type=int, default=None,
+                    help="Cap to first N markets after skip (for train/holdout slicing).")
     pt.set_defaults(func=cmd_tune)
 
     pp = sp.add_parser("report", help="Re-render tuning report from results.jsonl")
