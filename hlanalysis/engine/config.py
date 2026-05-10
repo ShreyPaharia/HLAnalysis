@@ -44,6 +44,10 @@ class AllowlistEntry(BaseModel):
     price_extreme_max: float = 1.0
     min_safety_d: float = 0.0
     vol_lookback_seconds: int = 1800
+    # Mid-hold safety_d exit threshold (0 = disabled) and EWMA decay for σ
+    # (0 = legacy sample stdev). Layered on top of the entry gates above.
+    exit_safety_d: float = 0.0
+    vol_ewma_lambda: float = 0.0
 
 
 class GlobalRiskConfig(BaseModel):

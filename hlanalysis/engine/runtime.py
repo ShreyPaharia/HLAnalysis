@@ -54,6 +54,8 @@ def build_late_resolution_config(cfg: StrategyConfig) -> LateResolutionConfig:
         price_extreme_max=getattr(d, "price_extreme_max", 1.0),
         min_safety_d=getattr(d, "min_safety_d", 0.0),
         vol_lookback_seconds=getattr(d, "vol_lookback_seconds", 1800),
+        exit_safety_d=getattr(d, "exit_safety_d", 0.0),
+        vol_ewma_lambda=getattr(d, "vol_ewma_lambda", 0.0),
     )
 
 
