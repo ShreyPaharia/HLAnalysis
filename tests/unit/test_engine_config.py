@@ -27,12 +27,21 @@ def test_load_strategy_yaml_from_repo():
     assert cfg.defaults.price_extreme_max == 0.995
     assert cfg.defaults.min_safety_d == 1.5
     assert cfg.defaults.vol_lookback_seconds == 3600
+    assert cfg.defaults.exit_safety_d == 1.0
+    assert cfg.defaults.vol_ewma_lambda == 0.85
     btc_binary = next(
         e for e in cfg.allowlist if e.match.get("class") == "priceBinary"
     )
     assert btc_binary.price_extreme_max == 0.995
     assert btc_binary.min_safety_d == 1.5
     assert btc_binary.vol_lookback_seconds == 3600
+    assert btc_binary.exit_safety_d == 1.0
+    assert btc_binary.vol_ewma_lambda == 0.85
+    btc_bucket = next(
+        e for e in cfg.allowlist if e.match.get("class") == "priceBucket"
+    )
+    assert btc_bucket.exit_safety_d == 1.0
+    assert btc_bucket.vol_ewma_lambda == 0.85
 
 
 def test_allowlist_entry_safety_gate_defaults_when_omitted():
@@ -47,6 +56,8 @@ def test_allowlist_entry_safety_gate_defaults_when_omitted():
     assert e.price_extreme_max == 1.0
     assert e.min_safety_d == 0.0
     assert e.vol_lookback_seconds == 1800
+    assert e.exit_safety_d == 0.0
+    assert e.vol_ewma_lambda == 0.0
 
 
 def test_allowlist_entry_safety_gate_explicit_values():
@@ -56,10 +67,13 @@ def test_allowlist_entry_safety_gate_explicit_values():
         tte_max_seconds=7200, price_extreme_threshold=0.90,
         distance_from_strike_usd_min=0, vol_max=100,
         price_extreme_max=0.995, min_safety_d=1.5, vol_lookback_seconds=3600,
+        exit_safety_d=1.0, vol_ewma_lambda=0.85,
     )
     assert e.price_extreme_max == 0.995
     assert e.min_safety_d == 1.5
     assert e.vol_lookback_seconds == 3600
+    assert e.exit_safety_d == 1.0
+    assert e.vol_ewma_lambda == 0.85
 
 
 def test_allowlist_match_picks_first_matching_entry(tmp_path):

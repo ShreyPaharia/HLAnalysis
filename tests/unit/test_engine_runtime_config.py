@@ -23,6 +23,8 @@ strategy:
       price_extreme_max: 0.995
       min_safety_d: 1.5
       vol_lookback_seconds: 3600
+      exit_safety_d: 1.0
+      vol_ewma_lambda: 0.85
       distance_from_strike_usd_min: 0
       vol_max: 100
   blocklist_question_idxs: []
@@ -36,6 +38,8 @@ strategy:
     price_extreme_max: 0.995
     min_safety_d: 1.5
     vol_lookback_seconds: 3600
+    exit_safety_d: 1.0
+    vol_ewma_lambda: 0.85
     distance_from_strike_usd_min: 0
     vol_max: 100
   global:
@@ -93,6 +97,8 @@ def test_runtime_threads_safety_gate_fields_into_strategy_config(tmp_path: Path)
     assert rcfg.price_extreme_max == 0.995
     assert rcfg.min_safety_d == 1.5
     assert rcfg.vol_lookback_seconds == 3600
+    assert rcfg.exit_safety_d == 1.0
+    assert rcfg.vol_ewma_lambda == 0.85
 
 
 def test_runtime_falls_back_to_defaults_when_yaml_omits_safety_gates(tmp_path: Path):
@@ -103,3 +109,5 @@ def test_runtime_falls_back_to_defaults_when_yaml_omits_safety_gates(tmp_path: P
     assert rcfg.price_extreme_max == 1.0
     assert rcfg.min_safety_d == 0.0
     assert rcfg.vol_lookback_seconds == 1800
+    assert rcfg.exit_safety_d == 0.0
+    assert rcfg.vol_ewma_lambda == 0.0

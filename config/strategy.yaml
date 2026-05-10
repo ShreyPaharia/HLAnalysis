@@ -20,6 +20,8 @@ strategy:
       price_extreme_max: 0.995
       min_safety_d: 1.5
       vol_lookback_seconds: 3600
+      exit_safety_d: 1.0
+      vol_ewma_lambda: 0.85
       distance_from_strike_usd_min: 0
       vol_max: 100
     # priceBucket — same per-leg consensus rule across all bucket legs.
@@ -34,6 +36,8 @@ strategy:
       price_extreme_max: 0.995
       min_safety_d: 1.5
       vol_lookback_seconds: 3600
+      exit_safety_d: 1.0
+      vol_ewma_lambda: 0.85
       distance_from_strike_usd_min: 0
       vol_max: 100
     # Add more class entries as new question classes are approved for trading
@@ -50,6 +54,8 @@ strategy:
     price_extreme_max: 0.995
     min_safety_d: 1.5
     vol_lookback_seconds: 3600
+    exit_safety_d: 1.0
+    vol_ewma_lambda: 0.85
     distance_from_strike_usd_min: 0
     vol_max: 100
 
