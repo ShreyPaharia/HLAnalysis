@@ -1,6 +1,6 @@
 strategy:
   name: late_resolution
-  paper_mode: true                      # Phase 1 default — explicit edit to go live
+  paper_mode: false                     # LIVE: real HL orders
 
   # Pattern-based allowlist; matches QuestionMetaEvent fields.
   # Auto-applies across rollovers; blocklist for per-instance escape hatch.
@@ -47,6 +47,6 @@ strategy:
     max_concurrent_positions: 5
     daily_loss_cap_usd: 200
     max_strike_distance_pct: 50         # 50% — BTC moves 5-10% per day, allow room
-    min_recent_volume_usd: 0            # 0 for paper testing; raise for live
+    min_recent_volume_usd: 1000         # live floor — skip illiquid binaries
     stale_data_halt_seconds: 5
     reconcile_interval_seconds: 60
