@@ -1,0 +1,23 @@
+# v1 sweep: fix price_extreme_max=0.995, vary lower threshold + TTE window.
+# 7 thresholds * 6 tte_max = 42 cells * walk-forward splits.
+
+v1_grid:
+  tte_min_seconds: [0]
+  tte_max_seconds: [900, 1800, 3600, 7200, 14400, 28800]   # 15m, 30m, 1h, 2h, 4h, 8h
+  price_extreme_threshold: [0.90, 0.92, 0.94, 0.95, 0.96, 0.97, 0.98]
+  price_extreme_max: [0.995]
+  distance_from_strike_usd_min: [0]
+  vol_max: [100]
+  stop_loss_pct: [null]
+
+v2_grid:
+  vol_lookback_seconds: [14400]
+  edge_buffer: [0.02]
+  stop_loss_pct: [null]
+  drift_lookback_seconds: [0]
+
+run:
+  train_markets: 60
+  test_markets: 20
+  step_markets: 20
+  max_workers: 8

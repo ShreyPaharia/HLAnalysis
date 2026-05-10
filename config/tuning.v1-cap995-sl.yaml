@@ -1,0 +1,24 @@
+# v1 sweep: cap=0.995 fixed, threshold + tte_max + stop_loss_pct varied.
+# 7 thresholds * 6 tte * 4 stop = 168 cells * walk-forward splits.
+# stop_loss_pct = % drawdown from entry: 5/10/20 → exit at 0.95/0.90/0.80 of entry.
+
+v1_grid:
+  tte_min_seconds: [0]
+  tte_max_seconds: [900, 1800, 3600, 7200, 14400, 28800]
+  price_extreme_threshold: [0.90, 0.92, 0.94, 0.95, 0.96, 0.97, 0.98]
+  price_extreme_max: [0.995]
+  distance_from_strike_usd_min: [0]
+  vol_max: [100]
+  stop_loss_pct: [null, 5, 10, 20]
+
+v2_grid:
+  vol_lookback_seconds: [14400]
+  edge_buffer: [0.02]
+  stop_loss_pct: [null]
+  drift_lookback_seconds: [0]
+
+run:
+  train_markets: 60
+  test_markets: 20
+  step_markets: 20
+  max_workers: 8
