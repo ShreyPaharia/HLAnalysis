@@ -11,9 +11,10 @@ def _book() -> BookState:
 
 def test_buy_fill_at_ask_plus_slippage_minus_fee():
     cfg = FillModelConfig(slippage_bps=10.0, fee_taker=0.02, book_depth_assumption=1000.0)
+    # limit_price headroom above slipped ask so slippage actually realizes
     intent = OrderIntent(
         question_idx=1, symbol="t1", side="buy",
-        size=100.0, limit_price=0.51, cloid="hla-x", time_in_force="ioc",
+        size=100.0, limit_price=0.55, cloid="hla-x", time_in_force="ioc",
     )
     fill = simulate_fill(intent, _book(), cfg)
     expected_px = 0.51 * (1 + 10 / 1e4)
@@ -22,15 +23,38 @@ def test_buy_fill_at_ask_plus_slippage_minus_fee():
     assert fill.fee == expected_px * 100.0 * 0.02
 
 
+def test_buy_fill_capped_at_limit_when_slippage_breaches():
+    cfg = FillModelConfig(slippage_bps=10.0, fee_taker=0.02, book_depth_assumption=1000.0)
+    # limit equal to ask: slippage would push above limit, so fill caps at limit
+    intent = OrderIntent(
+        question_idx=1, symbol="t1", side="buy",
+        size=100.0, limit_price=0.51, cloid="hla-x", time_in_force="ioc",
+    )
+    fill = simulate_fill(intent, _book(), cfg)
+    assert fill.price == 0.51
+    assert fill.size == 100.0
+
+
 def test_sell_fill_at_bid_minus_slippage():
+    cfg = FillModelConfig(slippage_bps=10.0, fee_taker=0.02, book_depth_assumption=1000.0)
+    # limit headroom below slipped bid so slippage actually realizes
+    intent = OrderIntent(
+        question_idx=1, symbol="t1", side="sell",
+        size=50.0, limit_price=0.45, cloid="hla-y", time_in_force="ioc",
+    )
+    fill = simulate_fill(intent, _book(), cfg)
+    expected_px = 0.49 * (1 - 10 / 1e4)
+    assert abs(fill.price - expected_px) < 1e-9
+
+
+def test_sell_fill_floored_at_limit_when_slippage_breaches():
     cfg = FillModelConfig(slippage_bps=10.0, fee_taker=0.02, book_depth_assumption=1000.0)
     intent = OrderIntent(
         question_idx=1, symbol="t1", side="sell",
         size=50.0, limit_price=0.49, cloid="hla-y", time_in_force="ioc",
     )
     fill = simulate_fill(intent, _book(), cfg)
-    expected_px = 0.49 * (1 - 10 / 1e4)
-    assert abs(fill.price - expected_px) < 1e-9
+    assert fill.price == 0.49
 
 
 def test_partial_fill_when_size_exceeds_assumed_depth():

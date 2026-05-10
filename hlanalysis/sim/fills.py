@@ -28,11 +28,22 @@ def simulate_fill(intent: OrderIntent, book: BookState, cfg: FillModelConfig) ->
     if intent.side == "buy":
         if book.ask_px is None:
             return Fill(intent.cloid, intent.symbol, "buy", 0.0, 0.0, 0.0, partial=True)
-        px = book.ask_px * (1.0 + cfg.slippage_bps / 1e4)
+        # IOC LIMIT semantics: never pay above the strategy's limit_price.
+        # Slippage only realizes when the ask + cost is still within the limit;
+        # otherwise the limit binds and we fill at the limit.
+        slipped = book.ask_px * (1.0 + cfg.slippage_bps / 1e4)
+        if intent.limit_price > 0:
+            px = min(slipped, intent.limit_price)
+        else:
+            px = slipped
     else:
         if book.bid_px is None:
             return Fill(intent.cloid, intent.symbol, "sell", 0.0, 0.0, 0.0, partial=True)
-        px = book.bid_px * (1.0 - cfg.slippage_bps / 1e4)
+        slipped = book.bid_px * (1.0 - cfg.slippage_bps / 1e4)
+        if intent.limit_price > 0:
+            px = max(slipped, intent.limit_price)
+        else:
+            px = slipped
     # Binary instruments pay [0, 1] at settlement; slippage above the cap is
     # economically meaningless (you'd never pay $1.0005 for a $1 ceiling).
     px = max(0.0, min(1.0, px))
