@@ -123,9 +123,8 @@ def _cli() -> None:
     from pathlib import Path
 
     from .config import load_strategy_config, match_question  # noqa: F401
-    from ..strategy.late_resolution import (
-        LateResolutionConfig, LateResolutionStrategy,
-    )
+    from .runtime import build_late_resolution_config
+    from ..strategy.late_resolution import LateResolutionStrategy
 
     p = argparse.ArgumentParser()
     p.add_argument("--parquet", required=True, help="parquet glob")
@@ -133,17 +132,7 @@ def _cli() -> None:
     args = p.parse_args()
 
     cfg = load_strategy_config(Path(args.strategy_config))
-    d = cfg.defaults
-    runtime_cfg = LateResolutionConfig(
-        tte_min_seconds=d.tte_min_seconds, tte_max_seconds=d.tte_max_seconds,
-        price_extreme_threshold=d.price_extreme_threshold,
-        distance_from_strike_usd_min=d.distance_from_strike_usd_min,
-        vol_max=d.vol_max, max_position_usd=d.max_position_usd,
-        stop_loss_pct=d.stop_loss_pct,
-        max_strike_distance_pct=cfg.global_.max_strike_distance_pct,
-        min_recent_volume_usd=cfg.global_.min_recent_volume_usd,
-        stale_data_halt_seconds=cfg.global_.stale_data_halt_seconds,
-    )
+    runtime_cfg = build_late_resolution_config(cfg)
     runner = ReplayRunner(strategy=LateResolutionStrategy(runtime_cfg))
     n = 0
     for _ in runner.run_parquet(Path(args.parquet)):

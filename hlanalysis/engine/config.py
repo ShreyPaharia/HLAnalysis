@@ -38,6 +38,12 @@ class AllowlistEntry(BaseModel):
     price_extreme_threshold: float
     distance_from_strike_usd_min: float
     vol_max: float
+    # Optional safety-gate params; defaults preserve pre-gate behavior so older
+    # YAMLs continue to load. Calibration in v1-safety-best (May 2026) showed
+    # these together lift full-year PnL on PM BTC daily Up/Down from $5 → $560.
+    price_extreme_max: float = 1.0
+    min_safety_d: float = 0.0
+    vol_lookback_seconds: int = 1800
 
 
 class GlobalRiskConfig(BaseModel):

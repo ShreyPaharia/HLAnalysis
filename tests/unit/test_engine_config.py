@@ -18,9 +18,48 @@ from hlanalysis.engine.config import (
 def test_load_strategy_yaml_from_repo():
     cfg = load_strategy_config(Path("config/strategy.yaml"))
     assert cfg.name == "late_resolution"
-    assert cfg.paper_mode is True
+    assert cfg.paper_mode is False
     assert cfg.global_.max_total_inventory_usd == 500
     assert cfg.global_.daily_loss_cap_usd == 200
+    # Calibrated v1-safety-best values landed on the BTC entries + defaults.
+    assert cfg.defaults.tte_max_seconds == 7200
+    assert cfg.defaults.price_extreme_threshold == 0.90
+    assert cfg.defaults.price_extreme_max == 0.995
+    assert cfg.defaults.min_safety_d == 1.5
+    assert cfg.defaults.vol_lookback_seconds == 3600
+    btc_binary = next(
+        e for e in cfg.allowlist if e.match.get("class") == "priceBinary"
+    )
+    assert btc_binary.price_extreme_max == 0.995
+    assert btc_binary.min_safety_d == 1.5
+    assert btc_binary.vol_lookback_seconds == 3600
+
+
+def test_allowlist_entry_safety_gate_defaults_when_omitted():
+    """Older YAMLs without the safety-gate fields must keep loading; defaults
+    preserve pre-gate behavior (max=1.0 is no cap, min_safety_d=0 is gate off)."""
+    e = AllowlistEntry(
+        match={"class": "priceBinary"},
+        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=0,
+        tte_max_seconds=3600, price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=0, vol_max=100,
+    )
+    assert e.price_extreme_max == 1.0
+    assert e.min_safety_d == 0.0
+    assert e.vol_lookback_seconds == 1800
+
+
+def test_allowlist_entry_safety_gate_explicit_values():
+    e = AllowlistEntry(
+        match={"class": "priceBinary"},
+        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=0,
+        tte_max_seconds=7200, price_extreme_threshold=0.90,
+        distance_from_strike_usd_min=0, vol_max=100,
+        price_extreme_max=0.995, min_safety_d=1.5, vol_lookback_seconds=3600,
+    )
+    assert e.price_extreme_max == 0.995
+    assert e.min_safety_d == 1.5
+    assert e.vol_lookback_seconds == 3600
 
 
 def test_allowlist_match_picks_first_matching_entry(tmp_path):

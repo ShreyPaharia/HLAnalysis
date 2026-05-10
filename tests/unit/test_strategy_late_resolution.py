@@ -114,7 +114,9 @@ def test_entry_yes_when_btc_above_strike_and_yes_book_extreme():
     assert intent.symbol == "@30"
     assert intent.side == "buy"
     assert intent.time_in_force == "ioc"
-    assert math.isclose(intent.limit_price, 0.96, rel_tol=1e-9)
+    # limit_price is price_extreme_max (cap on entry cost), not the live ask;
+    # sim/engine clamp fills to limit so realized fills never exceed the cap.
+    assert math.isclose(intent.limit_price, 1.0, rel_tol=1e-9)
 
 
 def test_entry_no_when_btc_below_strike_and_no_book_extreme():
