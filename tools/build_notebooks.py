@@ -1410,16 +1410,2182 @@ For a real trading decision we'd want:
 ]
 
 
+# ---------------------------------------------------------------------------
+# Strategy hypotheses footer — appended to every notebook
+# ---------------------------------------------------------------------------
+HYPOTHESIS_FOOTER = (
+    "md",
+    """
+## Strategy hypotheses
+
+- **Supports:** H?: (fill in after reviewing the chart above)
+- **Rules out:** H?: (fill in if evidence rules it out)
+- **Next probe:** (what would refine this further)
+""",
+)
+
+
+# ---------------------------------------------------------------------------
+# 07 — HIP-4 late-YES strategy with stop-loss
+# ---------------------------------------------------------------------------
+P7 = [
+    (
+        "md",
+        """
+# 07 — HIP-4 late-YES strategy with stop-loss
+
+**What this notebook produces**
+
+A ranked set of trading strategies for the daily HL HIP-4 BTC binary, with concrete entry/stop/sizing parameters for the one to start with on $1k of capital. Builds on the fair-value machinery from `05-hip4-binaries.ipynb` and `06-hip4-pricing-from-perp.ipynb`.
+
+**HIP-4 mechanics (from the [contract spec](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/contract-specifications.md#recurring-outcomes))**
+
+- Recurring binary outcome on the **HL BTC mark price**. Daily expiry at **06:00 UTC**.
+- Settlement: linear interpolation between the two mark-price updates immediately before and after 06:00 UTC. Resolves YES iff the interpolated mark ≥ `targetPrice`.
+- Each outcome has two sides quoted as separate coins. With `outcome_idx` and `side_idx ∈ {0,1}`, the coin name is `#{10*outcome_idx + side_idx}` (e.g. `#50`, `#51` are the two sides of outcome 5). Buying matched 1 unit of each pays exactly 1 USDC at settle.
+- Description metadata (parsed below): `class:priceBinary|underlying:BTC|expiry:YYYYMMDD-HHMM|targetPrice:K|period:1d`.
+
+**Why a late-YES strategy**
+
+- In the last 30–60 min of life, time-decay has done most of its work. If `S` is far from `K` in vol units, `P(YES | now)` is close to 1.
+- Edge is small per trade (a few ¢) but hit-rate is high. Asymmetric payoff means a single bad print without a stop wipes out many winners.
+- A stop converts the left tail into bounded loss. Bonus: because settlement is HL **mark price**, the **mark price itself** is the most informative stop trigger — earlier signal than the binary's own mid.
+
+**Capital frame**
+
+- Bankroll: $1k. Per-trade size band: $100–$200 (10–20% of bankroll).
+- One trade per day max while validating. ~30 trades = ~1 month.
+
+**Notebook layout**
+
+1. Setup, load HL BTC perp, parse HIP-4 metadata.
+2. `q_model` and the canonical entry signal: distance-to-strike `d` in vol units.
+3. `d` and `q_model` over the life of the most recent outcome.
+4. Regime guards — vol-up tripwire + perp depth check.
+5. Binary BBO + spread guard.
+6. Backtest scaffold — single-cycle simulator.
+7. Stop-loss sweep.
+8. Calibration plot — `d` vs realized YES rate.
+9. Strategy options (priority ordering + concrete starter params).
+""",
+    ),
+    (
+        "code",
+        """
+from hlanalysis.analysis import duck, glob_for, load_df, set_mpl_defaults
+import pandas as pd, numpy as np, matplotlib.pyplot as plt
+from scipy.stats import norm
+from dataclasses import dataclass, field
+import datetime as dt
+set_mpl_defaults()
+pd.options.display.float_format = '{:,.6g}'.format
+
+UTC = dt.timezone.utc
+SETTLE_HOUR_UTC = 6
+SEC_PER_YEAR = 365 * 24 * 3600
+
+# --- Strategy parameters (edit these to tune; defaults are the "Strategy 1" starter) ---
+STRAT = dict(
+    entry_window_min=(60, 5),       # only enter inside [T-60min, T-5min]
+    d_min=3.0,                       # require distance >= 3 vol-units
+    price_band=(0.93, 0.99),         # binary mid must be within this range
+    stop_d=1.5,                      # exit if d drops below this
+    stop_price=0.85,                 # exit if binary mid drops below this
+    vol_ratio_max=1.5,               # exit/blackout if RV_5m / RV_60m exceeds this
+    vol_floor=0.30,                  # σ floor (annualised) so quiet regimes don't lull d to ∞
+    binary_spread_max_cents=1.5,     # binary ask-bid <= 1.5¢
+    perp_depth_min_frac=0.50,        # require >= 50% of session-median top-10 depth
+    trade_size_usd=100,              # starter size (10% of $1k bankroll)
+)
+STRAT
+""",
+    ),
+    (
+        "md",
+        """
+## 1. Load HL BTC perp + parse HIP-4 metadata
+
+Mark price ticks (the **settlement source**), perp BBO, and book snapshots. Strikes/expiries come from `outcomeMeta` description, written into `market_meta` events.
+""",
+    ),
+    (
+        "code",
+        """
+# Mark = the actual settlement source. Use it for q_model, not perp mid.
+mark = load_df(f'''
+    SELECT local_recv_ts, mark_px
+    FROM read_parquet('{glob_for(venue='hyperliquid', product_type='perp', event='mark', symbol='BTC')}',
+                      hive_partitioning=true)
+    ORDER BY local_recv_ts
+''')
+mark['t']  = pd.to_datetime(mark.local_recv_ts, unit='ns', utc=True)
+mark = mark.set_index('t')[['mark_px']]
+mark_1s = mark['mark_px'].resample('1s').last().ffill().dropna()
+print(f'mark ticks: {len(mark):,} | range: {mark.index.min()} -> {mark.index.max()}')
+
+# HIP-4 metadata. Each row is a snapshot; take latest per symbol.
+mm = load_df(f'''
+    SELECT symbol, exchange_ts, local_recv_ts, keys, values
+    FROM read_parquet('{glob_for(venue='hyperliquid', product_type='prediction_binary', event='market_meta')}',
+                      hive_partitioning=true)
+    ORDER BY local_recv_ts
+''')
+
+def parse_meta(row):
+    d = dict(zip(row['keys'], row['values']))
+    try: K = float(d.get('targetPrice', 'nan'))
+    except Exception: K = float('nan')
+    try: exp = pd.to_datetime(d.get('expiry', ''), format='%Y%m%d-%H%M', utc=True)
+    except Exception: exp = pd.NaT
+    return pd.Series({
+        'strike': K, 'expiry': exp,
+        'side_idx':   int(d.get('side_idx', -1)),
+        'side_name':  d.get('side_name', ''),
+        'underlying': d.get('underlying', ''),
+        'period':     d.get('period', ''),
+        'cls':        d.get('class', ''),
+    })
+
+if mm.empty:
+    meta = pd.DataFrame()
+    print('No HIP-4 metadata yet — recorder needs to run through at least one outcome boundary.')
+else:
+    latest = mm.sort_values('local_recv_ts').groupby('symbol').tail(1).reset_index(drop=True)
+    meta   = pd.concat([latest[['symbol']], latest.apply(parse_meta, axis=1)], axis=1)
+    meta = meta.sort_values(['expiry', 'side_idx']).reset_index(drop=True)
+meta
+""",
+    ),
+    (
+        "md",
+        """
+## 2. The entry signal — distance `d` in vol units
+
+For a digital that pays 1 if `S_T ≥ K`, log-normal returns give:
+
+$$d_2 = \\frac{\\ln(S/K) - \\tfrac{1}{2}\\sigma^2 \\tau}{\\sigma\\sqrt{\\tau}}, \\qquad q_{\\text{model}} = \\Phi(d_2)$$
+
+The **distance to strike in vol units** is:
+
+$$d \\;=\\; \\frac{S - K}{S \\cdot \\sigma \\sqrt{\\tau}}$$
+
+Why `d` instead of just "binary mid ≥ 95¢" as the entry trigger:
+
+- A binary at 96¢ with `d = 1.5` is mispriced *toward* you the wrong way — the market is overconfident relative to vol.
+- A binary at 96¢ with `d = 4` is conservative and that's your edge.
+- Same screen price, opposite trade. `d` exposes that.
+
+Notebook 06 already validated `Φ(d_2)` against market mid; here we use the same machinery as a gate, not a model fit.
+""",
+    ),
+    (
+        "code",
+        """
+def q_model(S, K, sigma_annual, tau_years):
+    \"\"\"P(S_T >= K) under log-normal. Vectorised over S/sigma/tau (K scalar).\"\"\"
+    S = np.asarray(S, dtype=float)
+    sig = np.maximum(np.asarray(sigma_annual, dtype=float), 1e-9)
+    tau = np.maximum(np.asarray(tau_years, dtype=float), 1e-12)
+    d2 = (np.log(S / K) - 0.5 * sig**2 * tau) / (sig * np.sqrt(tau))
+    return norm.cdf(d2)
+
+def distance_to_strike(S, K, sigma_annual, tau_years):
+    \"\"\"Signed distance |S - K| / (S sigma sqrt(tau)). Sign convention:
+    positive when YES (S > K) is the comfortable side.\"\"\"
+    S = np.asarray(S, dtype=float)
+    sig = np.maximum(np.asarray(sigma_annual, dtype=float), 1e-9)
+    tau = np.maximum(np.asarray(tau_years, dtype=float), 1e-12)
+    return (S - K) / (S * sig * np.sqrt(tau))
+
+# Realised vol estimators. Mark-price ticks are the right thing to differentiate
+# (BBO mid is noisier and the binary settles on mark, not mid).
+log_ret_1s = np.log(mark_1s).diff().dropna()
+def rolling_rv(returns_1s, window_seconds):
+    var = (returns_1s ** 2).rolling(window_seconds, min_periods=window_seconds // 2).sum()
+    return np.sqrt(var) * np.sqrt(SEC_PER_YEAR / window_seconds)
+
+rv_5m  = rolling_rv(log_ret_1s, 5 * 60)
+rv_60m = rolling_rv(log_ret_1s, 60 * 60)
+
+fig, ax = plt.subplots(figsize=(11, 3.5))
+ax.plot(rv_5m.index,  rv_5m,  lw=0.9, alpha=0.7, label='RV 5m')
+ax.plot(rv_60m.index, rv_60m, lw=1.4,             label='RV 60m')
+ax.axhline(STRAT['vol_floor'], ls='--', color='grey', label=f"σ-floor = {STRAT['vol_floor']:.0%}")
+ax.set_ylabel('annualised σ'); ax.legend(); ax.set_title('HL BTC mark — rolling realised vol')
+plt.tight_layout(); plt.show()
+print(f"σ_60m median: {rv_60m.median():.2%} | σ_5m median: {rv_5m.median():.2%}")
+""",
+    ),
+    (
+        "md",
+        """
+## 3. `d` and `q_model` over the life of the most recent outcome
+
+Pick the most-recently-expired (or active) outcome from `meta`, build the time series of `d` and `q_model`. The horizontal lines `d = 3, 1.5, 0` are the strategy's entry / stop / strike-touch thresholds.
+""",
+    ),
+    (
+        "code",
+        """
+def build_d_series(K, expiry, mark_1s, rv_60m, vol_floor):
+    \"\"\"Construct a 1s-grid DataFrame of (S, sigma, tau_years, d, q) for the cycle ending at expiry.\"\"\"
+    s_grid = mark_1s.loc[:expiry]
+    sigma  = rv_60m.reindex(s_grid.index).clip(lower=vol_floor).ffill().bfill()
+    tau    = ((expiry - s_grid.index).total_seconds() / SEC_PER_YEAR).to_numpy().clip(min=1e-12)
+    S_arr  = s_grid.to_numpy()
+    sig_arr = sigma.to_numpy()
+    d_arr   = (S_arr - K) / (S_arr * sig_arr * np.sqrt(tau))
+    q_arr   = q_model(S_arr, K, sig_arr, tau)
+    return pd.DataFrame({'S': S_arr, 'sigma': sig_arr, 'tau_years': tau,
+                         'd': d_arr, 'q_yes': q_arr}, index=s_grid.index)
+
+if meta.empty:
+    print('No metadata yet — section skipped.')
+    cycle_df = pd.DataFrame()
+else:
+    yes = meta[meta.side_idx == 0].dropna(subset=['strike','expiry']).sort_values('expiry').iloc[-1]
+    K, T_exp, sym = float(yes.strike), pd.Timestamp(yes.expiry), yes.symbol
+    print(f"Cycle: {sym}  K = {K:,.0f}  expiry = {T_exp:%Y-%m-%d %H:%M} UTC")
+    cycle_df = build_d_series(K, T_exp, mark_1s, rv_60m, STRAT['vol_floor'])
+    cycle_df = cycle_df.loc[T_exp - pd.Timedelta(days=1):T_exp]
+
+    fig, axes = plt.subplots(2, 1, figsize=(11, 6.5), sharex=True,
+                             gridspec_kw={'height_ratios': [1.4, 1]})
+    axes[0].plot(cycle_df.index, cycle_df.S, lw=1.0, color='C0')
+    axes[0].axhline(K, ls='--', color='red', label=f'strike K = {K:,.0f}')
+    axes[0].set_ylabel('BTC mark'); axes[0].legend()
+    axes[1].plot(cycle_df.index, cycle_df.d, lw=1.1, color='C2')
+    for level, col, txt in [(STRAT['d_min'], 'green', 'd_min (entry)'),
+                            (STRAT['stop_d'], 'orange', 'stop_d (exit)'),
+                            (0, 'red', 'strike touch')]:
+        axes[1].axhline(level, ls='--', color=col, alpha=0.7, label=f'{txt} = {level}')
+    axes[1].set_ylabel('distance d (vol units)'); axes[1].legend(loc='lower left', fontsize=8)
+    fig.suptitle(f'{sym} — S vs K, distance d over the day')
+    plt.tight_layout(); plt.show()
+    cycle_df.tail(3)
+""",
+    ),
+    (
+        "md",
+        """
+## 4. Regime guards — vol-up tripwire + perp depth
+
+A trade is allowed only if **all** the following hold (in addition to the `d` and price filters):
+
+- `RV_5m / RV_60m ≤ 1.5` — no vol-regime change in progress.
+- BTC perp top-10 level depth ≥ 50% of session-median — book is healthy enough that a benign trade can exit on stop without massive slippage.
+- (Operational) Not within ±60 min of a scheduled macro release (CPI/FOMC/NFP/ECB). External calendar; not enforced in code.
+
+The small outcome market is *not* a manipulation risk source: the maximum profit available to an attacker scales with the binary's open interest, while the cost to push BTC mark through the strike scales with HL perp depth. Until the binary is materially deeper than today's market, manipulation cost dominates by orders of magnitude. The depth check below is a guard against **uncorrelated** big BTC moves, not against directed manipulation.
+""",
+    ),
+    (
+        "code",
+        """
+# Vol-regime ratio
+vol_ratio = (rv_5m / rv_60m).clip(0.1, 5)
+fig, ax = plt.subplots(figsize=(11, 3))
+ax.plot(vol_ratio.index, vol_ratio, lw=0.9)
+ax.axhline(STRAT['vol_ratio_max'], ls='--', color='red',
+           label=f"blackout above {STRAT['vol_ratio_max']}")
+ax.axhline(1.0, ls=':', color='grey')
+ax.set_ylabel('RV_5m / RV_60m'); ax.legend(); ax.set_title('Vol-regime ratio (entry blackout above red line)')
+plt.tight_layout(); plt.show()
+
+# HL BTC perp top-of-book depth
+book = load_df(f'''
+    SELECT local_recv_ts, bid_px, bid_sz, ask_px, ask_sz
+    FROM read_parquet('{glob_for(venue='hyperliquid', product_type='perp', event='book_snapshot', symbol='BTC')}',
+                      hive_partitioning=true)
+    ORDER BY local_recv_ts
+''')
+if book.empty:
+    print('No HL perp book snapshots — depth guard cannot be calibrated yet.')
+else:
+    book['t'] = pd.to_datetime(book.local_recv_ts, unit='ns', utc=True)
+    book = book.set_index('t').sort_index()
+    def top_n_notional(px_arr, sz_arr, n=5):
+        if px_arr is None or len(px_arr) == 0: return np.nan
+        k = min(n, len(px_arr))
+        return float(np.sum(np.array(px_arr[:k]) * np.array(sz_arr[:k])))
+    book['bid_top5_usd'] = [top_n_notional(p, s) for p, s in zip(book.bid_px, book.bid_sz)]
+    book['ask_top5_usd'] = [top_n_notional(p, s) for p, s in zip(book.ask_px, book.ask_sz)]
+    book['top10_usd']    = book.bid_top5_usd + book.ask_top5_usd
+
+    median_depth = book['top10_usd'].median()
+    fig, ax = plt.subplots(figsize=(11, 3))
+    ax.plot(book.index, book.top10_usd / 1e6, lw=0.8)
+    ax.axhline(median_depth / 1e6, ls='--', color='black',
+               label=f'session median = ${median_depth/1e6:.2f}M')
+    ax.axhline(STRAT['perp_depth_min_frac'] * median_depth / 1e6, ls='--', color='red',
+               label=f"depth-guard floor = {STRAT['perp_depth_min_frac']:.0%} of median")
+    ax.set_ylabel('top-10 levels notional ($M)'); ax.legend()
+    ax.set_title('HL BTC perp top-of-book depth')
+    plt.tight_layout(); plt.show()
+    print(f'median top-10 depth: ${median_depth:,.0f}')
+""",
+    ),
+    (
+        "md",
+        """
+## 5. Outcome-side BBO + the binary spread/depth guard
+
+Loads the binary BBO if collected. If not yet present, this cell simply prints a status note — the recorder is already configured to capture `prediction_binary` BBO (see `config/symbols.yaml`); we just need it to accumulate cycles.
+""",
+    ),
+    (
+        "code",
+        """
+def load_binary_bbo(symbol):
+    g = glob_for(venue='hyperliquid', product_type='prediction_binary', event='bbo', symbol=symbol)
+    try:
+        df = load_df(f'''
+            SELECT local_recv_ts, bid_px, bid_sz, ask_px, ask_sz
+            FROM read_parquet('{g}', hive_partitioning=true)
+            WHERE bid_px > 0 AND ask_px > 0
+            ORDER BY local_recv_ts
+        ''')
+    except Exception as e:
+        return pd.DataFrame()
+    if df.empty: return df
+    df['t']      = pd.to_datetime(df.local_recv_ts, unit='ns', utc=True)
+    df['mid']    = 0.5 * (df.bid_px + df.ask_px)
+    df['spread'] = df.ask_px - df.bid_px
+    df['top1_usd'] = df.bid_sz * df.bid_px + df.ask_sz * df.ask_px
+    return df.set_index('t')
+
+if meta.empty:
+    yes_bbo = no_bbo = pd.DataFrame()
+    print('no metadata; skipping binary BBO load.')
+else:
+    pair = meta.dropna(subset=['expiry']).sort_values('expiry').iloc[-2:]   # last YES/NO pair
+    yes_sym = pair[pair.side_idx == 0].symbol.iloc[0] if (pair.side_idx == 0).any() else None
+    no_sym  = pair[pair.side_idx == 1].symbol.iloc[0] if (pair.side_idx == 1).any() else None
+    yes_bbo = load_binary_bbo(yes_sym) if yes_sym else pd.DataFrame()
+    no_bbo  = load_binary_bbo(no_sym)  if no_sym  else pd.DataFrame()
+    print(f'YES {yes_sym}: {len(yes_bbo):,} BBO rows | NO {no_sym}: {len(no_bbo):,} BBO rows')
+
+if yes_bbo.empty:
+    print('Binary BBO not yet collected for this cycle. Re-run after recorder accumulates ≥ 1 day.')
+else:
+    fig, axes = plt.subplots(2, 1, figsize=(11, 5.5), sharex=True,
+                             gridspec_kw={'height_ratios': [1.6, 1]})
+    axes[0].plot(yes_bbo.index, yes_bbo.mid, lw=1.0, label=f'{yes_sym} mid')
+    axes[0].fill_between(yes_bbo.index, yes_bbo.bid_px, yes_bbo.ask_px, alpha=0.15)
+    axes[0].axhspan(*STRAT['price_band'], color='green', alpha=0.10, label='entry price band')
+    axes[0].set_ylabel('YES price'); axes[0].set_ylim(0, 1); axes[0].legend(loc='lower right', fontsize=8)
+    axes[1].plot(yes_bbo.index, yes_bbo.spread * 100, lw=0.9, color='C3', label='spread (¢)')
+    axes[1].axhline(STRAT['binary_spread_max_cents'], ls='--', color='red',
+                    label=f"max spread = {STRAT['binary_spread_max_cents']}¢")
+    axes[1].set_ylabel('spread (cents)'); axes[1].legend(loc='upper right', fontsize=8)
+    fig.suptitle(f'{yes_sym} binary BBO with strategy bands')
+    plt.tight_layout(); plt.show()
+""",
+    ),
+    (
+        "md",
+        """
+## 6. Backtest scaffold — single-cycle simulator
+
+Given a cycle (`K`, `expiry`, plus the `mark_1s`, `rv_60m`, `book`, `yes_bbo`, `no_bbo` series), the simulator walks the entry window once per second:
+
+- **Gate check** at each tick `t`: `T_remaining ∈ window`, `d_t ≥ d_min`, `mid_t ∈ price_band`, `vol_ratio_t ≤ 1.5`, `perp_depth_t ≥ 0.5 × median`, binary spread `≤ 1.5¢`.
+- On first pass: enter YES at `ask_t` for `trade_size_usd / ask_t` units. Place stop on `mid ≤ stop_price` AND `d ≤ stop_d` (whichever fires first).
+- Walk forward; if any stop fires, exit at next bid; else hold to settlement.
+- Realized PnL: at settlement `S_settle ≥ K → 1, else → 0`. Per-unit PnL = `(payoff - entry_ask)` if held; `(stop_bid - entry_ask)` if stopped.
+
+The simulator emits one `TradeResult` per cycle (or `None` if no entry condition was met). Stop-loss sweeps and option comparisons reuse this primitive.
+""",
+    ),
+    (
+        "code",
+        """
+@dataclass
+class TradeResult:
+    cycle_symbol: str
+    K: float
+    expiry: pd.Timestamp
+    entry_t: pd.Timestamp | None
+    entry_ask: float | None
+    exit_t:  pd.Timestamp | None
+    exit_px: float | None
+    exit_reason: str
+    d_at_entry: float | None
+    sigma_at_entry: float | None
+    settle_S: float | None
+    payoff: float | None
+    pnl_per_unit: float | None
+    units: float | None
+    pnl_usd: float | None
+
+def simulate_cycle(K, expiry, *, sym, mark_1s, rv_60m, book, yes_bbo, strat=STRAT) -> TradeResult | None:
+    \"\"\"Single late-YES trade with stop-loss. Returns None if no entry condition was ever met.\"\"\"
+    if yes_bbo.empty:
+        return None
+
+    window_start = expiry - pd.Timedelta(minutes=strat['entry_window_min'][0])
+    window_end   = expiry - pd.Timedelta(minutes=strat['entry_window_min'][1])
+
+    # Pre-compute decision-grid features on yes_bbo's timestamps.
+    grid = yes_bbo[['bid_px','ask_px','mid','spread']].copy()
+    grid = grid.loc[window_start:expiry]
+    if grid.empty: return None
+
+    # Align mark, sigma, depth, vol-ratio, no_mid onto grid via asof-merge (forward-fill).
+    grid = grid.join(mark_1s.rename('S').reindex(grid.index, method='ffill'))
+    grid['sigma']    = rv_60m.reindex(grid.index, method='ffill').clip(lower=strat['vol_floor'])
+    grid['vol_ratio']= (rv_5m / rv_60m).reindex(grid.index, method='ffill')
+    if not book.empty and 'top10_usd' in book.columns:
+        depth_med = book['top10_usd'].median()
+        grid['depth_ok'] = (book['top10_usd'].reindex(grid.index, method='ffill')
+                            >= strat['perp_depth_min_frac'] * depth_med)
+    else:
+        grid['depth_ok'] = True
+    grid['tau_yr'] = ((expiry - grid.index).total_seconds() / SEC_PER_YEAR).clip(lower=1e-12)
+    grid['d']      = (grid.S - K) / (grid.S * grid.sigma * np.sqrt(grid.tau_yr))
+
+    # Entry gate
+    enter_mask = (
+        (grid.index <= window_end)
+        & (grid['d'] >= strat['d_min'])
+        & (grid['mid'].between(*strat['price_band']))
+        & (grid['vol_ratio'].fillna(1.0) <= strat['vol_ratio_max'])
+        & (grid['spread'] <= strat['binary_spread_max_cents'] / 100.0)
+        & (grid['depth_ok'])
+    )
+    if not enter_mask.any():
+        return TradeResult(sym, K, expiry, None, None, None, None, 'no-entry',
+                           None, None, None, None, None, None, None)
+
+    entry_t   = grid.index[enter_mask][0]
+    entry_row = grid.loc[entry_t]
+    entry_ask = float(entry_row['ask_px'])
+    units     = strat['trade_size_usd'] / entry_ask
+
+    # Walk forward; check stop on every later tick.
+    fwd = grid.loc[entry_t:]
+    stop_mask = (fwd['mid'] <= strat['stop_price']) | (fwd['d'] <= strat['stop_d'])
+    if stop_mask.any():
+        exit_t   = fwd.index[stop_mask][0]
+        exit_row = fwd.loc[exit_t]
+        exit_px  = float(exit_row['bid_px'])         # exit on bid
+        reason   = 'stop_d' if exit_row['d'] <= strat['stop_d'] else 'stop_price'
+        # The settlement payoff doesn't matter once stopped; we record it for context.
+    else:
+        # Held to settlement.
+        S_at_settle = float(mark_1s.asof(expiry))
+        payoff = 1.0 if S_at_settle >= K else 0.0
+        exit_t  = expiry
+        exit_px = payoff
+        reason  = 'settle_yes' if payoff == 1.0 else 'settle_no'
+
+    pnl_per_unit = (exit_px - entry_ask) if reason.startswith('stop') else (exit_px - entry_ask)
+    settle_S = float(mark_1s.asof(expiry)) if expiry in mark_1s.index or len(mark_1s.loc[:expiry])>0 else None
+    return TradeResult(
+        cycle_symbol=sym, K=K, expiry=expiry,
+        entry_t=entry_t, entry_ask=entry_ask,
+        exit_t=exit_t, exit_px=exit_px,
+        exit_reason=reason,
+        d_at_entry=float(entry_row['d']),
+        sigma_at_entry=float(entry_row['sigma']),
+        settle_S=settle_S,
+        payoff=(1.0 if settle_S is not None and settle_S >= K else 0.0) if settle_S else None,
+        pnl_per_unit=pnl_per_unit,
+        units=units,
+        pnl_usd=pnl_per_unit * units,
+    )
+
+# Run the simulator on the most-recent cycle (if data is present).
+results: list[TradeResult] = []
+if not meta.empty and not yes_bbo.empty:
+    pair = meta.dropna(subset=['strike','expiry']).sort_values('expiry').iloc[-2:]
+    yes  = pair[pair.side_idx == 0].iloc[0]
+    res = simulate_cycle(float(yes.strike), pd.Timestamp(yes.expiry),
+                         sym=yes.symbol, mark_1s=mark_1s, rv_60m=rv_60m,
+                         book=book, yes_bbo=yes_bbo)
+    if res is not None: results.append(res)
+    print(res)
+else:
+    print('Simulator ready; need outcome BBO + multiple historical cycles before running.')
+""",
+    ),
+    (
+        "md",
+        """
+## 7. Stop-loss sweep — what's the right `stop_price` and `stop_d`?
+
+Vary one stop knob at a time over many cycles. Plot:
+
+- **EV per trade** — does a tighter stop improve net EV (false stops vs catastrophic saves)?
+- **95th-percentile loss** — drawdown control.
+- **Hit rate** — fraction of trades that resolve YES (or stop) profitably.
+
+Analytical reminder: a stop improves EV iff
+
+$$\\frac{g}{f} > \\frac{q}{1-q} \\cdot \\frac{1-s}{s}$$
+
+where `q` is true YES probability, `s` is stop price, `f` is false-stop rate (stopped on a YES that would have resolved), `g` is save rate (stopped on a NO that would have resolved). For `q=0.99, s=0.85` the bar is `g/f > 17`. For `q=0.95` it's `g/f > 3.3`. The lower your conviction, the more useful the stop.
+
+In early validation `q` is uncertain, so the stop is correct even if EV-neutral — it bounds drawdown on a $1k bankroll.
+""",
+    ),
+    (
+        "code",
+        """
+def all_cycles_meta(meta_df):
+    \"\"\"Group meta by (outcome, expiry) and return one (sym_yes, K, expiry) per cycle.\"\"\"
+    if meta_df.empty: return []
+    yes = meta_df[(meta_df.side_idx == 0)].dropna(subset=['strike','expiry'])
+    return [(r.symbol, float(r.strike), pd.Timestamp(r.expiry)) for r in yes.itertuples()]
+
+def sweep_stop_price(stop_grid, cycles, **base):
+    rows = []
+    for s in stop_grid:
+        strat = {**STRAT, **base, 'stop_price': s}
+        trades = []
+        for sym, K, exp in cycles:
+            yb = load_binary_bbo(sym)
+            if yb.empty: continue
+            tr = simulate_cycle(K, exp, sym=sym, mark_1s=mark_1s, rv_60m=rv_60m,
+                                book=book, yes_bbo=yb, strat=strat)
+            if tr is not None and tr.pnl_per_unit is not None:
+                trades.append(tr)
+        if not trades: continue
+        pnls = np.array([t.pnl_per_unit for t in trades])
+        rows.append({
+            'stop_price': s,
+            'n_trades': len(trades),
+            'mean_pnl_per_unit': pnls.mean(),
+            'p05_pnl': np.quantile(pnls, 0.05),
+            'p95_pnl': np.quantile(pnls, 0.95),
+            'win_rate': float((pnls > 0).mean()),
+        })
+    return pd.DataFrame(rows)
+
+cycles = all_cycles_meta(meta)
+print(f'cycles available: {len(cycles)}')
+
+if len(cycles) >= 5 and not yes_bbo.empty:
+    sweep = sweep_stop_price(np.linspace(0.70, 0.92, 12), cycles)
+    fig, axes = plt.subplots(1, 3, figsize=(13, 3.6))
+    axes[0].plot(sweep.stop_price, sweep.mean_pnl_per_unit, '-o'); axes[0].axhline(0, color='grey', lw=0.5)
+    axes[0].set_title('mean PnL per unit'); axes[0].set_xlabel('stop_price')
+    axes[1].plot(sweep.stop_price, sweep.p05_pnl, '-o', color='C3'); axes[1].axhline(0, color='grey', lw=0.5)
+    axes[1].set_title('5th-pct PnL (left tail)'); axes[1].set_xlabel('stop_price')
+    axes[2].plot(sweep.stop_price, sweep.win_rate, '-o', color='C2')
+    axes[2].set_title('win rate'); axes[2].set_xlabel('stop_price')
+    plt.tight_layout(); plt.show()
+    print(sweep)
+else:
+    print('Need ≥ 5 cycles of binary BBO before stop-sweep is informative.')
+    print('Today: cycles=', len(cycles), 'binary_bbo_present=', not yes_bbo.empty)
+""",
+    ),
+    (
+        "md",
+        """
+## 8. Calibration plot — `d` vs realized YES rate
+
+The central reliability check: if our `q_model` says 99%, does the market really resolve YES 99% of the time? Bucket cycles by `d` (measured at T-30min) and plot the empirical YES rate vs the modeled rate.
+
+- A clean monotonic curve hugging the diagonal = `q_model` is calibrated and entry rule is sound.
+- Persistent below-diagonal at high `d` = model is too confident; tighten `d_min` or use a higher σ proxy.
+- Persistent above-diagonal at low `d` = market is too cautious; you have edge even at lower `d`.
+
+This plot is the single most-important output of the first month of paper trading.
+""",
+    ),
+    (
+        "code",
+        """
+def calibration_table(cycles, eval_offset_min=30):
+    \"\"\"For each historical cycle, sample (d, q_model) at T - eval_offset and pair with realized YES.\"\"\"
+    rows = []
+    for sym, K, exp in cycles:
+        eval_t = exp - pd.Timedelta(minutes=eval_offset_min)
+        if eval_t not in mark_1s.index and len(mark_1s.loc[:eval_t]) == 0:
+            continue
+        S      = float(mark_1s.asof(eval_t))
+        sigma  = float(rv_60m.asof(eval_t)) if not pd.isna(rv_60m.asof(eval_t)) else STRAT['vol_floor']
+        sigma  = max(sigma, STRAT['vol_floor'])
+        tau    = max((exp - eval_t).total_seconds() / SEC_PER_YEAR, 1e-12)
+        d_val  = (S - K) / (S * sigma * np.sqrt(tau))
+        q_pred = float(q_model(np.array([S]), K, np.array([sigma]), np.array([tau]))[0])
+        S_settle = float(mark_1s.asof(exp))
+        rows.append({'symbol': sym, 'K': K, 'expiry': exp,
+                     'S_eval': S, 'sigma_eval': sigma, 'd': d_val, 'q_pred': q_pred,
+                     'S_settle': S_settle, 'realized_yes': int(S_settle >= K)})
+    return pd.DataFrame(rows)
+
+cal = calibration_table(cycles, eval_offset_min=30)
+print(f'calibration sample size: {len(cal)}')
+
+if len(cal) >= 10:
+    # Bucket on q_pred (= calibration plot a la weather forecasters)
+    cal['bucket'] = pd.cut(cal.q_pred, bins=[0, 0.5, 0.7, 0.85, 0.93, 0.97, 0.99, 1.0])
+    grp = cal.groupby('bucket').agg(predicted=('q_pred','mean'),
+                                    realized=('realized_yes','mean'),
+                                    n=('symbol','size')).dropna()
+    fig, ax = plt.subplots(figsize=(5.5, 5.5))
+    ax.plot([0,1], [0,1], 'k--', lw=0.7, label='perfect calibration')
+    ax.scatter(grp.predicted, grp.realized, s=60 + 3*grp.n, alpha=0.7)
+    for _, r in grp.iterrows():
+        ax.annotate(f'n={int(r.n)}', (r.predicted, r.realized), xytext=(4,4), textcoords='offset points', fontsize=8)
+    ax.set_xlabel('predicted q'); ax.set_ylabel('realized YES rate')
+    ax.set_title(f'Reliability diagram @ T-{30}min  (n={len(cal)})')
+    ax.legend(); ax.set_xlim(0, 1.02); ax.set_ylim(0, 1.02)
+    plt.tight_layout(); plt.show()
+    print(grp)
+else:
+    print('Need ≥ 10 historical cycles for a meaningful reliability diagram.')
+""",
+    ),
+    (
+        "md",
+        """
+## 9. Strategy options — priority ordering
+
+Four candidate strategies, scored on (i) capital efficiency on a $1k bankroll, (ii) operational complexity, (iii) clarity of testable edge, (iv) tail-risk control. Run them in this order; do not advance to the next one until the current one has 20+ paper or live trades and a reliability diagram that holds.
+
+### Tier 1 — START HERE
+
+**Strategy A: Mark-anchored late YES with `d`-stop and price-stop**
+
+*One-liner:* Manually enter YES in the last 30–15 min when `d ≥ 3`, regime is calm, BTC perp depth is healthy, binary spread is tight, mid is 93–99¢. Exit on `d ≤ 1.5` or mid `≤ 0.85`, whichever first.
+
+- **Why first:** Settlement source (HL mark) is exactly what `q_model` predicts, so calibration is testable on the data we already collect for the perp. Single-leg, a single human can monitor 1 trade/day. Stop is informative without being a hedge — exactly your constraint.
+- **Capital:** $100/trade (10% of $1k bankroll). Max loss per trade: ~$10–12 with stop at 0.85.
+- **What to validate first:** the reliability diagram in section 8. If `q_pred ≈ 0.95` buckets resolve YES <90%, your σ proxy is wrong; refit before going live.
+- **Operational footprint:** open `07` once a day in the last 60 min before 06:00 UTC; check the gates pass; place the trade; set a programmatic stop on HL UI; let it ride.
+
+### Tier 2 — once Tier 1 has 20+ trades and calibration holds
+
+**Strategy B: Cross-side pair (YES + cheap NO insurance)**
+
+*One-liner:* Same entry as Strategy A, but also buy a small position of the *opposite* side (e.g. 1¢–4¢) so total max-loss is bounded by the insurance leg, eliminating the need to monitor a stop in real time.
+
+- **Why second:** Same edge source as A but converts the trade from "asymmetric with stop" to "defined-loss". You give up a little EV (paying the insurance premium) for operational simplicity (no stop monitoring required).
+- **When to switch from A→B:** if the stop-loss sweep in section 7 shows the binary-price stop has high false-trigger rate (`f` large), the implicit insurance from a cross-side hedge is mathematically equivalent to a perfect stop.
+- **Capital:** $100 YES + ~$3–8 NO. Max loss bounded by `(YES_paid - 0)` minus `(NO_paid * 1)` recovered = predetermined.
+- **Constraint:** requires the NO side to have liquidity. If NO is one-sided (no MM), this strategy is not available.
+
+### Tier 3 — once binary microstructure is mapped
+
+**Strategy C: Settlement-window passive provision**
+
+*One-liner:* Post resting bids at 0.94–0.96 in the last 30 min instead of crossing the spread. Get filled only when an aggressor lifts you. Stop based on perp mark moving toward strike.
+
+- **Why third:** Captures spread instead of paying it. Higher gross EV per filled trade. But it's *adversely-selected by construction* — you are most likely to fill exactly when someone has news that justifies the lower price.
+- **Prerequisite analysis:** a Phase-P4-style markout study on the binary BBO (when a passive bid is hit, what does the binary mid do over the next 30s?). Until that markout is positive net of fees, do not provide.
+- **Capital:** same $100, but expect lower fill rate so daily PnL is more variable.
+- **Risk gotcha:** during HL outages a resting order can be filled while you have no working stop. **Do not pursue this until automated stop-monitoring is in place.**
+
+### Tier 4 — speculative, defer until ≥3 months of data
+
+**Strategy D: Settlement-pin / gamma-magnet directional**
+
+*One-liner:* Predict whether HL BTC mark "magnets" toward the strike near 06:00 UTC (a known options gamma-hedging effect) and pre-position accordingly. Pure microstructure / order-flow trade.
+
+- **Why last:** Requires the binary to be liquid enough that delta-hedgers exist; today's HIP-4 binary is too small. Only run this once binary OI is at least 10× current.
+- **Inputs needed:** order-flow imbalance in the last 15 min, perp depth asymmetry near strike, end-of-day funding-print history.
+
+---
+
+### Concrete starter parameters for Strategy A
+
+| Parameter | Starting value | How we know it's right |
+|---|---|---|
+| Entry window | T-30min to T-5min | Slippage + edge-decay analysis from collected BBO |
+| `d_min` | 3.0 | Reliability diagram in section 8 |
+| Price band | [0.93, 0.99] | Below 93¢ payoff doesn't cover frictions; above 99¢ insufficient liquidity |
+| Vol-ratio max | 1.5 | Section 4 (RV_5m / RV_60m) |
+| BTC perp depth min | 50% of session-median | Section 4 depth chart |
+| Binary spread max | 1.5¢ | Section 5 |
+| Position size | $100 (10% of bankroll) | Bump to $200 after 20 paper or 10 live wins that hit calibration target |
+| Stop A: `d`-stop | exit if d ≤ 1.5 | Sweep in section 7 |
+| Stop B: price-stop | exit if mid ≤ 0.85 | Sweep in section 7 |
+| Macro blackout | ±60 min around CPI/FOMC/NFP/ECB | External calendar |
+
+### What this notebook needs to evolve into a live signal
+
+1. **Outcome-side BBO/book/trade data** — recorder is already configured; we just need accumulation. After ~7 cycles section 7's stop sweep starts being informative; after ~20 cycles section 8's reliability diagram is statistically meaningful.
+2. **Per-trade journal** — a small parquet at `data/journal/strategy=late-yes/...parquet` capturing `(entry_t, d, S, K, sigma, mid, exit_reason, pnl)` for every paper and live trade.
+3. **Daily 06:00 UTC report** — schedule this notebook to run headlessly at 06:01 UTC and emit `docs/reports/late-yes-YYYY-MM-DD.md` with the cycle's chart pack + the reliability diagram refreshed.
+
+### What to **not** do
+
+- Do not enter inside the last 5 minutes — gamma is too violent and slippage compounds.
+- Do not enter at price ≥ 0.995. Net edge is below fee floor and slippage on exit is unbounded.
+- Do not trade across multiple cycles in one day (until 1 cycle per day produces calibrated results).
+- Do not skip the macro-event blackout — vol spikes and depth collapse simultaneously.
+""",
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
+# 08 — HIP-4 markouts (trade-flow information content)
+# ---------------------------------------------------------------------------
+P_HIP4_MARKOUTS = [
+    (
+        "md",
+        """
+# 08 — HIP-4 markouts (trade-flow information content)
+
+**What this notebook answers**
+
+Does aggressor-initiated flow on HIP-4 binary markets carry directional information?
+
+Specifically, we measure how much the mid-price moves **in the direction of the aggressor**
+(buy → mid goes up; sell → mid goes down) over horizons of 1 s, 5 s, 30 s and 60 s.
+If mean markout exceeds the round-trip cost (~10–15 bps, established in `00-overview.md §3.4`),
+informed flow is present and passive provision has negative expected value unless the
+entry model correctly screens for it.
+
+**Hypothesis tested:** H1 — HIP-4 trade flow carries directional information.
+
+Sign convention (from `analysis/markouts.py`):
+- `markout_h_{N}s = (mid_{t+N} − mid_t) × sign(aggressor_side)` where `buy → +1, sell → −1`.
+- Positive = informed (mid moved the right way); negative = uninformed / noise.
+""",
+    ),
+    (
+        "code",
+        """
+from hlanalysis.analysis import duck, glob_for, load_df, set_mpl_defaults, fmt_ts
+from hlanalysis.analysis import markouts
+import pandas as pd, numpy as np, matplotlib.pyplot as plt
+
+set_mpl_defaults()
+con = duck()
+
+# Reproducible bootstrap seed
+RNG = np.random.default_rng(seed=0)
+
+HORIZONS_S = (1, 5, 30, 60)
+ROUND_TRIP_BPS = 12.0   # midpoint of 10–15 bps from overview §3.4
+
+def bootstrap_mean_ci(x, n_boot=1000, alpha=0.05, rng=RNG):
+    \"\"\"Return (mean, lo, hi) bootstrap 95% CI.  Seed fixed via rng for reproducibility.\"\"\"
+    x = np.asarray(x, dtype=float)
+    x = x[~np.isnan(x)]
+    if len(x) < 2:
+        return (np.nan, np.nan, np.nan)
+    boots = [rng.choice(x, size=len(x), replace=True).mean() for _ in range(n_boot)]
+    return (float(x.mean()), float(np.quantile(boots, alpha / 2)), float(np.quantile(boots, 1 - alpha / 2)))
+
+print("helpers loaded; round-trip cost assumption:", ROUND_TRIP_BPS, "bps")
+""",
+    ),
+    (
+        "md",
+        """
+## §1 Discover HIP-4 binary symbols in the data window
+
+List every `prediction_binary` trade symbol with its row count and time span.
+We iterate over all symbols with sufficient trades for a meaningful markout study.
+""",
+    ),
+    (
+        "code",
+        """
+sym_df = load_df(f'''
+    SELECT symbol,
+           count(*)                                          AS n_trades,
+           min(local_recv_ts)                               AS t0_ns,
+           max(local_recv_ts)                               AS t1_ns,
+           sum(CASE WHEN side = 'unknown' THEN 1 ELSE 0 END) AS unknown_side_count
+    FROM read_parquet(
+            '{glob_for(venue="hyperliquid", product_type="prediction_binary", event="trade")}',
+            hive_partitioning=true
+         )
+    GROUP BY symbol
+    ORDER BY n_trades DESC
+''')
+sym_df['t0'] = sym_df.t0_ns.map(fmt_ts)
+sym_df['t1'] = sym_df.t1_ns.map(fmt_ts)
+sym_df['unknown_pct'] = 100.0 * sym_df.unknown_side_count / sym_df.n_trades.clip(lower=1)
+print(sym_df[['symbol','n_trades','unknown_pct','t0','t1']].to_string(index=False))
+""",
+    ),
+    (
+        "code",
+        """
+# Symbols to include: all with >= 10 aggressed (non-unknown) trades.
+# If most side values are 'unknown', the markout study is a no-op — flag that.
+MIN_TRADES = 10
+eligible = sym_df[sym_df.n_trades >= MIN_TRADES].copy()
+if eligible.empty:
+    print("WARNING: no HIP-4 trade symbols with enough data yet.")
+    SYMBOLS = []
+elif eligible.unknown_pct.mean() > 90:
+    print("WARNING: > 90% of trades have side='unknown'. "
+          "Markout study will be mostly empty — flag this as a finding.")
+    SYMBOLS = eligible.symbol.tolist()
+else:
+    SYMBOLS = eligible.symbol.tolist()
+    print(f"Study symbols ({len(SYMBOLS)}): {SYMBOLS}")
+    print(f"Mean unknown-side pct across study symbols: {eligible.unknown_pct.mean():.1f}%")
+""",
+    ),
+    (
+        "md",
+        """
+## §2 Compute markouts per symbol over the available window
+
+For each symbol, call `markouts.trade_markouts(con, venue='hyperliquid',
+product_type='prediction_binary', symbol=sym, ...)`.  Results are concatenated
+into a single DataFrame; each row is one aggressed trade.
+""",
+    ),
+    (
+        "code",
+        """
+all_frames = []
+for sym in SYMBOLS:
+    row = sym_df[sym_df.symbol == sym].iloc[0]
+    t0, t1 = int(row.t0_ns), int(row.t1_ns)
+    df = markouts.trade_markouts(
+        con,
+        venue='hyperliquid',
+        product_type='prediction_binary',
+        symbol=sym,
+        start_ns=t0,
+        end_ns=t1,
+        horizons_s=HORIZONS_S,
+    )
+    df['symbol'] = sym
+    all_frames.append(df)
+    print(f"  {sym}: {len(df):,} aggressed trades  "
+          f"(NaN mid_at_trade: {df.mid_at_trade.isna().sum()})")
+
+if all_frames:
+    mdf = pd.concat(all_frames, ignore_index=True)
+    # Convert markout columns from price units to bps (relative to mid_at_trade).
+    # bps = markout_price / mid_at_trade * 10_000
+    # Rows where mid_at_trade is NaN already have NaN markout, so this is safe.
+    for h in HORIZONS_S:
+        col = f"markout_h_{h}s"
+        if col in mdf.columns:
+            mdf[f"markout_h_{h}s"] = mdf[col] / mdf['mid_at_trade'] * 1e4
+    print(f"\\nTotal rows: {len(mdf):,}  |  symbols: {mdf.symbol.nunique()}")
+    print(mdf[['symbol','aggressor_side','size']].groupby('symbol')
+            .agg(n=('size','count'), buy_n=('aggressor_side', lambda x: (x=='buy').sum()),
+                 sell_n=('aggressor_side', lambda x: (x=='sell').sum())).to_string())
+else:
+    mdf = pd.DataFrame()
+    print("No aggressed trades found — markout table is empty.")
+""",
+    ),
+    (
+        "md",
+        """
+## §3 Markout distributions by aggressor side
+
+Histogram of `markout_h_60s` split by aggressor side.  The vertical dashed line
+marks the assumed round-trip cost (12 bps).  A distribution whose bulk lies to the
+right of the line indicates the average aggressor earns more than they pay in fees —
+i.e. informed flow.
+""",
+    ),
+    (
+        "code",
+        """
+if mdf.empty:
+    print("No data — skipping §3 plots.")
+else:
+    col_h = f"markout_h_{HORIZONS_S[-1]}s"   # 60s is the headline horizon
+    clean = mdf.dropna(subset=[col_h])
+
+    sides = sorted(clean.aggressor_side.unique())
+    fig, axes = plt.subplots(1, len(sides), figsize=(5.5 * len(sides), 4), sharey=False)
+    if len(sides) == 1:
+        axes = [axes]
+
+    for ax, side in zip(axes, sides):
+        vals = clean.loc[clean.aggressor_side == side, col_h].values
+        # clip at 1st/99th percentile for legibility
+        lo, hi = np.nanpercentile(vals, 1), np.nanpercentile(vals, 99)
+        ax.hist(vals.clip(lo, hi), bins=60, color='C0' if side == 'buy' else 'C3',
+                alpha=0.75, edgecolor='none')
+        mean_val = float(np.nanmean(vals))
+        ax.axvline(0,                  color='black', lw=0.8, ls='--', label='zero')
+        ax.axvline(ROUND_TRIP_BPS,     color='green', lw=1.0, ls='--', label=f'round-trip cost ({ROUND_TRIP_BPS:.0f} bps)')
+        ax.axvline(-ROUND_TRIP_BPS,    color='green', lw=1.0, ls='--')
+        ax.axvline(mean_val,           color='C1',    lw=1.2, ls='-',  label=f'mean = {mean_val:.2f} bps')
+        ax.set_xlabel('markout (bps)'); ax.set_ylabel('count')
+        ax.set_title(f'Aggressor side: {side}  (n={len(vals):,})')
+        ax.legend(fontsize=8)
+
+    fig.suptitle(f'HIP-4 markout distribution at +{HORIZONS_S[-1]}s  (all symbols)')
+    plt.tight_layout(); plt.show()
+""",
+    ),
+    (
+        "code",
+        """
+# Tiled by horizon: 2×2 grid for all four horizons, side='buy' only (or first available)
+if mdf.empty:
+    print("No data — skipping horizon tile.")
+else:
+    side_focus = 'buy' if 'buy' in mdf.aggressor_side.values else mdf.aggressor_side.iloc[0]
+    sub = mdf[mdf.aggressor_side == side_focus]
+
+    fig, axes = plt.subplots(2, 2, figsize=(11, 7), sharey=False)
+    for ax, h in zip(axes.flat, HORIZONS_S):
+        col = f"markout_h_{h}s"
+        if col not in sub.columns:
+            ax.set_visible(False); continue
+        vals = sub[col].dropna().values
+        if len(vals) == 0:
+            ax.set_title(f'+{h}s  (no data)'); continue
+        lo, hi = np.nanpercentile(vals, 1), np.nanpercentile(vals, 99)
+        ax.hist(vals.clip(lo, hi), bins=50, color='C0', alpha=0.75, edgecolor='none')
+        m, ci_lo, ci_hi = bootstrap_mean_ci(vals)
+        ax.axvline(m,               color='C1', lw=1.2, ls='-',  label=f'mean {m:.2f} bps')
+        ax.axvline(ROUND_TRIP_BPS,  color='green', lw=0.9, ls='--', label=f'RT cost {ROUND_TRIP_BPS:.0f} bps')
+        ax.axvline(-ROUND_TRIP_BPS, color='green', lw=0.9, ls='--')
+        ax.set_title(f'+{h}s  (n={len(vals):,}  95%CI=[{ci_lo:.2f},{ci_hi:.2f}])')
+        ax.set_xlabel('markout (bps)'); ax.legend(fontsize=7)
+
+    fig.suptitle(f'HIP-4 markout distributions by horizon — aggressor_side={side_focus}')
+    plt.tight_layout(); plt.show()
+""",
+    ),
+    (
+        "md",
+        """
+## §4 Markouts by trade size bucket
+
+Does the signal scale with size?  We bucket trades into quartiles by `size`, then
+tabulate mean markout + bootstrap 95% CI per (side × size_bucket × horizon).
+
+**This table is the primary AC2 deliverable.**
+""",
+    ),
+    (
+        "code",
+        """
+if mdf.empty:
+    print("No data — skipping size-bucket analysis.")
+else:
+    # Assign size quartile labels
+    mdf['size_bucket'] = pd.qcut(mdf['size'], q=4, labels=['Q1 (small)', 'Q2', 'Q3', 'Q4 (large)'], duplicates='drop')
+
+    rows = []
+    for side in sorted(mdf.aggressor_side.unique()):
+        for bucket in mdf['size_bucket'].cat.categories:
+            sub = mdf[(mdf.aggressor_side == side) & (mdf['size_bucket'] == bucket)]
+            for h in HORIZONS_S:
+                col = f"markout_h_{h}s"
+                if col not in sub.columns:
+                    continue
+                vals = sub[col].dropna().values
+                n = len(vals)
+                if n == 0:
+                    rows.append({'side': side, 'size_bucket': bucket, 'horizon_s': h,
+                                 'n': 0, 'mean_bps': np.nan, 'ci_lo': np.nan, 'ci_hi': np.nan})
+                    continue
+                mean_v, ci_lo, ci_hi = bootstrap_mean_ci(vals)
+                rows.append({'side': side, 'size_bucket': str(bucket), 'horizon_s': h,
+                             'n': n, 'mean_bps': round(mean_v, 3),
+                             'ci_lo': round(ci_lo, 3), 'ci_hi': round(ci_hi, 3)})
+
+    summary = pd.DataFrame(rows)
+    print("Mean markout (bps) by side × size_bucket × horizon (bootstrap 95% CI, seed=0):")
+    print(summary.to_string(index=False))
+    summary
+""",
+    ),
+    (
+        "code",
+        """
+# Heatmap: mean markout at each horizon for buy-side, by size bucket
+if mdf.empty or 'size_bucket' not in mdf.columns:
+    print("No data.")
+else:
+    for side in sorted(mdf.aggressor_side.unique()):
+        sub = summary[summary.side == side].copy()
+        if sub.empty: continue
+        pivot = sub.pivot_table(index='size_bucket', columns='horizon_s', values='mean_bps')
+        fig, ax = plt.subplots(figsize=(8, 3.5))
+        im = ax.imshow(pivot.values, aspect='auto', cmap='RdYlGn',
+                       vmin=-ROUND_TRIP_BPS, vmax=ROUND_TRIP_BPS)
+        ax.set_xticks(range(len(pivot.columns))); ax.set_xticklabels([f'+{c}s' for c in pivot.columns])
+        ax.set_yticks(range(len(pivot.index)));  ax.set_yticklabels(pivot.index)
+        ax.set_xlabel('horizon'); ax.set_ylabel('size bucket')
+        ax.set_title(f'Mean markout (bps) — {side} aggressor  (green > round-trip cost)')
+        plt.colorbar(im, ax=ax, label='mean markout (bps)')
+        for i, row_vals in enumerate(pivot.values):
+            for j, v in enumerate(row_vals):
+                if not np.isnan(v):
+                    ax.text(j, i, f'{v:.1f}', ha='center', va='center', fontsize=9,
+                            color='white' if abs(v) > ROUND_TRIP_BPS * 0.6 else 'black')
+        plt.tight_layout(); plt.show()
+""",
+    ),
+    (
+        "md",
+        """
+## §5 Decision: does the mean markout exceed the round-trip cost?
+
+Net markout = mean_markout_bps − ROUND_TRIP_BPS.
+
+- **Positive net markout** at a (side, bucket, horizon) cell → informed flow at that slice;
+  passive provision at that slice is adversely selected.
+- **Negative net markout** across all cells → flow is uninformed; providing liquidity is
+  viable (you earn the spread and lose nothing on adverse selection).
+
+Round-trip cost: **12 bps** midpoint of 10–15 bps range (from `00-overview.md §3.4`).
+""",
+    ),
+    (
+        "code",
+        """
+if mdf.empty or summary.empty:
+    print("No data — verdict not computable.")
+else:
+    verdict = summary.copy()
+    verdict['net_markout_bps'] = verdict['mean_bps'] - ROUND_TRIP_BPS
+    verdict['verdict'] = np.where(
+        verdict['mean_bps'].isna(), 'no data',
+        np.where(verdict['net_markout_bps'] > 0, 'INFORMED (> RT cost)', 'uninformed (< RT cost)')
+    )
+    print(f"Round-trip cost assumption: {ROUND_TRIP_BPS} bps")
+    print()
+    print(verdict[['side','size_bucket','horizon_s','n','mean_bps','net_markout_bps','verdict']]
+          .to_string(index=False))
+""",
+    ),
+    (
+        "md",
+        """
+## Strategy hypotheses
+
+- **Supports:** H1: HIP-4 trade flow carries directional info — (fill in from §3 chart whether
+  mean markout is positive at any meaningful horizon, and reference which size bucket shows the
+  strongest signal).
+- **Rules out:** H1: (fill in if every bucket × horizon has mean markout below round-trip cost —
+  i.e. `net_markout_bps < 0` throughout the verdict table).
+- **Next probe:** lead-lag with BTC perp (notebook 09) and a stop-loss-conditioned variant —
+  does flow signal survive when filtered by perp move direction?
+""",
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
+# 09 — HIP-4 vs BTC perp lead-lag
+# ---------------------------------------------------------------------------
+P_HIP4_PERP_LEADLAG = [
+    (
+        "md",
+        """
+# 09 — HIP-4 vs BTC perp lead-lag
+
+**What this notebook answers**
+
+Does the HIP-4 binary mid-price **lag** BTC perp moves?  If perp drives HIP-4,
+there is a window between the perp print and the HIP-4 BBO update during which a
+reactive strategy can trade HIP-4 before its price catches up.
+
+**Hypothesis tested: H2** — *HIP-4 mid lags BTC perp moves.*
+
+Sign convention for CCF (`cross_correlation`):
+- `lag > 0` → perp's **past** predicts HIP-4's **present** (perp leads HIP-4).
+- `lag = 0` → contemporaneous.
+- `lag < 0` → HIP-4's past predicts perp's present (HIP-4 leads perp).
+
+A positive peak at a positive lag supports H2.
+""",
+    ),
+    (
+        "code",
+        """
+from hlanalysis.analysis import duck, glob_for, load_df, set_mpl_defaults, fmt_ts
+from hlanalysis.analysis import microstructure
+import pandas as pd, numpy as np, matplotlib.pyplot as plt
+
+set_mpl_defaults()
+con = duck()
+
+# --- tuneable parameters ------------------------------------------------
+RESAMPLE_MS  = 100       # grid spacing; bump to 250/500 if HIP-4 is too sparse
+MAX_LAG_S    = 10        # CCF window ±10 s
+SLIDE_WIN_S  = 3600      # sliding-window size (1 h)
+SIG_THRESH   = 0.02      # |ccf| threshold for "actionable" lag
+Z_THRESH     = 2.0       # minimum z-score for significance claim
+ROUND_TRIP_BPS = 12.0    # from overview §3.4
+
+MAX_LAG_STEPS = int(MAX_LAG_S * 1000 / RESAMPLE_MS)   # e.g. 100 steps at 100 ms
+
+print(f"grid: {RESAMPLE_MS} ms   CCF window: ±{MAX_LAG_S} s ({MAX_LAG_STEPS} steps)")
+print(f"round-trip cost: {ROUND_TRIP_BPS} bps")
+""",
+    ),
+    (
+        "md",
+        """
+## §1 Discover active HIP-4 binary symbols
+
+List every `prediction_binary` BBO symbol sorted by BBO update count.
+We pick the **yes-side** symbol from the most active question pair as the
+HIP-4 series.  (By parity `no_mid ≈ 1 − yes_mid`, so yes alone captures the
+full signal.)
+""",
+    ),
+    (
+        "code",
+        """
+bbo_sym = load_df(f'''
+    SELECT symbol,
+           count(*)               AS n_bbo,
+           min(local_recv_ts)     AS t0_ns,
+           max(local_recv_ts)     AS t1_ns
+    FROM read_parquet(
+            '{glob_for(venue="hyperliquid", product_type="prediction_binary", event="bbo")}',
+            hive_partitioning=true
+         )
+    WHERE bid_px > 0 AND ask_px > 0
+    GROUP BY symbol
+    ORDER BY n_bbo DESC
+''')
+if not bbo_sym.empty:
+    bbo_sym['t0'] = bbo_sym.t0_ns.map(fmt_ts)
+    bbo_sym['t1'] = bbo_sym.t1_ns.map(fmt_ts)
+    print(bbo_sym[['symbol','n_bbo','t0','t1']].to_string(index=False))
+else:
+    print("WARNING: no HIP-4 BBO data found.")
+""",
+    ),
+    (
+        "code",
+        """
+# Pick the most-active symbol as the HIP-4 series.
+# Prefer a '#yes' suffix (odd-numbered) or just take the top row.
+if bbo_sym.empty:
+    HIP4_SYM = None
+    STUDY_T0  = None
+    STUDY_T1  = None
+    print("No HIP-4 symbols — remainder of notebook will produce empty outputs.")
+else:
+    # Heuristic: odd-numbered asset IDs are the YES side on HL HIP-4 markets.
+    # Try to find a symbol whose integer suffix is odd; fall back to top row.
+    def _num(s):
+        return int(s.lstrip('#')) if s.lstrip('#').isdigit() else -1
+    yes_candidates = bbo_sym[bbo_sym.symbol.map(lambda s: _num(s) % 2 == 1)]
+    if not yes_candidates.empty:
+        top = yes_candidates.iloc[0]
+    else:
+        top = bbo_sym.iloc[0]
+
+    HIP4_SYM = top.symbol
+    # Study window: overlap of HIP-4 and perp windows.
+    # We'll refine in §2 once we load both streams.
+    STUDY_T0  = int(top.t0_ns)
+    STUDY_T1  = int(top.t1_ns)
+    print(f"HIP-4 series : {HIP4_SYM}")
+    print(f"Available window: {fmt_ts(STUDY_T0)} → {fmt_ts(STUDY_T1)}")
+    print(f"BBO count in window: {int(top.n_bbo):,}")
+""",
+    ),
+    (
+        "md",
+        """
+## §2 Resampled returns at {RESAMPLE_MS} ms
+
+Build a `RESAMPLE_MS`-ms log-return grid for both HIP-4 yes and HL BTC perp.
+HIP-4 BBO updates ~50×/min (overview §3.1), so most grid points will be NaN
+for HIP-4 — that is expected.  `cross_correlation` handles NaNs by pairwise
+listwise drop when computing Pearson correlation.
+
+We use `local_recv_ts` throughout (no exchange_ts alignment needed within the
+same venue — both streams land on the same recorder host).
+""",
+    ),
+    (
+        "code",
+        """
+if HIP4_SYM is None:
+    hip4_ret = pd.DataFrame(columns=['ts_ns', 'log_return'])
+    perp_ret  = pd.DataFrame(columns=['ts_ns', 'log_return'])
+    print("Skipped — no HIP-4 symbol selected.")
+else:
+    # Narrow study window to the intersection of HIP-4 and perp availability.
+    perp_bounds = load_df(f'''
+        SELECT min(local_recv_ts) AS t0, max(local_recv_ts) AS t1
+        FROM read_parquet(
+                '{glob_for(venue="hyperliquid", product_type="perp", event="bbo", symbol="BTC")}',
+                hive_partitioning=true
+             )
+        WHERE bid_px > 0 AND ask_px > 0
+    ''')
+    if perp_bounds.empty or perp_bounds.t0.iloc[0] is None:
+        print("WARNING: no HL BTC perp BBO data.")
+        T0 = STUDY_T0; T1 = STUDY_T1
+    else:
+        T0 = int(max(STUDY_T0, int(perp_bounds.t0.iloc[0])))
+        T1 = int(min(STUDY_T1, int(perp_bounds.t1.iloc[0])))
+
+    print(f"Study window: {fmt_ts(T0)} → {fmt_ts(T1)}")
+    window_h = (T1 - T0) / 1e9 / 3600
+    print(f"Duration: {window_h:.2f} h   grid points (at {RESAMPLE_MS} ms): "
+          f"{int((T1 - T0) / 1e6 / RESAMPLE_MS):,}")
+
+    hip4_ret = microstructure.returns_resampled(
+        con,
+        venue='hyperliquid',
+        product_type='prediction_binary',
+        symbol=HIP4_SYM,
+        start_ns=T0,
+        end_ns=T1,
+        dt_ms=RESAMPLE_MS,
+    )
+    perp_ret = microstructure.returns_resampled(
+        con,
+        venue='hyperliquid',
+        product_type='perp',
+        symbol='BTC',
+        start_ns=T0,
+        end_ns=T1,
+        dt_ms=RESAMPLE_MS,
+    )
+    hip4_non_nan = hip4_ret.log_return.notna().sum()
+    perp_non_nan = perp_ret.log_return.notna().sum()
+    total = len(hip4_ret)
+    print(f"\\nHIP-4 non-NaN returns : {hip4_non_nan:,} / {total:,}  "
+          f"({100*hip4_non_nan/max(total,1):.1f}%)")
+    print(f"Perp  non-NaN returns : {perp_non_nan:,} / {total:,}  "
+          f"({100*perp_non_nan/max(total,1):.1f}%)")
+    print()
+    # If HIP-4 grid is too sparse, suggest bumping RESAMPLE_MS.
+    if hip4_non_nan / max(total, 1) < 0.02:
+        print("INFO: HIP-4 fill rate < 2% at this grid resolution.")
+        print("      Consider bumping RESAMPLE_MS to 250 or 500.")
+""",
+    ),
+    (
+        "md",
+        """
+## §3 Per-venue latency adjustment
+
+Overview §3.6 records that the HL perp transport latency from this IP is ~225 ms
+and the HIP-4 stream lands on the same recorder host.  Both streams are from
+**Hyperliquid** (same exchange WebSocket infrastructure), so the per-stream
+`local_recv_ts − exchange_ts` skews should be nearly identical.
+
+We compute the median skew for each stream.  If they differ by > 100 ms we shift
+one stream's timestamps before computing returns, otherwise we document that no
+adjustment is needed.
+""",
+    ),
+    (
+        "code",
+        """
+def median_skew_ms(venue, product_type, symbol, t0_ns, t1_ns):
+    \"\"\"Return median (local_recv_ts − exchange_ts) in ms for BBO events.\"\"\"
+    g = glob_for(venue=venue, product_type=product_type, event='bbo', symbol=symbol)
+    df = load_df(f'''
+        SELECT (local_recv_ts - exchange_ts) / 1e6 AS skew_ms
+        FROM read_parquet('{g}', hive_partitioning=true)
+        WHERE local_recv_ts BETWEEN {t0_ns} AND {t1_ns}
+          AND bid_px > 0 AND ask_px > 0
+    ''')
+    if df.empty:
+        return float('nan')
+    return float(df.skew_ms.median())
+
+if HIP4_SYM is None:
+    print("Skipped — no symbols.")
+else:
+    skew_hip4 = median_skew_ms('hyperliquid', 'prediction_binary', HIP4_SYM, T0, T1)
+    skew_perp = median_skew_ms('hyperliquid', 'perp', 'BTC', T0, T1)
+    delta_ms   = abs(skew_hip4 - skew_perp)
+
+    print(f"HIP-4 median skew : {skew_hip4:.1f} ms")
+    print(f"Perp  median skew : {skew_perp:.1f} ms")
+    print(f"Delta             : {delta_ms:.1f} ms")
+
+    if delta_ms > 100:
+        print("\\nWARNING: skew delta > 100 ms — applying ts adjustment.")
+        print("Adjusting HIP-4 ts by the delta before return computation.")
+        APPLY_TS_ADJUST = True
+    else:
+        print(f"\\nSkew delta = {delta_ms:.1f} ms < 100 ms → no ts adjustment needed.")
+        APPLY_TS_ADJUST = False
+""",
+    ),
+    (
+        "md",
+        """
+## §4 Cross-correlation at ±10 s
+
+We compute the CCF between HIP-4 yes-mid log-returns and HL BTC perp log-returns
+at all integer lags in [−`MAX_LAG_STEPS`, +`MAX_LAG_STEPS`].
+
+The CCF may be noisy because HIP-4 log-returns are mostly zero (price rarely
+updates at the 100 ms tick).  The z-score `z = ccf × √N_pairs` (where N_pairs is
+the number of non-NaN overlapping rows used) gauges whether a peak is statistically
+meaningful.
+
+**Significance threshold used:** |ccf| > {SIG_THRESH} **and** z > {Z_THRESH}.
+""",
+    ),
+    (
+        "code",
+        """
+if HIP4_SYM is None or hip4_ret.empty or perp_ret.empty:
+    print("Skipped — missing data.")
+    ccf_df = pd.DataFrame(columns=['lag', 'ccf'])
+    PEAK_LAG_MS = None
+    PEAK_CCF    = None
+    PEAK_Z      = None
+else:
+    # Align the two return series by row index (they share the same ts_ns grid).
+    x = hip4_ret['log_return'].copy()   # HIP-4 is "x"
+    y = perp_ret['log_return'].copy()   # Perp  is "y"
+
+    # Count non-NaN overlap (used for z-score denominator).
+    overlap_mask = x.notna() & y.notna()
+    N_pairs = int(overlap_mask.sum())
+    print(f"Non-NaN overlapping pairs: {N_pairs:,} of {len(x):,}")
+
+    if N_pairs < MAX_LAG_STEPS * 2 + 10:
+        print(f"WARNING: only {N_pairs} overlapping non-NaN pairs — CCF unreliable.")
+        print("Consider increasing RESAMPLE_MS or narrowing window.")
+
+    # Replace NaN with 0 for CCF (sparse binary returns: zero = no price change,
+    # which is the typical state; this preserves the correlation structure while
+    # satisfying the max_lag constraint).
+    x_filled = x.fillna(0.0)
+    y_filled = y.fillna(0.0)
+
+    ccf_df = microstructure.cross_correlation(x_filled, y_filled, max_lag=MAX_LAG_STEPS)
+
+    # --- compute peak and z-score ---
+    peak_idx  = ccf_df['ccf'].abs().idxmax()
+    PEAK_LAG_MS  = int(ccf_df.loc[peak_idx, 'lag']) * RESAMPLE_MS
+    PEAK_CCF     = float(ccf_df.loc[peak_idx, 'ccf'])
+    PEAK_Z       = PEAK_CCF * np.sqrt(max(N_pairs, 1))
+
+    print(f"\\nPeak CCF : lag = {PEAK_LAG_MS:+d} ms,  ccf = {PEAK_CCF:.4f},  "
+          f"z = {PEAK_Z:.2f}")
+    print(f"  (lag > 0 → perp leads HIP-4)")
+
+    # --- plot ---
+    lag_ms = ccf_df['lag'].values * RESAMPLE_MS
+    fig, ax = plt.subplots(figsize=(11, 4))
+    ax.bar(lag_ms, ccf_df['ccf'].values, width=RESAMPLE_MS * 0.8, color='C0', alpha=0.75)
+    ax.axvline(0, color='black', lw=0.8, ls='--')
+
+    # Significance band: ±1/√N_pairs (Bartlett's approximate 95% CI)
+    if N_pairs > 0:
+        ci_band = 1.96 / np.sqrt(N_pairs)
+        ax.axhline( ci_band, color='grey', lw=0.8, ls=':', label=f'95% CI (Bartlett) ±{ci_band:.4f}')
+        ax.axhline(-ci_band, color='grey', lw=0.8, ls=':')
+
+    # Annotate peak
+    ax.axvline(PEAK_LAG_MS, color='C3', lw=1.2, ls='--',
+               label=f'peak: lag={PEAK_LAG_MS:+d} ms, ccf={PEAK_CCF:.4f}, z={PEAK_Z:.2f}')
+
+    ax.set_xlabel(f'lag (ms)  —  lag > 0 ⇒ perp past predicts HIP-4 present')
+    ax.set_ylabel('CCF (Pearson)')
+    ax.set_title(f'HIP-4 ({HIP4_SYM}) vs BTC perp mid log-returns  '
+                 f'CCF at ±{MAX_LAG_S} s  (grid = {RESAMPLE_MS} ms)')
+    ax.legend(fontsize=8)
+    plt.tight_layout(); plt.show()
+""",
+    ),
+    (
+        "md",
+        """
+## §5 Sliding 1-hour windows — is the lag stable?
+
+We split the study window into `SLIDE_WIN_S`-second bins and compute the CCF peak
+lag and peak CCF value for each bin.  A stable lead-lag relationship that persists
+across time suggests a structural relationship; an unstable one suggests the CCF
+peak in §4 is noise.
+""",
+    ),
+    (
+        "code",
+        """
+if HIP4_SYM is None or hip4_ret.empty or perp_ret.empty:
+    print("Skipped — missing data.")
+else:
+    step_ns     = SLIDE_WIN_S * 1_000_000_000
+    window_bins = list(range(T0, T1, step_ns))
+
+    slide_rows = []
+    for wb_t0 in window_bins:
+        wb_t1 = wb_t0 + step_ns
+        # Slice to this window using ts_ns column.
+        mask = (hip4_ret['ts_ns'] >= wb_t0) & (hip4_ret['ts_ns'] < wb_t1)
+        xw = hip4_ret.loc[mask, 'log_return'].fillna(0.0).reset_index(drop=True)
+        yw = perp_ret.loc[mask, 'log_return'].fillna(0.0).reset_index(drop=True)
+
+        n_pairs_w = int(((hip4_ret.loc[mask, 'log_return'].notna()) &
+                         (perp_ret.loc[mask, 'log_return'].notna())).sum())
+
+        if len(xw) <= MAX_LAG_STEPS * 2 + 2 or n_pairs_w < 5:
+            slide_rows.append({
+                'window_t0': wb_t0,
+                'window_label': fmt_ts(wb_t0),
+                'peak_lag_ms': np.nan,
+                'peak_ccf': np.nan,
+                'n_pairs': n_pairs_w,
+            })
+            continue
+
+        try:
+            ccf_w = microstructure.cross_correlation(xw, yw, max_lag=MAX_LAG_STEPS)
+        except ValueError:
+            slide_rows.append({
+                'window_t0': wb_t0,
+                'window_label': fmt_ts(wb_t0),
+                'peak_lag_ms': np.nan,
+                'peak_ccf': np.nan,
+                'n_pairs': n_pairs_w,
+            })
+            continue
+
+        pk_idx     = ccf_w['ccf'].abs().idxmax()
+        pk_lag_ms  = int(ccf_w.loc[pk_idx, 'lag']) * RESAMPLE_MS
+        pk_ccf     = float(ccf_w.loc[pk_idx, 'ccf'])
+        slide_rows.append({
+            'window_t0': wb_t0,
+            'window_label': fmt_ts(wb_t0),
+            'peak_lag_ms': pk_lag_ms,
+            'peak_ccf': pk_ccf,
+            'n_pairs': n_pairs_w,
+        })
+
+    slide_df = pd.DataFrame(slide_rows)
+    print(slide_df[['window_label','n_pairs','peak_lag_ms','peak_ccf']].to_string(index=False))
+""",
+    ),
+    (
+        "code",
+        """
+if HIP4_SYM is None or not slide_rows:
+    print("Skipped — missing data.")
+else:
+    valid = slide_df.dropna(subset=['peak_lag_ms', 'peak_ccf'])
+    if valid.empty:
+        print("All sliding windows had insufficient data.")
+    else:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
+
+        x_pos = range(len(valid))
+        ax1.bar(x_pos, valid['peak_lag_ms'], color='C0', alpha=0.75)
+        ax1.axhline(0, color='black', lw=0.6)
+        ax1.set_ylabel('peak lag (ms)')
+        ax1.set_title('Sliding 1-h windows: peak CCF lag (positive = perp leads HIP-4)')
+
+        ax2.bar(x_pos, valid['peak_ccf'].abs(), color='C1', alpha=0.75)
+        ax2.set_ylabel('|peak CCF|')
+        ax2.set_title('Sliding 1-h windows: peak |CCF| value')
+        ax2.set_xticks(list(x_pos))
+        ax2.set_xticklabels(valid['window_label'].tolist(), rotation=45, ha='right', fontsize=7)
+
+        plt.tight_layout(); plt.show()
+
+        # Stability summary
+        lag_std = valid['peak_lag_ms'].std()
+        lag_med = valid['peak_lag_ms'].median()
+        print(f"\\nPeak lag across windows — median: {lag_med:.0f} ms,  "
+              f"std: {lag_std:.0f} ms  (n_windows={len(valid)})")
+        if lag_std < abs(lag_med) * 0.5 and len(valid) >= 3:
+            print("Lag appears STABLE (std < 50% of median).")
+        else:
+            print("Lag appears UNSTABLE or has too few windows to judge.")
+""",
+    ),
+    (
+        "md",
+        """
+## §6 Decision: is the lag large enough to exploit?
+
+A reactive strategy can profit from the lead-lag if:
+1. **Statistical significance**: |ccf| > threshold **and** z > {Z_THRESH}.
+2. **Actionable magnitude**: peak lag > the order-entry round-trip latency
+   (our host → HL matching engine → fill confirmation; assume ≥ 50 ms best-case
+   from the EC2 co-location setup).
+3. **Economic viability**: the expected mid-move during the lag window must
+   exceed the round-trip cost ({ROUND_TRIP_BPS} bps).
+""",
+    ),
+    (
+        "code",
+        """
+if HIP4_SYM is None or PEAK_LAG_MS is None:
+    print("No CCF computed — skipping decision cell.")
+else:
+    # --- significance ---
+    is_significant = (abs(PEAK_CCF) >= SIG_THRESH) and (abs(PEAK_Z) >= Z_THRESH)
+
+    # Actionable lag: largest lag where |ccf| > SIG_THRESH and z > Z_THRESH
+    N_full = int(((hip4_ret['log_return'].notna()) & (perp_ret['log_return'].notna())).sum())
+    ccf_df['z'] = ccf_df['ccf'] * np.sqrt(max(N_full, 1))
+    actionable = ccf_df[(ccf_df['ccf'].abs() >= SIG_THRESH) & (ccf_df['z'].abs() >= Z_THRESH)]
+    if actionable.empty:
+        actionable_lag_ms = 0
+    else:
+        actionable_lag_ms = int(actionable['lag'].abs().max()) * RESAMPLE_MS
+
+    # Approximate mid-move during the actionable window.
+    # Use perp 1-min realised vol as a rough proxy for expected move per lag.
+    perp_1min_vol = float(perp_ret['log_return'].std()) * np.sqrt(600 / (RESAMPLE_MS / 1000))
+    expected_move_bps = perp_1min_vol * 1e4 * abs(PEAK_CCF)
+
+    print("=" * 60)
+    print(f"Significance:       {'YES' if is_significant else 'NO'}")
+    print(f"  |ccf| = {abs(PEAK_CCF):.4f}  (threshold {SIG_THRESH})")
+    print(f"  z     = {abs(PEAK_Z):.2f}    (threshold {Z_THRESH})")
+    print(f"Peak lag:           {PEAK_LAG_MS:+d} ms")
+    print(f"Actionable lag:     {actionable_lag_ms} ms "
+          f"(window where |ccf|≥{SIG_THRESH} & z≥{Z_THRESH})")
+    print(f"Expected mid-move:  ~{expected_move_bps:.2f} bps over lag window")
+    print(f"Round-trip cost:    {ROUND_TRIP_BPS} bps")
+    print()
+
+    if not is_significant:
+        print("VERDICT: CCF peak is NOT statistically significant at the chosen thresholds.")
+        print("H2 is NEITHER supported NOR ruled out with current data volume.")
+    elif actionable_lag_ms <= 50:
+        print("VERDICT: Lag is statistically significant but likely sub-execution-latency.")
+        print("H2 is UNLIKELY to be exploitable given execution round-trip ≥ 50 ms.")
+    elif expected_move_bps < ROUND_TRIP_BPS:
+        print("VERDICT: Lag is significant and long enough, but expected move < round-trip cost.")
+        print("H2 MAY be valid but the edge is insufficient to cover fees at current vol.")
+    else:
+        print("VERDICT: Lag is significant, long enough, and expected move > round-trip cost.")
+        print("H2 SUPPORTS a reactive strategy — validate with live limit-order sim.")
+    print("=" * 60)
+""",
+    ),
+    (
+        "md",
+        """
+## Strategy hypotheses
+
+- **Supports H2**: HIP-4 mid lags BTC perp — at peak lag of `PEAK_LAG_MS` ms,
+  ccf of `PEAK_CCF` (see §4 chart).  The lag is stable across 1-h windows if §5
+  shows low std of peak lag.  A reactive strategy enters HIP-4 after observing a
+  perp directional move within the actionable window.
+
+- **Rules out H2**: if the §4 CCF peak is below the significance threshold
+  (|ccf| < {SIG_THRESH} or z < {Z_THRESH}), or if the peak lag is ≤ 50 ms
+  (within execution round-trip), the lag is not exploitable with this data.
+
+- **Next probe**: condition the lead-lag on perp move magnitude — does HIP-4 lag
+  faster after large perp moves?  Also: repeat across all active HIP-4 question
+  pairs and across the full multi-day window to test whether the relationship is
+  structural or per-question noise (§5 sliding-window stability chart is the
+  starting point).
+""",
+    ),
+]
+
+
+
+# ---------------------------------------------------------------------------
+# 11 — HIP-4 settlement event study
+# ---------------------------------------------------------------------------
+P_HIP4_SETTLEMENT_EVENT_STUDY = [
+    (
+        "md",
+        """
+# 11 — HIP-4 settlement event study
+
+**What this notebook answers**
+
+- Does the YES-leg mid-price path in the final hour before expiry carry a
+  detectable directional signal? (**H5**: *settlement micro-structure differs
+  in the final hour*)
+- At TTE = 60 / 30 / 10 / 5 / 1 minute, if `yes_mid >= 0.95`, what fraction
+  of those cases actually resolved YES?  This is the empirical hit-rate of the
+  v1-style `price_extreme_threshold` heuristic — the primary AC2 deliverable.
+
+**Hypothesis tested: H5** — *Late-hour micro-structure carries directional
+information: the yes-mid trajectory in the final 60 minutes differs
+systematically between YES-winners and NO-winners.*
+
+**How this informs v1's `price_extreme_threshold`**
+
+The v1 strategy enters a YES position when `yes_mid >= price_extreme_threshold`
+at some TTE before expiry.  If the empirical hit rate at threshold = 0.95 is
+materially above 0.95, the market is *mis-pricing* near-certainty and there is
+edge.  If the hit rate is ≤ 0.95, the threshold is at most calibrated — the
+strategy earns the spread but not an additional probability premium.
+
+> **Data note** — the recorder does not yet emit a dedicated `event=settlement`
+> partition.  Settled questions are discovered from `market_meta` rows (which
+> include `expiry` in their key/value payload) combined with the mark-price
+> signal at expiry (mark → 0 for the YES leg means NO won; mark → 1 means YES
+> won).  Results below are labelled "informational" when N < 5 settled
+> questions exist in the window.
+""",
+    ),
+    (
+        "code",
+        """
+from hlanalysis.analysis import duck, glob_for, load_df, set_mpl_defaults, fmt_ts
+from hlanalysis.analysis import book
+import pandas as pd, numpy as np, matplotlib.pyplot as plt
+import datetime
+
+set_mpl_defaults()
+con = duck()
+
+# --- tuneable parameters ---------------------------------------------------
+WINDOW_S   = 3600        # final hour before expiry
+THRESHOLD  = 0.95        # v1-style "near 1" cutoff for YES win heuristic
+RESAMPLE_MS = 10_000     # 10 s grid → 360 points per hour
+TTE_CHECKPOINTS_MIN = [60, 30, 10, 5, 1]  # AC2 TTE bucket list (minutes)
+N_BOOT      = 2000       # bootstrap iterations for CI (used if N >= 10)
+RNG         = np.random.default_rng(seed=42)
+
+print(f"window          : {WINDOW_S // 60} min ({WINDOW_S} s) before expiry")
+print(f"resample grid   : {RESAMPLE_MS // 1000} s  →  {WINDOW_S * 1000 // RESAMPLE_MS} grid points / question")
+print(f"threshold       : YES mid >= {THRESHOLD}")
+print(f"TTE checkpoints : {TTE_CHECKPOINTS_MIN} minutes")
+""",
+    ),
+    (
+        "md",
+        """
+## §1 Discover settled questions in the recorder window
+
+The recorder stores per-market metadata in `event=market_meta` rows.
+Each binary yes-leg row carries an `expiry` field (format `YYYYMMDD-HHMM`).
+We identify **settled** questions as those whose expiry timestamp falls
+**within or before** the recorder's data window, restricting to `priceBinary`
+class (the canonical HIP-4 binary).
+
+Settlement outcome is inferred from the mark price on the YES leg at or just
+after expiry: `mark ≈ 0 → NO won`, `mark ≈ 1 → YES won`.
+""",
+    ),
+    (
+        "code",
+        """
+# Step 1: parse market_meta to extract (yes_symbol, outcome_idx, expiry_ns) tuples.
+g_meta = glob_for(venue='hyperliquid', product_type='prediction_binary', event='market_meta')
+try:
+    meta_raw = con.execute(f'''
+        SELECT DISTINCT symbol, keys, values
+        FROM read_parquet('{g_meta}', hive_partitioning=true)
+    ''').df()
+except Exception as e:
+    meta_raw = pd.DataFrame(columns=['symbol','keys','values'])
+    print(f"WARNING: could not read market_meta — {e}")
+
+def kv_get(keys_list, values_list, key):
+    \"\"\"Extract a value from parallel key/value lists; returns None if absent.\"\"\"
+    try:
+        idx = keys_list.index(key)
+        return values_list[idx]
+    except ValueError:
+        return None
+
+rows = []
+for _, r in meta_raw.iterrows():
+    keys   = r['keys']   if isinstance(r['keys'],   list) else []
+    values = r['values'] if isinstance(r['values'], list) else []
+    side_name  = kv_get(keys, values, 'side_name')
+    cls        = kv_get(keys, values, 'class')
+    expiry_str = kv_get(keys, values, 'expiry')
+    out_idx    = kv_get(keys, values, 'outcome_idx')
+    if side_name != 'Yes' or cls != 'priceBinary' or expiry_str is None:
+        continue
+    try:
+        expiry_dt = datetime.datetime.strptime(expiry_str, '%Y%m%d-%H%M').replace(
+            tzinfo=datetime.timezone.utc)
+        expiry_ns = int(expiry_dt.timestamp() * 1e9)
+    except ValueError:
+        continue
+    rows.append({
+        'yes_symbol': r['symbol'],
+        'outcome_idx': int(out_idx) if out_idx is not None else None,
+        'expiry_str':  expiry_str,
+        'expiry_ns':   expiry_ns,
+    })
+
+market_df = pd.DataFrame(rows).drop_duplicates('yes_symbol').reset_index(drop=True)
+print(f"priceBinary YES symbols found: {len(market_df)}")
+print(market_df[['yes_symbol','outcome_idx','expiry_str']].to_string(index=False))
+""",
+    ),
+    (
+        "code",
+        """
+# Step 2: determine recorder window bounds.
+g_all_bbo = glob_for(venue='hyperliquid', product_type='prediction_binary', event='bbo')
+try:
+    bounds = con.execute(f'''
+        SELECT min(local_recv_ts) AS t0, max(local_recv_ts) AS t1
+        FROM read_parquet('{g_all_bbo}', hive_partitioning=true)
+    ''').fetchone()
+    REC_T0, REC_T1 = int(bounds[0]), int(bounds[1])
+except Exception:
+    REC_T0, REC_T1 = 0, 0
+    print("WARNING: no prediction_binary BBO data found.")
+
+print(f"Recorder window : {fmt_ts(REC_T0)} → {fmt_ts(REC_T1)}")
+
+# Step 3: filter to questions whose expiry is within the recorder window
+# (i.e., we captured data up to the expiry).
+settled_mask = market_df['expiry_ns'].between(REC_T0, REC_T1)
+settled_df   = market_df[settled_mask].copy().reset_index(drop=True)
+print(f"Questions with expiry inside recorder window: {len(settled_df)}")
+if settled_df.empty:
+    print()
+    print("INFO: No fully-captured settlement cycles found yet.")
+    print("      Re-run this notebook after the recorder has captured at least one expiry.")
+else:
+    print(settled_df[['yes_symbol','expiry_str']].to_string(index=False))
+""",
+    ),
+    (
+        "md",
+        """
+## §2 Map each settled question to YES/NO legs and infer outcome
+
+For each settled question:
+- The YES leg symbol is taken directly from market_meta (`side_name = 'Yes'`).
+- The NO leg is the YES symbol with the last digit flipped from even to odd
+  (`#{N*10}` → `#{N*10+1}`).
+- Settlement outcome is inferred from the mark price on the YES leg at or just
+  after expiry: `mark_px < 0.5` → NO won; `mark_px >= 0.5` → YES won.
+""",
+    ),
+    (
+        "code",
+        """
+def no_symbol_from_yes(yes_sym: str) -> str:
+    \"\"\"Derive the NO-leg symbol from the YES-leg symbol.
+    YES: #{outcome_idx * 10}  e.g. #40
+    NO : #{outcome_idx * 10 + 1}  e.g. #41
+    \"\"\"
+    num = int(yes_sym.lstrip('#'))
+    return f'#{num + 1}'
+
+def infer_outcome(con, yes_sym: str, expiry_ns: int) -> str | None:
+    \"\"\"Return 'YES' or 'NO' based on mark price at expiry; None if no data.\"\"\"
+    g = glob_for(venue='hyperliquid', product_type='prediction_binary',
+                 event='mark', symbol=yes_sym)
+    try:
+        row = con.execute(f'''
+            SELECT mark_px FROM read_parquet('{g}', hive_partitioning=true)
+            WHERE local_recv_ts >= {expiry_ns}
+            ORDER BY local_recv_ts LIMIT 1
+        ''').fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    return 'YES' if float(row[0]) >= 0.5 else 'NO'
+
+if not settled_df.empty:
+    settled_df['no_symbol'] = settled_df['yes_symbol'].map(no_symbol_from_yes)
+    settled_df['outcome']   = settled_df.apply(
+        lambda r: infer_outcome(con, r['yes_symbol'], r['expiry_ns']), axis=1)
+    settled_df = settled_df[settled_df['outcome'].notna()].reset_index(drop=True)
+
+    print(f"Settled questions with outcome inferred: {len(settled_df)}")
+    print(settled_df[['yes_symbol','no_symbol','expiry_str','outcome']].to_string(index=False))
+else:
+    settled_df['no_symbol'] = pd.Series(dtype=str)
+    settled_df['outcome']   = pd.Series(dtype=str)
+    print("No settled questions — skipping outcome inference.")
+
+N_SETTLED = len(settled_df)
+if N_SETTLED == 0:
+    print("\\nAll subsequent sections will produce empty outputs.")
+elif N_SETTLED < 5:
+    print(f"\\nINFO: only {N_SETTLED} settled question(s) — "
+          "results are informational (not statistically meaningful).")
+else:
+    print(f"\\n{N_SETTLED} questions available for event study.")
+""",
+    ),
+    (
+        "md",
+        """
+## §3 YES-mid trajectory in the final hour, aligned on T = expiry
+
+For each settled question we:
+1. Call `book.mid_path(...)` on the YES-leg BBO over `[expiry - 3600s, expiry]`
+   with a 10-second resample grid (360 grid points per question).
+2. Re-index by **TTE = seconds-to-expiry** (positive, decreasing toward 0).
+3. Stack all questions into a matrix, then compute mean ± IQR by outcome.
+
+Plot: faint per-question lines (alpha=0.3) + bold mean ± IQR per outcome.
+Red = YES winners, Blue = NO winners.
+""",
+    ),
+    (
+        "code",
+        """
+yes_mid_by_q = {}   # {yes_symbol: pd.Series indexed by TTE_s (float)}
+
+for _, row in settled_df.iterrows():
+    sym        = row['yes_symbol']
+    expiry_ns  = int(row['expiry_ns'])
+    start_ns   = expiry_ns - WINDOW_S * int(1e9)
+
+    try:
+        mp = book.mid_path(
+            con,
+            venue='hyperliquid',
+            product_type='prediction_binary',
+            symbol=sym,
+            start_ns=start_ns,
+            end_ns=expiry_ns,
+            resample_ms=RESAMPLE_MS,
+        )
+    except Exception as e:
+        print(f"WARNING: mid_path failed for {sym}: {e}")
+        continue
+
+    if mp.empty or mp['mid'].notna().sum() < 10:
+        print(f"WARNING: insufficient mid data for {sym} in final {WINDOW_S//60} min")
+        continue
+
+    # Convert ts_ns → TTE_s (seconds to expiry, positive; 0 = at expiry)
+    mp['tte_s'] = (expiry_ns - mp['ts_ns']) / 1e9
+    mp = mp.set_index('tte_s')['mid'].sort_index(ascending=False)  # TTE high→low
+    yes_mid_by_q[sym] = mp
+    print(f"  {sym}: {mp.notna().sum()} / {len(mp)} grid points populated  "
+          f"(final mid={mp.iloc[0]:.4f})")
+
+print(f"\\nQuestions with usable mid-path data: {len(yes_mid_by_q)} / {N_SETTLED}")
+""",
+    ),
+    (
+        "code",
+        """
+if not yes_mid_by_q:
+    print("No mid-path data — skipping trajectory plot.")
+else:
+    # Split by outcome
+    yes_winners = [sym for _, row in settled_df.iterrows()
+                   if row['outcome'] == 'YES' and row['yes_symbol'] in yes_mid_by_q
+                   for sym in [row['yes_symbol']]]
+    no_winners  = [sym for _, row in settled_df.iterrows()
+                   if row['outcome'] == 'NO'  and row['yes_symbol'] in yes_mid_by_q
+                   for sym in [row['yes_symbol']]]
+
+    # Build aggregate DataFrame per outcome bucket
+    def _agg(syms, label):
+        if not syms:
+            return None, label
+        mat = pd.concat([yes_mid_by_q[s].rename(s) for s in syms], axis=1)
+        # common TTE index (union)
+        mat = mat.sort_index(ascending=False)
+        return mat, label
+
+    mat_yes, _ = _agg(yes_winners, 'YES')
+    mat_no,  _ = _agg(no_winners,  'NO')
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+
+    def _plot_group(mat, color, label):
+        if mat is None:
+            return
+        tte_min = mat.index / 60.0   # convert TTE s → TTE min for x-axis
+        for col in mat.columns:
+            ax.plot(tte_min, mat[col].values, color=color, alpha=0.3, lw=0.8)
+        mean_mid = mat.mean(axis=1)
+        q25      = mat.quantile(0.25, axis=1)
+        q75      = mat.quantile(0.75, axis=1)
+        ax.plot(tte_min, mean_mid, color=color, lw=2.0,
+                label=f'{label} (n={mat.shape[1]}, mean)')
+        ax.fill_between(tte_min, q25, q75, color=color, alpha=0.15, label=f'{label} IQR')
+
+    _plot_group(mat_yes, 'C3', 'YES won')
+    _plot_group(mat_no,  'C0', 'NO won')
+
+    ax.axhline(THRESHOLD, color='k', ls='--', lw=0.9, label=f'threshold={THRESHOLD}')
+    ax.set_xlabel('TTE (minutes before expiry)')
+    ax.set_ylabel('YES-leg mid-price')
+    ax.set_title('YES-mid trajectory in final hour  —  aligned on T = expiry', loc='left')
+    # x-axis: 60 min on left, 0 on right
+    ax.set_xlim(WINDOW_S / 60, 0)
+    xticks = [60, 45, 30, 15, 10, 5, 1, 0]
+    ax.set_xticks([x for x in xticks if x <= WINDOW_S / 60])
+    ax.set_xticklabels([f'{x} min' for x in xticks if x <= WINDOW_S / 60])
+    ax.legend(fontsize=8)
+    plt.tight_layout(); plt.show()
+""",
+    ),
+    (
+        "md",
+        """
+## §4 First-crossing-0.95 distribution  (v1 hit-rate study)
+
+For each settled question, find the **latest TTE** (furthest from expiry) at
+which `yes_mid >= THRESHOLD` first crossed upward.  Bucketed by outcome.
+
+This answers: *"At what point in the final hour does YES mid first reach 0.95,
+and does it stay there?"* — the raw signal behind the v1 heuristic.
+""",
+    ),
+    (
+        "code",
+        """
+crossing_records = []  # list of {yes_symbol, outcome, first_crossing_tte_s}
+
+for _, row in settled_df.iterrows():
+    sym     = row['yes_symbol']
+    outcome = row['outcome']
+    if sym not in yes_mid_by_q:
+        continue
+    series = yes_mid_by_q[sym]   # indexed by TTE_s (descending: 3600 → 0)
+    # Find the *earliest* TTE (highest TTE value, i.e. furthest from expiry)
+    # at which mid >= THRESHOLD.
+    above = series[series >= THRESHOLD]
+    first_tte = float(above.index.max()) if not above.empty else None  # None = never crossed
+    crossing_records.append({
+        'yes_symbol':          sym,
+        'outcome':             outcome,
+        'first_crossing_tte_s': first_tte,
+    })
+
+cross_df = pd.DataFrame(crossing_records)
+print(cross_df.to_string(index=False))
+
+n_crossed_yes = cross_df[(cross_df.outcome=='YES') & cross_df.first_crossing_tte_s.notna()].shape[0]
+n_crossed_no  = cross_df[(cross_df.outcome=='NO')  & cross_df.first_crossing_tte_s.notna()].shape[0]
+n_never       = cross_df[cross_df.first_crossing_tte_s.isna()].shape[0]
+print(f"\\nCrossed >= {THRESHOLD}: {n_crossed_yes} YES-winners, {n_crossed_no} NO-winners")
+print(f"Never crossed {THRESHOLD}: {n_never} question(s)")
+""",
+    ),
+    (
+        "code",
+        """
+if cross_df.empty or cross_df.first_crossing_tte_s.notna().sum() == 0:
+    print("No crossing data — skipping §4 distribution plot.")
+else:
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharey=False)
+
+    for ax, outcome, color in zip(axes, ['YES','NO'], ['C3','C0']):
+        sub = cross_df[(cross_df.outcome == outcome) &
+                       cross_df.first_crossing_tte_s.notna()]['first_crossing_tte_s'] / 60.0
+        if sub.empty:
+            ax.text(0.5, 0.5, f'No {outcome} winners\\ncrossed threshold',
+                    ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(f'{outcome} winners: first crossing of {THRESHOLD} (n=0)')
+            continue
+        bins = np.linspace(0, WINDOW_S / 60, 30)
+        ax.hist(sub, bins=bins, color=color, alpha=0.75, edgecolor='none')
+        ax.set_xlabel('TTE at first crossing (minutes)')
+        ax.set_ylabel('count')
+        ax.set_title(f'{outcome} winners: first crossing of {THRESHOLD}  (n={len(sub)})')
+        ax.invert_xaxis()   # 60 min on left, 0 on right (matches trajectory chart)
+
+    fig.suptitle(f'Distribution of TTE at first yes_mid >= {THRESHOLD}')
+    plt.tight_layout(); plt.show()
+""",
+    ),
+    (
+        "md",
+        """
+## §5 v1-style hit-rate at TTE = 60 / 30 / 10 / 5 / 1 minute
+
+**AC2 deliverable.**
+
+For each TTE checkpoint:
+- Look up `yes_mid` for each settled question at that TTE (nearest grid point).
+- Count questions where `yes_mid >= THRESHOLD`.
+- Of those, count how many actually resolved YES.
+- Hit rate = `n_winners_among_those / n_at_threshold`.
+
+A hit rate materially above `THRESHOLD` implies the market is under-pricing
+near-certainty → edge for the v1 strategy.  At or below `THRESHOLD` → the
+heuristic is calibrated (no extra premium available via the binary alone).
+""",
+    ),
+    (
+        "code",
+        """
+def mid_at_tte(series: pd.Series, tte_s: float, tol_s: float = 30.0) -> float | None:
+    \"\"\"Look up yes_mid at TTE = tte_s (seconds) ± tol_s from the pre-built series.
+    Returns None if no grid point within tolerance is populated.
+    \"\"\"
+    if series is None or series.empty:
+        return None
+    # series is indexed by TTE_s (positive, high → low)
+    nearest_idx = (series.index - tte_s).abs().idxmin()
+    if abs(nearest_idx - tte_s) > tol_s:
+        return None
+    val = series.loc[nearest_idx]
+    return float(val) if pd.notna(val) else None
+
+hit_rate_rows = []
+for tte_min in TTE_CHECKPOINTS_MIN:
+    tte_s = tte_min * 60.0
+    n_above = 0
+    n_yes_won = 0
+    n_questions = 0
+    for _, row in settled_df.iterrows():
+        sym = row['yes_symbol']
+        if sym not in yes_mid_by_q:
+            continue
+        n_questions += 1
+        mid_val = mid_at_tte(yes_mid_by_q[sym], tte_s)
+        if mid_val is not None and mid_val >= THRESHOLD:
+            n_above += 1
+            if row['outcome'] == 'YES':
+                n_yes_won += 1
+    hit_rate = n_yes_won / n_above if n_above > 0 else float('nan')
+    hit_rate_rows.append({
+        'TTE_min':          tte_min,
+        'n_questions':      n_questions,
+        'n_above_threshold': n_above,
+        'n_winners':        n_yes_won,
+        'hit_rate':         hit_rate,
+    })
+
+hit_df = pd.DataFrame(hit_rate_rows)
+print("v1-style hit-rate table (AC2 deliverable)")
+print("=" * 58)
+header = f"{'TTE':>6}  {'n_Q':>4}  {'n_above':>7}  {'n_win':>6}  {'hit_rate':>9}"
+print(header)
+print("-" * 58)
+for _, hr in hit_df.iterrows():
+    hr_str = f"{hr.hit_rate:.3f}" if not np.isnan(hr.hit_rate) else "  n/a "
+    print(f"{int(hr.TTE_min):>4}min  {int(hr.n_questions):>4}  "
+          f"{int(hr.n_above_threshold):>7}  {int(hr.n_winners):>6}  {hr_str:>9}")
+print("=" * 58)
+if N_SETTLED < 5:
+    print(f"\\nINFO: N={N_SETTLED} settled question(s) — figures are informational only.")
+""",
+    ),
+    (
+        "code",
+        """
+# Bootstrap CI on hit_rate (only if N >= 10 settled questions)
+if N_SETTLED >= 10 and not hit_df.empty:
+    print("\\nBootstrap 95% CI on hit_rate (n_boot={N_BOOT}):")
+    for _, hr in hit_df.iterrows():
+        tte_s = hr.TTE_min * 60.0
+        outcomes_above = []
+        for _, row in settled_df.iterrows():
+            sym = row['yes_symbol']
+            if sym not in yes_mid_by_q:
+                continue
+            mid_val = mid_at_tte(yes_mid_by_q[sym], tte_s)
+            if mid_val is not None and mid_val >= THRESHOLD:
+                outcomes_above.append(1 if row['outcome'] == 'YES' else 0)
+        if len(outcomes_above) < 2:
+            print(f"  TTE={int(hr.TTE_min)}min: n_above={len(outcomes_above)} — too few for CI")
+            continue
+        arr   = np.array(outcomes_above)
+        boots = [RNG.choice(arr, size=len(arr), replace=True).mean()
+                 for _ in range(N_BOOT)]
+        lo, hi = np.quantile(boots, [0.025, 0.975])
+        print(f"  TTE={int(hr.TTE_min):>2}min: hit_rate={arr.mean():.3f}  "
+              f"95% CI [{lo:.3f}, {hi:.3f}]")
+else:
+    if N_SETTLED < 10:
+        print(f"Bootstrap CI skipped (N={N_SETTLED} < 10 — need >= 10 settled questions).")
+""",
+    ),
+    (
+        "md",
+        """
+## §6 Discussion: is the v1 heuristic calibrated or over-confident?
+
+The key comparison is `hit_rate − THRESHOLD` at each TTE checkpoint.
+
+- **hit_rate > THRESHOLD**: the market is *under-pricing* late-resolution —
+  buying YES when `yes_mid >= 0.95` yields better-than-95% win rate.
+  This is genuine edge for v1.
+- **hit_rate ≈ THRESHOLD**: the heuristic is calibrated.  The strategy earns
+  the spread (passive liquidity provision) but no extra probability premium.
+- **hit_rate < THRESHOLD**: the market is *over-pricing* certainty — the
+  heuristic is over-confident and will lose on its extreme bets.
+""",
+    ),
+    (
+        "code",
+        """
+print(f"Calibration check: hit_rate − {THRESHOLD}")
+print("-" * 40)
+for _, hr in hit_df.iterrows():
+    diff = hr.hit_rate - THRESHOLD if not np.isnan(hr.hit_rate) else float('nan')
+    flag = ""
+    if not np.isnan(diff):
+        if diff > 0.02:
+            flag = "  ← edge (above threshold)"
+        elif diff < -0.02:
+            flag = "  ← over-confident"
+        else:
+            flag = "  ← calibrated"
+    diff_str = f"{diff:+.3f}" if not np.isnan(diff) else "   n/a"
+    print(f"  TTE={int(hr.TTE_min):>2}min  Δ={diff_str}{flag}")
+
+if N_SETTLED < 5:
+    print()
+    print(f"NOTE: Based on N={N_SETTLED} settled question(s).  Increase sample "
+          "before drawing conclusions.")
+""",
+    ),
+    (
+        "md",
+        """
+## Strategy hypotheses
+
+- **Supports H5**: late-hour micro-structure carries directional information —
+  inspect the §3 trajectory chart to confirm YES-winners and NO-winners
+  diverge in the final 30 minutes.  The v1-style hit-rate table (§5) provides
+  the empirical win probability at each TTE checkpoint (fill in: *at TTE=X min,
+  yes_mid above 0.95 wins Y% of the time*).
+
+- **Rules out H5**: if the §5 hit rate at every TTE is ≤ 0.95, the heuristic
+  is at most calibrated — no extra edge from the binary price extreme alone.
+  In that case the strategy must rely on the *joint* signal (price extreme AND
+  distance-from-strike) described in the next probe.
+
+- **Next probe**: condition on `|BTC_mark − strike|` from notebook 05/06's
+  fair-value framework.  The v1 heuristic gates on price extreme AND
+  distance-from-strike; eyeballing only price extreme misses the joint
+  structure.  With more settlement cycles (recorder running ≥ 30 days), repeat
+  this study at daily frequency and test a logistic regression:
+  `P(YES | yes_mid, TTE, |mark − strike|)`.
+""",
+    ),
+]
+
+
 def main() -> None:
-    notebooks = {
+    # Notebooks that use the generic HYPOTHESIS_FOOTER appended at the end.
+    notebooks_with_generic_footer = {
         "01-data-quality.ipynb": P0,
         "02-cross-venue-basis.ipynb": P1,
         "03-microstructure.ipynb": P2,
         "04-trade-flow-leadlag.ipynb": P3,
         "05-hip4-binaries.ipynb": P5,
         "06-hip4-pricing-from-perp.ipynb": P6,
+        "07-binary-late-yes-strategy.ipynb": P7,
     }
-    for name, cells in notebooks.items():
+    for name, cells in notebooks_with_generic_footer.items():
+        nb = _build([*cells, HYPOTHESIS_FOOTER])
+        path = OUT / name
+        with path.open("w") as f:
+            nbf.write(nb, f)
+        print(f"wrote {path.relative_to(REPO)}  ({len(cells) + 1} cells, +footer)")
+
+    # Notebooks with a custom footer already embedded in their cell list.
+    notebooks_custom_footer = {
+        "08-hip4-markouts.ipynb": P_HIP4_MARKOUTS,
+        "09-hip4-perp-leadlag.ipynb": P_HIP4_PERP_LEADLAG,
+        "11-hip4-settlement-eventstudy.ipynb": P_HIP4_SETTLEMENT_EVENT_STUDY,
+    }
+    for name, cells in notebooks_custom_footer.items():
         nb = _build(cells)
         path = OUT / name
         with path.open("w") as f:

@@ -1272,6 +1272,7 @@ dev = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "nbformat" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -1308,6 +1309,7 @@ provides-extras = ["analysis", "dev"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "nbformat", specifier = ">=5.10.4" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
 ]

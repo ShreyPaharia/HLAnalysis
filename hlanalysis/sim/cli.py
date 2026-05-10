@@ -14,6 +14,7 @@ from .data.cache import Cache
 from .data.schemas import PMMarket, PMTrade
 from .fills import FillModelConfig
 from .metrics import summarise_run
+from .plots.per_market_trace import plot_market_trace
 from .report import write_single_run_report, write_tuning_report
 from .runner import RunnerConfig, run_one_market
 from .tuning import TuningJob
@@ -135,22 +136,32 @@ def cmd_run(args: argparse.Namespace) -> None:
         slippage_bps=args.slippage_bps, fee_taker=args.fee_taker,
         book_depth_assumption=args.depth,
     )
+    out_dir = Path(args.out_dir)
     pnl: list[float] = []
     n_trades = 0
+    diag_dir = out_dir / "diagnostics"
+    fills_dir = out_dir / "fills"
+    markets = []
     for j in jobs:
         rcfg = RunnerConfig(
             scanner_interval_seconds=60, fill_model=fill_cfg,
             synthetic_half_spread=args.half_spread, synthetic_depth=args.depth,
             day_open_btc=j.day_open_btc,
         )
-        res = run_one_market(strat, j.market, j.klines, j.trades, rcfg)
+        res = run_one_market(strat, j.market, j.klines, j.trades, rcfg,
+                             diagnostics_dir=diag_dir, fills_dir=fills_dir)
         pnl.append(res.realized_pnl_usd or 0.0)
         n_trades += len(res.fills)
+        markets.append(j.market)
     summary = summarise_run(pnl, n_trades=n_trades)
-    out_dir = Path(args.out_dir)
     write_single_run_report(
         out_dir=out_dir, strategy_name=args.strategy,
         config_summary=params, per_market_pnl=pnl, summary=summary,
+        markets=markets, fills_dir=fills_dir,
+        fee_taker=args.fee_taker, slippage_bps=args.slippage_bps,
+        half_spread=args.half_spread,
+        diagnostics_dir=diag_dir,
+        klines_dir=Path(args.cache_root) / "btc_klines",
     )
     logger.info(f"Report → {out_dir}/report.md")
 
@@ -189,6 +200,16 @@ def cmd_tune(args: argparse.Namespace) -> None:
     ))
     write_tuning_report(out_dir=out_dir, strategy_name=args.strategy, rows=rows, top_k=10)
     logger.info(f"Tuning report → {out_dir}/report.md")
+
+
+def cmd_trace(args: argparse.Namespace) -> None:
+    run_dir = Path(args.run_dir)
+    out = Path(args.out) if args.out else run_dir / "traces" / f"{args.market}.html"
+    result = plot_market_trace(args.market, run_dir, out)
+    if result is None:
+        logger.error(f"No diagnostics for market {args.market} in {run_dir}")
+        return
+    logger.info(f"Trace → {result}")
 
 
 def cmd_report(args: argparse.Namespace) -> None:
@@ -249,6 +270,12 @@ def main() -> None:
     pt.add_argument("--max-markets", type=int, default=None,
                     help="Cap to first N markets after skip (for train/holdout slicing).")
     pt.set_defaults(func=cmd_tune)
+
+    ptr = sp.add_parser("trace", help="Per-market trace plot")
+    ptr.add_argument("--run-dir", required=True)
+    ptr.add_argument("--market", required=True, help="condition_id of the market to trace")
+    ptr.add_argument("--out", help="Output HTML path; defaults to <run-dir>/traces/<market>.html")
+    ptr.set_defaults(func=cmd_trace)
 
     pp = sp.add_parser("report", help="Re-render tuning report from results.jsonl")
     pp.add_argument("--strategy", choices=["v1", "v2"], required=True)
