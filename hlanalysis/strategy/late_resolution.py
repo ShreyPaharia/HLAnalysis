@@ -35,6 +35,15 @@ class LateResolutionConfig:
     # zero PnL after the [0,1] fill clamp — they pay $1 and settle $1. Default
     # 1.0 disables the cap (existing behavior); set to ~0.99 to skip dead trades.
     price_extreme_max: float = 1.0
+    # Joint vol+distance gate. safety_d = |ln(BTC/strike)| / (σ_1m * sqrt(tte_min)).
+    # Higher = favorite more securely on its side of the strike given remaining time.
+    # Default 0 disables (existing behavior); set positive to require min standard
+    # deviations of "safety" before entering.
+    min_safety_d: float = 0.0
+    # Lookback for σ in the safety gate AND vol_max gate. Runner provides 24h of
+    # 1m returns; we slice to the last N (= vol_lookback_seconds // 60). Shorter =
+    # more reactive to current regime. Default 1800s (30min, 30 samples).
+    vol_lookback_seconds: int = 1800
 
 
 class LateResolutionStrategy(Strategy):
@@ -153,13 +162,33 @@ class LateResolutionStrategy(Strategy):
         # don't have a single strike. Binary callers can tighten via config if needed.
 
         # 6) Realized vol cap (sample stdev of log-returns; treat as raw, not annualised)
+        # Slice recent_returns to last vol_lookback_seconds (runner provides 24h of 1m bars).
         if len(recent_returns) < 2:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "vol_insufficient_data"),))
-        vol = float(np.std(recent_returns, ddof=1))
+        n_keep = max(2, self.cfg.vol_lookback_seconds // 60)
+        returns_window = recent_returns[-n_keep:] if len(recent_returns) > n_keep else recent_returns
+        if len(returns_window) < 2:
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "vol_insufficient_data"),))
+        vol = float(np.std(returns_window, ddof=1))
         if vol > self.cfg.vol_max:
             return Decision(action=Action.HOLD, diagnostics=(
                 Diagnostic("info", "vol_above_cap", (("vol", f"{vol:.4f}"),)),
             ))
+
+        # 6b) Joint safety gate: how many σ is BTC from the strike given remaining
+        # time? safety_d = |ln(BTC/strike)| / (σ_1m * sqrt(tte_min)). Skip when too
+        # close to the flip line. Only meaningful for binaries with a real strike.
+        if self.cfg.min_safety_d > 0.0 and question.klass == "priceBinary" and question.strike > 0 and reference_price > 0:
+            tte_min = max(tte_s / 60.0, 1.0)
+            sigma_window = vol * math.sqrt(tte_min)
+            if sigma_window > 0:
+                log_dist = abs(math.log(reference_price / question.strike))
+                safety_d = log_dist / sigma_window
+                if safety_d < self.cfg.min_safety_d:
+                    return Decision(action=Action.HOLD, diagnostics=(
+                        Diagnostic("info", "safety_d_below_min",
+                                   (("d", f"{safety_d:.3f}"),)),
+                    ))
 
         # 7) Recent-volume sanity (avoid dead questions)
         if recent_volume_usd < self.cfg.min_recent_volume_usd:

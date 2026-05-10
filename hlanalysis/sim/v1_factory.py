@@ -18,5 +18,7 @@ def build_v1_strategy_from_params(params: dict[str, Any]) -> LateResolutionStrat
         min_recent_volume_usd=float(params.get("min_recent_volume_usd", 0.0)),
         stale_data_halt_seconds=int(params.get("stale_data_halt_seconds", 86400)),
         price_extreme_max=float(params.get("price_extreme_max", 1.0)),
+        min_safety_d=float(params.get("min_safety_d", 0.0)),
+        vol_lookback_seconds=int(params.get("vol_lookback_seconds", 1800)),
     )
     return LateResolutionStrategy(cfg)

@@ -1,0 +1,27 @@
+# v1 sweep: cap=0.995, stop_loss=null, plus min_safety_d gate.
+# safety_d = |ln(BTC/strike)| / (σ_30m * sqrt(tte_min)) — joint vol+distance gate.
+# σ uses 1h lookback of 1m bars (vol_lookback_seconds=3600).
+# 5 thresholds * 4 tte * 5 safety_d = 100 cells * 3 splits.
+
+v1_grid:
+  tte_min_seconds: [0]
+  tte_max_seconds: [900, 1800, 3600, 7200]
+  price_extreme_threshold: [0.90, 0.92, 0.94, 0.96, 0.98]
+  price_extreme_max: [0.995]
+  distance_from_strike_usd_min: [0]
+  vol_max: [100]
+  stop_loss_pct: [null]
+  min_safety_d: [0.0, 1.0, 1.5, 2.0, 3.0]
+  vol_lookback_seconds: [3600]
+
+v2_grid:
+  vol_lookback_seconds: [14400]
+  edge_buffer: [0.02]
+  stop_loss_pct: [null]
+  drift_lookback_seconds: [0]
+
+run:
+  train_markets: 60
+  test_markets: 60
+  step_markets: 60
+  max_workers: 12
