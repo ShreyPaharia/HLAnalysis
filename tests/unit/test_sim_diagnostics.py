@@ -428,6 +428,8 @@ class TestCmdRunOutDirOrdering:
             fee_taker=0.0,
             half_spread=0.005,
             depth=10_000.0,
+            skip_markets=0,
+            max_markets=None,
         )
 
         # Should not raise NameError (or any error).
@@ -805,6 +807,8 @@ class TestRunnerFillsDir:
             fee_taker=0.0,
             half_spread=0.005,
             depth=10_000.0,
+            skip_markets=0,
+            max_markets=None,
         )
         cmd_run(args)
         fills_parquet = out_dir / "fills" / "0xclicmd1.parquet"
