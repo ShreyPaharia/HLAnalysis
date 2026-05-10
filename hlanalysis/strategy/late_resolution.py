@@ -44,6 +44,20 @@ class LateResolutionConfig:
     # 1m returns; we slice to the last N (= vol_lookback_seconds // 60). Shorter =
     # more reactive to current regime. Default 1800s (30min, 30 samples).
     vol_lookback_seconds: int = 1800
+    # Mid-hold exit threshold. Re-evaluates safety_d every tick while position is
+    # open; exits IOC at bid when safety_d drops below this. 0 = disabled. Should
+    # be lower than min_safety_d to avoid thrashing on the entry boundary.
+    exit_safety_d: float = 0.0
+    # Hard price-level stop: exit IOC if held leg's bid drops to/below this.
+    # Catches sudden flips that safety_d misses because kline cadence is too slow
+    # for sub-minute moves. 0 = disabled.
+    exit_bid_floor: float = 0.0
+    # When True, safety_d uses drift-corrected distance:
+    #   d = sign(ln S/K) * (ln S/K + μ * τ) / (σ * √τ)
+    # where μ = mean of returns_window. Captures the case where BTC is trending
+    # toward the strike (drift adverse to the favorite). Default False preserves
+    # the symmetric |ln S/K| formulation.
+    drift_aware_d: bool = False
 
 
 class LateResolutionStrategy(Strategy):
@@ -62,6 +76,24 @@ class LateResolutionStrategy(Strategy):
 
     def __init__(self, cfg: LateResolutionConfig) -> None:
         self.cfg = cfg
+
+    def _safety_d(
+        self,
+        *,
+        ref_price: float,
+        strike: float,
+        sigma_window: float,
+        returns_window: tuple[float, ...] | np.ndarray,
+        tte_min: float,
+    ) -> float:
+        """safety_d in either symmetric (|ln S/K|) or drift-aware form. Larger = safer."""
+        log_sk = math.log(ref_price / strike)
+        if self.cfg.drift_aware_d and len(returns_window) >= 2:
+            mu = float(np.mean(returns_window))
+            sign = 1.0 if log_sk >= 0 else -1.0
+            adjusted = sign * (log_sk + mu * tte_min)
+            return adjusted / sigma_window
+        return abs(log_sk) / sigma_window
 
     def evaluate(
         self,
@@ -87,9 +119,83 @@ class LateResolutionStrategy(Strategy):
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "settled"),))
 
         if position is not None:
+            held_book = books.get(position.symbol)
+
+            # Hard bid-level exit: catches sudden flips faster than safety_d can.
+            if (
+                self.cfg.exit_bid_floor > 0.0
+                and held_book is not None
+                and held_book.bid_px is not None
+                and held_book.bid_px <= self.cfg.exit_bid_floor
+            ):
+                intent = OrderIntent(
+                    question_idx=question.question_idx,
+                    symbol=position.symbol,
+                    side="sell" if position.qty > 0 else "buy",
+                    size=abs(position.qty),
+                    limit_price=held_book.bid_px,
+                    cloid=f"hla-{uuid.uuid4()}",
+                    time_in_force="ioc",
+                    reduce_only=True,
+                )
+                return Decision(
+                    action=Action.EXIT,
+                    intents=(intent,),
+                    diagnostics=(
+                        Diagnostic("warn", "exit_bid_below_floor",
+                                   (("bid", f"{held_book.bid_px:.4f}"),)),
+                    ),
+                )
+
+            # Mid-hold safety_d exit: re-evaluate the same gate used at entry.
+            # Fires before stop-loss so a regime-change flip can be cut at bid
+            # rather than waiting for settle. Skipped near settlement (tte_s<=0)
+            # because √tte_min would underflow and safety_d explodes.
+            if (
+                self.cfg.exit_safety_d > 0.0
+                and question.klass == "priceBinary"
+                and question.strike > 0
+                and reference_price > 0
+                and held_book is not None
+                and held_book.bid_px is not None
+                and held_book.bid_px > 0
+                and len(recent_returns) >= 2
+            ):
+                tte_s_now = (question.expiry_ns - now_ns) / 1e9
+                if tte_s_now > 0:
+                    n_keep = max(2, self.cfg.vol_lookback_seconds // 60)
+                    rw = recent_returns[-n_keep:] if len(recent_returns) > n_keep else recent_returns
+                    if len(rw) >= 2:
+                        vol_now = float(np.std(rw, ddof=1))
+                        sigma_window = vol_now * math.sqrt(max(tte_s_now / 60.0, 1.0))
+                        if sigma_window > 0:
+                            safety_d_now = self._safety_d(
+                                ref_price=reference_price, strike=question.strike,
+                                sigma_window=sigma_window, returns_window=rw,
+                                tte_min=tte_s_now / 60.0,
+                            )
+                            if safety_d_now < self.cfg.exit_safety_d:
+                                intent = OrderIntent(
+                                    question_idx=question.question_idx,
+                                    symbol=position.symbol,
+                                    side="sell" if position.qty > 0 else "buy",
+                                    size=abs(position.qty),
+                                    limit_price=held_book.bid_px,
+                                    cloid=f"hla-{uuid.uuid4()}",
+                                    time_in_force="ioc",
+                                    reduce_only=True,
+                                )
+                                return Decision(
+                                    action=Action.EXIT,
+                                    intents=(intent,),
+                                    diagnostics=(
+                                        Diagnostic("warn", "exit_safety_d_below_min",
+                                                   (("d", f"{safety_d_now:.3f}"),)),
+                                    ),
+                                )
+
             # Soft stop-loss signal. The risk gate is the authoritative enforcer
             # (Plan 1B); we mirror it here so logging/diagnostics line up.
-            held_book = books.get(position.symbol)
             if held_book is not None and held_book.bid_px is not None:
                 if held_book.bid_px <= position.stop_loss_price:
                     intent = OrderIntent(
@@ -182,8 +288,11 @@ class LateResolutionStrategy(Strategy):
             tte_min = max(tte_s / 60.0, 1.0)
             sigma_window = vol * math.sqrt(tte_min)
             if sigma_window > 0:
-                log_dist = abs(math.log(reference_price / question.strike))
-                safety_d = log_dist / sigma_window
+                safety_d = self._safety_d(
+                    ref_price=reference_price, strike=question.strike,
+                    sigma_window=sigma_window, returns_window=returns_window,
+                    tte_min=tte_min,
+                )
                 if safety_d < self.cfg.min_safety_d:
                     return Decision(action=Action.HOLD, diagnostics=(
                         Diagnostic("info", "safety_d_below_min",

@@ -20,5 +20,8 @@ def build_v1_strategy_from_params(params: dict[str, Any]) -> LateResolutionStrat
         price_extreme_max=float(params.get("price_extreme_max", 1.0)),
         min_safety_d=float(params.get("min_safety_d", 0.0)),
         vol_lookback_seconds=int(params.get("vol_lookback_seconds", 1800)),
+        exit_safety_d=float(params.get("exit_safety_d", 0.0)),
+        exit_bid_floor=float(params.get("exit_bid_floor", 0.0)),
+        drift_aware_d=bool(params.get("drift_aware_d", False)),
     )
     return LateResolutionStrategy(cfg)

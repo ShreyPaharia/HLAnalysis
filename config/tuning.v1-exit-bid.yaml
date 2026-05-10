@@ -1,0 +1,27 @@
+# v1 sweep: hold entry+exit_safety_d fixed at v1-exit-best, sweep exit_bid_floor.
+# 5 floors * 3 splits = 15 cells. Quick.
+
+v1_grid:
+  tte_min_seconds: [0]
+  tte_max_seconds: [7200]
+  price_extreme_threshold: [0.90]
+  price_extreme_max: [0.995]
+  distance_from_strike_usd_min: [0]
+  vol_max: [100]
+  stop_loss_pct: [null]
+  min_safety_d: [1.5]
+  vol_lookback_seconds: [3600]
+  exit_safety_d: [1.0]
+  exit_bid_floor: [0.0, 0.5, 0.6, 0.7, 0.8]
+
+v2_grid:
+  vol_lookback_seconds: [14400]
+  edge_buffer: [0.02]
+  stop_loss_pct: [null]
+  drift_lookback_seconds: [0]
+
+run:
+  train_markets: 60
+  test_markets: 60
+  step_markets: 60
+  max_workers: 12
