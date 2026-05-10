@@ -20,7 +20,7 @@ class SimMarketState:
 
     def __post_init__(self) -> None:
         self._books = {}
-        self._kline_closes = deque()  # (ts_ns, close)
+        self._kline_closes = deque()  # (ts_ns, high, low, close)
 
     def apply_l2(self, snap: L2Snapshot) -> None:
         self._books[snap.token_id] = BookState(
@@ -44,15 +44,17 @@ class SimMarketState:
         return self._books.get(token_id)
 
     def apply_kline(self, k: Kline) -> None:
-        self._kline_closes.append((k.ts_ns, k.close))
+        # Store (ts, high, low, close) so the Parkinson range estimator has the
+        # H/L it needs while preserving close-to-close returns.
+        self._kline_closes.append((k.ts_ns, k.high, k.low, k.close))
 
     def latest_btc_close(self) -> float | None:
-        return self._kline_closes[-1][1] if self._kline_closes else None
+        return self._kline_closes[-1][3] if self._kline_closes else None
 
     def recent_returns(self, *, now_ns: int, lookback_seconds: int) -> tuple[float, ...]:
         window_ns = lookback_seconds * 1_000_000_000
         cutoff = now_ns - window_ns
-        prices = [(t, c) for (t, c) in self._kline_closes if t >= cutoff and t <= now_ns]
+        prices = [(t, c) for (t, _h, _l, c) in self._kline_closes if t >= cutoff and t <= now_ns]
         if len(prices) < 2:
             return ()
         returns = []
@@ -61,3 +63,15 @@ class SimMarketState:
             if p_prev > 0 and p_now > 0:
                 returns.append(math.log(p_now / p_prev))
         return tuple(returns)
+
+    def recent_hl_bars(
+        self, *, now_ns: int, lookback_seconds: int
+    ) -> tuple[tuple[float, float], ...]:
+        """Return (high, low) tuples for klines in the lookback window. Used by
+        the Parkinson range-based σ estimator."""
+        window_ns = lookback_seconds * 1_000_000_000
+        cutoff = now_ns - window_ns
+        return tuple(
+            (h, l) for (t, h, l, _c) in self._kline_closes
+            if t >= cutoff and t <= now_ns and h > 0 and l > 0
+        )

@@ -1,0 +1,23 @@
+# v1 A/B: σ estimator stdev vs Parkinson, everything else at v1-exit-best.
+# Train slice: first 255 markets, 3 splits.
+
+v1_grid:
+  tte_min_seconds: [0]
+  tte_max_seconds: [7200]
+  price_extreme_threshold: [0.90]
+  price_extreme_max: [0.995]
+  distance_from_strike_usd_min: [0]
+  vol_max: [100]
+  stop_loss_pct: [null]
+  min_safety_d: [1.5]
+  vol_lookback_seconds: [3600]
+  exit_safety_d: [1.0]
+  vol_estimator: ["stdev", "parkinson"]
+
+v2_grid: {}
+
+run:
+  train_markets: 60
+  test_markets: 65
+  step_markets: 65
+  max_workers: 8

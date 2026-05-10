@@ -57,6 +57,9 @@ class ModelEdgeStrategy(Strategy):
         recent_volume_usd: float,
         position: Position | None,
         now_ns: int,
+        # Accepted but unused: v2 only consumes close-to-close returns. Present
+        # so the runner can pass HL bars uniformly without per-strategy branching.
+        recent_hl_bars: tuple[tuple[float, float], ...] = (),
     ) -> Decision:
         if question.settled:
             if position is not None:

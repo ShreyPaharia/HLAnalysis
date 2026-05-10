@@ -29,4 +29,9 @@ class Strategy(ABC):
         recent_volume_usd: float,         # last-hour notional volume on this question
         position: Position | None,
         now_ns: int,
+        # Optional side-channel: (high, low) for each 1m kline in the lookback
+        # window, in chronological order. Used by σ estimators that need range
+        # data (Parkinson, Garman-Klass). Empty tuple is the default; strategies
+        # that only need close-to-close returns may ignore this.
+        recent_hl_bars: tuple[tuple[float, float], ...] = (),
     ) -> Decision: ...

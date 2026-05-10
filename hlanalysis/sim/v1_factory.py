@@ -23,5 +23,11 @@ def build_v1_strategy_from_params(params: dict[str, Any]) -> LateResolutionStrat
         exit_safety_d=float(params.get("exit_safety_d", 0.0)),
         exit_bid_floor=float(params.get("exit_bid_floor", 0.0)),
         drift_aware_d=bool(params.get("drift_aware_d", False)),
+        vol_ewma_lambda=float(params.get("vol_ewma_lambda", 0.0)),
+        exit_safety_d_5m=float(params.get("exit_safety_d_5m", 0.0)),
+        exit_vol_lookback_5m_seconds=int(params.get("exit_vol_lookback_5m_seconds", 300)),
+        vol_estimator=str(params.get("vol_estimator", "stdev")),
+        size_scaling=str(params.get("size_scaling", "fixed")),
+        size_min_fraction=float(params.get("size_min_fraction", 0.25)),
     )
     return LateResolutionStrategy(cfg)

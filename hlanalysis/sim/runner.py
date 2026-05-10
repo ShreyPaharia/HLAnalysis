@@ -104,6 +104,7 @@ def run_one_market(
                  market.no_token_id:  state.book(market.no_token_id)}
         books = {k: v for k, v in books.items() if v is not None}
         recent_returns = state.recent_returns(now_ns=ev.ts_ns, lookback_seconds=86_400)
+        recent_hl = state.recent_hl_bars(now_ns=ev.ts_ns, lookback_seconds=86_400)
         ref_close = state.latest_btc_close() or cfg.day_open_btc
 
         decision = strategy.evaluate(
@@ -112,6 +113,7 @@ def run_one_market(
             recent_returns=recent_returns,
             recent_volume_usd=0.0,
             position=pos, now_ns=ev.ts_ns,
+            recent_hl_bars=recent_hl,
         )
         result.n_decisions += 1
 

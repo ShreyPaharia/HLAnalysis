@@ -1,0 +1,27 @@
+# v1 sig5m lookback sweep at best threshold from threshold sweep (0.7).
+
+v1_grid:
+  tte_min_seconds: [0]
+  tte_max_seconds: [7200]
+  price_extreme_threshold: [0.90]
+  price_extreme_max: [0.995]
+  distance_from_strike_usd_min: [0]
+  vol_max: [100]
+  stop_loss_pct: [null]
+  min_safety_d: [1.5]
+  vol_lookback_seconds: [3600]
+  exit_safety_d: [1.0]
+  exit_safety_d_5m: [0.7]
+  exit_vol_lookback_5m_seconds: [180, 300, 600]
+
+v2_grid:
+  vol_lookback_seconds: [14400]
+  edge_buffer: [0.02]
+  stop_loss_pct: [null]
+  drift_lookback_seconds: [0]
+
+run:
+  train_markets: 60
+  test_markets: 65
+  step_markets: 65
+  max_workers: 12

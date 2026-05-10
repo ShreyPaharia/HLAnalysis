@@ -1,0 +1,28 @@
+# v1 sig5m sweep: hold v1-exit-best fixed; sweep exit_safety_d_5m (fast σ exit gate).
+# Layered on top of exit_safety_d (σ_1h). Train 255 markets, 3 splits.
+
+v1_grid:
+  tte_min_seconds: [0]
+  tte_max_seconds: [7200]
+  price_extreme_threshold: [0.90]
+  price_extreme_max: [0.995]
+  distance_from_strike_usd_min: [0]
+  vol_max: [100]
+  stop_loss_pct: [null]
+  min_safety_d: [1.5]
+  vol_lookback_seconds: [3600]
+  exit_safety_d: [1.0]
+  exit_safety_d_5m: [0.0, 0.3, 0.5, 0.7, 1.0]
+  exit_vol_lookback_5m_seconds: [300]
+
+v2_grid:
+  vol_lookback_seconds: [14400]
+  edge_buffer: [0.02]
+  stop_loss_pct: [null]
+  drift_lookback_seconds: [0]
+
+run:
+  train_markets: 60
+  test_markets: 65
+  step_markets: 65
+  max_workers: 12
