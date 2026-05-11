@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.stats import norm  # type: ignore[import-untyped]
 
+from ._numba.vol import sample_std_returns as _nb_sample_std
 from .base import Strategy
 from .types import (
     Action, BookState, Decision, Diagnostic, OrderIntent, Position, QuestionView,
@@ -104,7 +105,7 @@ class ModelEdgeStrategy(Strategy):
         returns_window = recent_returns[-n_keep:]
         if len(returns_window) < 2:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "vol_insufficient_data"),))
-        sigma_raw = float(np.std(returns_window, ddof=1))
+        sigma_raw = float(_nb_sample_std(np.asarray(returns_window, dtype=np.float64)))
         ann_factor = math.sqrt(_ANNUAL_SECONDS / float(self.cfg.vol_sampling_dt_seconds))
         sigma = max(self.cfg.vol_clip_min, min(self.cfg.vol_clip_max, sigma_raw * ann_factor))
         if sigma <= 0:
