@@ -19,6 +19,117 @@ from .types import (
 )
 
 
+def _kv_get(qv: QuestionView, key: str) -> str:
+    for k, v in qv.kv:
+        if k == key:
+            return v
+    return ""
+
+
+def _winning_region(
+    qv: QuestionView, symbol: str
+) -> tuple[float | None, float | None]:
+    """Return (lo, hi) such that the leg `symbol` wins iff BTC ∈ [lo, hi] at
+    expiry. ``None`` denotes an unbounded side (-∞ for lo, +∞ for hi).
+
+    Binary YES wins above strike → (strike, None); NO wins at-or-below → (None, strike).
+    Bucket layout (HL convention, N thresholds yield N+1 outcomes, 2 legs each;
+    YES at even leg index, NO at odd):
+      outcome 0       (lowest)  → (None, thr[0])
+      outcome 1..N-1  (middle)  → (thr[i-1], thr[i])
+      outcome N       (highest) → (thr[-1], None)
+    NO legs invert the corresponding YES region (winning region splits into two
+    half-lines for middle buckets — collapse to whichever half-line a strict
+    inversion would yield; this helper instead returns the YES bucket bounds and
+    callers compute safety_d against the NEAREST adverse boundary, which is
+    correct for both YES and the half-line NO cases).
+    """
+    if qv.klass == "priceBinary":
+        if symbol == qv.yes_symbol:
+            return (qv.strike, None)
+        if symbol == qv.no_symbol:
+            return (None, qv.strike)
+        return (None, None)
+
+    if qv.klass != "priceBucket" or not qv.leg_symbols or symbol not in qv.leg_symbols:
+        return (None, None)
+
+    thresholds_raw = _kv_get(qv, "priceThresholds")
+    thr = [float(t) for t in thresholds_raw.split(",") if t.strip()]
+    if not thr:
+        return (None, None)
+
+    idx = qv.leg_symbols.index(symbol)
+    outcome_pos = idx // 2
+    side_idx = idx % 2  # 0=YES, 1=NO
+
+    # YES region for this outcome bucket.
+    if outcome_pos == 0:
+        yes_lo: float | None = None
+        yes_hi: float | None = thr[0]
+    elif outcome_pos == len(thr):
+        yes_lo, yes_hi = thr[-1], None
+    elif 0 < outcome_pos < len(thr):
+        yes_lo, yes_hi = thr[outcome_pos - 1], thr[outcome_pos]
+    else:
+        return (None, None)
+
+    if side_idx == 0:
+        return (yes_lo, yes_hi)
+
+    # NO of a single-sided bucket inverts to the opposite half-line.
+    if yes_lo is None:
+        return (yes_hi, None)
+    if yes_hi is None:
+        return (None, yes_lo)
+    # NO of a middle bucket is the union of two half-lines; not a contiguous
+    # winning region. Callers treat (None, None) as "no leg-level gate" and
+    # fall back to non-safety exits (stop-loss, settlement). Buying NO of a
+    # middle bucket is disallowed anyway by the YES-only entry path.
+    return (None, None)
+
+
+def _safety_d_for_region(
+    *,
+    ref_price: float,
+    lo: float | None,
+    hi: float | None,
+    sigma_window: float,
+    mu: float,
+    tte_min: float,
+    drift_aware: bool,
+) -> float | None:
+    """Signed safety distance (in σ-window units) from ``ref_price`` to the
+    nearer adverse boundary of the leg's winning region.
+
+    Returns ``None`` when neither boundary is known (e.g. NO leg of a middle
+    bucket). Positive values mean BTC is safely inside the winning region;
+    negative means already on the losing side.
+
+    Drift adjustment shifts the distance by μ·τ in the adverse direction
+    (positive μ raises safety for lower-bounded legs, lowers it for
+    upper-bounded). Two-sided (middle bucket) drops drift because there is
+    no single adverse direction.
+    """
+    if sigma_window <= 0:
+        return None
+    if lo is not None and hi is not None:
+        d_unscaled = min(math.log(ref_price / lo), math.log(hi / ref_price))
+        # drift dropped for two-sided regions.
+        return d_unscaled / sigma_window
+    if lo is not None and hi is None:
+        d_unscaled = math.log(ref_price / lo)
+        if drift_aware:
+            d_unscaled += mu * tte_min
+        return d_unscaled / sigma_window
+    if lo is None and hi is not None:
+        d_unscaled = math.log(hi / ref_price)
+        if drift_aware:
+            d_unscaled -= mu * tte_min
+        return d_unscaled / sigma_window
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class LateResolutionConfig:
     tte_min_seconds: int
@@ -177,23 +288,29 @@ class LateResolutionStrategy(Strategy):
             # Fall through to stdev if Parkinson degenerates (all H==L).
         return self._sigma_stdev(returns_window)
 
-    def _safety_d(
+    def _safety_d_for_leg(
         self,
         *,
+        question: QuestionView,
+        leg_symbol: str,
         ref_price: float,
-        strike: float,
         sigma_window: float,
         returns_window: tuple[float, ...] | np.ndarray,
         tte_min: float,
-    ) -> float:
-        """safety_d in either symmetric (|ln S/K|) or drift-aware form. Larger = safer."""
-        log_sk = math.log(ref_price / strike)
-        if self.cfg.drift_aware_d and len(returns_window) >= 2:
-            mu = float(np.mean(returns_window))
-            sign = 1.0 if log_sk >= 0 else -1.0
-            adjusted = sign * (log_sk + mu * tte_min)
-            return adjusted / sigma_window
-        return abs(log_sk) / sigma_window
+    ) -> float | None:
+        """Leg-aware safety_d. Returns None when the leg has no contiguous
+        winning region (e.g. NO of a middle bucket), σ_window is 0, or the
+        helper inputs are non-positive — callers treat None as "gate skipped".
+        """
+        lo, hi = _winning_region(question, leg_symbol)
+        if lo is None and hi is None:
+            return None
+        mu = float(np.mean(returns_window)) if len(returns_window) >= 2 else 0.0
+        return _safety_d_for_region(
+            ref_price=ref_price, lo=lo, hi=hi,
+            sigma_window=sigma_window, mu=mu, tte_min=tte_min,
+            drift_aware=self.cfg.drift_aware_d,
+        )
 
     def evaluate(
         self,
@@ -254,8 +371,6 @@ class LateResolutionStrategy(Strategy):
             # below remains active as the slower confirmation.
             if (
                 self.cfg.exit_safety_d_5m > 0.0
-                and question.klass == "priceBinary"
-                and question.strike > 0
                 and reference_price > 0
                 and held_book is not None
                 and held_book.bid_px is not None
@@ -278,31 +393,31 @@ class LateResolutionStrategy(Strategy):
                     if len(rw_5m) >= 2:
                         vol_5m = self._sigma(rw_5m, hl_5m)
                         sigma_window_5m = vol_5m * math.sqrt(max(tte_s_now_5m / 60.0, 1.0))
-                        if sigma_window_5m > 0:
-                            safety_d_5m = self._safety_d(
-                                ref_price=reference_price, strike=question.strike,
-                                sigma_window=sigma_window_5m, returns_window=rw_5m,
-                                tte_min=tte_s_now_5m / 60.0,
+                        safety_d_5m = self._safety_d_for_leg(
+                            question=question, leg_symbol=position.symbol,
+                            ref_price=reference_price,
+                            sigma_window=sigma_window_5m, returns_window=rw_5m,
+                            tte_min=tte_s_now_5m / 60.0,
+                        )
+                        if safety_d_5m is not None and safety_d_5m < self.cfg.exit_safety_d_5m:
+                            intent = OrderIntent(
+                                question_idx=question.question_idx,
+                                symbol=position.symbol,
+                                side="sell" if position.qty > 0 else "buy",
+                                size=abs(position.qty),
+                                limit_price=held_book.bid_px,
+                                cloid=f"hla-{uuid.uuid4()}",
+                                time_in_force="ioc",
+                                reduce_only=True,
                             )
-                            if safety_d_5m < self.cfg.exit_safety_d_5m:
-                                intent = OrderIntent(
-                                    question_idx=question.question_idx,
-                                    symbol=position.symbol,
-                                    side="sell" if position.qty > 0 else "buy",
-                                    size=abs(position.qty),
-                                    limit_price=held_book.bid_px,
-                                    cloid=f"hla-{uuid.uuid4()}",
-                                    time_in_force="ioc",
-                                    reduce_only=True,
-                                )
-                                return Decision(
-                                    action=Action.EXIT,
-                                    intents=(intent,),
-                                    diagnostics=(
-                                        Diagnostic("warn", "exit_safety_d_5m_below_min",
-                                                   (("d", f"{safety_d_5m:.3f}"),)),
-                                    ),
-                                )
+                            return Decision(
+                                action=Action.EXIT,
+                                intents=(intent,),
+                                diagnostics=(
+                                    Diagnostic("warn", "exit_safety_d_5m_below_min",
+                                               (("d", f"{safety_d_5m:.3f}"),)),
+                                ),
+                            )
 
             # Mid-hold safety_d exit: re-evaluate the same gate used at entry.
             # Fires before stop-loss so a regime-change flip can be cut at bid
@@ -310,8 +425,6 @@ class LateResolutionStrategy(Strategy):
             # because √tte_min would underflow and safety_d explodes.
             if (
                 self.cfg.exit_safety_d > 0.0
-                and question.klass == "priceBinary"
-                and question.strike > 0
                 and reference_price > 0
                 and held_book is not None
                 and held_book.bid_px is not None
@@ -330,31 +443,31 @@ class LateResolutionStrategy(Strategy):
                     if len(rw) >= 2:
                         vol_now = self._sigma(rw, hl)
                         sigma_window = vol_now * math.sqrt(max(tte_s_now / 60.0, 1.0))
-                        if sigma_window > 0:
-                            safety_d_now = self._safety_d(
-                                ref_price=reference_price, strike=question.strike,
-                                sigma_window=sigma_window, returns_window=rw,
-                                tte_min=tte_s_now / 60.0,
+                        safety_d_now = self._safety_d_for_leg(
+                            question=question, leg_symbol=position.symbol,
+                            ref_price=reference_price,
+                            sigma_window=sigma_window, returns_window=rw,
+                            tte_min=tte_s_now / 60.0,
+                        )
+                        if safety_d_now is not None and safety_d_now < self.cfg.exit_safety_d:
+                            intent = OrderIntent(
+                                question_idx=question.question_idx,
+                                symbol=position.symbol,
+                                side="sell" if position.qty > 0 else "buy",
+                                size=abs(position.qty),
+                                limit_price=held_book.bid_px,
+                                cloid=f"hla-{uuid.uuid4()}",
+                                time_in_force="ioc",
+                                reduce_only=True,
                             )
-                            if safety_d_now < self.cfg.exit_safety_d:
-                                intent = OrderIntent(
-                                    question_idx=question.question_idx,
-                                    symbol=position.symbol,
-                                    side="sell" if position.qty > 0 else "buy",
-                                    size=abs(position.qty),
-                                    limit_price=held_book.bid_px,
-                                    cloid=f"hla-{uuid.uuid4()}",
-                                    time_in_force="ioc",
-                                    reduce_only=True,
-                                )
-                                return Decision(
-                                    action=Action.EXIT,
-                                    intents=(intent,),
-                                    diagnostics=(
-                                        Diagnostic("warn", "exit_safety_d_below_min",
-                                                   (("d", f"{safety_d_now:.3f}"),)),
-                                    ),
-                                )
+                            return Decision(
+                                action=Action.EXIT,
+                                intents=(intent,),
+                                diagnostics=(
+                                    Diagnostic("warn", "exit_safety_d_below_min",
+                                               (("d", f"{safety_d_now:.3f}"),)),
+                                ),
+                            )
 
             # Soft stop-loss signal. The risk gate is the authoritative enforcer
             # (Plan 1B); we mirror it here so logging/diagnostics line up.
@@ -446,20 +559,24 @@ class LateResolutionStrategy(Strategy):
                 Diagnostic("info", "vol_above_cap", (("vol", f"{vol:.4f}"),)),
             ))
 
-        # 6b) Joint safety gate: how many σ is BTC from the strike given remaining
-        # time? safety_d = |ln(BTC/strike)| / (σ_1m * sqrt(tte_min)). Skip when too
-        # close to the flip line. Only meaningful for binaries with a real strike.
+        # 6b) Joint safety gate: how many σ from the leg's winning region is BTC
+        # given remaining time? For binary YES leg the region is (strike, +∞)
+        # and d collapses to ln(BTC/strike) / (σ * sqrt(tte_min)) — the legacy
+        # binary formula. For priceBucket legs the region is the bucket's
+        # (lo, hi); d uses the nearer adverse boundary. None = no leg-level
+        # gate available (rare); treat as skip.
         # Side effect: when computed, `safety_d_entry` is retained for size scaling.
         safety_d_entry: float | None = None
-        if self.cfg.min_safety_d > 0.0 and question.klass == "priceBinary" and question.strike > 0 and reference_price > 0:
+        if self.cfg.min_safety_d > 0.0 and reference_price > 0:
             tte_min = max(tte_s / 60.0, 1.0)
             sigma_window = vol * math.sqrt(tte_min)
-            if sigma_window > 0:
-                safety_d = self._safety_d(
-                    ref_price=reference_price, strike=question.strike,
-                    sigma_window=sigma_window, returns_window=returns_window,
-                    tte_min=tte_min,
-                )
+            safety_d = self._safety_d_for_leg(
+                question=question, leg_symbol=win_symbol,
+                ref_price=reference_price,
+                sigma_window=sigma_window, returns_window=returns_window,
+                tte_min=tte_min,
+            )
+            if safety_d is not None:
                 if safety_d < self.cfg.min_safety_d:
                     return Decision(action=Action.HOLD, diagnostics=(
                         Diagnostic("info", "safety_d_below_min",
