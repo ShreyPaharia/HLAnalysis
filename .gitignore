@@ -1,5 +1,6 @@
-/data/
-/data-local/
+data/
+!hlanalysis/**/data/
+data-local/
 .venv/
 venv/
 __pycache__/
