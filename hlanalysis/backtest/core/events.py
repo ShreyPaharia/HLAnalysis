@@ -1,13 +1,9 @@
-"""Market event dataclasses. Local mirror of §3.1 from
-docs/specs/2026-05-11-backtester-rebuild.md until Task A's PR merges.
+"""Market event dataclasses (spec §3.1).
 
-The §3 contract is frozen: tasks B/C/D mirror these definitions locally and
-Task E (integration) drops the mirrors and re-targets the real imports.
-
-Additive vs §3.1: `SettlementEvent.symbol: str = ""` is added (default empty)
-so multi-outcome (bucket) markets can key per-leg outcomes to the leg symbol,
-as required by §3.4. This is the only deviation; the field is optional so
-Task A's mirror remains forward-compatible.
+Additive vs the original §3.1: ``SettlementEvent.symbol: str = ""`` is added
+(default empty) so multi-outcome (bucket) markets can key per-leg outcomes to
+the leg symbol, as required by §3.4. Binary sources may leave it as the empty
+string; the runner falls back to ``q.leg_symbols`` ordering in that case.
 """
 from __future__ import annotations
 
