@@ -8,11 +8,6 @@ Reference-price source: HL perp BTC BBO mid (falls back to perp ``mark`` if BBO
 is empty over the requested window). HIP-4 binaries settle off the HL perp mark,
 so perp is the correct underlying. BBO is denser than mark in the recorded data
 (~2× rows historical), so it's the primary reference.
-
-The §3.1/§3.2 dataclasses + ``DataSource`` Protocol live inline in this module
-as a temporary mirror until task A's ``hlanalysis/backtest/core/`` PR lands. The
-integration pass (task E) drops the mirror and re-points imports.
-TODO(task-E): drop ``_LocalMirror`` block and import from ``hlanalysis.backtest.core``.
 """
 from __future__ import annotations
 
@@ -24,74 +19,22 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal, Protocol, Union
+from typing import Any, Literal
 
 import duckdb
 
 from hlanalysis.strategy.types import QuestionView
 
+from ..core.data_source import DataSource, QuestionDescriptor
+from ..core.events import (
+    BookSnapshot,
+    MarketEvent,
+    ReferenceEvent,
+    SettlementEvent,
+    TradeEvent,
+)
+
 log = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Local mirror of the §3 contract types. Drop once task A merges.
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class BookSnapshot:
-    ts_ns: int
-    symbol: str
-    bids: tuple[tuple[float, float], ...]
-    asks: tuple[tuple[float, float], ...]
-
-
-@dataclass(frozen=True, slots=True)
-class TradeEvent:
-    ts_ns: int
-    symbol: str
-    side: Literal["buy", "sell"]
-    price: float
-    size: float
-
-
-@dataclass(frozen=True, slots=True)
-class ReferenceEvent:
-    ts_ns: int
-    symbol: str
-    high: float
-    low: float
-    close: float
-
-
-@dataclass(frozen=True, slots=True)
-class SettlementEvent:
-    ts_ns: int
-    question_idx: int
-    outcome: Literal["yes", "no", "unknown"]
-
-
-MarketEvent = Union[BookSnapshot, TradeEvent, ReferenceEvent, SettlementEvent]
-
-
-@dataclass(frozen=True, slots=True)
-class QuestionDescriptor:
-    question_id: str
-    question_idx: int
-    start_ts_ns: int
-    end_ts_ns: int
-    leg_symbols: tuple[str, ...]
-    klass: str
-    underlying: str
-
-
-class DataSource(Protocol):
-    name: str
-
-    def discover(self, *, start: str, end: str, **filters: Any) -> list[QuestionDescriptor]: ...
-    def events(self, q: QuestionDescriptor) -> Iterator[MarketEvent]: ...
-    def question_view(self, q: QuestionDescriptor, *, now_ns: int, settled: bool) -> QuestionView: ...
-    def resolved_outcome(self, q: QuestionDescriptor) -> Literal["yes", "no", "unknown"]: ...
 
 
 # ---------------------------------------------------------------------------

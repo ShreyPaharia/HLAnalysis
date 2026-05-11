@@ -12,13 +12,15 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from hlanalysis.backtest.data.hl_hip4 import (
+from hlanalysis.backtest.core.data_source import QuestionDescriptor
+from hlanalysis.backtest.core.events import (
     BookSnapshot,
-    HLHip4DataSource,
-    QuestionDescriptor,
     ReferenceEvent,
     SettlementEvent,
     TradeEvent,
+)
+from hlanalysis.backtest.data.hl_hip4 import (
+    HLHip4DataSource,
     _expiry_ns,
     _iso_to_ns,
     _leg_for,

@@ -15,14 +15,14 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
-from hlanalysis.backtest.data.hl_hip4 import (
+from hlanalysis.backtest.core.events import (
     BookSnapshot,
-    HLHip4DataSource,
     MarketEvent,
     ReferenceEvent,
     SettlementEvent,
     TradeEvent,
 )
+from hlanalysis.backtest.data.hl_hip4 import HLHip4DataSource
 
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "hl_hip4"

@@ -19,10 +19,15 @@ ALLOWED_DIRECT_PREFIXES = {
 
 FORBIDDEN_PREFIXES = {
     "hlanalysis.engine",
-    "hlanalysis.sim",
     "hlanalysis.alerts",
     "hlanalysis.adapters",
     "hlanalysis.recorder",
+    "hlanalysis.backtest.runner",
+    "hlanalysis.backtest.data",
+    "hlanalysis.backtest.cli",
+    "hlanalysis.backtest.tuning",
+    "hlanalysis.backtest.report",
+    "hlanalysis.backtest.plots",
     "aiohttp",
     "httpx",
     "requests",
@@ -45,21 +50,27 @@ def _walk_strategy_modules() -> list[str]:
 
 
 def test_strategy_modules_have_no_forbidden_imports():
+    """strategy/ stays free of IO + heavyweight modules.
+
+    `hlanalysis.backtest.core.registry` is intentionally permitted: it is a
+    dependency-free decorator that lets strategy modules self-register at
+    import time. Everything heavier (runner, CLI, data sources) remains
+    forbidden — see FORBIDDEN_PREFIXES.
+    """
     offenders: list[str] = []
     for modname in _walk_strategy_modules():
         importlib.import_module(modname)
         mod = sys.modules[modname]
-        # Inspect raw source to catch direct imports without being misled by
-        # what other test modules already loaded into sys.modules.
         src = open(mod.__file__).read() if mod.__file__ else ""
-        for forbidden in FORBIDDEN_PREFIXES:
-            base = forbidden.split(".")[0]
-            for line in src.splitlines():
-                stripped = line.strip()
-                if stripped.startswith(("import ", "from ")):
-                    head = stripped.split()[1].split(".")[0]
-                    if head == base:
-                        offenders.append(f"{modname}: {stripped}")
+        for line in src.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith(("import ", "from ")):
+                continue
+            imported = stripped.split()[1]
+            for forbidden in FORBIDDEN_PREFIXES:
+                if imported == forbidden or imported.startswith(forbidden + "."):
+                    offenders.append(f"{modname}: {stripped}")
+                    break
     assert not offenders, "strategy/ has forbidden imports:\n  " + "\n  ".join(offenders)
 
 
