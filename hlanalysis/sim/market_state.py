@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
 from hlanalysis.strategy._numba.returns_buffer import KlineRingBuffer
 from hlanalysis.strategy.types import BookState
 
@@ -50,18 +52,22 @@ class SimMarketState:
 
     def recent_returns(
         self, *, now_ns: int, lookback_seconds: int
-    ) -> tuple[float, ...]:
-        rets, _hls = self._klines.slice_window(
+    ) -> np.ndarray:
+        """1-D float64 of in-window log returns. (Was ``tuple[float, ...]`` —
+        switched to ndarray for the hot path; ``len()`` and indexing
+        semantics are preserved so existing callers and tests are unchanged.)
+        """
+        rets, _hl = self._klines.slice_window(
             now_ns=now_ns, lookback_seconds=lookback_seconds
         )
         return rets
 
     def recent_hl_bars(
         self, *, now_ns: int, lookback_seconds: int
-    ) -> tuple[tuple[float, float], ...]:
-        """Return (high, low) tuples for klines in the lookback window. Used by
-        the Parkinson range-based σ estimator."""
-        _rets, hls = self._klines.slice_window(
+    ) -> np.ndarray:
+        """2-D float64 of shape ``(N, 2)`` with rows ``[high, low]`` for
+        in-window bars. (Was ``tuple[tuple[float, float], ...]``.)"""
+        _rets, hl = self._klines.slice_window(
             now_ns=now_ns, lookback_seconds=lookback_seconds
         )
-        return hls
+        return hl
