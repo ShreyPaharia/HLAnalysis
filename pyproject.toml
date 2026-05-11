@@ -19,6 +19,7 @@ dependencies = [
   "tenacity>=9.0",
   "scipy>=1.14",
   "hftbacktest>=2.0",
+  "numba>=0.65",
   "plotly>=5.20",
 ]
 

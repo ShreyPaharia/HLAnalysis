@@ -1,10 +1,11 @@
 # hlanalysis/sim/market_state.py
 from __future__ import annotations
 
-import math
-from collections import deque
 from dataclasses import dataclass
 
+import numpy as np
+
+from hlanalysis.strategy._numba.returns_buffer import KlineRingBuffer
 from hlanalysis.strategy.types import BookState
 
 from .data.binance_klines import Kline
@@ -16,11 +17,11 @@ class SimMarketState:
     """In-memory book + recent BTC log-returns. Strategies decide their own
     sampling cadence; this just collects the inputs."""
     _books: dict[str, BookState] = None  # type: ignore[assignment]
-    _kline_closes: deque = None          # type: ignore[assignment]
+    _klines: KlineRingBuffer = None      # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         self._books = {}
-        self._kline_closes = deque()  # (ts_ns, high, low, close)
+        self._klines = KlineRingBuffer()
 
     def apply_l2(self, snap: L2Snapshot) -> None:
         self._books[snap.token_id] = BookState(
@@ -44,34 +45,29 @@ class SimMarketState:
         return self._books.get(token_id)
 
     def apply_kline(self, k: Kline) -> None:
-        # Store (ts, high, low, close) so the Parkinson range estimator has the
-        # H/L it needs while preserving close-to-close returns.
-        self._kline_closes.append((k.ts_ns, k.high, k.low, k.close))
+        self._klines.append(ts_ns=k.ts_ns, high=k.high, low=k.low, close=k.close)
 
     def latest_btc_close(self) -> float | None:
-        return self._kline_closes[-1][3] if self._kline_closes else None
+        return self._klines.latest_close()
 
-    def recent_returns(self, *, now_ns: int, lookback_seconds: int) -> tuple[float, ...]:
-        window_ns = lookback_seconds * 1_000_000_000
-        cutoff = now_ns - window_ns
-        prices = [(t, c) for (t, _h, _l, c) in self._kline_closes if t >= cutoff and t <= now_ns]
-        if len(prices) < 2:
-            return ()
-        returns = []
-        for i in range(1, len(prices)):
-            p_prev, p_now = prices[i - 1][1], prices[i][1]
-            if p_prev > 0 and p_now > 0:
-                returns.append(math.log(p_now / p_prev))
-        return tuple(returns)
+    def recent_returns(
+        self, *, now_ns: int, lookback_seconds: int
+    ) -> np.ndarray:
+        """1-D float64 of in-window log returns. (Was ``tuple[float, ...]`` —
+        switched to ndarray for the hot path; ``len()`` and indexing
+        semantics are preserved so existing callers and tests are unchanged.)
+        """
+        rets, _hl = self._klines.slice_window(
+            now_ns=now_ns, lookback_seconds=lookback_seconds
+        )
+        return rets
 
     def recent_hl_bars(
         self, *, now_ns: int, lookback_seconds: int
-    ) -> tuple[tuple[float, float], ...]:
-        """Return (high, low) tuples for klines in the lookback window. Used by
-        the Parkinson range-based σ estimator."""
-        window_ns = lookback_seconds * 1_000_000_000
-        cutoff = now_ns - window_ns
-        return tuple(
-            (h, l) for (t, h, l, _c) in self._kline_closes
-            if t >= cutoff and t <= now_ns and h > 0 and l > 0
+    ) -> np.ndarray:
+        """2-D float64 of shape ``(N, 2)`` with rows ``[high, low]`` for
+        in-window bars. (Was ``tuple[tuple[float, float], ...]``.)"""
+        _rets, hl = self._klines.slice_window(
+            now_ns=now_ns, lookback_seconds=lookback_seconds
         )
+        return hl

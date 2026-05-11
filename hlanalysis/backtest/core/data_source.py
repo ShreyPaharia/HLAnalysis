@@ -1,3 +1,4 @@
+"""DataSource protocol + QuestionDescriptor (spec §3.2)."""
 from __future__ import annotations
 
 from collections.abc import Iterator

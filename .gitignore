@@ -1,6 +1,5 @@
 data/
-!hlanalysis/backtest/data/
-hlanalysis/backtest/data/__pycache__/
+!hlanalysis/**/data/
 data-local/
 .venv/
 venv/

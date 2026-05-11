@@ -7,6 +7,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ._numba.safety import safety_d_for_region_core as _nb_safety_d_core
+from ._numba.vol import (
+    ewma_std as _nb_ewma_std,
+    parkinson_sigma_window as _nb_parkinson_sigma_window,
+    sample_std_returns as _nb_sample_std,
+)
 from .base import Strategy
 from .types import (
     Action,
@@ -17,6 +23,14 @@ from .types import (
     Position,
     QuestionView,
 )
+
+
+def _as_f64(x) -> np.ndarray:
+    """Coerce ``tuple[float, ...] | list | ndarray`` to a contiguous float64
+    1-D array. Cheap O(N) Python-loop-free conversion at the JIT boundary."""
+    if isinstance(x, np.ndarray) and x.dtype == np.float64 and x.flags["C_CONTIGUOUS"]:
+        return x
+    return np.asarray(x, dtype=np.float64)
 
 
 def _kv_get(qv: QuestionView, key: str) -> str:
@@ -106,28 +120,26 @@ def _safety_d_for_region(
     bucket). Positive values mean BTC is safely inside the winning region;
     negative means already on the losing side.
 
-    Drift adjustment shifts the distance by μ·τ in the adverse direction
-    (positive μ raises safety for lower-bounded legs, lowers it for
-    upper-bounded). Two-sided (middle bucket) drops drift because there is
-    no single adverse direction.
+    Thin Optional wrapper around the JIT'd
+    ``_numba.safety.safety_d_for_region_core``: encodes ``None`` bounds as
+    flag/value pairs, then maps the JIT's NaN sentinel back to ``None``.
     """
-    if sigma_window <= 0:
+    has_lo = lo is not None
+    has_hi = hi is not None
+    val = _nb_safety_d_core(
+        float(ref_price),
+        has_lo,
+        float(lo) if has_lo else 0.0,
+        has_hi,
+        float(hi) if has_hi else 0.0,
+        float(sigma_window),
+        float(mu),
+        float(tte_min),
+        bool(drift_aware),
+    )
+    if math.isnan(val):
         return None
-    if lo is not None and hi is not None:
-        d_unscaled = min(math.log(ref_price / lo), math.log(hi / ref_price))
-        # drift dropped for two-sided regions.
-        return d_unscaled / sigma_window
-    if lo is not None and hi is None:
-        d_unscaled = math.log(ref_price / lo)
-        if drift_aware:
-            d_unscaled += mu * tte_min
-        return d_unscaled / sigma_window
-    if lo is None and hi is not None:
-        d_unscaled = math.log(hi / ref_price)
-        if drift_aware:
-            d_unscaled -= mu * tte_min
-        return d_unscaled / sigma_window
-    return None
+    return float(val)
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,56 +234,48 @@ class LateResolutionStrategy(Strategy):
     def __init__(self, cfg: LateResolutionConfig) -> None:
         self.cfg = cfg
 
-    # 1 / (4 ln 2): Parkinson's normalisation constant for (ln H/L)² → variance.
+    # 1 / (4 ln 2): kept for backward reference (consumers used to reach
+    # for it before the JIT helpers landed). The Parkinson constant now lives
+    # in `_numba.vol`.
     _PARK_K = 1.0 / (4.0 * math.log(2.0))
 
     @staticmethod
     def _ewma_std(returns: tuple[float, ...] | np.ndarray, lam: float) -> float:
-        """Recursive EWMA stdev of returns. σ²_t = λ·σ²_{t-1} + (1-λ)·r²_t,
-        seeded σ²_0 = r²_0. Caller must ensure len(returns) >= 1."""
-        var = float(returns[0]) ** 2
-        for r in returns[1:]:
-            rf = float(r)
-            var = lam * var + (1.0 - lam) * rf * rf
-        return math.sqrt(var)
-
-    @classmethod
-    def _parkinson_per_bar_var(
-        cls, hl_bars: tuple[tuple[float, float], ...] | np.ndarray
-    ) -> list[float]:
-        """Per-bar Parkinson variance estimates: σ²_i = (ln(H_i/L_i))² / (4 ln 2).
-        Returns an empty list if no bars have H > L > 0."""
-        out: list[float] = []
-        for h, l in hl_bars:
-            hf = float(h)
-            lf = float(l)
-            if hf > 0 and lf > 0 and hf >= lf:
-                ln_hl = math.log(hf / lf) if lf > 0 else 0.0
-                out.append(cls._PARK_K * ln_hl * ln_hl)
-        return out
+        """Recursive EWMA stdev of returns. Delegates to the JIT'd helper;
+        Python signature preserved for callers/tests."""
+        return float(_nb_ewma_std(_as_f64(returns), float(lam)))
 
     def _sigma_stdev(
         self, returns_window: tuple[float, ...] | np.ndarray
     ) -> float:
+        arr = _as_f64(returns_window)
         if self.cfg.vol_ewma_lambda > 0.0:
-            return self._ewma_std(returns_window, self.cfg.vol_ewma_lambda)
-        return float(np.std(returns_window, ddof=1))
+            return float(_nb_ewma_std(arr, float(self.cfg.vol_ewma_lambda)))
+        return float(_nb_sample_std(arr))
 
     def _sigma_parkinson(
         self, hl_window: tuple[tuple[float, float], ...] | np.ndarray
     ) -> float:
-        """Window-level Parkinson σ. With EWMA: variance decays by λ across bars
-        (same recursion as close-to-close), else arithmetic mean of per-bar σ²."""
-        per_bar_var = self._parkinson_per_bar_var(hl_window)
-        if not per_bar_var:
-            return 0.0
-        if self.cfg.vol_ewma_lambda > 0.0:
-            var = per_bar_var[0]
-            lam = self.cfg.vol_ewma_lambda
-            for v in per_bar_var[1:]:
-                var = lam * var + (1.0 - lam) * v
-            return math.sqrt(max(var, 0.0))
-        return math.sqrt(sum(per_bar_var) / len(per_bar_var))
+        """Window-level Parkinson σ via JIT helper. With EWMA: variance decays
+        by λ across bars; else arithmetic mean of per-bar σ²."""
+        if isinstance(hl_window, np.ndarray):
+            hl_arr = np.ascontiguousarray(hl_window, dtype=np.float64)
+            if hl_arr.size == 0:
+                return 0.0
+            highs = hl_arr[:, 0]
+            lows = hl_arr[:, 1]
+        else:
+            n = len(hl_window)
+            if n == 0:
+                return 0.0
+            highs = np.empty(n, dtype=np.float64)
+            lows = np.empty(n, dtype=np.float64)
+            for i, (h, l) in enumerate(hl_window):
+                highs[i] = h
+                lows[i] = l
+        return float(
+            _nb_parkinson_sigma_window(highs, lows, float(self.cfg.vol_ewma_lambda))
+        )
 
     def _sigma(
         self,
