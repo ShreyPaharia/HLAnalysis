@@ -1,4 +1,5 @@
 data/
+!hlanalysis/**/data/
 data-local/
 .venv/
 venv/
