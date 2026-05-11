@@ -1,4 +1,6 @@
 data/
+!hlanalysis/sim/data/
+!hlanalysis/backtest/data/
 data-local/
 .venv/
 venv/

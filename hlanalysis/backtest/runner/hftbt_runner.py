@@ -303,13 +303,21 @@ def run_one_question(
             settle_events.append(ev)
 
     # --- Build hftbacktest assets per leg ---------------------------------
+    # ``BacktestAsset.data(ndarray)`` stashes the array's ctypes pointer in the
+    # native engine. The Python array must stay alive for the entire backtest;
+    # otherwise GC frees it and the engine reads dangling memory (visible as
+    # NaN bids/asks and a corrupted ``current_timestamp``). We hold the per-leg
+    # arrays in ``_data_keepalive`` for the lifetime of this call.
     assets = []
     leg_to_asset: dict[str, int] = {}
+    _data_keepalive: list[np.ndarray] = []
     for i, sym in enumerate(q.leg_symbols):
         leg_arr = _build_leg_event_array(book_events[sym], trade_events[sym])
-        # Prepend two depth-clear events so the asset starts with an empty book.
         clear_arr = _initial_clear_array(q.start_ts_ns)
-        full = np.concatenate([clear_arr, leg_arr]) if len(leg_arr) > 0 else clear_arr
+        full = (
+            np.concatenate([clear_arr, leg_arr]) if len(leg_arr) > 0 else clear_arr
+        )
+        _data_keepalive.append(full)
         assets.append(_build_asset(full, cfg))
         leg_to_asset[sym] = i
 
@@ -374,12 +382,19 @@ def run_one_question(
         )
 
     # --- Scan loop ---------------------------------------------------------
+    # The engine's `elapse(duration)` returns 1 when the *internal clock* runs
+    # past the last data event, but pinning the loop on `q.end_ts_ns` is the
+    # authoritative termination (some hftbacktest builds keep returning 0 when
+    # the clock advances past the data without there being a *next* event to
+    # report end-of-data on). Both are checked.
     while True:
         rc = hbt.elapse(scan_interval_ns)
         if rc != 0:
             break
 
         now_ns = int(hbt.current_timestamp)
+        if now_ns >= q.end_ts_ns:
+            break
 
         # Drain reference events up to now into MarketState.
         while ref_idx < len(ref_events) and ref_events[ref_idx].ts_ns <= now_ns:
