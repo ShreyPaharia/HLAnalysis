@@ -604,3 +604,36 @@ def test_bucket_exit_safety_d_fires_when_btc_exits_middle_bucket():
     assert d.intents[0].symbol == "@42"
     assert d.intents[0].side == "sell"
     assert d.intents[0].reduce_only is True
+
+
+# --- Entry size respects the risk gate's notional = size * limit_price cap ---
+
+
+def test_entry_notional_never_exceeds_max_position_usd():
+    # ask just below the limit cap is the bug regime: floor(size_usd/ask) on
+    # 0.01 contracts yields ~100.10 contracts, then size * limit_price (1.0) =
+    # 100.10 > cap 100, and the risk gate vetoes every order in a tight loop.
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = {
+        "@30": _ref_book("@30", ask=0.99899, bid=0.99, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.02, bid=0.01, ts_ns=now - 100),
+    }
+    # price_extreme_max=1.0 (default) — matches prod config.
+    cfg = _cfg(
+        price_extreme_threshold=0.95,
+        max_position_usd=100.0,
+        min_recent_volume_usd=0.0,
+    )
+    d = LateResolutionStrategy(cfg).evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=None, now_ns=now,
+    )
+    assert d.action is Action.ENTER
+    intent = d.intents[0]
+    notional = intent.size * intent.limit_price
+    assert notional <= cfg.max_position_usd, (
+        f"notional {notional} would trip risk gate cap {cfg.max_position_usd}"
+    )

@@ -590,8 +590,10 @@ class LateResolutionStrategy(Strategy):
                 Diagnostic("info", "low_volume", (("vol_usd", f"{recent_volume_usd:.0f}")),),
             ))
 
-        # 8) Build the IOC intent. Size = max_position_usd / ask_px, taking entry
-        # cost as a proxy for notional. Risk gate caps this again.
+        # 8) Build the IOC intent. Size = size_usd / max(ask, limit_price). The
+        # risk gate computes notional = size * limit_price; with limit_price set
+        # to price_extreme_max (typically 1.0) and ask < 1.0, dividing by ask
+        # alone overshoots the cap by cents and the gate vetoes every order.
         # Optional safety_d-aware scaling: bigger size on safer setups, floor
         # at size_min_fraction so we never effectively trade zero. Only applies
         # when min_safety_d > 0 (so safety_d_entry is available) and scaling != "fixed".
@@ -609,7 +611,8 @@ class LateResolutionStrategy(Strategy):
                 # else "linear_safety" uses raw as-is.
                 scale = min(1.0, max(self.cfg.size_min_fraction, raw))
         size_usd = self.cfg.max_position_usd * scale
-        size = max(0.0, math.floor((size_usd / win.ask_px) * 100) / 100)
+        sizing_px = max(win.ask_px, self.cfg.price_extreme_max)
+        size = max(0.0, math.floor((size_usd / sizing_px) * 100) / 100)
         if size <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"),))
 
