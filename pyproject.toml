@@ -49,6 +49,7 @@ hl-recorder = "hlanalysis.recorder.main:main"
 hl-replay = "hlanalysis.engine.replay:_cli"
 hl-engine = "hlanalysis.engine.main:main"
 hl-sim = "hlanalysis.sim.cli:main"
+hl-bt = "hlanalysis.backtest.cli:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
