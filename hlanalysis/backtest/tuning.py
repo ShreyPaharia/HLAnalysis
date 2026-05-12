@@ -186,11 +186,15 @@ def _run_one_cell(args: tuple) -> dict:
     run_cfg = RunConfig(**run_cfg_kwargs)
     pnl: list[float] = []
     n_trades = 0
+    # Use a wide window so cache-driven sources (e.g. PolymarketDataSource,
+    # which filters by `end_ts_ns ∈ [start, end)`) actually return all
+    # cached questions, not an empty set. The parent process already applied
+    # the user's --start/--end during the initial discover; workers just
+    # need to re-map question_id → descriptor across all cached entries.
+    all_descs = list(data_source.discover(start="1970-01-01", end="2999-12-31"))
     for q_id, strike in te_ids_with_strikes:
-        # discover() returned QuestionDescriptors; the worker re-discovers and
-        # matches by question_id.
         match = next(
-            (d for d in data_source.discover(start="", end="") if d.question_id == q_id),
+            (d for d in all_descs if d.question_id == q_id),
             None,
         )
         if match is None:

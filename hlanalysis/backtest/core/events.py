@@ -35,6 +35,12 @@ class ReferenceEvent:
     high: float
     low: float
     close: float
+    # `open` is needed by binary markets where strike = open-of-first-bar at
+    # market start (the legacy `day_open_btc` convention). For tick-style
+    # reference streams (e.g. HL perp BBO mid where there's no bar concept)
+    # sources can omit it; the default (0.0) signals "no open distinct from
+    # close" and the runner falls back to `close` as the strike.
+    open: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

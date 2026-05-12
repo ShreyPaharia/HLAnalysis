@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import heapq
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -129,6 +130,39 @@ def _fetch_trades_raw(condition_id: str) -> list[dict]:
     return out
 
 
+_BTC_UPDOWN_STRIKE_RULE = re.compile(
+    r"Binance 1 minute candle for BTC/USDT\s+(\w+)\s+(\d+)\s+'(\d{2})\s+(\d{1,2}):(\d{2})\s+in the ET timezone",
+    re.IGNORECASE,
+)
+_MONTHS = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+           "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
+
+
+def _parse_strike_ref_ts_ns(description: str) -> int | None:
+    """Pull the strike-reference timestamp out of a PM 'BTC Up or Down' market
+    description. The text says, e.g., "...Binance 1 minute candle for BTC/USDT
+    Nov 27 '25 12:00 in the ET timezone...". The strike is the CLOSE of that
+    candle. Returns ns since epoch (UTC) or None if the description doesn't
+    match the expected pattern.
+    """
+    if not description:
+        return None
+    m = _BTC_UPDOWN_STRIKE_RULE.search(description)
+    if not m:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        et = ZoneInfo("America/New_York")
+    except Exception:
+        return None
+    mon, day, yr2, hh, mm = m.groups()
+    if mon not in _MONTHS:
+        return None
+    year = 2000 + int(yr2)
+    dt = datetime(year, _MONTHS[mon], int(day), int(hh), int(mm), tzinfo=et)
+    return int(dt.astimezone(timezone.utc).timestamp() * 1e9)
+
+
 def _parse_binary_event(ev: dict) -> dict | None:
     """Parse a Gamma binary event into a manifest-shaped record. Returns None
     if it doesn't look like a single-market binary."""
@@ -159,7 +193,9 @@ def _parse_binary_event(ev: dict) -> dict | None:
                 outcome = "yes"
             elif no_p >= 0.99:
                 outcome = "no"
-    return {
+    description = mk.get("description") or ev.get("description") or ""
+    strike_ref_ts_ns = _parse_strike_ref_ts_ns(description)
+    out: dict = {
         "condition_id": str(cond_id),
         "yes_token_id": str(token_ids[0]),
         "no_token_id": str(token_ids[1]),
@@ -169,6 +205,9 @@ def _parse_binary_event(ev: dict) -> dict | None:
         "total_volume_usd": float(mk.get("volume") or 0.0),
         "n_trades": 0,
     }
+    if strike_ref_ts_ns is not None:
+        out["strike_ref_ts_ns"] = strike_ref_ts_ns
+    return out
 
 
 def _parse_bucket_event(ev: dict) -> dict | None:
@@ -259,6 +298,11 @@ class PolymarketDataSource:
     ) -> None:
         self._cache_root = Path(cache_root)
         self._stream_cfg = _StreamCfg(half_spread=half_spread, depth=depth)
+        # Lazy caches populated on first read. Significant for tuning workers
+        # that backtest dozens of markets per cell — without caches each
+        # market would re-parse the manifest + the (large) BTC klines JSON.
+        self._manifest_cache: dict | None = None
+        self._klines_cache: list[dict] | None = None
 
     # -- public API --------------------------------------------------------
 
@@ -402,7 +446,7 @@ class PolymarketDataSource:
             question_idx=q.question_idx,
             yes_symbol=q.leg_symbols[0],
             no_symbol=q.leg_symbols[1],
-            strike=0.0,  # binary strike is the day_open_btc — runner injects via ReferenceEvent stream
+            strike=self._binary_strike(q),
             expiry_ns=q.end_ts_ns,
             underlying=q.underlying,
             klass=q.klass,
@@ -411,6 +455,37 @@ class PolymarketDataSource:
             settled_side=side,
             leg_symbols=q.leg_symbols,
         )
+
+    def _binary_strike(self, q: QuestionDescriptor) -> float:
+        """Strike convention for 'BTC Up or Down on DATE' PM markets.
+
+        Per the PM rule (parsed from each market's Gamma description), the
+        market resolves UP iff the Binance 1m BTC/USDT close at a specific
+        strike-reference timestamp < the close at expiry. The strike-reference
+        ts is stored in the manifest as ``strike_ref_ts_ns`` when the
+        description matches the known rule pattern. For older cache entries
+        that predate the parser, fall back to ``end_ts - 24h`` — empirically
+        every BTC Up/Down market in the current corpus uses exactly that
+        offset, so the fallback matches the parsed value.
+
+        Returns the Binance 1m CLOSE at the strike-reference ts, looked up
+        from the cached kline file. Uses the nearest-preceding 1m candle if
+        the exact ts isn't present in the data (data gap).
+        """
+        entry = self._load_manifest().get(q.question_id, {})
+        strike_ts_ns = entry.get("strike_ref_ts_ns")
+        if strike_ts_ns is None:
+            strike_ts_ns = q.end_ts_ns - 24 * 3600 * 1_000_000_000
+        strike_ts_ns = int(strike_ts_ns)
+        klines = self._load_all_klines()
+        if not klines:
+            return 0.0
+        import bisect
+        ts_list = [int(k["ts_ns"]) for k in klines]
+        idx = bisect.bisect_right(ts_list, strike_ts_ns) - 1
+        if idx < 0:
+            return 0.0
+        return float(klines[idx]["close"])
 
     def _question_view_bucket(
         self, q: QuestionDescriptor, entry: dict, *, now_ns: int, settled: bool,
@@ -532,11 +607,14 @@ class PolymarketDataSource:
                     leg_events.append(_book_from_l2(comp_snap))
         leg_event_streams.append(iter(leg_events))
 
-        # Reference stream from klines.
+        # Reference stream from klines. Populate `open` so binary-market runners
+        # can use the first bar's open as the canonical strike — matching the
+        # legacy `day_open_btc` convention.
         leg_event_streams.append(iter(
             ReferenceEvent(
                 ts_ns=int(k["ts_ns"]), symbol="BTC",
-                high=float(k["high"]), low=float(k["low"]), close=float(k["close"]),
+                high=float(k["high"]), low=float(k["low"]),
+                close=float(k["close"]), open=float(k["open"]),
             )
             for k in sorted(klines, key=lambda k: int(k["ts_ns"]))
         ))
@@ -560,14 +638,19 @@ class PolymarketDataSource:
         return self._cache_root / "manifest.json"
 
     def _load_manifest(self) -> dict:
+        if self._manifest_cache is not None:
+            return self._manifest_cache
         path = self._manifest_path()
         if not path.exists():
-            return {}
-        return json.loads(path.read_text())
+            self._manifest_cache = {}
+            return self._manifest_cache
+        self._manifest_cache = json.loads(path.read_text())
+        return self._manifest_cache
 
     def _write_manifest(self, manifest: dict) -> None:
         self._cache_root.mkdir(parents=True, exist_ok=True)
         self._manifest_path().write_text(json.dumps(manifest, indent=2))
+        self._manifest_cache = manifest
 
     def _read_trades(self, condition_id: str) -> list["_RawTrade"]:
         path = self._cache_root / "pm_trades" / f"{condition_id}.parquet"
@@ -586,13 +669,28 @@ class PolymarketDataSource:
             for r in rows
         ]
 
-    def _load_klines_window(self, start_ns: int, end_ns: int) -> list[dict]:
+    def _load_all_klines(self) -> list[dict]:
+        """Load and cache all BTC kline rows from disk once per instance.
+
+        The kline JSON files are large (~500k rows / ~30 MB for a year of 1m
+        BTC bars). Re-parsing them on every `events(q)` call was the dominant
+        backtester cost — visible in profiling as ~0.5s per market on the
+        v1 tuning grid. Caching collapses that to a one-time hit per worker.
+        """
+        if self._klines_cache is not None:
+            return self._klines_cache
         klines_dir = self._cache_root / "btc_klines"
-        if not klines_dir.exists():
-            return []
         rows: list[dict] = []
-        for f in sorted(klines_dir.glob("*.json")):
-            rows.extend(json.loads(f.read_text()))
+        if klines_dir.exists():
+            for f in sorted(klines_dir.glob("*.json")):
+                rows.extend(json.loads(f.read_text()))
+        # Sort once so windowed slices via bisect would be possible later.
+        rows.sort(key=lambda r: int(r["ts_ns"]))
+        self._klines_cache = rows
+        return rows
+
+    def _load_klines_window(self, start_ns: int, end_ns: int) -> list[dict]:
+        rows = self._load_all_klines()
         return [r for r in rows if start_ns <= int(r["ts_ns"]) <= end_ns]
 
     # -- internals: live fetch (used by fetch_and_cache only) --------------
