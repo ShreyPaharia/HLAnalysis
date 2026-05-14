@@ -14,8 +14,9 @@ from collections import deque
 
 import numpy as np
 
-from hlanalysis.sim.data.binance_klines import Kline
-from hlanalysis.sim.market_state import SimMarketState
+from hlanalysis.backtest.core.events import ReferenceEvent
+from hlanalysis.backtest.data.binance_klines import Kline
+from hlanalysis.backtest.runner.market_state import MarketState
 from hlanalysis.strategy._numba.vol import (
     ewma_std,
     parkinson_sigma_window,
@@ -145,7 +146,15 @@ def _replay(strat_cls, state) -> float:
 
     t0 = time.perf_counter()
     for k in klines:
-        state.apply_kline(k)
+        # _LegacyMarketState has apply_kline; new MarketState consumes
+        # ReferenceEvent. The benchmark exercises both paths.
+        if hasattr(state, "apply_kline"):
+            state.apply_kline(k)
+        else:
+            state.apply_reference(ReferenceEvent(
+                ts_ns=k.ts_ns, symbol="BTC",
+                high=k.high, low=k.low, close=k.close,
+            ))
         now = k.ts_ns
         books = {
             "@30": BookState(symbol="@30", bid_px=yes.bid_px, bid_sz=yes.bid_sz,
@@ -178,7 +187,7 @@ def test_jit_path_at_least_5x_faster_than_pure_python(capsys):
     _warmup_jits()
     # Run baseline (legacy state + legacy σ) and JIT (ring buffer + JIT σ).
     t_legacy = _replay(_LegacySigmaStrategy, _LegacyMarketState())
-    t_jit = _replay(LateResolutionStrategy, SimMarketState())
+    t_jit = _replay(LateResolutionStrategy, MarketState())
     speedup = t_legacy / t_jit
     with capsys.disabled():
         print(f"\n10k-tick replay  legacy={t_legacy:.3f}s  "

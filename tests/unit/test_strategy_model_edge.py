@@ -139,7 +139,7 @@ def test_tau_yr_precision_roundtrip_short_tte():
     ModelEdgeStrategy uses :.12f for tau_yr to achieve sub-ppm precision.
     """
     import math
-    from hlanalysis.sim.diagnostics import _parse_edge_fields
+    from hlanalysis.backtest.runner.result import _parse_edge_fields
     from hlanalysis.strategy.types import BookState, Decision, Diagnostic
 
     tte_s = 5 * 60  # 300 seconds

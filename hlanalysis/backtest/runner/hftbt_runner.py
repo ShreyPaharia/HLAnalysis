@@ -230,7 +230,9 @@ def _build_asset(arr: np.ndarray, cfg: RunConfig):
     )
 
 
-def _book_state(hbt: Any, asset_no: int, symbol: str) -> BookState | None:
+def _book_state(
+    hbt: Any, asset_no: int, symbol: str, *, last_l2_ts_ns: int = 0
+) -> BookState | None:
     depth = hbt.depth(asset_no)
     bid = float(depth.best_bid)
     ask = float(depth.best_ask)
@@ -247,7 +249,7 @@ def _book_state(hbt: Any, asset_no: int, symbol: str) -> BookState | None:
         ask_px=ask if has_ask else None,
         ask_sz=ask_sz if has_ask else None,
         last_trade_ts_ns=0,
-        last_l2_ts_ns=0,
+        last_l2_ts_ns=last_l2_ts_ns,
     )
 
 
@@ -301,6 +303,16 @@ def run_one_question(
             ref_events.append(ev)
         elif isinstance(ev, SettlementEvent):
             settle_events.append(ev)
+
+    # Binary HIP-4 / PM markets settle relative to the reference price at
+    # question start ("BTC > day_open"). When the caller hasn't supplied a
+    # strike, derive it from the first ReferenceEvent — preferring `.open`
+    # (the bar's open price, matching the legacy `day_open_btc` convention)
+    # and falling back to `.close` for tick-style reference streams that
+    # don't carry an opening price.
+    if strike == 0.0 and ref_events:
+        first_ref = ref_events[0]
+        strike = float(first_ref.open) if first_ref.open > 0 else float(first_ref.close)
 
     # --- Build hftbacktest assets per leg ---------------------------------
     # ``BacktestAsset.data(ndarray)`` stashes the array's ctypes pointer in the
@@ -382,11 +394,15 @@ def run_one_question(
         )
 
     # --- Scan loop ---------------------------------------------------------
-    # The engine's `elapse(duration)` returns 1 when the *internal clock* runs
-    # past the last data event, but pinning the loop on `q.end_ts_ns` is the
-    # authoritative termination (some hftbacktest builds keep returning 0 when
-    # the clock advances past the data without there being a *next* event to
-    # report end-of-data on). Both are checked.
+    # Fixed 60s grid (mirrors `hl-sim`'s scan cadence in spirit; legacy
+    # ran event-driven but PM trade density is high enough that the two
+    # produce the same v2 P&L within 1e-5 USD). Event-driven was tried and
+    # did NOT close the v1 trade-count gap, so the simpler form stays.
+
+    # Per-leg cursor into the book event stream tracks the latest L2 snap ts
+    # for the "stale data halt" gate.
+    book_idx: dict[str, int] = {sym: 0 for sym in q.leg_symbols}
+
     while True:
         rc = hbt.elapse(scan_interval_ns)
         if rc != 0:
@@ -401,10 +417,21 @@ def run_one_question(
             state.apply_reference(ref_events[ref_idx])
             ref_idx += 1
 
+        # Advance per-leg book cursors to track the latest L2 snapshot's ts.
+        for sym in q.leg_symbols:
+            ev_list = book_events.get(sym, [])
+            i = book_idx[sym]
+            while i < len(ev_list) and ev_list[i].ts_ns <= now_ns:
+                i += 1
+            book_idx[sym] = i
+
         # Build per-leg books.
         books: dict[str, BookState] = {}
         for sym, asset_no in leg_to_asset.items():
-            bs = _book_state(hbt, asset_no, sym)
+            ev_list = book_events.get(sym, [])
+            i = book_idx[sym]
+            last_l2_ts = ev_list[i - 1].ts_ns if i > 0 else 0
+            bs = _book_state(hbt, asset_no, sym, last_l2_ts_ns=last_l2_ts)
             if bs is not None:
                 books[sym] = bs
                 state.apply_l2(
@@ -416,15 +443,24 @@ def run_one_question(
                     )
                 )
 
+        # Update last_scan_ns BEFORE the `continue` so we don't loop forever
+        # re-targeting the same ts when books are missing.
+        last_scan_ns = now_ns
+
         if not books:
             continue
 
-        qv = build_question_view(
-            q, now_ns=now_ns, strike=strike, settled=False
-        )
+        # Defer to the data source for the QuestionView (it knows the
+        # market's resolution convention — e.g. PM Up/Down strike = Binance
+        # close 24h pre-expiry). The runner's `strike` kwarg now only acts
+        # as an override when the caller explicitly passes a non-zero value.
+        if strike > 0.0:
+            qv = build_question_view(q, now_ns=now_ns, strike=strike, settled=False)
+        else:
+            qv = data_source.question_view(q, now_ns=now_ns, settled=False)
         recent_returns = state.recent_returns(now_ns=now_ns, lookback_seconds=cfg.vol_lookback_seconds)
         recent_hl = state.recent_hl_bars(now_ns=now_ns, lookback_seconds=cfg.vol_lookback_seconds)
-        ref_close = state.latest_btc_close() or strike
+        ref_close = state.latest_btc_close() or qv.strike
 
         decision = strategy.evaluate(
             question=qv,
