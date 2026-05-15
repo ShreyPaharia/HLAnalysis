@@ -45,7 +45,8 @@ _CLOB_DATA_BASE = "https://data-api.polymarket.com"
 _CLOB_BASE = "https://clob.polymarket.com"
 _BTC_UPDOWN_SERIES_SLUG = "btc-up-or-down-daily"
 _BTC_BUCKET_SERIES_SLUG = "bitcoin-multi-strikes-hourly"
-_SERIES_PAGE_LIMIT = 500
+_SERIES_PAGE_LIMIT = 100  # Gamma /events caps responses at 100 even when limit > 100;
+# requesting 500 silently truncates and we mistake the short response for "end of data".
 _TRADES_PAGE_SIZE = 500
 _HALF_SPREAD_DEFAULT = 0.005
 _DEPTH_DEFAULT = 10_000.0
@@ -99,7 +100,7 @@ def _fetch_series_events(series_slug: str) -> list[dict]:
         out.extend(page)
         if len(page) < _SERIES_PAGE_LIMIT:
             break
-        offset += _SERIES_PAGE_LIMIT
+        offset += len(page)
     return out
 
 
@@ -722,6 +723,11 @@ class PolymarketDataSource:
                 "last_pull_ts_ns": int(datetime.now(timezone.utc).timestamp() * 1e9),
                 "market": mkt,
             }
+            # Persist after each market so a crash mid-fetch leaves a usable
+            # resume point. Without this the manifest is only written at the
+            # end of fetch_and_cache, so a transient network failure orphans
+            # every parquet written so far.
+            self._write_manifest(manifest)
 
     def _fetch_and_cache_bucket(
         self, manifest: dict, *, start_iso: str, end_iso: str, refresh: bool,
@@ -746,6 +752,7 @@ class PolymarketDataSource:
                 "last_pull_ts_ns": int(datetime.now(timezone.utc).timestamp() * 1e9),
                 "bucket": parsed,
             }
+            self._write_manifest(manifest)
 
     def _write_trades_parquet(self, condition_id: str, raw_trades: list[dict]) -> None:
         import pyarrow as pa  # local to keep top-level import surface small
