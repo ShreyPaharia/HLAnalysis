@@ -21,22 +21,24 @@ def test_load_strategy_yaml_from_repo():
     assert cfg.paper_mode is False
     assert cfg.global_.max_total_inventory_usd == 500
     assert cfg.global_.daily_loss_cap_usd == 200
-    # Calibrated v1-safety-best values landed on the BTC entries + defaults.
+    # v1-final values from the 1y PM walk-forward + focused (thr,max,stop) sweep.
     assert cfg.defaults.tte_max_seconds == 7200
-    assert cfg.defaults.price_extreme_threshold == 0.90
-    assert cfg.defaults.price_extreme_max == 0.995
-    assert cfg.defaults.min_safety_d == 1.5
+    assert cfg.defaults.price_extreme_threshold == 0.85
+    assert cfg.defaults.price_extreme_max == 0.97
+    assert cfg.defaults.min_safety_d == 1.0
     assert cfg.defaults.vol_lookback_seconds == 3600
     assert cfg.defaults.exit_safety_d == 1.0
     assert cfg.defaults.vol_ewma_lambda == 0.85
+    assert cfg.defaults.stop_loss_pct is None  # disabled per tuning
     btc_binary = next(
         e for e in cfg.allowlist if e.match.get("class") == "priceBinary"
     )
-    assert btc_binary.price_extreme_max == 0.995
-    assert btc_binary.min_safety_d == 1.5
+    assert btc_binary.price_extreme_max == 0.97
+    assert btc_binary.min_safety_d == 1.0
     assert btc_binary.vol_lookback_seconds == 3600
     assert btc_binary.exit_safety_d == 1.0
     assert btc_binary.vol_ewma_lambda == 0.85
+    assert btc_binary.stop_loss_pct is None
     btc_bucket = next(
         e for e in cfg.allowlist if e.match.get("class") == "priceBucket"
     )

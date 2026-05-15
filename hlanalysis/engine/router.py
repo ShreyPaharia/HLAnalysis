@@ -4,6 +4,7 @@ import time
 
 from loguru import logger
 
+from .config import StrategyConfig, match_question
 from .event_bus import EventBus
 from .hl_client import HLClient, PlaceRequest
 from .risk import RiskGate, RiskInputs
@@ -11,6 +12,12 @@ from .risk_events import Entry, Exit, RiskVeto
 from .state import OpenOrder, Position, StateDAL
 from ..strategy.render import outcome_description, question_description
 from ..strategy.types import Action, Decision, OrderIntent, QuestionView
+
+
+# Mirrors hlanalysis.backtest.runner.hftbt_runner._STOP_DISABLED_SENTINEL — a
+# negative price the risk gate's stop-loss check (px <= stop_loss_price for
+# longs) can never trigger on, since real bid prices are ≥ 0.
+_STOP_DISABLED_SENTINEL = -1.0
 
 
 class Router:
@@ -27,12 +34,14 @@ class Router:
         gate: RiskGate,
         bus: EventBus,
         hl: HLClient,
+        strategy_cfg: StrategyConfig,
         strategy_id: str = "late_resolution",
     ) -> None:
         self.dal = dal
         self.gate = gate
         self.bus = bus
         self.hl = hl
+        self.strategy_cfg = strategy_cfg
         self.strategy_id = strategy_id
 
     async def handle(self, decision: Decision, *, inputs: RiskInputs, now_ns: int) -> None:
@@ -51,12 +60,18 @@ class Router:
                     intent.cloid, verdict.reason, verdict.detail,
                 )
                 continue
-            await self._place(intent, now_ns=now_ns, decision=decision, question=inputs.question)
+            await self._place(intent, now_ns=now_ns, decision=decision,
+                              question=inputs.question,
+                              question_fields=inputs.question_fields)
         # Settlement-driven EXIT with no intents: book the close locally.
         if decision.action is Action.EXIT and not decision.intents:
             await self._close_settled(inputs.question.question_idx, now_ns=now_ns, question=inputs.question)
 
-    async def _place(self, intent: OrderIntent, *, now_ns: int, decision: Decision, question: QuestionView | None = None) -> None:
+    async def _place(
+        self, intent: OrderIntent, *, now_ns: int, decision: Decision,
+        question: QuestionView | None = None,
+        question_fields: dict[str, str] | None = None,
+    ) -> None:
         # 1. Persist pending row before the network call (spec §5.5 idempotency).
         self.dal.upsert_order(OpenOrder(
             cloid=intent.cloid, venue_oid=None, question_idx=intent.question_idx,
@@ -84,11 +99,37 @@ class Router:
                     intent.cloid, ack.fill_size, ack.fill_price,
                 )
                 return
-            await self._book_fill(intent, ack.fill_price, ack.fill_size, now_ns=now_ns, question=question)
+            await self._book_fill(intent, ack.fill_price, ack.fill_size,
+                                  now_ns=now_ns, question=question,
+                                  question_fields=question_fields)
+
+    def _stop_loss_price_for(
+        self, fill_price: float, question_idx: int,
+        question_fields: dict[str, str] | None,
+    ) -> float:
+        """Resolve the per-trade stop loss from the matched allowlist entry.
+
+        Returns the price at which the risk gate should trigger a stop-loss
+        exit, or _STOP_DISABLED_SENTINEL when the entry's `stop_loss_pct` is
+        None (or no entry matches — defaults catch this in practice).
+        """
+        matched = None
+        if question_fields:
+            matched = match_question(
+                self.strategy_cfg,
+                question_idx=question_idx,
+                fields=question_fields,
+            )
+        entry = matched or self.strategy_cfg.defaults
+        pct = entry.stop_loss_pct
+        if pct is None:
+            return _STOP_DISABLED_SENTINEL
+        return max(0.0, fill_price * (1.0 - pct / 100.0))
 
     async def _book_fill(
         self, intent: OrderIntent, price: float, size: float, *, now_ns: int,
         question: QuestionView | None = None,
+        question_fields: dict[str, str] | None = None,
     ) -> None:
         q_desc = question_description(question) if question else ""
         o_desc = outcome_description(question, intent.symbol) if question else ""
@@ -99,9 +140,9 @@ class Router:
                 question_idx=intent.question_idx, symbol=intent.symbol,
                 qty=signed, avg_entry=price, realized_pnl=0.0,
                 last_update_ts_ns=now_ns,
-                # Stop-loss = entry * (1 - stop_loss_pct/100) for longs
-                # (Plan 1C will look up the matched allowlist entry's stop_loss_pct.)
-                stop_loss_price=price * 0.9,
+                stop_loss_price=self._stop_loss_price_for(
+                    price, intent.question_idx, question_fields,
+                ),
             ))
             await self.bus.publish(Entry(
                 ts_ns=now_ns, cloid=intent.cloid,

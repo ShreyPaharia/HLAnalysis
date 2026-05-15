@@ -32,7 +32,12 @@ class AllowlistEntry(BaseModel):
     model_config = ConfigDict(frozen=True)
     match: dict[str, str | list[str]]
     max_position_usd: float
-    stop_loss_pct: float
+    # Nullable: when None, the position carries a sentinel stop_loss_price that
+    # the risk gate never triggers — disabling per-trade stops at the engine
+    # level. Calibration on 1y PM corpus showed every tested non-null value
+    # (10/30/50/70) underperformed null because the stop fires on transient
+    # noise and exits positions that would have ridden to settlement.
+    stop_loss_pct: float | None
     tte_min_seconds: int
     tte_max_seconds: int
     price_extreme_threshold: float

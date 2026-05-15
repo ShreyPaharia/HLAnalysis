@@ -47,7 +47,10 @@ def build_late_resolution_config(cfg: StrategyConfig) -> LateResolutionConfig:
         price_extreme_threshold=d.price_extreme_threshold,
         distance_from_strike_usd_min=d.distance_from_strike_usd_min,
         vol_max=d.vol_max, max_position_usd=d.max_position_usd,
-        stop_loss_pct=d.stop_loss_pct,
+        # LateResolutionConfig.stop_loss_pct is a non-Optional float; the
+        # strategy treats values ≥1e8 as "disabled" (matches build_v1_late_resolution
+        # in strategy/late_resolution.py). Map None -> sentinel here.
+        stop_loss_pct=1e9 if d.stop_loss_pct is None else d.stop_loss_pct,
         max_strike_distance_pct=cfg.global_.max_strike_distance_pct,
         min_recent_volume_usd=cfg.global_.min_recent_volume_usd,
         stale_data_halt_seconds=cfg.global_.stale_data_halt_seconds,
@@ -91,7 +94,8 @@ class EngineRuntime:
             tg = self._make_telegram(http)
             rules = AlertRules(bus=self.bus, telegram=tg)
             risk = RiskGate(self.strategy_cfg)
-            router = Router(dal=dal, gate=risk, bus=self.bus, hl=hl)
+            router = Router(dal=dal, gate=risk, bus=self.bus, hl=hl,
+                            strategy_cfg=self.strategy_cfg)
 
             # Strategy runtime config from the matched defaults entry
             rcfg = build_late_resolution_config(self.strategy_cfg)

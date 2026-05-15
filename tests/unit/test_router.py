@@ -83,7 +83,8 @@ async def test_approved_decision_writes_db_row_and_calls_place(tmp_path):
     sub = bus.subscribe()
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
-    router = Router(dal=dal, gate=RiskGate(_strategy_cfg()), bus=bus, hl=client)
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
     o = dal.get_order("hla-router-1")
     assert o is not None and o.status == "filled"
@@ -98,7 +99,8 @@ async def test_vetoed_decision_publishes_veto_and_does_not_call_place(tmp_path):
     sub = bus.subscribe()
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
-    router = Router(dal=dal, gate=RiskGate(_strategy_cfg()), bus=bus, hl=client)
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
     inputs = replace(_approval_inputs(), kill_switch_active=True)
     await router.handle(_decision_enter(), inputs=inputs, now_ns=2)
     assert dal.get_order("hla-router-1") is None
