@@ -1,0 +1,41 @@
+# v1 late-resolution: 1-year walk-forward grid on PM BTC Up/Down binaries.
+#
+# Splits: 60 train / 60 test / 60 step (~6 non-overlapping 2-month OOS test
+# windows over ~365 daily markets). The strategy has no learned state, so
+# "train" here is just unused tail context kept for traceability — the test
+# window is the OOS slice we score on.
+#
+# Grid (108 cells):
+#   tte_max_seconds          [3600, 5400, 7200]   3
+#   price_extreme_threshold  [0.85, 0.90, 0.93]   3   <-- main entry-gate knob
+#   price_extreme_max        [0.995]              1   <-- ceiling on entry ask
+#   vol_max                  [100, 0.0010]        2   <-- 100 disables; 0.001 caps daily σ ≈ 1.6%
+#   min_safety_d             [1.0, 1.5, 2.0]      3   <-- joint vol+distance safety floor (σ units)
+#   exit_safety_d            [0, 1.0]             2   <-- mid-hold exit; 0 disables
+# Fixed:
+#   tte_min_seconds=0, vol_lookback_seconds=3600 (1h), vol_ewma_lambda=0.85,
+#   stop_loss_pct=null, distance_from_strike_usd_min=0, exit_bid_floor=0,
+#   drift_aware_d=false, vol_estimator=stdev, max_position_usd=100.
+
+grids:
+  v1_late_resolution:
+    tte_min_seconds: [0]
+    tte_max_seconds: [3600, 5400, 7200]
+    price_extreme_threshold: [0.85, 0.90, 0.93]
+    price_extreme_max: [0.995]
+    distance_from_strike_usd_min: [0]
+    vol_max: [100, 0.0010]
+    stop_loss_pct: [null]
+    min_safety_d: [1.0, 1.5, 2.0]
+    vol_lookback_seconds: [3600]
+    exit_safety_d: [0, 1.0]
+    exit_bid_floor: [0]
+    drift_aware_d: [false]
+    vol_ewma_lambda: [0.85]
+    max_position_usd: [100]
+
+run:
+  train_markets: 60
+  test_markets: 60
+  step_markets: 60
+  max_workers: 12
