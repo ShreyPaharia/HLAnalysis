@@ -5,20 +5,21 @@ strategy:
   # Pattern-based allowlist; matches QuestionMetaEvent fields.
   # Auto-applies across rollovers; blocklist for per-instance escape hatch.
   allowlist:
-    # 24h regime: enter inside the last 2h, winning leg ∈ [0.90, 0.995], with
-    # joint vol+distance safety gate. Calibrated on PM BTC daily Up/Down (May
-    # 2025 – May 2026): full-year $560 PnL, holdout $131, Sharpe 1.76, hit 74%.
-    # See sim configs/v1-safety-best.json and runs/v1-safety-best-fixed-full-2026-05-10/.
+    # 24h regime: enter inside the last 2h, winning leg ∈ [0.85, 0.97], joint
+    # vol+distance safety gate at 1.0σ. Calibrated on PM BTC daily Up/Down
+    # (May 2025 – May 2026): walk-forward 5-OOS-split total $577 (mean $115/2mo,
+    # std $43), full-year unsplit $687, Sharpe 3.70, hit 74.9%.
+    # See config/v1-final.json and data/sim/tuning/v1-thr-max-pm/.
     - match:
         class: priceBinary
         underlying: BTC
       max_position_usd: 100
-      stop_loss_pct: 10
+      stop_loss_pct: null                # disabled — 1y PM tuning showed any stop hurts net PnL
       tte_min_seconds: 0
       tte_max_seconds: 7200
-      price_extreme_threshold: 0.90
-      price_extreme_max: 0.995
-      min_safety_d: 1.5
+      price_extreme_threshold: 0.85
+      price_extreme_max: 0.97
+      min_safety_d: 1.0
       vol_lookback_seconds: 3600
       exit_safety_d: 1.0
       vol_ewma_lambda: 0.85
@@ -29,12 +30,12 @@ strategy:
         class: priceBucket
         underlying: BTC
       max_position_usd: 100
-      stop_loss_pct: 10
+      stop_loss_pct: null                # disabled — 1y PM tuning showed any stop hurts net PnL
       tte_min_seconds: 0
       tte_max_seconds: 7200
-      price_extreme_threshold: 0.90
-      price_extreme_max: 0.995
-      min_safety_d: 1.5
+      price_extreme_threshold: 0.85
+      price_extreme_max: 0.97
+      min_safety_d: 1.0
       vol_lookback_seconds: 3600
       exit_safety_d: 1.0
       vol_ewma_lambda: 0.85
@@ -47,12 +48,12 @@ strategy:
   defaults:
     match: {}
     max_position_usd: 100
-    stop_loss_pct: 10
+    stop_loss_pct: null
     tte_min_seconds: 0
     tte_max_seconds: 7200
-    price_extreme_threshold: 0.90
-    price_extreme_max: 0.995
-    min_safety_d: 1.5
+    price_extreme_threshold: 0.85
+    price_extreme_max: 0.97
+    min_safety_d: 1.0
     vol_lookback_seconds: 3600
     exit_safety_d: 1.0
     vol_ewma_lambda: 0.85

@@ -1,0 +1,35 @@
+# v1 late-resolution: focused 2-D sweep over (price_extreme_threshold, price_extreme_max).
+# The original v1-1year grid fixed max=0.995; ablation showed 0.97 beats 0.995,
+# but the optimum max likely depends on threshold so we sweep them jointly.
+#
+# Other knobs held at v1-final values (already tuned in v1-1year sweep):
+#   min_safety_d=1.0, exit_safety_d=1.0, vol_max=100, vol_lookback=3600,
+#   vol_ewma_lambda=0.85, tte_max=7200.
+#
+# Also sweep stop_loss_pct to test if a hard stop helps with the 4 catastrophic
+# leg-flip trades we saw in the segmentation analysis.
+#
+# Cells: 4 thr × 5 max × 4 stop = 80 × 5 splits = 400 runs (~15 min on 12 workers).
+
+grids:
+  v1_late_resolution:
+    tte_min_seconds: [0]
+    tte_max_seconds: [7200]
+    price_extreme_threshold: [0.80, 0.85, 0.90, 0.93]
+    price_extreme_max: [0.92, 0.95, 0.97, 0.99, 0.995]
+    distance_from_strike_usd_min: [0]
+    vol_max: [100]
+    stop_loss_pct: [null, 30, 50, 70]
+    min_safety_d: [1.0]
+    vol_lookback_seconds: [3600]
+    exit_safety_d: [1.0]
+    exit_bid_floor: [0]
+    drift_aware_d: [false]
+    vol_ewma_lambda: [0.85]
+    max_position_usd: [100]
+
+run:
+  train_markets: 60
+  test_markets: 60
+  step_markets: 60
+  max_workers: 12
