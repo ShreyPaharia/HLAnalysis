@@ -88,6 +88,17 @@ class Router:
         # 3. Update DB row from ack.
         self.dal.update_order_status(intent.cloid, status=ack.status,
                                       venue_oid=ack.venue_oid, now_ns=now_ns)
+        # Surface venue-side rejections. The ack.error is dropped on the floor
+        # by upsert_order_status (no error column on the openorder table), so
+        # without this log the rejection reason is invisible — symptoms are
+        # "orders placed silently never fill", which is what bit us live with
+        # the HYPE-short eating all margin and HIP-4 buys getting rejected.
+        if ack.status == "rejected":
+            logger.warning(
+                "order rejected cloid={} symbol={} side={} size={} price={} err={}",
+                intent.cloid, intent.symbol, intent.side, intent.size,
+                intent.limit_price, ack.error or "<no_error_field>",
+            )
         # 4. If filled, update Position + emit Entry/Exit.
         # Use `is not None` rather than truthy: a falsy 0.0 is a malformed ack
         # that should be logged as a problem, not silently treated as 'no fill'
