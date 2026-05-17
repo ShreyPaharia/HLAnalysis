@@ -215,6 +215,17 @@ class LateResolutionConfig:
     # smallest bet so we don't trade ~0 size on borderline-safe entries.
     size_scaling: str = "fixed"
     size_min_fraction: float = 0.25
+    # Targeted size cap for catastrophic near-strike low-ask entries. When non-zero
+    # AND chosen leg ask < size_cap_min_ask AND BTC is within
+    # size_cap_max_dist_pct% of the chosen leg's nearest adverse boundary
+    # (strike for binary YES; nearest of (lo, hi) for bucket legs),
+    # multiply final size by (1 − size_cap_near_strike_pct). Default 0 disables.
+    size_cap_near_strike_pct: float = 0.0
+    # Distance threshold (in % of boundary) at or below which the cap kicks in.
+    size_cap_max_dist_pct: float = 1.5
+    # Ask ceiling below which the cap kicks in (favorites that are still cheap
+    # enough to flip catastrophically).
+    size_cap_min_ask: float = 0.88
 
 
 class LateResolutionStrategy(Strategy):
@@ -614,6 +625,49 @@ class LateResolutionStrategy(Strategy):
                     raw = math.sqrt(max(raw, 0.0))
                 # else "linear_safety" uses raw as-is.
                 scale = min(1.0, max(self.cfg.size_min_fraction, raw))
+
+        # Targeted size cap for catastrophic near-strike low-ask entries. Applied
+        # AFTER safety_d-based scaling so it stacks multiplicatively. Only fires
+        # when ALL three conditions hold: cap enabled (pct > 0), chosen leg's
+        # ask is below the favorite ceiling, AND BTC is within the configured
+        # % of the leg's nearest adverse boundary. Bucket NO legs of the middle
+        # outcome have no contiguous winning region (lo=hi=None) → skip.
+        if self.cfg.size_cap_near_strike_pct > 0.0:
+            lo, hi = _winning_region(question, win_symbol)
+            nearest: float | None = None
+            denom: float | None = None
+            if lo is not None and hi is not None:
+                d_lo = abs(reference_price - lo)
+                d_hi = abs(reference_price - hi)
+                if d_lo <= d_hi:
+                    nearest, denom = d_lo, lo
+                else:
+                    nearest, denom = d_hi, hi
+            elif lo is not None:
+                nearest, denom = abs(reference_price - lo), lo
+            elif hi is not None:
+                nearest, denom = abs(reference_price - hi), hi
+            if nearest is not None and denom is not None and denom > 0:
+                dist_pct = (nearest / denom) * 100.0
+                if (
+                    dist_pct < self.cfg.size_cap_max_dist_pct
+                    and win.ask_px < self.cfg.size_cap_min_ask
+                ):
+                    scale *= 1.0 - self.cfg.size_cap_near_strike_pct
+                    if scale < 0.0:
+                        scale = 0.0
+                    diags.append(
+                        Diagnostic(
+                            "info",
+                            "size_cap_near_strike",
+                            (
+                                ("dist_pct", f"{dist_pct:.3f}"),
+                                ("ask", f"{win.ask_px:.3f}"),
+                                ("scale_after", f"{scale:.3f}"),
+                            ),
+                        )
+                    )
+
         size_usd = self.cfg.max_position_usd * scale
         sizing_px = max(win.ask_px, self.cfg.price_extreme_max)
         size = max(0.0, math.floor((size_usd / sizing_px) * 100) / 100)
@@ -635,7 +689,7 @@ class LateResolutionStrategy(Strategy):
         return Decision(
             action=Action.ENTER,
             intents=(intent,),
-            diagnostics=(Diagnostic("info", "entry"),),
+            diagnostics=(Diagnostic("info", "entry"), *diags),
         )
 
 
@@ -667,5 +721,8 @@ def build_v1_late_resolution(params: dict) -> LateResolutionStrategy:
         vol_estimator=str(params.get("vol_estimator", "stdev")),
         size_scaling=str(params.get("size_scaling", "fixed")),
         size_min_fraction=float(params.get("size_min_fraction", 0.25)),
+        size_cap_near_strike_pct=float(params.get("size_cap_near_strike_pct", 0.0)),
+        size_cap_max_dist_pct=float(params.get("size_cap_max_dist_pct", 1.5)),
+        size_cap_min_ask=float(params.get("size_cap_min_ask", 0.88)),
     )
     return LateResolutionStrategy(cfg)

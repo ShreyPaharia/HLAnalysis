@@ -12,5 +12,8 @@
   "exit_safety_d": 1.0,
   "exit_bid_floor": 0,
   "drift_aware_d": false,
-  "vol_ewma_lambda": 0.85
+  "vol_ewma_lambda": 0.85,
+  "size_cap_near_strike_pct": 1.0,
+  "size_cap_max_dist_pct": 1.5,
+  "size_cap_min_ask": 0.88
 }

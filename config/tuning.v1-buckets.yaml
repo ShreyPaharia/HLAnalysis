@@ -1,0 +1,44 @@
+# v1 late-resolution on PM bitcoin-multi-strikes-hourly bucket markets.
+#
+# Buckets are hourly multi-strike (10 thresholds → 10 outcomes × 2 legs = 20).
+# Strategy enters YES legs only (idx 0, 2, 4, ...). The leg-flip dynamics
+# differ from binaries: a single bucket has many adjacent winning legs and
+# BTC drift over a 1h window is a much smaller fraction of σ.
+#
+# Splits: 30 train / 30 test / 25 step → 5 OOS windows on a corpus
+# of ~187 cached bucket events. Smaller than the binary 60/60/60 because
+# the bitcoin-multi-strikes-hourly series only goes back ~3 months (started
+# ~March 2026); the cached subset here is from a 9-day window in late
+# March 2026 due to a slow fetch — this is a tight intra-week walk-forward
+# rather than a multi-regime OOS. See docs/v1-bucket-sizing-results.md.
+#
+# Grid (108 cells, mirrors config/tuning.v1-1year.yaml):
+#   tte_max_seconds          [3600, 5400, 7200]   3
+#   price_extreme_threshold  [0.85, 0.90, 0.93]   3
+#   price_extreme_max        [0.995]              1
+#   vol_max                  [100, 0.0010]        2
+#   min_safety_d             [1.0, 1.5, 2.0]      3
+#   exit_safety_d            [0, 1.0]             2
+
+grids:
+  v1_late_resolution:
+    tte_min_seconds: [0]
+    tte_max_seconds: [3600, 5400, 7200]
+    price_extreme_threshold: [0.85, 0.90, 0.93]
+    price_extreme_max: [0.995]
+    distance_from_strike_usd_min: [0]
+    vol_max: [100, 0.0010]
+    stop_loss_pct: [null]
+    min_safety_d: [1.0, 1.5, 2.0]
+    vol_lookback_seconds: [3600]
+    exit_safety_d: [0, 1.0]
+    exit_bid_floor: [0]
+    drift_aware_d: [false]
+    vol_ewma_lambda: [0.85]
+    max_position_usd: [100]
+
+run:
+  train_markets: 30
+  test_markets: 30
+  step_markets: 25
+  max_workers: 12
