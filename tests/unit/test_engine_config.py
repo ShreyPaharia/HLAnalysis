@@ -30,6 +30,10 @@ def test_load_strategy_yaml_from_repo():
     assert cfg.defaults.exit_safety_d == 1.0
     assert cfg.defaults.vol_ewma_lambda == 0.85
     assert cfg.defaults.stop_loss_pct is None  # disabled per tuning
+    # Size-cap fields default — not yet set in YAML (tuned in a later commit).
+    assert cfg.defaults.size_cap_near_strike_pct == 0.0
+    assert cfg.defaults.size_cap_max_dist_pct == 1.5
+    assert cfg.defaults.size_cap_min_ask == 0.88
     btc_binary = next(
         e for e in cfg.allowlist if e.match.get("class") == "priceBinary"
     )
@@ -39,6 +43,9 @@ def test_load_strategy_yaml_from_repo():
     assert btc_binary.exit_safety_d == 1.0
     assert btc_binary.vol_ewma_lambda == 0.85
     assert btc_binary.stop_loss_pct is None
+    assert btc_binary.size_cap_near_strike_pct == 0.0
+    assert btc_binary.size_cap_max_dist_pct == 1.5
+    assert btc_binary.size_cap_min_ask == 0.88
     btc_bucket = next(
         e for e in cfg.allowlist if e.match.get("class") == "priceBucket"
     )
@@ -60,6 +67,10 @@ def test_allowlist_entry_safety_gate_defaults_when_omitted():
     assert e.vol_lookback_seconds == 1800
     assert e.exit_safety_d == 0.0
     assert e.vol_ewma_lambda == 0.0
+    # Size-cap fields default to a disabled state (pct=0).
+    assert e.size_cap_near_strike_pct == 0.0
+    assert e.size_cap_max_dist_pct == 1.5
+    assert e.size_cap_min_ask == 0.88
 
 
 def test_allowlist_entry_safety_gate_explicit_values():

@@ -59,6 +59,9 @@ def build_late_resolution_config(cfg: StrategyConfig) -> LateResolutionConfig:
         vol_lookback_seconds=getattr(d, "vol_lookback_seconds", 1800),
         exit_safety_d=getattr(d, "exit_safety_d", 0.0),
         vol_ewma_lambda=getattr(d, "vol_ewma_lambda", 0.0),
+        size_cap_near_strike_pct=getattr(d, "size_cap_near_strike_pct", 0.0),
+        size_cap_max_dist_pct=getattr(d, "size_cap_max_dist_pct", 1.5),
+        size_cap_min_ask=getattr(d, "size_cap_min_ask", 0.88),
     )
 
 
