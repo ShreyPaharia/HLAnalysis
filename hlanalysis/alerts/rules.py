@@ -15,7 +15,8 @@ from loguru import logger
 from ..engine.event_bus import EventBus
 from ..engine.risk_events import (
     BusEvent, DailyLossHalt, Entry, Exit, KillSwitchActivated, NewQuestion,
-    ReconcileDrift, RiskHalt, RiskVeto, StaleDataHalt, StopLossTriggered,
+    OrderRejected, ReconcileDrift, RiskHalt, RiskVeto, StaleDataHalt,
+    StopLossTriggered,
 )
 
 
@@ -121,6 +122,19 @@ class AlertRules:
                 lines.append(f"qty={ev.qty:g}  PnL={pnl_sign}${ev.realized_pnl:.2f}")
                 lines.append(f"<code>q={ev.question_idx}</code> <code>{_e(ev.symbol)}</code>")
                 return f"exit:{ev.question_idx}:{ev.reason}", "\n".join(lines)
+            case OrderRejected():
+                notional = ev.size * ev.price
+                lines = ["❌ <b>ORDER REJECTED</b>"]
+                lines.append(
+                    f"{ev.side.upper()} {ev.size:g} @ ${ev.price:.4f}  "
+                    f"(notional ${notional:,.2f})"
+                )
+                lines.append(f"<code>q={ev.question_idx}</code> <code>{_e(ev.symbol)}</code>")
+                lines.append(f"<i>{_e(ev.error) or 'no_error_field'}</i>")
+                # Dedupe by error string + symbol — repeated identical rejects
+                # on the same leg (e.g. min-notional retries) collapse, but a
+                # new error or new symbol fires a fresh alert.
+                return f"rej:{ev.symbol}:{ev.error}", "\n".join(lines)
             case NewQuestion():
                 lines = ["📣 <b>NEW MARKET</b>"]
                 if ev.description:

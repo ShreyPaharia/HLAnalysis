@@ -89,10 +89,26 @@ class NewQuestion(_Base):
     leg_count: int = 0
 
 
+class OrderRejected(_Base):
+    """Fired when HL responds with status=rejected on a place call. The risk
+    gate's hard veto is already covered by RiskVeto; this captures venue-side
+    rejections (min notional, invalid size, insufficient balance, etc.) that
+    bypass the gate."""
+    kind: Literal["order_rejected"] = "order_rejected"
+    cloid: str
+    question_idx: int
+    symbol: str
+    side: Literal["buy", "sell"]
+    size: float
+    price: float
+    error: str = ""
+
+
 BusEvent = Annotated[
     Union[
         RiskVeto, RiskHalt, StopLossTriggered, DailyLossHalt, StaleDataHalt,
         KillSwitchActivated, ReconcileDrift, Entry, Exit, NewQuestion,
+        OrderRejected,
     ],
     Field(discriminator="kind"),
 ]

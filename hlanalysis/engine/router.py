@@ -8,7 +8,7 @@ from .config import StrategyConfig, match_question
 from .event_bus import EventBus
 from .hl_client import HLClient, PlaceRequest
 from .risk import RiskGate, RiskInputs
-from .risk_events import Entry, Exit, RiskVeto
+from .risk_events import Entry, Exit, OrderRejected, RiskVeto
 from .state import OpenOrder, Position, StateDAL
 from ..strategy.render import outcome_description, question_description
 from ..strategy.types import Action, Decision, OrderIntent, QuestionView
@@ -99,6 +99,16 @@ class Router:
                 intent.cloid, intent.symbol, intent.side, intent.size,
                 intent.limit_price, ack.error or "<no_error_field>",
             )
+            await self.bus.publish(OrderRejected(
+                ts_ns=now_ns,
+                cloid=intent.cloid,
+                question_idx=intent.question_idx,
+                symbol=intent.symbol,
+                side=intent.side,
+                size=intent.size,
+                price=intent.limit_price,
+                error=ack.error or "",
+            ))
         # 4. If filled, update Position + emit Entry/Exit.
         # Use `is not None` rather than truthy: a falsy 0.0 is a malformed ack
         # that should be logged as a problem, not silently treated as 'no fill'

@@ -8,7 +8,8 @@ import pytest
 from hlanalysis.alerts.rules import AlertRules
 from hlanalysis.engine.event_bus import EventBus
 from hlanalysis.engine.risk_events import (
-    DailyLossHalt, Entry, Exit, KillSwitchActivated, ReconcileDrift, RiskVeto,
+    DailyLossHalt, Entry, Exit, KillSwitchActivated, OrderRejected,
+    ReconcileDrift, RiskVeto,
 )
 
 
@@ -81,6 +82,42 @@ async def test_entry_and_exit_format_pnl():
         pass
     assert any("ENTRY" in m and "@30" in m for m in tg.messages)
     assert any("EXIT" in m and "5.00" in m for m in tg.messages)
+
+
+@pytest.mark.asyncio
+async def test_order_rejected_alerts_with_error_text():
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    await bus.publish(OrderRejected(
+        ts_ns=1, cloid="hla-1", question_idx=10, symbol="#551",
+        side="buy", size=100.10, price=0.999,
+        error="Order has invalid size.",
+    ))
+    # Different error string → not deduped
+    await bus.publish(OrderRejected(
+        ts_ns=2, cloid="hla-2", question_idx=10, symbol="#551",
+        side="buy", size=100.0, price=0.999,
+        error="Insufficient margin",
+    ))
+    # Same (symbol, error) — deduped
+    await bus.publish(OrderRejected(
+        ts_ns=3, cloid="hla-3", question_idx=10, symbol="#551",
+        side="buy", size=100.0, price=0.999,
+        error="Insufficient margin",
+    ))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    rej_msgs = [m for m in tg.messages if "REJECTED" in m]
+    assert len(rej_msgs) == 2
+    assert any("invalid size" in m for m in rej_msgs)
+    assert any("Insufficient margin" in m for m in rej_msgs)
 
 
 @pytest.mark.asyncio
