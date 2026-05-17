@@ -226,6 +226,25 @@ class HLClient:
             # router's position bookkeeping (which verifies sell size doesn't
             # exceed held qty before submitting).
             req_reduce_only = req.reduce_only and not req.symbol.startswith("#")
+            # Floor size to the asset's szDecimals. The strategy emits 2-decimal
+            # sizes (PM/Binance lot=0.01 convention) but HIP-4 has szDecimals=0
+            # (integer sizes only); HL rejects "Order has invalid size" for any
+            # fractional input. The asset map is already populated by
+            # _patch_info_for_hip4 so we just look it up and floor.
+            sz_decimals = 2
+            try:
+                asset_id = self._exchange.info.coin_to_asset[req.symbol]
+                sz_decimals = self._exchange.info.asset_to_sz_decimals[asset_id]
+            except (KeyError, AttributeError):
+                pass
+            import math as _math
+            quant = 10 ** sz_decimals
+            sized = _math.floor(req.size * quant) / quant if quant > 1 else _math.floor(req.size)
+            if sized <= 0:
+                return OrderAck(
+                    cloid=req.cloid, venue_oid="", status="rejected",
+                    error=f"size {req.size} flooring to {sz_decimals} decimals → 0",
+                )
             # SDK expects cloid as a Cloid object (32-byte hex). Accept both
             # 0x-prefixed hex and our internal 'hla-{uuid}' format and adapt.
             from hyperliquid.utils.types import Cloid  # type: ignore[import-not-found]
@@ -237,7 +256,7 @@ class HLClient:
                 cloid_str = f"0x{hex_only.zfill(32)}"
             cloid_obj = Cloid.from_str(cloid_str)
             resp = self._exchange.order(
-                req.symbol, req.side == "buy", req.size, req.price,
+                req.symbol, req.side == "buy", sized, req.price,
                 {"limit": {"tif": "Ioc" if req.time_in_force == "ioc" else "Gtc"}},
                 reduce_only=req_reduce_only,
                 cloid=cloid_obj,
