@@ -1,0 +1,32 @@
+# v1 late-resolution: drift_aware × min_safety_d sweep.
+#
+# Goal: address the 4 catastrophic leg-flip trades from the 1y PM segmentation.
+# All 4 entered when BTC was within ~1% of strike (-1.15% to +0.99%) at low
+# entry ask (0.855-0.875). The symmetric |ln(S/K)| safety_d gate doesn't
+# distinguish between BTC drifting AWAY from strike (safe) and TOWARD strike
+# (about to flip). drift_aware_d=true subtracts μ*τ from the safety margin.
+#
+# Other params held at v1-final values. Cells = 2 × 4 = 8 × 5 splits = 40 runs.
+
+grids:
+  v1_late_resolution:
+    tte_min_seconds: [0]
+    tte_max_seconds: [7200]
+    price_extreme_threshold: [0.85]
+    price_extreme_max: [0.97]
+    distance_from_strike_usd_min: [0]
+    vol_max: [100]
+    stop_loss_pct: [null]
+    min_safety_d: [0.8, 1.0, 1.2, 1.5]
+    vol_lookback_seconds: [3600]
+    exit_safety_d: [1.0]
+    exit_bid_floor: [0]
+    drift_aware_d: [false, true]
+    vol_ewma_lambda: [0.85]
+    max_position_usd: [100]
+
+run:
+  train_markets: 60
+  test_markets: 60
+  step_markets: 60
+  max_workers: 12

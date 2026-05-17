@@ -1,0 +1,34 @@
+# v1 late-resolution: size_scaling × vol_estimator sweep.
+#
+# Goal: reduce loss MAGNITUDE on the 4 catastrophic leg-flips (not their count
+# — we just established the rules can't distinguish them ex-ante). Scale size
+# down on low-confidence (low safety_d) entries via size_scaling, and try the
+# more sample-efficient Parkinson vol estimator.
+#
+# Cells: 3 × 2 × 3 = 18 × 5 splits = 90 runs (~6 min).
+
+grids:
+  v1_late_resolution:
+    tte_min_seconds: [0]
+    tte_max_seconds: [7200]
+    price_extreme_threshold: [0.85]
+    price_extreme_max: [0.97]
+    distance_from_strike_usd_min: [0]
+    vol_max: [100]
+    stop_loss_pct: [null]
+    min_safety_d: [1.0]
+    vol_lookback_seconds: [3600]
+    exit_safety_d: [1.0]
+    exit_bid_floor: [0]
+    drift_aware_d: [false]
+    vol_ewma_lambda: [0.85]
+    max_position_usd: [100]
+    size_scaling: ["fixed", "linear_safety", "sqrt_safety"]
+    size_min_fraction: [0.25, 0.40, 0.50]
+    vol_estimator: ["stdev", "parkinson"]
+
+run:
+  train_markets: 60
+  test_markets: 60
+  step_markets: 60
+  max_workers: 12
