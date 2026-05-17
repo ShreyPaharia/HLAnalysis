@@ -25,7 +25,23 @@ strategy:
       vol_ewma_lambda: 0.85
       distance_from_strike_usd_min: 0
       vol_max: 100
+      # Targeted near-strike low-ask size cap — zero size on the 4 catastrophic
+      # leg-flip trades the 1y PM analysis surfaced (BTC within 1.5% of strike,
+      # ask ∈ [0.85, 0.88]). Walk-forward 5-OOS-split total $585 → $679
+      # (+$94, +16%), max drawdown $122 → $90 (−26%), Sharpe 3.88 → 6.22
+      # at fixed trade count (−12 trades, all losers). See
+      # data/sim/tuning/v1-size-cap-pm/.
+      size_cap_near_strike_pct: 1.0
+      size_cap_max_dist_pct: 1.5
+      size_cap_min_ask: 0.88
     # priceBucket — same per-leg consensus rule across all bucket legs.
+    # NOTE: Polymarket bucket data uses an "above-X binary stack" layout that
+    # is incompatible with the strategy's HL mutually-exclusive bucket
+    # interpretation (see docs/v1-bucket-sizing-results.md), so the PM corpus
+    # cannot be used to tune these params. This entry stays calibrated to the
+    # binary params and applies only to HL HIP-4 priceBucket markets (which
+    # match the strategy's expected layout). size_cap defaults to disabled
+    # here pending HL-bucket-specific tuning.
     - match:
         class: priceBucket
         underlying: BTC
@@ -59,6 +75,11 @@ strategy:
     vol_ewma_lambda: 0.85
     distance_from_strike_usd_min: 0
     vol_max: 100
+    # See per-allowlist entries above; engine `build_late_resolution_config`
+    # reads from defaults here, so the strategy instance always sees this cap.
+    size_cap_near_strike_pct: 1.0
+    size_cap_max_dist_pct: 1.5
+    size_cap_min_ask: 0.88
 
   global:
     max_total_inventory_usd: 500

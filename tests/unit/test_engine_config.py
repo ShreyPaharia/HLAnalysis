@@ -30,8 +30,10 @@ def test_load_strategy_yaml_from_repo():
     assert cfg.defaults.exit_safety_d == 1.0
     assert cfg.defaults.vol_ewma_lambda == 0.85
     assert cfg.defaults.stop_loss_pct is None  # disabled per tuning
-    # Size-cap fields default — not yet set in YAML (tuned in a later commit).
-    assert cfg.defaults.size_cap_near_strike_pct == 0.0
+    # Size-cap fields: tuned from the v1-size-cap-pm sweep (1y PM binary
+    # walk-forward). pct=1.0 zeros size on near-strike low-ask entries,
+    # lifting 5-OOS-split PnL $585 → $679 (+$94, Sharpe 3.88 → 6.22).
+    assert cfg.defaults.size_cap_near_strike_pct == 1.0
     assert cfg.defaults.size_cap_max_dist_pct == 1.5
     assert cfg.defaults.size_cap_min_ask == 0.88
     btc_binary = next(
@@ -43,7 +45,7 @@ def test_load_strategy_yaml_from_repo():
     assert btc_binary.exit_safety_d == 1.0
     assert btc_binary.vol_ewma_lambda == 0.85
     assert btc_binary.stop_loss_pct is None
-    assert btc_binary.size_cap_near_strike_pct == 0.0
+    assert btc_binary.size_cap_near_strike_pct == 1.0
     assert btc_binary.size_cap_max_dist_pct == 1.5
     assert btc_binary.size_cap_min_ask == 0.88
     btc_bucket = next(
@@ -51,6 +53,10 @@ def test_load_strategy_yaml_from_repo():
     )
     assert btc_bucket.exit_safety_d == 1.0
     assert btc_bucket.vol_ewma_lambda == 0.85
+    # Bucket entry's size-cap left disabled — PM bucket data (used to tune the
+    # binary cap) uses an "above-X stack" layout incompatible with the
+    # strategy's HL bucket interpretation, so we can't reuse the binary tune.
+    assert btc_bucket.size_cap_near_strike_pct == 0.0
 
 
 def test_allowlist_entry_safety_gate_defaults_when_omitted():
