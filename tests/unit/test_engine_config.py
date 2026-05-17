@@ -24,7 +24,7 @@ def test_load_strategy_yaml_from_repo():
     # v1-final values from the 1y PM walk-forward + focused (thr,max,stop) sweep.
     assert cfg.defaults.tte_max_seconds == 7200
     assert cfg.defaults.price_extreme_threshold == 0.85
-    assert cfg.defaults.price_extreme_max == 0.97
+    assert cfg.defaults.price_extreme_max == 0.999
     assert cfg.defaults.min_safety_d == 1.0
     assert cfg.defaults.vol_lookback_seconds == 3600
     assert cfg.defaults.exit_safety_d == 1.0
@@ -33,7 +33,7 @@ def test_load_strategy_yaml_from_repo():
     btc_binary = next(
         e for e in cfg.allowlist if e.match.get("class") == "priceBinary"
     )
-    assert btc_binary.price_extreme_max == 0.97
+    assert btc_binary.price_extreme_max == 0.999
     assert btc_binary.min_safety_d == 1.0
     assert btc_binary.vol_lookback_seconds == 3600
     assert btc_binary.exit_safety_d == 1.0

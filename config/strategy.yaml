@@ -5,11 +5,12 @@ strategy:
   # Pattern-based allowlist; matches QuestionMetaEvent fields.
   # Auto-applies across rollovers; blocklist for per-instance escape hatch.
   allowlist:
-    # 24h regime: enter inside the last 2h, winning leg ∈ [0.85, 0.97], joint
-    # vol+distance safety gate at 1.0σ. Calibrated on PM BTC daily Up/Down
-    # (May 2025 – May 2026): walk-forward 5-OOS-split total $577 (mean $115/2mo,
-    # std $43), full-year unsplit $687, Sharpe 3.70, hit 74.9%.
-    # See config/v1-final.json and data/sim/tuning/v1-thr-max-pm/.
+    # 24h regime: enter inside the last 2h, winning leg ∈ [0.85, 0.999]. Lower
+    # bound calibrated on PM BTC daily Up/Down (May 2025 – May 2026): walk-forward
+    # 5-OOS-split total $577, full-year $687, Sharpe 3.70, hit 74.9%. Upper bound
+    # widened from PM-optimal 0.97 because HL HIP-4 favorites trade tighter
+    # (0.98–0.9999); the 0.97 cap blocked every HL trade in live. HL-specific
+    # tuning is a follow-up once enough live fills accumulate.
     - match:
         class: priceBinary
         underlying: BTC
@@ -18,7 +19,7 @@ strategy:
       tte_min_seconds: 0
       tte_max_seconds: 7200
       price_extreme_threshold: 0.85
-      price_extreme_max: 0.97
+      price_extreme_max: 0.999            # HL HIP-4 favorites trade 0.98-0.9999; 0.97 cap blocked every trade live
       min_safety_d: 1.0
       vol_lookback_seconds: 3600
       exit_safety_d: 1.0
@@ -34,7 +35,7 @@ strategy:
       tte_min_seconds: 0
       tte_max_seconds: 7200
       price_extreme_threshold: 0.85
-      price_extreme_max: 0.97
+      price_extreme_max: 0.999            # HL HIP-4 favorites trade 0.98-0.9999; 0.97 cap blocked every trade live
       min_safety_d: 1.0
       vol_lookback_seconds: 3600
       exit_safety_d: 1.0
@@ -52,7 +53,7 @@ strategy:
     tte_min_seconds: 0
     tte_max_seconds: 7200
     price_extreme_threshold: 0.85
-    price_extreme_max: 0.97
+    price_extreme_max: 0.999
     min_safety_d: 1.0
     vol_lookback_seconds: 3600
     exit_safety_d: 1.0
@@ -65,6 +66,6 @@ strategy:
     max_concurrent_positions: 5
     daily_loss_cap_usd: 200
     max_strike_distance_pct: 50         # 50% — BTC moves 5-10% per day, allow room
-    min_recent_volume_usd: 1000         # live floor — skip illiquid binaries
-    stale_data_halt_seconds: 5
+    min_recent_volume_usd: 100          # HL HIP-4 binaries are inherently thin; 1000 vetoed every trade
+    stale_data_halt_seconds: 30         # HIP-4 books update on bursts not steady streams; 5s vetoed every trade
     reconcile_interval_seconds: 60
