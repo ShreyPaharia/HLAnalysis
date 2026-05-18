@@ -38,10 +38,19 @@ get_param() {
   aws ssm get-parameter "${args[@]}"
 }
 
+# v1 (late_resolution) — required.
 HL_ACCOUNT_ADDRESS=$(get_param /hl-engine/account-address no)
 HL_API_SECRET_KEY=$(get_param /hl-engine/api-secret-key yes)
 TG_BOT_TOKEN=$(get_param /hl-engine/tg-bot-token yes)
 TG_CHAT_ID=$(get_param /hl-engine/tg-chat-id no)
+
+# v31 (theta_harvester) — multi-account. Optional so a fresh install with only
+# the legacy v1 params doesn't fail-start. If either v31 param is missing the
+# engine will still boot v1; the runtime errors loudly when load_deploy_config
+# tries to substitute the missing env var, surfacing the misconfiguration in
+# journalctl rather than silently running with empty credentials.
+HL_ACCOUNT_ADDRESS_V31=$(get_param /hl-engine/account-address-v31 no 2>/dev/null || true)
+HL_API_SECRET_KEY_V31=$(get_param /hl-engine/api-secret-key-v31 yes 2>/dev/null || true)
 
 # Write atomically so a partial write can never be sourced by EnvironmentFile.
 TMP=$(mktemp /etc/hl-engine/env.XXXXXX)
@@ -49,6 +58,8 @@ chmod 600 "$TMP"
 cat > "$TMP" <<ENVEOF
 HL_ACCOUNT_ADDRESS=${HL_ACCOUNT_ADDRESS}
 HL_API_SECRET_KEY=${HL_API_SECRET_KEY}
+HL_ACCOUNT_ADDRESS_V31=${HL_ACCOUNT_ADDRESS_V31}
+HL_API_SECRET_KEY_V31=${HL_API_SECRET_KEY_V31}
 TG_BOT_TOKEN=${TG_BOT_TOKEN}
 TG_CHAT_ID=${TG_CHAT_ID}
 PYTHONUNBUFFERED=1
