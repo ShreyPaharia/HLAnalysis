@@ -238,7 +238,24 @@ class EngineRuntime:
                 return
             try:
                 now = self._now_ns()
-                rec = Reconciler(dal, fills_lookup=lambda c: hl.user_fills())
+                # Build symbol→question_idx from the current market state so
+                # the reconciler can attribute venue-orphan HIP-4 positions to
+                # their question rows when adopting them into the DB. Without
+                # this mapping the reconciler can only emit unattributed drift
+                # events and the gate stays blind to the venue position.
+                sym_to_q: dict[str, int] = {}
+                for q in self.market_state.all_questions():
+                    legs = q.leg_symbols or (
+                        (q.yes_symbol, q.no_symbol) if q.yes_symbol else ()
+                    )
+                    for sym in legs:
+                        if sym:
+                            sym_to_q[sym] = q.question_idx
+                rec = Reconciler(
+                    dal,
+                    fills_lookup=lambda c: hl.user_fills(),
+                    symbol_to_question=sym_to_q,
+                )
                 res = rec.run(
                     venue_open=hl.open_orders(),
                     venue_state=hl.clearinghouse_state(),
