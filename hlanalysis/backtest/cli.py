@@ -39,6 +39,7 @@ from .runner.result import summarise_run
 # `hl-bt tune` reach the same caches through the same env vars.
 _ENV_PM_CACHE = "HLBT_PM_CACHE_ROOT"
 _ENV_HL_DATA = "HLBT_HL_DATA_ROOT"
+_ENV_KALSHI_CACHE = "HLBT_KALSHI_CACHE_ROOT"
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +73,11 @@ def _resolve_data_source(name: str, *, cache_root: str | None = None) -> DataSou
 
         root = cache_root or os.environ.get(_ENV_HL_DATA, "data")
         return HLHip4DataSource(data_root=Path(root))
+    if name == "kalshi":
+        from .data.kalshi import KalshiDataSource
+
+        root = cache_root or os.environ.get(_ENV_KALSHI_CACHE, "data/kalshi")
+        return KalshiDataSource(cache_root=Path(root))
     raise SystemExit(f"Unknown --data-source: {name}")
 
 
@@ -93,11 +99,20 @@ def make_hl_hip4_source() -> "DataSource":
     return HLHip4DataSource(data_root=Path(root))
 
 
+def make_kalshi_source() -> "DataSource":
+    from .data.kalshi import KalshiDataSource
+
+    root = os.environ.get(_ENV_KALSHI_CACHE, "data/kalshi")
+    return KalshiDataSource(cache_root=Path(root))
+
+
 def _factory_dotted_for(name: str) -> str:
     if name == "polymarket":
         return "hlanalysis.backtest.cli.make_polymarket_source"
     if name == "hl_hip4":
         return "hlanalysis.backtest.cli.make_hl_hip4_source"
+    if name == "kalshi":
+        return "hlanalysis.backtest.cli.make_kalshi_source"
     raise SystemExit(f"--data-source {name!r} not supported by `tune`")
 
 
