@@ -220,3 +220,162 @@ def test_edge_max_none_disables_filter_preserving_v3_baseline() -> None:
         position=None, now_ns=0,
     )
     assert decision.action == Action.ENTER
+
+
+# ---------------------------------------------------------------------------
+# Bucket (priceBucket) tests — verify v3.1 generalises to multi-outcome markets.
+# ---------------------------------------------------------------------------
+
+
+def _qv_bucket(expiry_ns: int = 10**18) -> QuestionView:
+    """3-outcome bucket: BTC<90k | 90k≤BTC<110k | BTC≥110k.
+
+    HL layout: leg_symbols = [Y0, N0, Y1, N1, Y2, N2] with YES at even idx, NO at odd.
+    NO of an edge bucket inverts to the opposite half-line; NO of the middle
+    bucket is non-contiguous and must be skipped by the strategy.
+    """
+    return QuestionView(
+        question_idx=0,
+        yes_symbol="",
+        no_symbol="",
+        strike=0.0,
+        expiry_ns=expiry_ns,
+        underlying="BTC",
+        klass="priceBucket",
+        period="1d",
+        settled=False,
+        kv=(("priceThresholds", "90000,110000"),),
+        leg_symbols=("Y0", "N0", "Y1", "N1", "Y2", "N2"),
+    )
+
+
+def test_bucket_entry_picks_leg_with_best_edge() -> None:
+    """With BTC sitting comfortably inside the middle bucket (90k<BTC<110k),
+    a low-priced Y1 ask should be the best-edge leg and get bought."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        edge_buffer=0.02, edge_max=None, favorite_threshold=0.0,
+    ))
+    qv = _qv_bucket(expiry_ns=3600 * 10**9)
+    # Low realized vol → BTC near-certain to stay in (90k, 110k) over 1h.
+    rets = tuple([0.0001] * 120)
+    books = {
+        "Y0": _book("Y0", bid=0.04, ask=0.05),  # P(BTC<90k) ~ 0  → edge negative
+        "N0": _book("N0", bid=0.94, ask=0.95),  # P(BTC≥90k) ~ 1  → edge near 0.05
+        "Y1": _book("Y1", bid=0.69, ask=0.70),  # P(middle)    ~ 1  → edge ~ 0.30 (BEST)
+        "N1": _book("N1", bid=0.30, ask=0.31),  # middle NO — skipped (non-contiguous)
+        "Y2": _book("Y2", bid=0.04, ask=0.05),  # P(BTC≥110k) ~ 0 → edge negative
+        "N2": _book("N2", bid=0.94, ask=0.95),  # P(BTC<110k) ~ 1 → edge near 0.05
+    }
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=100_000.0, recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    assert decision.action == Action.ENTER
+    assert decision.intents[0].symbol == "Y1"  # middle YES has the biggest edge
+
+
+def test_bucket_entry_skips_middle_no_leg() -> None:
+    """N1 of a 3-outcome bucket has a non-contiguous winning region (BTC<90k or
+    BTC≥110k). v3.1 must not enter it even when its ask looks cheap."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        edge_buffer=0.02, edge_max=None, favorite_threshold=0.0,
+    ))
+    qv = _qv_bucket(expiry_ns=3600 * 10**9)
+    rets = tuple([0.0001] * 120)
+    # All other legs visibly negative-edge; N1 ask is ridiculously cheap (0.01).
+    # Despite the apparent edge, the strategy must NOT pick N1.
+    books = {
+        "Y0": _book("Y0", bid=0.59, ask=0.60),
+        "N0": _book("N0", bid=0.59, ask=0.60),
+        "Y1": _book("Y1", bid=0.99, ask=0.999),  # tiny edge after costs
+        "N1": _book("N1", bid=0.005, ask=0.01),  # MUST be skipped
+        "Y2": _book("Y2", bid=0.59, ask=0.60),
+        "N2": _book("N2", bid=0.59, ask=0.60),
+    }
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=100_000.0, recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    # Either enters something else or HOLDs — must not pick N1.
+    if decision.action == Action.ENTER:
+        assert decision.intents[0].symbol != "N1"
+
+
+def test_bucket_exit_fires_when_held_bucket_loses_edge() -> None:
+    """Hold Y1 (middle YES). When BTC moves to 130k (out of bucket), p_win for
+    the middle drops near zero and edge_held collapses → EXIT."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        edge_buffer=0.02, exit_edge_threshold=-0.01,
+    ))
+    qv = _qv_bucket(expiry_ns=3600 * 10**9)
+    rets = tuple([0.0001] * 120)
+    # Held leg Y1 currently quoting at low bid (binary is collapsing) — but the
+    # exit decision is driven by the MODEL's edge, not bid level. With BTC at
+    # 130k and low vol, p_win(Y1 = middle bucket) ≈ 0.
+    books = {
+        "Y0": _book("Y0", bid=0.04, ask=0.05),
+        "N0": _book("N0", bid=0.94, ask=0.95),
+        "Y1": _book("Y1", bid=0.10, ask=0.11),  # held leg bid = 0.10 (visible loss)
+        "N1": _book("N1", bid=0.88, ask=0.89),
+        "Y2": _book("Y2", bid=0.85, ask=0.86),
+        "N2": _book("N2", bid=0.14, ask=0.15),
+    }
+    pos = Position(
+        question_idx=0, symbol="Y1", qty=200.0,
+        avg_entry=0.70, stop_loss_price=0.0, last_update_ts_ns=0,
+    )
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=130_000.0,  # ref jumped out of the middle bucket
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert decision.action == Action.EXIT
+    assert "exit_edge" in [d.message for d in decision.diagnostics]
+
+
+def test_bucket_favorite_threshold_filters_leg_set() -> None:
+    """With favorite_threshold=0.7, only legs whose mid ≥ 0.7 are eligible."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        edge_buffer=0.02, favorite_threshold=0.7,
+    ))
+    qv = _qv_bucket(expiry_ns=3600 * 10**9)
+    rets = tuple([0.0001] * 120)
+    # Y1 mid = 0.80 (passes); Y0 and Y2 mid = 0.05 (fails); N0/N2 mid = 0.95 (pass).
+    # Among passers, Y1 has the highest edge by construction (p_win ≈ 1 vs ask 0.80
+    # gives edge ≈ 0.20; N0 and N2 have edge ≈ 0.04 only).
+    books = {
+        "Y0": _book("Y0", bid=0.04, ask=0.05),
+        "N0": _book("N0", bid=0.94, ask=0.95),
+        "Y1": _book("Y1", bid=0.79, ask=0.80),
+        "N1": _book("N1", bid=0.18, ask=0.19),
+        "Y2": _book("Y2", bid=0.04, ask=0.05),
+        "N2": _book("N2", bid=0.94, ask=0.95),
+    }
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=100_000.0, recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    assert decision.action == Action.ENTER
+    assert decision.intents[0].symbol == "Y1"
+
+
+def test_bucket_holds_when_no_leg_passes_favorite_gate() -> None:
+    """If all legs have mid < favorite_threshold, the gate fires and we HOLD."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        edge_buffer=0.02, favorite_threshold=0.9,
+    ))
+    qv = _qv_bucket(expiry_ns=3600 * 10**9)
+    rets = tuple([0.0001] * 120)
+    # Every leg quotes near 0.50 mid → none exceed 0.9.
+    books = {sym: _book(sym, bid=0.49, ask=0.50) for sym in ("Y0", "N0", "Y1", "N1", "Y2", "N2")}
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=100_000.0, recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    assert decision.action == Action.HOLD
+    assert "no_favorite" in [d.message for d in decision.diagnostics]

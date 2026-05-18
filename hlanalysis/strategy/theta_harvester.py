@@ -18,6 +18,108 @@ from .types import (
 _ANNUAL_SECONDS = 365.25 * 86400.0
 
 
+# ---------------------------------------------------------------------------
+# Leg-aware helpers — handle both priceBinary and priceBucket question classes
+# uniformly. Bucket layout mirrors v1 (late_resolution.py): for N thresholds we
+# get N+1 outcomes × 2 legs each, alternating [yes_o0, no_o0, yes_o1, no_o1, ...].
+# Helpers are intentionally duplicated rather than imported from v1 so the two
+# strategies stay decoupled and can diverge over time.
+# ---------------------------------------------------------------------------
+
+
+def _kv_get(qv: QuestionView, key: str) -> str:
+    for k, v in qv.kv:
+        if k == key:
+            return v
+    return ""
+
+
+def _winning_region(qv: QuestionView, symbol: str) -> tuple[Optional[float], Optional[float]]:
+    """Return (lo, hi) such that the leg `symbol` wins iff underlying ∈ [lo, hi]
+    at expiry. None on either side denotes ±∞.
+
+    Binary YES wins above strike → (strike, None); NO wins at-or-below → (None, strike).
+    Bucket (HL convention, YES at even leg index, NO at odd):
+      outcome 0       → YES wins below thr[0]
+      outcome 1..N-1  → YES wins inside (thr[i-1], thr[i])
+      outcome N       → YES wins above thr[-1]
+    NO of an edge bucket inverts to the opposite half-line. NO of a middle
+    bucket is the union of two half-lines (non-contiguous) and is signaled
+    by returning (None, None) — callers must skip such legs as no-edge.
+    """
+    if qv.klass == "priceBinary":
+        if symbol == qv.yes_symbol:
+            return (qv.strike, None)
+        if symbol == qv.no_symbol:
+            return (None, qv.strike)
+        return (None, None)
+
+    if qv.klass != "priceBucket" or not qv.leg_symbols or symbol not in qv.leg_symbols:
+        return (None, None)
+
+    thresholds_raw = _kv_get(qv, "priceThresholds")
+    thr = [float(t) for t in thresholds_raw.split(",") if t.strip()]
+    if not thr:
+        return (None, None)
+
+    idx = qv.leg_symbols.index(symbol)
+    outcome_pos = idx // 2
+    side_idx = idx % 2  # 0=YES, 1=NO
+
+    if outcome_pos == 0:
+        yes_lo: Optional[float] = None
+        yes_hi: Optional[float] = thr[0]
+    elif outcome_pos == len(thr):
+        yes_lo, yes_hi = thr[-1], None
+    elif 0 < outcome_pos < len(thr):
+        yes_lo, yes_hi = thr[outcome_pos - 1], thr[outcome_pos]
+    else:
+        return (None, None)
+
+    if side_idx == 0:
+        return (yes_lo, yes_hi)
+    # NO leg
+    if yes_lo is None:
+        return (yes_hi, None)
+    if yes_hi is None:
+        return (None, yes_lo)
+    # Middle-bucket NO = union of two half-lines (non-contiguous). Treat as
+    # ineligible for entry; v3 exit-side handling needs care here too — see
+    # _p_leg_win_prob which returns 0 in this case.
+    return (None, None)
+
+
+def _p_leg_win_prob(
+    *,
+    reference_price: float,
+    lo: Optional[float],
+    hi: Optional[float],
+    sigma: float,
+    mu_eff: float,
+    tau_yr: float,
+) -> Optional[float]:
+    """P(lo < S_T ≤ hi) under GBM with drift μ, Itô-corrected.
+
+    Returns None when the leg has no contiguous winning region (e.g. NO of a
+    middle bucket — caller must skip). For unbounded edges, +∞/−∞ map to the
+    natural CDF limits.
+    """
+    if lo is None and hi is None:
+        return None
+    sigma_sqrt_tau = sigma * math.sqrt(tau_yr)
+    drift = (mu_eff - 0.5 * sigma * sigma) * tau_yr
+
+    def _N_above(k: float) -> float:
+        """P(S_T > k) under GBM. With d = (ln(S/K) + drift) / (σ√τ), this is N(d)."""
+        d = (math.log(reference_price / k) + drift) / sigma_sqrt_tau
+        return float(norm.cdf(d))
+
+    p_above_lo = 1.0 if lo is None else _N_above(lo)
+    p_above_hi = 0.0 if hi is None else _N_above(hi)
+    # P(lo < S_T ≤ hi) = P(S > lo) − P(S > hi)
+    return max(0.0, p_above_lo - p_above_hi)
+
+
 @dataclass(frozen=True, slots=True)
 class ThetaHarvesterConfig:
     # v2 entry knobs (copied; we deliberately do NOT import ModelEdgeConfig to
@@ -123,11 +225,6 @@ class ThetaHarvesterStrategy(Strategy):
         ann = per_sample * (_ANNUAL_SECONDS / float(self.cfg.vol_sampling_dt_seconds))
         return self.cfg.drift_blend * ann
 
-    def _p_model(self, *, reference_price: float, strike: float, sigma: float, mu_eff: float, tau_yr: float) -> tuple[float, float]:
-        ln_sk = math.log(reference_price / strike)
-        d = (ln_sk + (mu_eff - 0.5 * sigma ** 2) * tau_yr) / (sigma * math.sqrt(tau_yr))
-        return float(norm.cdf(d)), ln_sk
-
     def _evaluate_entry(
         self, *, question: QuestionView, books: Mapping[str, BookState], reference_price: float, sigma: float, mu_eff: float, tau_yr: float,
     ) -> Decision:
@@ -138,65 +235,127 @@ class ThetaHarvesterStrategy(Strategy):
                 Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tau_s:.0f}"),)),
             ))
 
-        p_model, ln_sk = self._p_model(
-            reference_price=reference_price, strike=question.strike,
-            sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+        # Determine candidate legs. For binaries we keep the historical
+        # (yes_symbol, no_symbol) ordering so behavior is bit-for-bit unchanged
+        # and existing tests stay green. For buckets we iterate leg_symbols.
+        legs: tuple[str, ...] = (
+            question.leg_symbols
+            if question.leg_symbols and question.klass != "priceBinary"
+            else (question.yes_symbol, question.no_symbol)
         )
+        if not legs:
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_legs"),))
 
-        yes = books.get(question.yes_symbol)
-        no_ = books.get(question.no_symbol)
-        if yes is None or yes.ask_px is None or no_ is None or no_.ask_px is None:
+        # Per-leg edge computation. Skip legs without a quote, without a
+        # contiguous winning region, or that fail the favorite gate. We retain
+        # explicit (edge_yes, edge_no) bookkeeping for binary diagnostics so
+        # downstream parsing (result.py:_parse_edge_fields) is unchanged.
+        is_binary = question.klass == "priceBinary"
+        per_leg: list[tuple[str, float, float, BookState]] = []  # (symbol, p_win, edge, book)
+        for sym in legs:
+            book = books.get(sym)
+            if book is None or book.ask_px is None:
+                continue
+            lo, hi = _winning_region(question, sym)
+            p_win = _p_leg_win_prob(
+                reference_price=reference_price, lo=lo, hi=hi,
+                sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+            )
+            if p_win is None:
+                continue  # NO leg of a middle bucket — no contiguous winning region
+            edge = p_win - book.ask_px - self.cfg.fee_taker - self.cfg.half_spread_assumption
+            per_leg.append((sym, p_win, edge, book))
+
+        if not per_leg:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_book"),))
 
-        edge_yes = p_model - yes.ask_px - self.cfg.fee_taker - self.cfg.half_spread_assumption
-        edge_no = (1.0 - p_model) - no_.ask_px - self.cfg.fee_taker - self.cfg.half_spread_assumption
-
+        # Favorite gate: require the leg's mid ≥ threshold. The binary case
+        # naturally collapses to "exactly one side passes" because YES+NO=1.
+        # Buckets: filter to legs whose mid ≥ threshold; if no leg passes,
+        # HOLD with diagnostic.
         if self.cfg.favorite_threshold > 0.0:
-            yes_mid = (yes.bid_px + yes.ask_px) / 2.0 if yes.bid_px is not None else yes.ask_px
-            no_mid = (no_.bid_px + no_.ask_px) / 2.0 if no_.bid_px is not None else no_.ask_px
-            if yes_mid >= self.cfg.favorite_threshold:
-                edge_no = -1e9
-            elif no_mid >= self.cfg.favorite_threshold:
-                edge_yes = -1e9
-            else:
+            def _mid(b: BookState) -> float:
+                if b.bid_px is not None and b.ask_px is not None:
+                    return (b.bid_px + b.ask_px) / 2.0
+                return b.ask_px if b.ask_px is not None else (b.bid_px or 0.0)
+            per_leg = [t for t in per_leg if _mid(t[3]) >= self.cfg.favorite_threshold]
+            if not per_leg:
                 return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_favorite"),))
 
-        diag = Diagnostic("info", "edge", (
-            ("p_model", f"{p_model:.4f}"),
-            ("edge_yes", f"{edge_yes:.4f}"),
-            ("edge_no", f"{edge_no:.4f}"),
-            ("sigma", f"{sigma:.4f}"),
-            ("tau_yr", f"{tau_yr:.12f}"),
-            ("ln_sk", f"{ln_sk:.4f}"),
-        ))
+        # Pick the leg with the highest edge.
+        chosen_sym, chosen_p, chosen_edge, chosen_book = max(per_leg, key=lambda t: t[2])
 
-        if max(edge_yes, edge_no) <= self.cfg.edge_buffer:
+        # Build a diagnostic preserving the binary schema (p_model/edge_yes/edge_no)
+        # so existing parquet writers and tests keep working unchanged.
+        if is_binary:
+            yes = books.get(question.yes_symbol)
+            no_ = books.get(question.no_symbol)
+            # Binary always has both legs at this point because per_leg is non-empty
+            # (favorite gate already passed if active). p_yes = P(S>strike).
+            p_yes_view = _p_leg_win_prob(
+                reference_price=reference_price, lo=question.strike, hi=None,
+                sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+            ) or 0.0
+            edge_yes = (
+                p_yes_view - (yes.ask_px if yes and yes.ask_px is not None else 1.0)
+                - self.cfg.fee_taker - self.cfg.half_spread_assumption
+            )
+            edge_no = (
+                (1.0 - p_yes_view) - (no_.ask_px if no_ and no_.ask_px is not None else 1.0)
+                - self.cfg.fee_taker - self.cfg.half_spread_assumption
+            )
+            # Apply favorite-gate disabling sentinels so the diagnostic mirrors
+            # the legacy behavior exactly (existing tests check exact values).
+            if self.cfg.favorite_threshold > 0.0:
+                if chosen_sym == question.yes_symbol:
+                    edge_no = -1e9
+                else:
+                    edge_yes = -1e9
+            ln_sk = math.log(reference_price / question.strike)
+            diag = Diagnostic("info", "edge", (
+                ("p_model", f"{p_yes_view:.4f}"),
+                ("edge_yes", f"{edge_yes:.4f}"),
+                ("edge_no", f"{edge_no:.4f}"),
+                ("sigma", f"{sigma:.4f}"),
+                ("tau_yr", f"{tau_yr:.12f}"),
+                ("ln_sk", f"{ln_sk:.4f}"),
+            ))
+        else:
+            # Bucket diagnostic. We keep the schema column names so the parquet
+            # writer is uniform; edge_yes carries the chosen-leg edge, edge_no
+            # gets a sentinel that downstream selection (max) ignores.
+            diag = Diagnostic("info", "edge", (
+                ("p_model", f"{chosen_p:.4f}"),
+                ("edge_yes", f"{chosen_edge:.4f}"),
+                ("edge_no", f"{-1e9:.4f}"),
+                ("sigma", f"{sigma:.4f}"),
+                ("tau_yr", f"{tau_yr:.12f}"),
+                ("ln_sk", "0.0000"),
+                ("chosen_leg", chosen_sym),
+            ))
+
+        if chosen_edge <= self.cfg.edge_buffer:
             return Decision(action=Action.HOLD, diagnostics=(diag,))
 
-        if self.cfg.edge_max is not None and max(edge_yes, edge_no) >= self.cfg.edge_max:
+        if self.cfg.edge_max is not None and chosen_edge >= self.cfg.edge_max:
             return Decision(action=Action.HOLD, diagnostics=(
                 Diagnostic("info", "edge_too_extreme", (
-                    ("edge", f"{max(edge_yes, edge_no):.4f}"),
+                    ("edge", f"{chosen_edge:.4f}"),
                     ("edge_max", f"{self.cfg.edge_max:.4f}"),
                 )),
                 diag,
             ))
 
-        if edge_yes >= edge_no:
-            target_book, target_symbol = yes, question.yes_symbol
-        else:
-            target_book, target_symbol = no_, question.no_symbol
-
-        size = max(0.0, math.floor((self.cfg.max_position_usd / target_book.ask_px) * 100) / 100)
+        size = max(0.0, math.floor((self.cfg.max_position_usd / chosen_book.ask_px) * 100) / 100)
         if size <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"), diag))
 
         intent = OrderIntent(
             question_idx=question.question_idx,
-            symbol=target_symbol,
+            symbol=chosen_sym,
             side="buy",
             size=size,
-            limit_price=target_book.ask_px,
+            limit_price=chosen_book.ask_px,
             cloid=f"hla-{uuid.uuid4()}",
             time_in_force="ioc",
         )
@@ -225,13 +384,21 @@ class ThetaHarvesterStrategy(Strategy):
         if self.cfg.take_profit_price is not None and held.bid_px >= position.avg_entry + self.cfg.take_profit_price:
             return self._exit_intent(question, position, held, reason="exit_take_profit")
 
-        # Rule 2: edge-based exit (the heart of v3)
-        p_model, _ = self._p_model(
-            reference_price=reference_price, strike=question.strike,
+        # Rule 2: edge-based exit (the heart of v3) — leg-aware.
+        # For binary, _winning_region returns the standard (strike, None) or
+        # (None, strike) and the result is bit-for-bit identical to the old
+        # p_model / (1-p_model) split.
+        lo, hi = _winning_region(question, position.symbol)
+        held_p = _p_leg_win_prob(
+            reference_price=reference_price, lo=lo, hi=hi,
             sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
         )
-        # held_p = probability the held leg wins
-        held_p = p_model if position.symbol == question.yes_symbol else (1.0 - p_model)
+        if held_p is None:
+            # Middle-bucket NO with no contiguous winning region. Skip edge
+            # check; rely on stop_loss / time_stop / settlement.
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "hold_no_region"),
+            ))
         edge_held = held_p - held.ask_px - self.cfg.fee_taker - self.cfg.half_spread_assumption
         if edge_held < self.cfg.exit_edge_threshold:
             return self._exit_intent(question, position, held, reason="exit_edge")
