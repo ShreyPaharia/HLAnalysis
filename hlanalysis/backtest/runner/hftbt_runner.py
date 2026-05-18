@@ -479,6 +479,12 @@ def run_one_question(
                     )
                 )
 
+        # Inject hedge book into the books mapping so strategies can read it.
+        if hedge_asset_no is not None and cfg.hedge_symbol:
+            hbs = _book_state(hbt, hedge_asset_no, cfg.hedge_symbol)
+            if hbs is not None:
+                books[cfg.hedge_symbol] = hbs
+
         # Update last_scan_ns BEFORE the `continue` so we don't loop forever
         # re-targeting the same ts when books are missing.
         last_scan_ns = now_ns
