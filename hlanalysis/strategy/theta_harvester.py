@@ -40,6 +40,14 @@ class ThetaHarvesterConfig:
     exit_edge_threshold: float          # exit when edge_held_side < this (typically <= 0)
     take_profit_price: Optional[float]  # exit when held_bid >= entry_px + this
     time_stop_seconds: int              # exit when tau_s < this; 0 disables
+    # v3.1 entry upper-edge filter. Trade-level analysis of v3 PM-corpus run
+    # surfaced an asymmetry: entries claiming edge >= 0.20 had hit rate 55%
+    # (same as the rest) but with full-position wipeouts on the losers, netting
+    # -$569 on 176 trades. Hypothesis: when GBM claims huge edge, the market
+    # usually knows something the realized-vol model doesn't (event risk).
+    # Filtering edge >= 0.20 lifted PnL +37% and cut max DD -84% on PM.
+    # None disables the filter (preserves v3 baseline behavior).
+    edge_max: Optional[float] = None
 
 
 class ThetaHarvesterStrategy(Strategy):
@@ -165,6 +173,15 @@ class ThetaHarvesterStrategy(Strategy):
         if max(edge_yes, edge_no) <= self.cfg.edge_buffer:
             return Decision(action=Action.HOLD, diagnostics=(diag,))
 
+        if self.cfg.edge_max is not None and max(edge_yes, edge_no) >= self.cfg.edge_max:
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "edge_too_extreme", (
+                    ("edge", f"{max(edge_yes, edge_no):.4f}"),
+                    ("edge_max", f"{self.cfg.edge_max:.4f}"),
+                )),
+                diag,
+            ))
+
         if edge_yes >= edge_no:
             target_book, target_symbol = yes, question.yes_symbol
         else:
@@ -267,5 +284,6 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         exit_edge_threshold=float(params["exit_edge_threshold"]),
         take_profit_price=(float(params["take_profit_price"]) if params.get("take_profit_price") is not None else None),
         time_stop_seconds=int(params.get("time_stop_seconds", 0)),
+        edge_max=(float(params["edge_max"]) if params.get("edge_max") is not None else None),
     )
     return ThetaHarvesterStrategy(cfg)

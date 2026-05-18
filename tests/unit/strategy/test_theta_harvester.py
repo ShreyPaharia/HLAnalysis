@@ -170,3 +170,53 @@ def test_stop_loss_fires_when_bid_at_or_below_stop_px() -> None:
     )
     assert decision.action == Action.EXIT
     assert "exit_stop_loss" in [d.message for d in decision.diagnostics]
+
+
+def test_edge_max_filter_rejects_extreme_edge_entries() -> None:
+    """When edge_max is set, entries claiming edge above the cap must HOLD,
+    even when the basic edge_buffer would otherwise green-light the trade."""
+    # 1h to expiry, ref massively above strike → p_model ~ 1
+    # YES ask = 0.50 → edge ≈ 0.50 (huge). edge_max=0.20 must reject.
+    strat = build_strategy("v3_theta_harvester", _params(edge_max=0.20))
+    qv = _qv(expiry_ns=3600 * 10**9)
+    books = {"YES": _book("YES", bid=0.49, ask=0.50), "NO": _book("NO", bid=0.49, ask=0.50)}
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=120_000.0, recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    assert decision.action == Action.HOLD
+    assert "edge_too_extreme" in [d.message for d in decision.diagnostics]
+
+
+def test_edge_max_filter_permits_moderate_edge_entries() -> None:
+    """When the edge sits in the normal band, edge_max must not interfere."""
+    # YES ask 0.85 with p_model ~ 1 → edge ~ 0.15. With edge_max=0.20 this passes.
+    strat = build_strategy("v3_theta_harvester", _params(edge_max=0.20))
+    qv = _qv(expiry_ns=3600 * 10**9)
+    books = {"YES": _book("YES", bid=0.84, ask=0.85), "NO": _book("NO", bid=0.14, ask=0.15)}
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=120_000.0, recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    assert decision.action == Action.ENTER
+    assert decision.intents[0].symbol == "YES"
+
+
+def test_edge_max_none_disables_filter_preserving_v3_baseline() -> None:
+    """Default behaviour: edge_max=None keeps v3 baseline behavior intact."""
+    # Same scenario as test_entry_emits_buy_when_v2_edge_present — huge edge,
+    # filter disabled → must still enter.
+    strat = build_strategy("v3_theta_harvester", _params())  # edge_max omitted → None
+    qv = _qv(expiry_ns=3600 * 10**9)
+    books = {"YES": _book("YES", bid=0.49, ask=0.50), "NO": _book("NO", bid=0.49, ask=0.50)}
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=120_000.0, recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    assert decision.action == Action.ENTER
