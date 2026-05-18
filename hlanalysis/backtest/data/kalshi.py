@@ -404,10 +404,11 @@ class KalshiDataSource:
                 [m.get("floor_strike"), m.get("cap_strike")]
                 for m in ordered_markets
             ]
-            start_ts_ns = min(
-                (_parse_iso_ns(m.get("open_time") or "") for m in ordered_markets),
-                default=end_ts_ns - 86_400 * 1_000_000_000,
-            )
+            open_times = [
+                _parse_iso_ns(m.get("open_time") or "") for m in ordered_markets
+            ]
+            open_times = [t for t in open_times if t > 0]
+            start_ts_ns = min(open_times) if open_times else end_ts_ns - 86_400 * 1_000_000_000
 
             n_rows = 0
             for market in leg_market_tickers:
@@ -475,6 +476,8 @@ class KalshiDataSource:
                 "size": float(t.get("count", 0)),
                 "taker_side": str(t.get("taker_side") or "yes"),
             })
+        if last_ts_ns is not None:
+            new_rows = [r for r in new_rows if r["ts_ns"] > last_ts_ns]
         all_rows = existing + new_rows
         if all_rows:
             table = pa.Table.from_pylist(sorted(all_rows, key=lambda r: int(r["ts_ns"])))

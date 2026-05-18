@@ -71,7 +71,10 @@ def test_iter_market_trades_paginates_and_stops_on_empty_cursor():
 
 
 @responses.activate
-def test_fetch_events_page_retries_on_transient_5xx():
+def test_fetch_events_page_retries_on_transient_5xx(monkeypatch):
+    monkeypatch.setattr(
+        "hlanalysis.backtest.data._kalshi_client.time.sleep", lambda _: None
+    )
     responses.add(responses.GET, f"{KALSHI_BASE}/events", status=503)
     responses.add(responses.GET, f"{KALSHI_BASE}/events", status=503)
     responses.add(

@@ -298,7 +298,10 @@ def cmd_audit(args: argparse.Namespace) -> int:
         return 2
     if summary["mutex_fail_multi_yes"] > 0:
         return 3
-    if summary["mutex_rate"] < 0.99:
+    # Severely degraded zero_yes corpus (>5% events failed to settle one bucket).
+    # Below this threshold the corpus is unfit for a tuning run.
+    # [0.95, 0.99) is a warning band but proceeds; <0.95 halts.
+    if summary["mutex_rate"] < 0.95:
         return 4
     return 0
 

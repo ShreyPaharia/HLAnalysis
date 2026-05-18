@@ -46,6 +46,13 @@ def main() -> None:
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
     base_ts = 1_700_000_000_000_000_000
+    # M1 is staggered by +30s so its trades interleave with M0/M2.
+    # M0/M2: base, base+60s, base+120s
+    # M1:    base+30s, base+90s, base+150s
+    # This ensures the leg_events.sort() in _build_stream is exercised by the
+    # integration smoke test — reverting the sort would break the monotone-ts
+    # assertion.
+    market_offsets = {"M0": 0, "M1": 30_000_000_000, "M2": 0}
     for market, prices in (
         ("M0", [0.12, 0.08, 0.06]),  # below 79k, fading
         ("M1", [0.55, 0.70, 0.92]),  # winning bucket, rising
@@ -54,7 +61,7 @@ def main() -> None:
         rows = []
         for i, p in enumerate(prices):
             rows.append({
-                "ts_ns": base_ts + i * 60_000_000_000,
+                "ts_ns": base_ts + market_offsets[market] + i * 60_000_000_000,
                 "yes_price": p,
                 "size": 5.0,
                 "taker_side": "yes" if i % 2 == 0 else "no",
