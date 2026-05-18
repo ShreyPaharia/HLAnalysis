@@ -91,10 +91,11 @@
 <div class="hero">
   <div style="font-size: 12.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px;">RECOMMENDATION</div>
   <div style="margin-top: 8px;">
-    <strong>Proceed cautiously to live shadow on v3.1 binary; hold on v3.1 bucket.</strong>
+    <strong>Proceed cautiously to live shadow on v3.1 binary; do not deploy v3.1 bucket.</strong>
     On 8 HL binary expiries both v1 and v3.1 are profitable, with v3.1 ahead of v1 on PnL (+45%) — directionally consistent with the 363-market PM finding.
     The realistic-cost stress (10× slippage, 2× half-spread) costs v3.1 only $3.38 (−5.9%) and v1 nothing (limit-style entries). On the 10 priceBucket expiries
-    v3.1 fires <strong>zero trades</strong>: the strategy's per-leg favorite-gate never resolves because the per-leg books are heavily one-sided or stale at scan time. Wiring bug, not a strategy verdict — debug before drawing conclusions on buckets.
+    v3.1 loses <strong>−$331.63</strong> (default cost) / <strong>−$223.65</strong> (realistic): the leg-aware generalisation fires real trades after two wiring fixes,
+    but the per-leg edge proxy on this small sample is net negative. Bucket calibration is unfinished — needs a dedicated tuning pass before any live exposure.
   </div>
 </div>
 
@@ -109,10 +110,10 @@
     <div class="value">$53.90</div>
     <div class="small">−5.9% vs default · 50 bps slip + 1% half-spread</div>
   </div>
-  <div class="kpi amber">
-    <div class="label">v3.1 bucket trades</div>
-    <div class="value">0</div>
-    <div class="small">10 markets surveyed · per-leg books too sparse</div>
+  <div class="kpi red">
+    <div class="label">v3.1 bucket PnL</div>
+    <div class="value">−$332</div>
+    <div class="small">44 trades · 50% hit · 10 markets · needs tuning</div>
   </div>
   <div class="kpi">
     <div class="label">Sample size caveat</div>
@@ -163,13 +164,13 @@
     <tr>
       <td><strong>v3.1 theta_harvester</strong></td>
       <td>priceBucket</td>
-      <td>default</td>
+      <td>default (5 bps, hs 0.5%)</td>
       <td>10</td>
-      <td class="strat-lose">0</td>
-      <td>0.00</td>
-      <td>—</td>
-      <td>—</td>
-      <td>0.00</td>
+      <td>44</td>
+      <td class="strat-lose">−331.63</td>
+      <td>−11.78</td>
+      <td>50.0%</td>
+      <td class="strat-lose">331.63</td>
     </tr>
     <tr>
       <td><strong>v1 late_resolution</strong></td>
@@ -196,13 +197,13 @@
     <tr>
       <td><strong>v3.1 theta_harvester</strong></td>
       <td>priceBucket</td>
-      <td>realistic</td>
+      <td>realistic (50 bps, hs 1.0%)</td>
       <td>10</td>
-      <td class="strat-lose">0</td>
-      <td>0.00</td>
-      <td>—</td>
-      <td>—</td>
-      <td>0.00</td>
+      <td>48</td>
+      <td class="strat-lose">−223.65</td>
+      <td>−8.74</td>
+      <td>60.0%</td>
+      <td class="strat-lose">237.71</td>
     </tr>
   </tbody>
 </table>
@@ -322,11 +323,11 @@ HL HIP-4 spread distribution (p50 ≈ 173 bps, p75 ≈ 1,265 bps) being much wid
     </tr>
     <tr>
       <td><strong>v3.1 bucket</strong></td>
-      <td>$0.00</td>
-      <td>$0.00</td>
-      <td>—</td>
-      <td>—</td>
-      <td>0 trades in either case — gate never opens.</td>
+      <td class="strat-lose">−$331.63</td>
+      <td class="strat-lose">−$223.65</td>
+      <td class="strat-win">+$107.98</td>
+      <td class="strat-win">+32.6%</td>
+      <td>Wider half-spread <em>filter</em> rejects the most marginal trades — realistic loses less. Both still net negative.</td>
     </tr>
   </tbody>
 </table>
@@ -366,33 +367,42 @@ at price = 1.0 (the contract pays out — no exchange order).</p>
   shave ~$4 (−7%) off v3.1's net binary PnL on this 11-day window. The strategy ordering does not change.
 </div>
 
-<h2>Bucket = 0 trades — what we know</h2>
+<h2>Bucket: loses money, two wiring fixes shipped</h2>
 
-<p>v3.1's bucket generalisation (<code>theta_harvester._winning_region</code>, added in commit <code>43316ff</code>) is in the code path, but on this corpus the
-strategy never enters. Diagnostics break down as:</p>
+<p>The first bucket run returned 0 trades / 7,150 <code>no_book</code> diagnostics. Two bugs in the bucket path were found and fixed before the numbers above were generated:</p>
 
 <table>
   <thead>
-    <tr><th>Reason</th><th>Ticks</th><th>Share</th><th>Meaning</th></tr>
+    <tr><th>Bug</th><th>Where</th><th>Effect</th><th>Fix</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>tte_out_of_window</code></td><td>6,471</td><td>47.5%</td><td>Scan tick &gt; 12h before expiry — expected, normal scanner behaviour.</td></tr>
-    <tr><td><code>no_book</code></td><td>7,150</td><td>52.5%</td><td>Strategy's per-leg loop found <em>zero</em> legs with a tradeable ask at this tick.</td></tr>
-    <tr><td><code>edge</code> / <code>no_favorite</code></td><td>0</td><td>0%</td><td>Never even reached the favorite-gate or edge check.</td></tr>
+    <tr>
+      <td>kv dropped on QuestionView</td>
+      <td><code>hftbt_runner.run_one_question</code></td>
+      <td>When strike &gt; 0 (always true on HL because runner derives it from first ref event), the runner built QuestionView via <code>build_question_view(...)</code> with <code>kv=()</code>. Strategy reads <code>priceThresholds</code> from kv to compute per-leg winning regions — empty kv → <code>(None, None)</code> region for every bucket leg → <code>no_book</code>.</td>
+      <td>Only use the strike-override path for <code>q.klass == "priceBinary"</code>; route bucket markets through <code>data_source.question_view(...)</code> which carries the real kv.</td>
+    </tr>
+    <tr>
+      <td>Exit-guard missed ask=None</td>
+      <td><code>theta_harvester._evaluate_exits</code> line 372</td>
+      <td>Guard checked <code>held.bid_px is None</code> only. When the held bucket leg loses its ask side (common late in HL HIP-4 bucket markets), line 402's edge calc dereferenced <code>None</code> and the runner crashed mid-question.</td>
+      <td>Add <code>held.ask_px is None</code> to the guard; hold (no edge-exit decision) until the ask reappears.</td>
+    </tr>
   </tbody>
 </table>
 
-<p>This is suspicious because direct DuckDB queries against the parquet show real two-sided books for several bucket legs in the 12h window — e.g. Q0 leg <code>#80</code>
-has 83k snapshots with tradeable asks in 0.85–0.99 over the last 12h. The strategy's per-tick view is built by the hftbacktest engine from per-leg event arrays; one or more of these is likely:</p>
+<p>After both fixes the bucket strategy enters real trades and exercises the full v3.1 logic. The results are negative on this sample:</p>
+
 <ul>
-  <li>The first <code>#</code>-prefixed leg (e.g. <code>#70</code>, which the diagnostic writer probes as "yes_bid/yes_ask") has empty/one-sided books, masking the others.</li>
-  <li>Other legs (<code>#80</code>) do have books but <code>_book_state</code> returns <code>None</code> because hftbt's <code>depth(asset_no)</code> hasn't yet advanced past the gap.</li>
-  <li>The bucket markets recorded so far ran on a different exchange instance with <code>bid_px = []</code> for the YES legs (the YES of a middle bucket frequently quotes only the certain-loss side).</li>
+  <li><strong>Default cost:</strong> 44 trades, <strong>−$331.63</strong>, hit 50%, max DD $331.63. Each loss is the full $100 max position (the strategy enters near-favorites that flip).</li>
+  <li><strong>Realistic cost:</strong> 48 trades, <strong>−$223.65</strong>, hit 60%, max DD $237.71. The wider <code>half_spread_assumption</code> acts as an extra edge filter and rejects the most marginal trades, which is why the realistic-cost variant loses <em>less</em>.</li>
 </ul>
 
-<div class="callout warn">
-  <strong>Action:</strong> Before declaring v3.1-on-bucket a verdict, re-run with <code>--max-markets 1</code> on the bucket with the cleanest book
-  (Q0/#80 above) and add a <code>no_book</code> diagnostic that lists the per-leg book state. The current diagnostic only logs the first two legs.
+<div class="callout danger">
+  <strong>The bucket params inherited from binary do not transfer.</strong> Binary v3.1 was tuned on the PM Up/Down corpus where the favorite-vs-fade distribution is well-behaved.
+  On HL HIP-4 buckets, edge-bucket NO legs trade near 1.0 most of the time and the rare flip costs the full $100 — exactly the toxic-edge bucket that <code>edge_max=0.20</code>
+  was designed to filter, but bucket edges live in a different range. A dedicated bucket walk-forward (likely tighter <code>edge_max</code>, asymmetric YES-vs-NO entry, and a true
+  <code>favorite_threshold</code> at 0.9+) is needed before any bucket exposure goes live.
 </div>
 
 <h2>Caveats</h2>
@@ -405,8 +415,8 @@ has 83k snapshots with tradeable asks in 0.85–0.99 over the last 12h. The stra
   <li><strong>Geographic difference:</strong> HL retail flow is concentrated in EMEA/APAC perp users speculating on binaries adjacent to BTC perp; PM is US prediction-market users.
   This is the most likely source of any persistent edge difference and we can't validate it from 12 days.</li>
   <li><strong>Fee model:</strong> All runs used symmetric <code>fee_taker=0</code>; HL is asymmetric (0 / 7 bps). Net impact ~$1 on this window.</li>
-  <li><strong>Bucket result:</strong> 0 trades is a wiring/diagnostic outcome, not a strategy verdict. v3.1's bucket code path is exercised by unit tests on synthetic
-  data; the failure mode is specific to the recorded HL bucket books.</li>
+  <li><strong>Bucket result:</strong> after two wiring fixes the strategy now trades, but with binary-tuned params the bucket PnL is negative on 10 markets.
+  Bucket needs its own tuning corpus (we have only 10 expiries so far — too few). Likely needs tighter <code>edge_max</code> and per-position $-cap on edge-bucket NO legs.</li>
 </ul>
 
 <h2>Recommendation</h2>
@@ -416,8 +426,9 @@ has 83k snapshots with tradeable asks in 0.85–0.99 over the last 12h. The stra
   v3.1 net PnL &gt; v1 net PnL at the 60% confidence level (~50 markets cumulative).</li>
   <li><strong>v3.1 binary, realistic cost:</strong> Sized at $100/position the strategy stays comfortably profitable after asymmetric HL fees;
   no config change needed.</li>
-  <li><strong>v3.1 bucket:</strong> Hold. Reproduce the no_book pattern on a single bucket market, surface per-leg book state in diagnostics,
-  and confirm the issue is wiring (not strategy logic) before any live exposure. Target a follow-up tuning run once 30+ bucket expiries are recorded.</li>
+  <li><strong>v3.1 bucket:</strong> Do not deploy. Strategy is wired correctly now (two fixes shipped) but the binary-tuned params lose $33/market on this 10-market sample.
+  Bucket needs its own walk-forward calibration: at minimum (a) a tighter <code>edge_max</code> for edge-bucket NO legs, (b) per-leg position size shaped by distance from threshold,
+  (c) a real HL bucket holdout with 30+ expiries before any live exposure.</li>
   <li><strong>v1:</strong> Stays live; production config validated on HL HIP-4 without changes.</li>
 </ol>
 
