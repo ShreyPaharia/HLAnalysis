@@ -39,3 +39,53 @@ def test_cli_fetch_kalshi_invokes_fetch_and_cache(tmp_path):
     call_kwargs = mock_fetch.call_args.kwargs
     assert call_kwargs["start"] == "2025-05-18"
     assert call_kwargs["end"] == "2026-05-18"
+
+
+def test_cli_audit_clean_corpus_exits_zero(tmp_path):
+    cache_root = tmp_path / "kalshi"
+    cache_root.mkdir()
+    (cache_root / "manifest.json").write_text(json.dumps({
+        "OK": {
+            "kind": "bucket",
+            "bucket": {
+                "event_ticker": "OK",
+                "series_ticker": "KXBTCD",
+                "start_ts_ns": 1, "end_ts_ns": 2,
+                "thresholds": [79000.0],
+                "leg_markets": ["A", "B"],
+                "leg_strike_ranges": [[None, 79000.0], [79000.0, None]],
+                "leg_settlements": ["yes", "no"],
+                "mutex_verified": True,
+                "settlement_close_price": None,
+            },
+        }
+    }))
+    rc = cli_main([
+        "audit", "--data-source", "kalshi", "--cache-root", str(cache_root),
+    ])
+    assert rc == 0
+
+
+def test_cli_audit_multi_yes_exits_nonzero(tmp_path):
+    cache_root = tmp_path / "kalshi"
+    cache_root.mkdir()
+    (cache_root / "manifest.json").write_text(json.dumps({
+        "BAD": {
+            "kind": "bucket",
+            "bucket": {
+                "event_ticker": "BAD",
+                "series_ticker": "KXBTCD",
+                "start_ts_ns": 1, "end_ts_ns": 2,
+                "thresholds": [79000.0],
+                "leg_markets": ["A", "B"],
+                "leg_strike_ranges": [[None, 79000.0], [79000.0, None]],
+                "leg_settlements": ["yes", "yes"],
+                "mutex_verified": False,
+                "settlement_close_price": None,
+            },
+        }
+    }))
+    rc = cli_main([
+        "audit", "--data-source", "kalshi", "--cache-root", str(cache_root),
+    ])
+    assert rc != 0

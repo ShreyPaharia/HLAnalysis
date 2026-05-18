@@ -278,6 +278,31 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     raise SystemExit(f"fetch does not support --data-source {args.data_source!r}")
 
 
+def cmd_audit(args: argparse.Namespace) -> int:
+    """Run the data-source-specific corpus audit.
+
+    Currently kalshi-only — runs the §7 mutex + contiguity checks and writes
+    `fetch_summary.json` next to the manifest. Exits non-zero on hard failure.
+    """
+    if args.data_source != "kalshi":
+        raise SystemExit(
+            f"audit not supported for --data-source {args.data_source!r}"
+        )
+    from .data.kalshi import KalshiDataSource
+
+    cache_root = Path(args.cache_root or os.environ.get(_ENV_KALSHI_CACHE, "data/kalshi"))
+    ds = KalshiDataSource(cache_root=cache_root)
+    summary = ds.audit()
+    logger.info(f"kalshi audit: {summary}")
+    if summary["contiguity_fail"] > 0:
+        return 2
+    if summary["mutex_fail_multi_yes"] > 0:
+        return 3
+    if summary["mutex_rate"] < 0.99:
+        return 4
+    return 0
+
+
 def cmd_tune(args: argparse.Namespace) -> int:
     """Walk-forward parallel grid sweep over the configured data source."""
     from .tuning import load_tuning_yaml, run_tuning_parallel
@@ -442,6 +467,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     pf.add_argument("--series-ticker", default=None,
                     help="kalshi-only; override the auto-probed series ticker.")
     pf.set_defaults(func=cmd_fetch)
+
+    pa = sp.add_parser("audit", help="Run corpus audit (mutex + contiguity for kalshi)")
+    pa.add_argument("--data-source", choices=["kalshi"], default="kalshi")
+    pa.add_argument("--cache-root", default=None,
+                    help="Override env HLBT_KALSHI_CACHE_ROOT")
+    pa.set_defaults(func=cmd_audit)
 
     pt = sp.add_parser("tune", help="Walk-forward parallel grid sweep")
     pt.add_argument("--strategy", required=True)
