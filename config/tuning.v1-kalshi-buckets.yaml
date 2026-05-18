@@ -1,0 +1,43 @@
+# v1 late-resolution: 1-year walk-forward grid on Kalshi BTC daily multi-bucket
+# events. Cell shape and splits match config/tuning.v1-1year.yaml so the result
+# is directly comparable to the PM-binary-tuned cell currently in
+# config/strategy.yaml's priceBucket allowlist entry.
+#
+# Splits: 60 train / 60 test / 60 step (~6 non-overlapping 2-month OOS test
+# windows over ~365 daily events). Reduce splits proportionally if the
+# Kalshi corpus has <180 settled events (the runner logs the OOS count).
+#
+# Grid (108 cells), identical knobs to the PM tune:
+#   tte_max_seconds          [3600, 5400, 7200]   3
+#   price_extreme_threshold  [0.85, 0.90, 0.93]   3
+#   price_extreme_max        [0.995]              1
+#   vol_max                  [100, 0.0010]        2
+#   min_safety_d             [1.0, 1.5, 2.0]      3
+#   exit_safety_d            [0, 1.0]             2
+# Fixed:
+#   tte_min_seconds=0, vol_lookback_seconds=3600, vol_ewma_lambda=0.85,
+#   stop_loss_pct=null, distance_from_strike_usd_min=0, exit_bid_floor=0,
+#   drift_aware_d=false, vol_estimator=stdev, max_position_usd=100.
+
+grids:
+  v1_late_resolution:
+    tte_min_seconds: [0]
+    tte_max_seconds: [3600, 5400, 7200]
+    price_extreme_threshold: [0.85, 0.90, 0.93]
+    price_extreme_max: [0.995]
+    distance_from_strike_usd_min: [0]
+    vol_max: [100, 0.0010]
+    stop_loss_pct: [null]
+    min_safety_d: [1.0, 1.5, 2.0]
+    vol_lookback_seconds: [3600]
+    exit_safety_d: [0, 1.0]
+    exit_bid_floor: [0]
+    drift_aware_d: [false]
+    vol_ewma_lambda: [0.85]
+    max_position_usd: [100]
+
+run:
+  train_markets: 60
+  test_markets: 60
+  step_markets: 60
+  max_workers: 12
