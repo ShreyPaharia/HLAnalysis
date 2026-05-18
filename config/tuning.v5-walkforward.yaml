@@ -1,0 +1,37 @@
+# v5 delta-hedged walk-forward.
+# Binary knobs fixed at v3 best (exit_edge_threshold=0.0). Hedge swept over interval × threshold.
+# Hedge data: Binance spot 1m klines (perp fapi.binance.com geo-blocked from dev IP — see memory).
+# Slippage budget: hedge_slippage_bps=15 absorbs spot-vs-perp basis (~5bp) + headroom.
+# Grid: 3 * 4 = 12 cells * 5 splits = 60 jobs at 8 workers.
+
+grids:
+  v5_delta_hedged:
+    vol_lookback_seconds: [3600]
+    vol_sampling_dt_seconds: [60]
+    edge_buffer: [0.02]
+    fee_taker: [0.0]
+    half_spread_assumption: [0.005]
+    stop_loss_pct: [null]
+    drift_lookback_seconds: [14400]
+    favorite_threshold: [0.7]
+    tte_min_seconds: [0]
+    tte_max_seconds: [43200]
+    max_position_usd: [100.0]
+    exit_edge_threshold: [0.0]
+    take_profit_price: [null]
+    time_stop_seconds: [0]
+    hedge_symbol: ["BTC-PERP"]
+    hedge_enabled: [true]
+    hedge_tick_size: [0.1]
+    hedge_lot_size: [0.001]
+    hedge_slippage_bps: [15.0]
+    hedge_fee_bps: [1.0]
+    hedge_half_spread_bps: [1.0]
+    rebalance_interval_s: [60, 300, 900]
+    rebalance_threshold: [0.1, 0.25, 0.5, 999.0]
+
+run:
+  train_markets: 60
+  test_markets: 60
+  step_markets: 60
+  max_workers: 8

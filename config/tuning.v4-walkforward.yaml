@@ -1,19 +1,20 @@
 # v4 binary stat-arb walk-forward.
 # Grid: 4 * 2 * 4 * 3 * 2 * 2 = 384 cells. If runtime > 6h, drop ewma_lambda to [0.95].
 
-v4_binary_statarb_grid:
-  lookback_seconds: [600, 1800, 3600, 7200]
-  sampling_dt_seconds: [60]
-  ewma_lambda: [0.85, 0.95]
-  z_entry: [1.5, 2.0, 2.5, 3.0]
-  z_exit: [0.0, 0.5, 1.0]
-  mid_lo: [0.2, 0.3]
-  mid_hi: [0.8]          # symmetric band; use mid_hi=1-mid_lo post-hoc; keeping one value avoids cross-product inflation
-  max_position_usd: [100.0]
-  stop_loss_pct: [null, 0.30]
-  time_stop_seconds: [600]
-  fee_taker: [0.0]
-  half_spread_assumption: [0.005]
+grids:
+  v4_binary_statarb:
+    lookback_seconds: [600, 1800, 3600, 7200]
+    sampling_dt_seconds: [60]
+    ewma_lambda: [0.85, 0.95]
+    z_entry: [1.5, 2.0, 2.5, 3.0]
+    z_exit: [0.0, 0.5, 1.0]
+    mid_lo: [0.2, 0.3]
+    mid_hi: [0.8]          # symmetric band; use mid_hi=1-mid_lo post-hoc; keeping one value avoids cross-product inflation
+    max_position_usd: [100.0]
+    stop_loss_pct: [null, 0.30]
+    time_stop_seconds: [600]
+    fee_taker: [0.0]
+    half_spread_assumption: [0.005]
 
 run:
   train_markets: 60
