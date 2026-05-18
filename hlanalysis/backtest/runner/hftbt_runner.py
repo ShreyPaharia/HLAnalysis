@@ -237,6 +237,22 @@ def _build_asset(arr: np.ndarray, cfg: RunConfig):
     )
 
 
+def _build_hedge_asset(arr: np.ndarray, cfg: RunConfig):
+    """Like _build_asset but uses hedge-specific tick/lot sizes."""
+    return (
+        hb.BacktestAsset()
+        .data(arr)
+        .linear_asset(1.0)
+        .constant_order_latency(0, 0)
+        .risk_adverse_queue_model()
+        .no_partial_fill_exchange()
+        .trading_value_fee_model(0.0, 0.0)
+        .tick_size(cfg.hedge_tick_size)
+        .lot_size(cfg.hedge_lot_size)
+        .last_trades_capacity(cfg.last_trades_capacity)
+    )
+
+
 def _book_state(
     hbt: Any, asset_no: int, symbol: str, *, last_l2_ts_ns: int = 0
 ) -> BookState | None:
@@ -290,6 +306,7 @@ def run_one_question(
     diagnostics_dir: Path | None = None,
     fills_dir: Path | None = None,
     strike: float = 0.0,
+    hedge_events: list[BookSnapshot] | None = None,
 ) -> RunResult:
     """Run one question end-to-end through hftbacktest."""
 
@@ -339,6 +356,18 @@ def run_one_question(
         _data_keepalive.append(full)
         assets.append(_build_asset(full, cfg))
         leg_to_asset[sym] = i
+
+    # Hedge leg: build a third BacktestAsset when hedge_enabled and events provided.
+    hedge_asset_no: int | None = None
+    if cfg.hedge_enabled and hedge_events is not None:
+        hedge_arr = _build_leg_event_array(hedge_events, [])
+        hedge_clear = _initial_clear_array(q.start_ts_ns)
+        hedge_full = (
+            np.concatenate([hedge_clear, hedge_arr]) if len(hedge_arr) > 0 else hedge_clear
+        )
+        _data_keepalive.append(hedge_full)
+        hedge_asset_no = len(assets)
+        assets.append(_build_hedge_asset(hedge_full, cfg))
 
     hbt = hb.HashMapMarketDepthBacktest(assets)
 
