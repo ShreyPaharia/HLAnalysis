@@ -534,9 +534,12 @@ def run_one_question(
 
         # Defer to the data source for the QuestionView (it knows the
         # market's resolution convention — e.g. PM Up/Down strike = Binance
-        # close 24h pre-expiry). The runner's `strike` kwarg now only acts
-        # as an override when the caller explicitly passes a non-zero value.
-        if strike > 0.0:
+        # close 24h pre-expiry, HL HIP-4 buckets carry priceThresholds in kv).
+        # The runner's `strike` kwarg only acts as an override for binary
+        # markets where the override is meaningful; for buckets we always
+        # need the data source's view because the strategy reads kv for the
+        # per-leg winning region.
+        if strike > 0.0 and q.klass == "priceBinary":
             qv = build_question_view(q, now_ns=now_ns, strike=strike, settled=False)
         else:
             qv = data_source.question_view(q, now_ns=now_ns, settled=False)

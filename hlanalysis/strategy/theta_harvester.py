@@ -369,7 +369,7 @@ class ThetaHarvesterStrategy(Strategy):
         self, *, question: QuestionView, books: Mapping[str, BookState], reference_price: float, sigma: float, mu_eff: float, tau_yr: float, tau_s: float, position: Position,
     ) -> Decision:
         held = books.get(position.symbol)
-        if held is None or held.bid_px is None:
+        if held is None or held.bid_px is None or held.ask_px is None:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_book_exit"),))
 
         # Rule 1: hard price stop (v2 legacy)
