@@ -70,4 +70,44 @@ def fetch_klines(
     return out
 
 
-__all__ = ["Kline", "fetch_klines"]
+_PERP_BASE = "https://fapi.binance.com"
+
+
+def fetch_perp_klines(
+    start_ts_ms: int,
+    end_ts_ms: int,
+    symbol: str = "BTCUSDT",
+    interval: str = "1m",
+) -> list[Kline]:
+    """Page through Binance USDM perp klines and return parsed rows ascending by ts."""
+    out: list[Kline] = []
+    cursor = start_ts_ms
+    while cursor < end_ts_ms:
+        page = _http_get(
+            f"{_PERP_BASE}/fapi/v1/klines",
+            params={
+                "symbol": symbol,
+                "interval": interval,
+                "startTime": cursor,
+                "endTime": end_ts_ms,
+                "limit": _LIMIT,
+            },
+        )
+        if not page:
+            break
+        for row in page:
+            out.append(Kline(
+                ts_ns=int(row[0]) * 1_000_000,
+                open=float(row[1]),
+                high=float(row[2]),
+                low=float(row[3]),
+                close=float(row[4]),
+                volume=float(row[5]),
+            ))
+        cursor = int(page[-1][0]) + 60_000  # advance past last bar's open_time
+        if len(page) < _LIMIT:
+            break
+    return out
+
+
+__all__ = ["Kline", "fetch_klines", "fetch_perp_klines"]
