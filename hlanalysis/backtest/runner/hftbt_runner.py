@@ -781,13 +781,14 @@ def run_one_question(
     # --- Settlement -------------------------------------------------------
     if pos is not None:
         outcome = data_source.resolved_outcome(q)
-        # For binaries: held leg wins iff outcome matches. Bucket markets emit
-        # per-leg SettlementEvents (spec §3.4) but lack a `symbol` on the event;
-        # source implementations expose the winning leg via `resolved_outcome`
-        # using a stable encoding ("leg_<idx>" for buckets) — task C owns the
-        # encoding and task E reconciles. For binaries we use the literal
-        # "yes"/"no" path below.
-        settle_px = _settle_px_for_outcome(pos, q, outcome)
+        # Prefer the data source's per-leg payoff when it provides one (HL
+        # HIP-4 handles bucket markets here). Fall back to the binary-only
+        # leg_symbols[0]/[1] lookup when the source doesn't expose it.
+        leg_payoff = getattr(data_source, "leg_payoff", None)
+        if leg_payoff is not None:
+            settle_px = float(leg_payoff(q, pos.symbol))
+        else:
+            settle_px = _settle_px_for_outcome(pos, q, outcome)
         settle_fill = Fill(
             cloid="settle",
             symbol=pos.symbol,

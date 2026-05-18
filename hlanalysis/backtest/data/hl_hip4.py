@@ -459,6 +459,101 @@ class HLHip4DataSource:
         # 3) Bucket without settlement → unknown (per-leg outcome is what runners care about).
         return "unknown"
 
+    def leg_payoff(self, q: QuestionDescriptor, leg_symbol: str) -> float:
+        """Per-leg payoff at settlement: 1.0 if the leg won, 0.0 otherwise.
+
+        Binary: delegates to ``resolved_outcome`` and matches against the
+        canonical (yes=leg0, no=leg1) layout.
+
+        Bucket: uses final HL perp BTC and the question's ``priceThresholds``
+        to determine which bucket BTC ended in, then pays:
+          - the YES leg of the winning bucket → 1.0
+          - the NO leg of every non-winning *named* bucket → 1.0
+          - everything else → 0.0
+        Falls back to a market-implied winner (the leg whose bid was ≥ 0.95
+        within the last minute pre-expiry) if no priceThresholds metadata or
+        no BTC reference is available.
+        """
+        if q.klass == "priceBinary":
+            outcome = self.resolved_outcome(q)
+            if outcome == "yes" and q.leg_symbols and leg_symbol == q.leg_symbols[0]:
+                return 1.0
+            if outcome == "no" and len(q.leg_symbols) > 1 and leg_symbol == q.leg_symbols[1]:
+                return 1.0
+            return 0.0
+
+        if q.klass != "priceBucket" or leg_symbol not in q.leg_symbols:
+            return 0.0
+
+        # Bucket: figure out the winning outcome_pos from BTC + thresholds.
+        meta = self._load_meta(q)
+        thr_raw = meta.kv.get("priceThresholds", "")
+        thr = [float(t) for t in thr_raw.split(",") if t.strip()]
+        last_btc = self._last_btc_ref_at_or_before(q.end_ts_ns)
+        winning_pos: int | None = None
+        if thr and last_btc is not None:
+            if last_btc <= thr[0]:
+                winning_pos = 0
+            elif last_btc > thr[-1]:
+                winning_pos = len(thr)
+            else:
+                for i in range(1, len(thr)):
+                    if thr[i - 1] < last_btc <= thr[i]:
+                        winning_pos = i
+                        break
+
+        # Fallback: pick the leg whose bid was nearest 1.0 just before expiry.
+        if winning_pos is None:
+            winning_pos = self._winning_pos_from_books(q)
+
+        if winning_pos is None:
+            return 0.0
+
+        idx = q.leg_symbols.index(leg_symbol)
+        held_pos = idx // 2
+        held_side = idx % 2  # 0 = YES, 1 = NO
+        n_named_buckets = max(1, len(q.leg_symbols) // 2 - 1)  # excludes fallback leg
+        # Held leg's outcome_pos may exceed n_named_buckets when it's the
+        # fallback bucket — treat it as "never wins" (HL fallback doesn't
+        # correspond to a price-range outcome).
+        if held_pos >= n_named_buckets:
+            return 0.0
+        if held_side == 0:
+            return 1.0 if held_pos == winning_pos else 0.0
+        # NO leg: pays out for every non-winning *named* bucket.
+        return 1.0 if held_pos != winning_pos else 0.0
+
+    def _winning_pos_from_books(self, q: QuestionDescriptor) -> int | None:
+        """Last-resort: scan each named YES leg's final book and return the
+        outcome_pos whose bid was ≥ 0.95 within 60s of expiry."""
+        end_ns = q.end_ts_ns
+        date_list = _date_partitions_in_range(end_ns - int(86400 * 1e9), end_ns)
+        n_named_buckets = max(1, len(q.leg_symbols) // 2 - 1)
+        for pos in range(n_named_buckets):
+            yes_leg = q.leg_symbols[2 * pos]
+            glob = self._partition_glob("book_snapshot", symbol=yes_leg)
+            if not self._partition_has_files(glob):
+                continue
+            con = duckdb.connect()
+            try:
+                row = con.sql(
+                    f"""
+                    SELECT bid_px FROM read_parquet('{glob}', hive_partitioning=1)
+                    WHERE date IN ({','.join(repr(d) for d in date_list)})
+                      AND exchange_ts <= {end_ns}
+                      AND exchange_ts > {end_ns - 60 * int(1e9)}
+                      AND bid_px IS NOT NULL AND len(bid_px) > 0
+                    ORDER BY exchange_ts DESC LIMIT 1
+                    """
+                ).fetchone()
+            except duckdb.Error:
+                row = None
+            if row is None or row[0] is None or len(row[0]) == 0:
+                continue
+            if float(row[0][0]) >= 0.95:
+                return pos
+        return None
+
     # -------------------------------- helpers -----------------------------
 
     def _load_meta(self, q: QuestionDescriptor) -> "_QuestionMeta":
