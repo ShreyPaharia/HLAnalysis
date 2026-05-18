@@ -5,6 +5,16 @@ import pytest
 from hlanalysis.strategy.types import BookState, Position, QuestionView
 
 
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip tests marked ``live`` unless ``-m live`` (or ``-m 'live ...'``) is passed."""
+    if config.option.markexpr and "live" in config.option.markexpr:
+        return  # user explicitly selected live tests — run them
+    skip_live = pytest.mark.skip(reason="live: hits real external APIs; pass -m live to run")
+    for item in items:
+        if item.get_closest_marker("live"):
+            item.add_marker(skip_live)
+
+
 @pytest.fixture
 def question() -> QuestionView:
     return QuestionView(
