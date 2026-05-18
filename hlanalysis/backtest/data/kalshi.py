@@ -25,6 +25,57 @@ _HALF_SPREAD_DEFAULT = 0.005
 _DEPTH_DEFAULT = 10_000.0
 _P_CLIP_LO = 1e-6
 _P_CLIP_HI = 1.0 - 1e-6
+_FLOAT_EPS = 1e-6
+
+
+class ContiguityError(ValueError):
+    """Raised when a Kalshi bucket event's markets don't form a contiguous,
+    boundary-covering partition of the BTC price line."""
+
+
+def _thresholds_from_markets(markets: list[dict]) -> tuple[list[float], list[dict]]:
+    """Given Kalshi market dicts with ``floor_strike`` / ``cap_strike`` fields,
+    return ``(thresholds, ordered_markets)``. Validates:
+
+    - Lowest market has ``floor_strike is None`` (open at the bottom).
+    - Highest market has ``cap_strike is None`` (open at the top).
+    - For adjacent markets ``cap_strike[k] == floor_strike[k+1]`` within
+      ``_FLOAT_EPS``.
+
+    Raises ``ContiguityError`` on any violation.
+    """
+    if not markets:
+        raise ContiguityError("no markets to derive thresholds from")
+    ordered = sorted(
+        markets,
+        key=lambda m: float("-inf") if m.get("floor_strike") is None else float(m["floor_strike"]),
+    )
+    if ordered[0].get("floor_strike") is not None:
+        raise ContiguityError(
+            f"lowest bucket missing open-bottom boundary: {ordered[0].get('ticker')}"
+        )
+    if ordered[-1].get("cap_strike") is not None:
+        raise ContiguityError(
+            f"highest bucket missing open-top boundary: {ordered[-1].get('ticker')}"
+        )
+    thresholds: list[float] = []
+    for i in range(len(ordered) - 1):
+        cap = ordered[i].get("cap_strike")
+        flo = ordered[i + 1].get("floor_strike")
+        if cap is None or flo is None:
+            raise ContiguityError(
+                f"missing inner boundary between {ordered[i].get('ticker')} and "
+                f"{ordered[i + 1].get('ticker')}"
+            )
+        cap_f, flo_f = float(cap), float(flo)
+        if abs(cap_f - flo_f) > _FLOAT_EPS:
+            kind = "overlap" if cap_f > flo_f else "gap"
+            raise ContiguityError(
+                f"{kind} between {ordered[i].get('ticker')} (cap={cap_f}) and "
+                f"{ordered[i + 1].get('ticker')} (floor={flo_f})"
+            )
+        thresholds.append(cap_f)
+    return thresholds, ordered
 
 
 def _question_idx(qid: str) -> int:

@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from hlanalysis.backtest.data.kalshi import KalshiDataSource
+from hlanalysis.backtest.data.kalshi import (
+    KalshiDataSource,
+    _thresholds_from_markets,
+    ContiguityError,
+)
 
 
 def _write_bucket_manifest(root: Path, *, thresholds: list[float],
@@ -72,3 +76,43 @@ def test_question_view_emits_priceThresholds_kv(tmp_path):
     assert qv.period == "1d"
     assert qv.underlying == "BTC"
     assert qv.settled is True
+
+
+def test_thresholds_from_contiguous_markets():
+    markets = [
+        {"ticker": "M0", "floor_strike": None,    "cap_strike": 79000.0},
+        {"ticker": "M1", "floor_strike": 79000.0, "cap_strike": 80000.0},
+        {"ticker": "M2", "floor_strike": 80000.0, "cap_strike": None},
+    ]
+    thresholds, ordered = _thresholds_from_markets(markets)
+    assert thresholds == [79000.0, 80000.0]
+    assert [m["ticker"] for m in ordered] == ["M0", "M1", "M2"]
+
+
+def test_thresholds_rejects_gap():
+    markets = [
+        {"ticker": "M0", "floor_strike": None,    "cap_strike": 79000.0},
+        {"ticker": "M1", "floor_strike": 79500.0, "cap_strike": 80000.0},
+        {"ticker": "M2", "floor_strike": 80000.0, "cap_strike": None},
+    ]
+    with pytest.raises(ContiguityError, match="gap"):
+        _thresholds_from_markets(markets)
+
+
+def test_thresholds_rejects_overlap():
+    markets = [
+        {"ticker": "M0", "floor_strike": None,    "cap_strike": 79500.0},
+        {"ticker": "M1", "floor_strike": 79000.0, "cap_strike": 80000.0},
+        {"ticker": "M2", "floor_strike": 80000.0, "cap_strike": None},
+    ]
+    with pytest.raises(ContiguityError, match="overlap"):
+        _thresholds_from_markets(markets)
+
+
+def test_thresholds_rejects_missing_boundary():
+    markets = [
+        {"ticker": "M0", "floor_strike": 78000.0, "cap_strike": 79000.0},
+        {"ticker": "M1", "floor_strike": 79000.0, "cap_strike": None},
+    ]
+    with pytest.raises(ContiguityError, match="boundary"):
+        _thresholds_from_markets(markets)
