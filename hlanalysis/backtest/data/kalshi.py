@@ -156,6 +156,70 @@ class KalshiDataSource:
         # smoke-callable.
         return iter(())
 
+    # ---- public: audit --------------------------------------------------
+
+    def audit(self) -> dict:
+        """Run §7 mutex + contiguity checks against the cached corpus.
+
+        Returns the `fetch_summary` dict and persists it to
+        `<cache_root>/fetch_summary.json`. Caller (the CLI) decides exit code
+        based on counts.
+        """
+        manifest = self._load_manifest()
+        mutex_pass = mutex_fail_zero = mutex_fail_multi = contiguity_fail = 0
+        events_settled = events_open = 0
+        failing: list[str] = []
+
+        for qid, entry in manifest.items():
+            if entry.get("kind") != "bucket":
+                continue
+            b = entry.get("bucket") or {}
+            settlements: list[str] = list(b.get("leg_settlements") or [])
+            ranges: list[list] = list(b.get("leg_strike_ranges") or [])
+            if not settlements:
+                events_open += 1
+                continue
+            events_settled += 1
+            ranges_as_markets = [
+                {"ticker": m, "floor_strike": r[0], "cap_strike": r[1]}
+                for m, r in zip(b.get("leg_markets") or [], ranges)
+            ]
+            try:
+                _thresholds_from_markets(ranges_as_markets)
+            except ContiguityError:
+                contiguity_fail += 1
+                failing.append(qid)
+                continue
+            yes_count = sum(1 for s in settlements if s == "yes")
+            if yes_count == 1:
+                mutex_pass += 1
+            elif yes_count == 0:
+                mutex_fail_zero += 1
+                failing.append(qid)
+            else:
+                mutex_fail_multi += 1
+                failing.append(qid)
+
+        denom = max(events_settled, 1)
+        summary = {
+            "series_ticker_resolved": next(
+                (e.get("bucket", {}).get("series_ticker") for e in manifest.values()
+                 if e.get("kind") == "bucket"),
+                None,
+            ),
+            "events_fetched": sum(1 for e in manifest.values() if e.get("kind") == "bucket"),
+            "events_settled": events_settled,
+            "events_open": events_open,
+            "mutex_pass": mutex_pass,
+            "mutex_fail_zero_yes": mutex_fail_zero,
+            "mutex_fail_multi_yes": mutex_fail_multi,
+            "contiguity_fail": contiguity_fail,
+            "mutex_rate": mutex_pass / denom,
+            "failing_event_tickers": sorted(set(failing)),
+        }
+        (self._cache_root / "fetch_summary.json").write_text(json.dumps(summary, indent=2))
+        return summary
+
     # ---- internals: descriptor build ------------------------------------
 
     def _descriptor_from_bucket(

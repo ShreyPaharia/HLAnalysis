@@ -116,3 +116,96 @@ def test_thresholds_rejects_missing_boundary():
     ]
     with pytest.raises(ContiguityError, match="boundary"):
         _thresholds_from_markets(markets)
+
+
+def _make_manifest_entry(
+    *, event_ticker: str, thresholds: list[float], leg_markets: list[str],
+    leg_settlements: list[str], leg_strike_ranges: list[list],
+) -> dict:
+    return {
+        "n_rows": 0,
+        "last_pull_ts_ns": 0,
+        "kind": "bucket",
+        "bucket": {
+            "event_ticker": event_ticker,
+            "series_ticker": "KXBTCD",
+            "start_ts_ns": 1_700_000_000_000_000_000,
+            "end_ts_ns":   1_700_086_400_000_000_000,
+            "thresholds": thresholds,
+            "leg_markets": leg_markets,
+            "leg_strike_ranges": leg_strike_ranges,
+            "leg_settlements": leg_settlements,
+            "mutex_verified": True,
+            "settlement_close_price": None,
+        },
+    }
+
+
+def test_audit_passes_on_clean_corpus(tmp_path):
+    manifest = {
+        "KXBTCD-26MAY18": _make_manifest_entry(
+            event_ticker="KXBTCD-26MAY18",
+            thresholds=[79000.0, 80000.0],
+            leg_markets=["M0", "M1", "M2"],
+            leg_settlements=["no", "yes", "no"],
+            leg_strike_ranges=[[None, 79000.0], [79000.0, 80000.0], [80000.0, None]],
+        ),
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    ds = KalshiDataSource(cache_root=tmp_path)
+    summary = ds.audit()
+    assert summary["mutex_pass"] == 1
+    assert summary["mutex_fail_zero_yes"] == 0
+    assert summary["mutex_fail_multi_yes"] == 0
+    assert summary["contiguity_fail"] == 0
+    assert summary["mutex_rate"] == 1.0
+    assert summary["failing_event_tickers"] == []
+    written = json.loads((tmp_path / "fetch_summary.json").read_text())
+    assert written["mutex_rate"] == 1.0
+
+
+def test_audit_flags_zero_yes_and_multi_yes(tmp_path):
+    manifest = {
+        "OK": _make_manifest_entry(
+            event_ticker="OK",
+            thresholds=[79000.0], leg_markets=["A", "B"],
+            leg_settlements=["yes", "no"],
+            leg_strike_ranges=[[None, 79000.0], [79000.0, None]],
+        ),
+        "ZERO": _make_manifest_entry(
+            event_ticker="ZERO",
+            thresholds=[79000.0], leg_markets=["A", "B"],
+            leg_settlements=["no", "no"],
+            leg_strike_ranges=[[None, 79000.0], [79000.0, None]],
+        ),
+        "MULTI": _make_manifest_entry(
+            event_ticker="MULTI",
+            thresholds=[79000.0], leg_markets=["A", "B"],
+            leg_settlements=["yes", "yes"],
+            leg_strike_ranges=[[None, 79000.0], [79000.0, None]],
+        ),
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    ds = KalshiDataSource(cache_root=tmp_path)
+    summary = ds.audit()
+    assert summary["mutex_pass"] == 1
+    assert summary["mutex_fail_zero_yes"] == 1
+    assert summary["mutex_fail_multi_yes"] == 1
+    assert set(summary["failing_event_tickers"]) == {"ZERO", "MULTI"}
+    assert summary["mutex_rate"] == pytest.approx(1.0 / 3)
+
+
+def test_audit_flags_contiguity_failure(tmp_path):
+    manifest = {
+        "BAD": _make_manifest_entry(
+            event_ticker="BAD",
+            thresholds=[79000.0], leg_markets=["A", "B"],
+            leg_settlements=["yes", "no"],
+            leg_strike_ranges=[[None, 79000.0], [79500.0, None]],  # gap
+        ),
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    ds = KalshiDataSource(cache_root=tmp_path)
+    summary = ds.audit()
+    assert summary["contiguity_fail"] == 1
+    assert summary["failing_event_tickers"] == ["BAD"]
