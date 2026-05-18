@@ -83,6 +83,13 @@ class RunConfig:
     book_depth_assumption: float = 10_000.0
     vol_lookback_seconds: int = 86_400
     last_trades_capacity: int = 256
+    # Hedge leg config (used by v5_delta_hedged; ignored by all other strategies)
+    hedge_enabled: bool = False
+    hedge_symbol: str = ""
+    hedge_tick_size: float = 0.1
+    hedge_lot_size: float = 0.001
+    hedge_slippage_bps: float = 10.0
+    hedge_fee_bps: float = 1.0
 
 
 # ---------------------------------------------------------------------------
