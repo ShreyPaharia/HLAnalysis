@@ -842,6 +842,7 @@ def run_one_question(
                     entry_tau_yr=meta.get("entry_tau_yr"),
                     realized_pnl_at_settle=realized,
                     resolved_outcome=meta.get("resolved_outcome"),
+                    is_hedge=f.is_hedge,
                 )
             )
         write_fills(fill_rows, fills_dir / f"{q.question_id}.parquet")

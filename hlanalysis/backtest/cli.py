@@ -132,9 +132,61 @@ def cmd_strategies(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _extract_hedge_config(params: dict) -> tuple[dict, dict | None]:
+    """Extract hedge_* keys from params and return (strategy_params, hedge_run_cfg_dict).
+
+    Strategy params have the CLI-only hedge keys removed (tick sizes, fee rates,
+    slippage) so the strategy factory never sees them. ``hedge_symbol`` and
+    ``rebalance_*`` stay in params because the v5 strategy factory reads them.
+
+    Returns ``None`` for ``hedge_run_cfg_dict`` when ``hedge_enabled`` is falsy.
+    """
+    params = dict(params)  # shallow copy; don't mutate the caller's dict
+    hedge_enabled = bool(params.pop("hedge_enabled", False))
+    # hedge_symbol stays in params for the strategy factory; we also read it here.
+    hedge_symbol = str(params.get("hedge_symbol", "BTC-PERP"))
+    # These are CLI-only tuning knobs — strip them from strategy params.
+    hedge_tick_size = float(params.pop("hedge_tick_size", 0.1))
+    hedge_lot_size = float(params.pop("hedge_lot_size", 0.001))
+    hedge_slippage_bps = float(params.pop("hedge_slippage_bps", 10.0))
+    hedge_fee_bps = float(params.pop("hedge_fee_bps", 1.0))
+    # half_spread_bps is hedge-data specific (BinancePerpKlinesSource param), not a strategy param.
+    hedge_half_spread_bps = float(params.pop("hedge_half_spread_bps", 1.0))
+    if not hedge_enabled:
+        return params, None
+    return params, dict(
+        hedge_enabled=True,
+        hedge_symbol=hedge_symbol,
+        hedge_tick_size=hedge_tick_size,
+        hedge_lot_size=hedge_lot_size,
+        hedge_slippage_bps=hedge_slippage_bps,
+        hedge_fee_bps=hedge_fee_bps,
+        _half_spread_bps=hedge_half_spread_bps,  # extra; consumed by _build_hedge_source only
+    )
+
+
+def _build_hedge_source(hedge_data_path: str | None, hedge_cfg: dict | None):
+    """Build a BinancePerpKlinesSource if hedge is enabled and a path is given."""
+    if hedge_cfg is None or not hedge_data_path:
+        return None
+    from .data.binance_perp import BinancePerpKlinesSource
+
+    return BinancePerpKlinesSource(
+        path=Path(hedge_data_path),
+        symbol=hedge_cfg["hedge_symbol"],
+        half_spread_bps=hedge_cfg.get("_half_spread_bps", 1.0),
+    )
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     params = json.loads(Path(args.config).read_text())
+
+    # Extract hedge config from params before passing to the strategy factory.
+    # This keeps the strategy factory clean (it only sees binary knobs).
+    params, hedge_cfg = _extract_hedge_config(params)
     strategy = _build_strategy_for_cli(args.strategy, params)
+
+    hedge_source = _build_hedge_source(args.hedge_data_path, hedge_cfg)
 
     data_source = _resolve_data_source(args.data_source, cache_root=args.cache_root)
     start = args.start or ""
@@ -154,7 +206,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         f"from data source '{args.data_source}'"
     )
 
-    run_cfg = RunConfig(
+    # Build RunConfig — include hedge fields when enabled.
+    run_cfg_kwargs: dict = dict(
         scanner_interval_seconds=args.scanner_interval_seconds,
         tick_size=args.tick_size,
         lot_size=args.lot_size,
@@ -162,6 +215,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         fee_taker=args.fee_taker,
         book_depth_assumption=args.depth,
     )
+    if hedge_cfg is not None:
+        run_cfg_kwargs["hedge_enabled"] = hedge_cfg["hedge_enabled"]
+        run_cfg_kwargs["hedge_symbol"] = hedge_cfg["hedge_symbol"]
+        run_cfg_kwargs["hedge_tick_size"] = hedge_cfg["hedge_tick_size"]
+        run_cfg_kwargs["hedge_lot_size"] = hedge_cfg["hedge_lot_size"]
+        run_cfg_kwargs["hedge_slippage_bps"] = hedge_cfg["hedge_slippage_bps"]
+        run_cfg_kwargs["hedge_fee_bps"] = hedge_cfg["hedge_fee_bps"]
+    run_cfg = RunConfig(**run_cfg_kwargs)
 
     strike_fn = _strike_for_data_source(args.data_source)
 
@@ -172,6 +233,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     outcomes: list[str] = []
     n_trades = 0
     for q in descriptors:
+        # Slice hedge events for this question's time window when available.
+        hedge_events = None
+        if hedge_source is not None:
+            hedge_events = list(
+                hedge_source.book_events(
+                    start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns
+                )
+            )
         res = run_one_question(
             strategy,
             data_source,
@@ -180,6 +249,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             diagnostics_dir=diag_dir,
             fills_dir=fills_dir,
             strike=strike_fn(q),
+            hedge_events=hedge_events,
         )
         per_q_pnl.append(res.realized_pnl_usd or 0.0)
         n_trades += len(res.fills)
@@ -285,7 +355,25 @@ def cmd_tune(args: argparse.Namespace) -> int:
             f"in [{args.start}, {args.end})"
         )
 
-    run_cfg = RunConfig(
+    # Extract hedge config from the grid's fixed_params section if present.
+    # The grid YAML may carry hedge_* keys in a top-level ``fixed_params`` block
+    # alongside the grid sweep keys, OR the grid values may be length-1 lists.
+    # Here we pull hedge_* from args (injected via --hedge-* flags at tune time).
+    hedge_cfg_dict: dict | None = None
+    if args.hedge_data_path:
+        hedge_cfg_dict = dict(
+            hedge_enabled=True,
+            hedge_symbol=args.hedge_symbol,
+            hedge_tick_size=args.hedge_tick_size,
+            hedge_lot_size=args.hedge_lot_size,
+            hedge_slippage_bps=args.hedge_slippage_bps,
+            hedge_fee_bps=args.hedge_fee_bps,
+            _half_spread_bps=args.hedge_half_spread_bps,
+        )
+        # Pass hedge data path to workers via env so they can rebuild the source.
+        os.environ["HLBT_HEDGE_DATA_PATH"] = str(args.hedge_data_path)
+
+    run_cfg_kwargs: dict = dict(
         scanner_interval_seconds=args.scanner_interval_seconds,
         tick_size=args.tick_size,
         lot_size=args.lot_size,
@@ -293,6 +381,14 @@ def cmd_tune(args: argparse.Namespace) -> int:
         fee_taker=args.fee_taker,
         book_depth_assumption=args.depth,
     )
+    if hedge_cfg_dict is not None:
+        run_cfg_kwargs["hedge_enabled"] = True
+        run_cfg_kwargs["hedge_symbol"] = hedge_cfg_dict["hedge_symbol"]
+        run_cfg_kwargs["hedge_tick_size"] = hedge_cfg_dict["hedge_tick_size"]
+        run_cfg_kwargs["hedge_lot_size"] = hedge_cfg_dict["hedge_lot_size"]
+        run_cfg_kwargs["hedge_slippage_bps"] = hedge_cfg_dict["hedge_slippage_bps"]
+        run_cfg_kwargs["hedge_fee_bps"] = hedge_cfg_dict["hedge_fee_bps"]
+    run_cfg = RunConfig(**run_cfg_kwargs)
 
     out_dir = Path(args.out_dir) / args.run_id
     run_meta = tcfg.run if isinstance(tcfg.run, dict) else {}
@@ -307,6 +403,8 @@ def cmd_tune(args: argparse.Namespace) -> int:
         step=int(run_meta.get("step_markets", 15)),
         out_dir=out_dir,
         n_workers=args.workers,
+        hedge_data_path=args.hedge_data_path,
+        hedge_half_spread_bps=float(getattr(args, "hedge_half_spread_bps", 1.0)),
     ))
     write_tuning_report(out_dir=out_dir, strategy_name=args.strategy, rows=rows, top_k=args.top_k)
     logger.info(f"Tuning report → {out_dir}/report.md ({len(rows)} cells)")
@@ -391,6 +489,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="Override cache/data root (env: HLBT_PM_CACHE_ROOT / HLBT_HL_DATA_ROOT).",
     )
+    pr.add_argument(
+        "--hedge-data-path",
+        default=None,
+        help="Path to Binance perp/spot kline JSON for the hedge leg (v5 only). "
+        "When omitted, hedge_enabled in --config is ignored.",
+    )
     pr.set_defaults(func=cmd_run)
 
     pf = sp.add_parser("fetch", help="Populate polymarket cache from Gamma + CLOB")
@@ -440,6 +544,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="(polymarket) Filter discovery to this question kind. "
         "Avoids mixing binary and bucket markets in one walk-forward.",
     )
+    # Hedge leg flags (v5_delta_hedged only; safe to pass for other strategies
+    # since hedge_enabled defaults to False when --hedge-data-path is omitted).
+    pt.add_argument(
+        "--hedge-data-path",
+        default=None,
+        help="Path to Binance perp/spot kline JSON for the hedge leg (v5 only).",
+    )
+    pt.add_argument("--hedge-symbol", default="BTC-PERP")
+    pt.add_argument("--hedge-tick-size", type=float, default=0.1)
+    pt.add_argument("--hedge-lot-size", type=float, default=0.001)
+    pt.add_argument("--hedge-slippage-bps", type=float, default=15.0)
+    pt.add_argument("--hedge-fee-bps", type=float, default=1.0)
+    pt.add_argument("--hedge-half-spread-bps", type=float, default=1.0)
     pt.set_defaults(func=cmd_tune)
 
     ptr = sp.add_parser("trace", help="Per-question diagnostic trace plot")
