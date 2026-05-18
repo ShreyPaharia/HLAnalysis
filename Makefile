@@ -1,4 +1,4 @@
-.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy deploy-recorder deploy-engine engine-local install-engine-on-ec2 ssh-ec2 status engine-status logs engine-logs query data-summary pull-data help
+.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy deploy-recorder deploy-engine engine-local install-engine-on-ec2 push-engine-secrets ssh-ec2 status engine-status logs engine-logs query data-summary pull-data help
 
 # Stack name
 STACK_NAME=HLRecorderStack
@@ -50,6 +50,13 @@ deploy-recorder:
 # in, investigate, and `rm` the flag.
 deploy-engine:
 	./scripts/deploy.sh --service engine
+
+# Push engine secrets from .env.local into AWS SSM Parameter Store.
+# Idempotent (overwrites existing params, skips empty optional ones), guarded
+# against pushing .env.local.example placeholders. After this, run
+# `make deploy-engine` so ExecStartPre re-pulls SSM into /etc/hl-engine/env.
+push-engine-secrets:
+	./scripts/push-engine-secrets.sh
 
 # Install or refresh /etc/systemd/system/hl-engine.service on the live box.
 # Use this after pushing a new branch that changes the unit content or after
@@ -248,6 +255,7 @@ help:
 	@echo "  deploy-recorder   Deploy code + restart recorder only"
 	@echo "  deploy-engine     Deploy code + restart engine only (triggers §5.5 drift gate)"
 	@echo "  install-engine-on-ec2  (Re)install /etc/systemd/system/hl-engine.service on the live box"
+	@echo "  push-engine-secrets    Push HL/TG env vars from .env.local into SSM (run before deploy-engine on first install or after rotating keys)"
 	@echo ""
 	@echo "Local dev:"
 	@echo "  engine-local      Run engine on this machine in paper mode (loads .env.local)"
