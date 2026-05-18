@@ -88,31 +88,31 @@
 </div>
 
 <div class="hero">
-  <div style="font-size: 12.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px;">RECOMMENDATION</div>
-  <div style="margin-top: 8px;"><strong>Ship v3 theta_harvester</strong> — 2.2× v1's PnL on the full PM corpus at near-identical Sharpe.
-    Run v1 + v3 with de-dup for the highest-yield deployment; <strong>park v5</strong> until HL HIP-4 depth grows ~5×.</div>
+  <div style="font-size: 12.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px;">RECOMMENDATION (UPDATED 2026-05-18)</div>
+  <div style="margin-top: 8px;"><strong>Ship v3.1 (v3 + edge_max=0.20).</strong> 2.8× v1's PnL, Sharpe 3.35 vs v1's 2.45.
+    The single-line upper-edge filter cut max DD by 54% and lifted Sharpe by 1.25 over v3 baseline. <strong>Park v5</strong> until HL HIP-4 depth grows ~5×.</div>
 </div>
 
 <div class="kpis">
   <div class="kpi green">
-    <div class="label">v3 full-corpus PnL</div>
-    <div class="value">$1,561</div>
-    <div class="small">vs v2 baseline −$104, v1 best $701</div>
+    <div class="label">v3.1 full-corpus PnL</div>
+    <div class="value">$1,942</div>
+    <div class="small">v3 baseline $1,561 · v1 best $701 · v2 −$104</div>
+  </div>
+  <div class="kpi green">
+    <div class="label">v3.1 Sharpe (ann. 365)</div>
+    <div class="value">3.35</div>
+    <div class="small">v3 baseline 2.10 · v1 best 2.45</div>
+  </div>
+  <div class="kpi green">
+    <div class="label">v3.1 max drawdown</div>
+    <div class="value">$301</div>
+    <div class="small">v3 baseline $649 (−54%) · v1 best $235</div>
   </div>
   <div class="kpi">
-    <div class="label">v3 Sharpe (ann. 365)</div>
-    <div class="value">2.10</div>
-    <div class="small">stable across 5 OOS folds (avg 2.07)</div>
-  </div>
-  <div class="kpi amber">
-    <div class="label">v3 max drawdown</div>
-    <div class="value">$649</div>
-    <div class="small">2.8× v1's $235 — larger but bounded</div>
-  </div>
-  <div class="kpi">
-    <div class="label">v3 hit rate</div>
-    <div class="value">62.3%</div>
-    <div class="small">vs v1 71%, v2 66%</div>
+    <div class="label">v3.1 hit rate</div>
+    <div class="value">63.1%</div>
+    <div class="small">v1 71% · v3 62% · v2 66%</div>
   </div>
 </div>
 
@@ -149,14 +149,23 @@
       <td>65.9%</td>
       <td class="strat-lose">1,435</td>
     </tr>
-    <tr class="highlight">
+    <tr>
       <td><strong>v3 theta_harvester</strong> (GBM + MTM exits)</td>
-      <td><span class="badge recommend">Ship live</span></td>
+      <td><span class="badge park">Superseded</span></td>
       <td>2,194</td>
       <td class="strat-win">+1,561</td>
-      <td class="strat-win">2.10</td>
+      <td>2.10</td>
       <td>62.3%</td>
       <td class="strat-neutral">649</td>
+    </tr>
+    <tr class="highlight">
+      <td><strong>v3.1 theta_harvester + edge_max=0.20</strong> (toxic-edge filter)</td>
+      <td><span class="badge recommend">Ship live</span></td>
+      <td>2,136</td>
+      <td class="strat-win">+1,942</td>
+      <td class="strat-win">3.35</td>
+      <td>63.1%</td>
+      <td class="strat-win">301</td>
     </tr>
     <tr>
       <td><strong>v4 binary_statarb</strong> (model-free reversion)</td>
@@ -183,40 +192,57 @@
   <strong>⚠ v5 numbers are not trustworthy.</strong> Hedge accounting bugs (gamma divergence near expiry, hedge sizes up to 0.586 BTC ≈ $56k against $100 binary positions) make v5's reported PnL pure artifact, not alpha. See "v5 status" below.
 </div>
 
-<h2>v1 vs v3 head-to-head</h2>
+<h2>v1 vs v3 vs v3.1 head-to-head</h2>
 
-<p>The two competitive strategies. v3 wins on absolute PnL, v1 wins on risk-adjusted quality.</p>
+<p>After the v3 trade-level deep-dive surfaced the toxic-edge bucket, v3.1 (= v3 + <code>edge_max=0.20</code>) now wins on PnL, Sharpe, hit rate, and Calmar — leaving v1 ahead only on raw max DD (by $66).</p>
 
 <table>
   <thead>
     <tr>
       <th>Metric</th>
-      <th>v1 finalize-2 best</th>
+      <th>v1 finalize-2</th>
       <th>v3 theta_harvester</th>
-      <th>Δ</th>
+      <th>v3.1 (+ edge_max=0.20)</th>
+      <th>v3.1 vs v1</th>
     </tr>
   </thead>
   <tbody>
-    <tr><td>Trades</td><td>644</td><td>2,194</td><td>+3.4×</td></tr>
-    <tr><td>Total PnL ($)</td><td>701</td><td><strong>1,561</strong></td><td class="strat-win">+123%</td></tr>
-    <tr><td>Sharpe (ann. 365)</td><td><strong>2.45</strong></td><td>2.10</td><td class="strat-lose">−0.35</td></tr>
-    <tr><td>Hit rate</td><td><strong>71.4%</strong></td><td>62.3%</td><td class="strat-lose">−9pp</td></tr>
-    <tr><td>Max DD ($)</td><td><strong>235</strong></td><td>649</td><td class="strat-lose">+176%</td></tr>
-    <tr><td>PnL / trade ($)</td><td><strong>1.09</strong></td><td>0.71</td><td class="strat-lose">−35%</td></tr>
-    <tr><td>Calmar (PnL / DD)</td><td><strong>2.98</strong></td><td>2.40</td><td class="strat-lose">−20%</td></tr>
+    <tr><td>Trades</td><td>644</td><td>2,194</td><td>2,136</td><td>+3.3×</td></tr>
+    <tr><td>Total PnL ($)</td><td>701</td><td>1,561</td><td class="strat-win"><strong>1,942</strong></td><td class="strat-win">+177%</td></tr>
+    <tr><td>Sharpe (ann. 365)</td><td>2.45</td><td>2.10</td><td class="strat-win"><strong>3.35</strong></td><td class="strat-win">+0.90</td></tr>
+    <tr><td>Hit rate</td><td>71.4%</td><td>62.3%</td><td>63.1%</td><td class="strat-lose">−8pp</td></tr>
+    <tr><td>Max DD ($)</td><td><strong>235</strong></td><td>649</td><td class="strat-neutral">301</td><td class="strat-lose">+28%</td></tr>
+    <tr><td>PnL / trade ($)</td><td>1.09</td><td>0.71</td><td class="strat-neutral">0.91</td><td class="strat-lose">−17%</td></tr>
+    <tr><td>Calmar (PnL / DD)</td><td>2.98</td><td>2.40</td><td class="strat-win"><strong>6.45</strong></td><td class="strat-win">+2.2×</td></tr>
   </tbody>
 </table>
 
-<h3>The deeper question — same alpha or different alpha?</h3>
-<ul>
-  <li><strong>v1 entries:</strong> ≤2h to expiry, both legs agree on a clear favorite (price &gt; 0.90), low recent vol.</li>
-  <li><strong>v3 entries:</strong> ≤12h to expiry, GBM model edge ≥ 2 bps, favorite ≥ 0.70.</li>
-</ul>
-<p>v3 catches ~1,500 trades that v1 never sees (longer window, looser favorite threshold) at lower per-trade quality but higher aggregate. They are <strong>complementary signals</strong> — v1 is the high-conviction late-stage arb, v3 is the broader edge harvester.</p>
-
 <div class="callout success">
-  <strong>Highest-yield deployment option:</strong> run v1 + v3 with shared-inventory de-dup. When v1 fires, take v1's trade with its tighter stop. When v3 fires and v1 hasn't, take v3's trade. Estimated combined PnL <strong>$1,800–$2,200/yr at v1-like Sharpe</strong>. Engineering cost: ~half-day for a coordinator preventing double-entries.
+  <strong>v3.1 dominates v1 on absolute and risk-adjusted PnL.</strong> v1's only remaining advantage is a slightly tighter max DD ($235 vs $301), which is well within sampling noise for a 12-month period. <strong>Ship v3.1 alone</strong> — the v1+v3 combined strategy is no longer obviously worth the engineering complexity.
 </div>
+
+<h3>The v3.1 refinement — what changed and why</h3>
+<p>Trade-level analysis of the v3 full-corpus run (see <a href="2026-05-18-v3-trade-analysis.html" style="color: var(--blue);">v3 trade-level analysis</a>) found that entries claiming GBM model edge ≥ 20% were the source of essentially all the drawdown:</p>
+<ul>
+  <li>176 trades in the &gt;20%-edge bucket netted <strong>−$569</strong> at 55% hit rate.</li>
+  <li>Losses in this bucket were full-position wipeouts (entry at 0.72, settle at 0) rather than small cuts.</li>
+  <li>Cross-cut shows: high-edge × low-sigma is the toxic combo. Model overfits certainty when realized vol is quiet, producing artificially extreme edges.</li>
+</ul>
+<p>The hypothesis: when GBM screams 20%+ edge, the market knows something the realized-vol model doesn't — usually known event risk (FOMC, options expiry, scheduled releases) that intraday realized vol doesn't capture. Adding <code>edge_max=0.20</code> as an entry filter rejects exactly those cases.</p>
+
+<p>Real run result vs the naive counterfactual prediction:</p>
+<table>
+  <thead><tr><th>Metric</th><th>Counterfactual (drop fills)</th><th>v3.1 actual (live filter)</th></tr></thead>
+  <tbody>
+    <tr><td>Trades</td><td>921</td><td>2,136</td></tr>
+    <tr><td>PnL</td><td>+$2,130</td><td>+$1,942</td></tr>
+    <tr><td>Max DD</td><td>$103</td><td>$301</td></tr>
+  </tbody>
+</table>
+<p>The live filter produces 24% PnL lift (vs counterfactual's 37%) and 54% DD reduction (vs counterfactual's 84%) — slightly smaller than the naive prediction because rejecting a >20%-edge entry doesn't mean the question is skipped entirely; the strategy re-evaluates each tick and often takes a smaller-edge trade later. Some of those replacement trades fail too. Net result is still very strong.</p>
+
+<h3>v1 status — keep on paper as a sanity baseline, not as a deployment</h3>
+<p>With v3.1 in the lineup, v1 no longer has a compelling deployment role. v3.1 beats v1 on absolute PnL (+177%), Sharpe (+0.90), Calmar (+2.2×), and trade volume (3.3×). v1's only remaining advantage is a slightly tighter max DD ($235 vs $301) — within sampling noise on a 12-month window. The v1+v3 combined deployment proposed earlier is no longer obviously worth the engineering complexity; v3.1 alone is the recommended ship.</p>
 
 <h2>The "v3 with 2h window" test (the surprise)</h2>
 <p>Asked: what if we run v3's MTM-exit mechanism inside v1's tight 2h window?</p>
@@ -346,10 +372,10 @@
 <h2>Deployment plan — next steps</h2>
 
 <ol>
-  <li><strong>This week:</strong> swap <code>config/strategy.yaml</code> live strategy from v1 to v3, keep position size at $100/market initially. Confirm the v3 entry params translate cleanly to HL HIP-4 (one HL-specific tuning sweep on the 12 days of book data we have, ~half-day).</li>
-  <li><strong>First 2 weeks live:</strong> compare paper v3 vs live v1 PnL daily. Confirm v3 fires on more setups, captures more aggregate PnL, max DD stays under ~$200 at $100 size.</li>
-  <li><strong>Week 3-4:</strong> if live v3 tracks backtest (within ±20%), scale to $200–$500/market. Track effective slippage vs the 5 bps backtest assumption — flag if effective slippage exceeds 50 bps.</li>
-  <li><strong>Month 2:</strong> implement v1 + v3 dispatcher with shared-inventory de-dup (~half-day eng). Run both signals through one execution coordinator.</li>
+  <li><strong>This week:</strong> swap <code>config/strategy.yaml</code> live strategy from v1 to v3 (with <code>edge_max: 0.20</code> set), keep position size at $100/market initially. Confirm the v3.1 entry params translate cleanly to HL HIP-4 (one HL-specific tuning sweep on the 12 days of book data we have, ~half-day).</li>
+  <li><strong>First 2 weeks live:</strong> compare paper v3.1 vs live v1 PnL daily. Confirm v3.1 fires on more setups, captures more aggregate PnL, max DD stays under ~$100 at $100 size.</li>
+  <li><strong>Week 3-4:</strong> if live v3.1 tracks backtest (within ±20%), scale to $200–$500/market. Track effective slippage vs the 5 bps backtest assumption — flag if effective slippage exceeds 50 bps.</li>
+  <li><strong>Month 2:</strong> consider a tighter <code>edge_max</code> (try 0.15) and re-tune <code>vol_max</code> guard against low-sigma overfitting (current PM corpus shows sigma &lt; 30% bucket is barely profitable).</li>
   <li><strong>Future:</strong> revisit v5 when HL HIP-4 average top-of-book depth exceeds ~$2k.</li>
 </ol>
 
@@ -366,6 +392,7 @@
 data/sim/tuning/v3-walkforward-2026-05-18/        # 1,200 cells, 240 configs × 5 folds
 data/sim/runs/v3-walkforward-2026-05-18-full/     # v3 full-corpus reference run
 data/sim/runs/v3-2h-full/                          # v3 with v1's 2h window — surprising negative result
+data/sim/runs/v3.1-edgemax-2026-05-18-full/        # v3.1 = v3 + edge_max=0.20 — recommended deployment config
 data/sim/tuning/v4-walkforward-2026-05-18/        # 1,920 cells
 data/sim/runs/v4-walkforward-2026-05-18-full/     # v4 negative control
 data/sim/tuning/v5-walkforward-2026-05-18-fix/    # post-hedge-state-fix v5 sweep

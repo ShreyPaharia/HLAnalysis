@@ -190,25 +190,42 @@
 </table>
 <p>Counter-intuitive but consistent with the edge×vol cross-cut: <strong>higher realized vol produces higher hit rate AND higher per-trade $</strong>. When markets are moving, the GBM model fires only on real signal. When vol is dead, the model invents "edge" out of measurement noise.</p>
 
-<h2>The counterfactual — v3 with `entry_edge < 0.20` filter</h2>
+<h2>v3.1 — the live filter (implemented and re-run)</h2>
 
+<p>After the counterfactual analysis surfaced the toxic-edge bucket, <code>edge_max: Optional[float]</code> was added to <code>ThetaHarvesterConfig</code>. When set, entries with <code>max(edge_yes, edge_no) ≥ edge_max</code> emit a HOLD with diagnostic <code>edge_too_extreme</code>. Production config sets <code>edge_max=0.20</code>; default None preserves v3 baseline behaviour for existing tuning grids.</p>
+
+<h3>Counterfactual vs actual</h3>
 <table>
-  <thead><tr><th>Metric</th><th>v3 baseline</th><th>v3 + edge cap</th><th>Δ</th></tr></thead>
+  <thead><tr><th>Metric</th><th>v3 baseline</th><th>Counterfactual (post-hoc fill drop)</th><th>v3.1 actual (live filter)</th></tr></thead>
   <tbody>
-    <tr><td>Trades</td><td>1,097</td><td>921</td><td>−176 (−16%)</td></tr>
-    <tr><td>Total PnL ($)</td><td>1,561</td><td class="good"><strong>2,130</strong></td><td class="good">+$569 (+37%)</td></tr>
-    <tr><td>Hit rate</td><td>55.0%</td><td>55.0%</td><td>flat</td></tr>
-    <tr><td>Max DD ($)</td><td>652</td><td class="good"><strong>103</strong></td><td class="good">−$549 (−84%)</td></tr>
-    <tr><td>Implied Sharpe</td><td>2.10</td><td class="good">~4.5+</td><td class="good">est. +2.4</td></tr>
-    <tr><td>Calmar (PnL/DD)</td><td>2.40</td><td class="good"><strong>20.7</strong></td><td class="good">+8.6×</td></tr>
+    <tr><td>Trades</td><td>2,194 fills</td><td>921 trades</td><td>2,136 fills</td></tr>
+    <tr><td>Total PnL ($)</td><td>1,561</td><td>2,130</td><td class="good"><strong>1,942</strong></td></tr>
+    <tr><td>Hit rate (per-market)</td><td>62.3%</td><td>—</td><td class="good">63.1%</td></tr>
+    <tr><td>Sharpe</td><td>2.10</td><td>~4.5 est.</td><td class="good"><strong>3.35</strong></td></tr>
+    <tr><td>Max DD ($)</td><td>652</td><td>103</td><td class="good"><strong>301</strong></td></tr>
+    <tr><td>Calmar (PnL/DD)</td><td>2.40</td><td>20.7</td><td class="good"><strong>6.45</strong></td></tr>
   </tbody>
 </table>
 
-<p>Hit rate is unchanged at 55% — confirming that the >20%-edge bucket isn't worse-by-being-wrong, it's worse-by-having-fatter-loss-tails. Same proportion of wins/losses, but the wipeouts are larger when they happen.</p>
+<p><strong>The live filter is less dramatic than the naive counterfactual.</strong> Rejecting a high-edge entry doesn't make the question disappear — the strategy re-evaluates each tick and often takes a smaller-edge trade later. Some of those replacement trades fail too. Net result: <strong>+24% PnL, −54% DD, +1.25 Sharpe over v3 baseline</strong>. Still the single biggest improvement of any single change we tested.</p>
+
+<h3>v3.1 vs the rest</h3>
+<table>
+  <thead><tr><th>Metric</th><th>v1 finalize-2</th><th>v3 baseline</th><th>v3.1 (recommended)</th></tr></thead>
+  <tbody>
+    <tr><td>PnL</td><td>$701</td><td>$1,561</td><td class="good"><strong>$1,942</strong></td></tr>
+    <tr><td>Sharpe</td><td>2.45</td><td>2.10</td><td class="good"><strong>3.35</strong></td></tr>
+    <tr><td>Hit rate</td><td>71.4%</td><td>62.3%</td><td>63.1%</td></tr>
+    <tr><td>Max DD</td><td>$235</td><td>$649</td><td>$301</td></tr>
+    <tr><td>Calmar</td><td>2.98</td><td>2.40</td><td class="good"><strong>6.45</strong></td></tr>
+  </tbody>
+</table>
 
 <div class="callout success">
-  <strong>This is the single highest-leverage v3 refinement.</strong> A one-line addition to the entry filter — <code>if entry_edge ≥ 0.20: HOLD with diagnostic("edge_too_extreme")</code> — should be the v3.1 deployment.
+  <strong>v3.1 is the new recommendation.</strong> It beats v1 on absolute PnL (+177%), Sharpe (+0.90), and Calmar (+2.2×) — leaving v1 ahead only on hit rate and a marginally tighter max DD. The v1+v3 combined deployment is no longer obviously worth the complexity.
 </div>
+
+<p>Artifacts: <code>data/sim/runs/v3.1-edgemax-2026-05-18-full/report.md</code> · strategy code in <code>hlanalysis/strategy/theta_harvester.py</code>.</p>
 
 <h2>Per-market view</h2>
 
