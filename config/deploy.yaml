@@ -1,12 +1,25 @@
 deploy:
   env: dev                              # dev | staging | prod
-  hl:
-    account_address: ${HL_ACCOUNT_ADDRESS}
-    api_secret_key: ${HL_API_SECRET_KEY}
-    base_url: https://api.hyperliquid.xyz
+  # Multi-account HL credentials. Each `account_alias` referenced by an entry in
+  # strategy.yaml must have a matching key here. Funding lives outside this
+  # config (ops decision). To add an account: introduce a new env var (e.g.
+  # HL_API_SECRET_KEY_V31) and add its block below.
+  hl_accounts:
+    v1:
+      account_address: ${HL_ACCOUNT_ADDRESS}
+      api_secret_key: ${HL_API_SECRET_KEY}
+      base_url: https://api.hyperliquid.xyz
+    # v31:
+    #   account_address: ${HL_ACCOUNT_ADDRESS_V31}
+    #   api_secret_key: ${HL_API_SECRET_KEY_V31}
+    #   base_url: https://api.hyperliquid.xyz
   alerts:
     telegram:
       bot_token: ${TG_BOT_TOKEN}
       chat_id: ${TG_CHAT_ID}
+  # When >1 hl_accounts is configured, the engine namespaces state.db and the
+  # kill switch under the alias: data/engine/<alias>/state.db ,
+  # data/engine/<alias>/halt. For a single 'default' (or single-named) account
+  # the legacy flat paths below are used to preserve existing deployments.
   state_db_path: data/engine/state.db
   kill_switch_path: data/engine/halt

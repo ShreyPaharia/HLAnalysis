@@ -1,92 +1,158 @@
-strategy:
-  name: late_resolution
-  paper_mode: false                     # LIVE: real HL orders
+# Multi-strategy live config.
+#
+# Each entry under `strategies:` is one (strategy, account) pair that the engine
+# runs concurrently — shared MarketState/WS, isolated state DB, risk gate,
+# router, reconciler, cloid prefix. See DEPLOYMENT.md "Multi-account topology"
+# for the wiring rationale and the deploy.yaml twin (`hl_accounts:`).
+#
+# To add a strategy: append another entry with a distinct `account_alias`
+# (must also exist under `deploy.hl_accounts` in deploy.yaml).
+# To roll back to a single strategy: keep only the first entry; engine still
+# loads it correctly.
 
-  # Pattern-based allowlist; matches QuestionMetaEvent fields.
-  # Auto-applies across rollovers; blocklist for per-instance escape hatch.
-  allowlist:
-    # 24h regime: enter inside the last 2h, winning leg ∈ [0.85, 0.999]. Lower
-    # bound calibrated on PM BTC daily Up/Down (May 2025 – May 2026): walk-forward
-    # 5-OOS-split total $577, full-year $687, Sharpe 3.70, hit 74.9%. Upper bound
-    # widened from PM-optimal 0.97 because HL HIP-4 favorites trade tighter
-    # (0.98–0.9999); the 0.97 cap blocked every HL trade in live. HL-specific
-    # tuning is a follow-up once enough live fills accumulate.
-    - match:
-        class: priceBinary
-        underlying: BTC
+strategies:
+  - name: late_resolution
+    account_alias: v1                   # → deploy.hl_accounts.v1
+    strategy_type: late_resolution
+    paper_mode: false                   # LIVE: real HL orders
+
+    # Pattern-based allowlist; matches QuestionMetaEvent fields.
+    # Auto-applies across rollovers; blocklist for per-instance escape hatch.
+    allowlist:
+      # 24h regime: enter inside the last 2h, winning leg ∈ [0.85, 0.999]. Lower
+      # bound calibrated on PM BTC daily Up/Down (May 2025 – May 2026): walk-forward
+      # 5-OOS-split total $577, full-year $687, Sharpe 3.70, hit 74.9%. Upper bound
+      # widened from PM-optimal 0.97 because HL HIP-4 favorites trade tighter
+      # (0.98–0.9999); the 0.97 cap blocked every HL trade in live. HL-specific
+      # tuning is a follow-up once enough live fills accumulate.
+      - match:
+          class: priceBinary
+          underlying: BTC
+        max_position_usd: 100
+        stop_loss_pct: null              # disabled — 1y PM tuning showed any stop hurts net PnL
+        tte_min_seconds: 0
+        tte_max_seconds: 7200
+        price_extreme_threshold: 0.85
+        price_extreme_max: 0.999          # HL HIP-4 favorites trade 0.98-0.9999; 0.97 cap blocked every trade live
+        min_safety_d: 1.0
+        vol_lookback_seconds: 3600
+        exit_safety_d: 1.0
+        vol_ewma_lambda: 0.85
+        distance_from_strike_usd_min: 0
+        vol_max: 100
+        # Targeted near-strike low-ask size cap — zero size on the 4 catastrophic
+        # leg-flip trades the 1y PM analysis surfaced (BTC within 1.5% of strike,
+        # ask ∈ [0.85, 0.88]). Walk-forward 5-OOS-split total $585 → $679
+        # (+$94, +16%), max drawdown $122 → $90 (−26%), Sharpe 3.88 → 6.22
+        # at fixed trade count (−12 trades, all losers). See
+        # data/sim/tuning/v1-size-cap-pm/.
+        size_cap_near_strike_pct: 1.0
+        size_cap_max_dist_pct: 1.5
+        size_cap_min_ask: 0.88
+      # priceBucket — same per-leg consensus rule across all bucket legs.
+      # NOTE: Polymarket bucket data uses an "above-X binary stack" layout that
+      # is incompatible with the strategy's HL mutually-exclusive bucket
+      # interpretation (see docs/v1-bucket-sizing-results.md), so the PM corpus
+      # cannot be used to tune these params. This entry stays calibrated to the
+      # binary params and applies only to HL HIP-4 priceBucket markets (which
+      # match the strategy's expected layout). size_cap defaults to disabled
+      # here pending HL-bucket-specific tuning.
+      - match:
+          class: priceBucket
+          underlying: BTC
+        max_position_usd: 100
+        stop_loss_pct: null              # disabled — 1y PM tuning showed any stop hurts net PnL
+        tte_min_seconds: 0
+        tte_max_seconds: 7200
+        price_extreme_threshold: 0.85
+        price_extreme_max: 0.999          # HL HIP-4 favorites trade 0.98-0.9999; 0.97 cap blocked every trade live
+        min_safety_d: 1.0
+        vol_lookback_seconds: 3600
+        exit_safety_d: 1.0
+        vol_ewma_lambda: 0.85
+        distance_from_strike_usd_min: 0
+        vol_max: 100
+      # Add more class entries as new question classes are approved for trading
+
+    blocklist_question_idxs: []         # explicit per-instance exclusions
+
+    defaults:
+      match: {}
       max_position_usd: 100
-      stop_loss_pct: null                # disabled — 1y PM tuning showed any stop hurts net PnL
+      stop_loss_pct: null
       tte_min_seconds: 0
       tte_max_seconds: 7200
       price_extreme_threshold: 0.85
-      price_extreme_max: 0.999            # HL HIP-4 favorites trade 0.98-0.9999; 0.97 cap blocked every trade live
+      price_extreme_max: 0.999
       min_safety_d: 1.0
       vol_lookback_seconds: 3600
       exit_safety_d: 1.0
       vol_ewma_lambda: 0.85
       distance_from_strike_usd_min: 0
       vol_max: 100
-      # Targeted near-strike low-ask size cap — zero size on the 4 catastrophic
-      # leg-flip trades the 1y PM analysis surfaced (BTC within 1.5% of strike,
-      # ask ∈ [0.85, 0.88]). Walk-forward 5-OOS-split total $585 → $679
-      # (+$94, +16%), max drawdown $122 → $90 (−26%), Sharpe 3.88 → 6.22
-      # at fixed trade count (−12 trades, all losers). See
-      # data/sim/tuning/v1-size-cap-pm/.
+      # See per-allowlist entries above; engine `build_late_resolution_config`
+      # reads from defaults here, so the strategy instance always sees this cap.
       size_cap_near_strike_pct: 1.0
       size_cap_max_dist_pct: 1.5
       size_cap_min_ask: 0.88
-    # priceBucket — same per-leg consensus rule across all bucket legs.
-    # NOTE: Polymarket bucket data uses an "above-X binary stack" layout that
-    # is incompatible with the strategy's HL mutually-exclusive bucket
-    # interpretation (see docs/v1-bucket-sizing-results.md), so the PM corpus
-    # cannot be used to tune these params. This entry stays calibrated to the
-    # binary params and applies only to HL HIP-4 priceBucket markets (which
-    # match the strategy's expected layout). size_cap defaults to disabled
-    # here pending HL-bucket-specific tuning.
-    - match:
-        class: priceBucket
-        underlying: BTC
-      max_position_usd: 100
-      stop_loss_pct: null                # disabled — 1y PM tuning showed any stop hurts net PnL
-      tte_min_seconds: 0
-      tte_max_seconds: 7200
-      price_extreme_threshold: 0.85
-      price_extreme_max: 0.999            # HL HIP-4 favorites trade 0.98-0.9999; 0.97 cap blocked every trade live
-      min_safety_d: 1.0
-      vol_lookback_seconds: 3600
-      exit_safety_d: 1.0
-      vol_ewma_lambda: 0.85
-      distance_from_strike_usd_min: 0
-      vol_max: 100
-    # Add more class entries as new question classes are approved for trading
 
-  blocklist_question_idxs: []           # explicit per-instance exclusions
+    global:
+      max_total_inventory_usd: 500
+      max_concurrent_positions: 5
+      daily_loss_cap_usd: 200
+      max_strike_distance_pct: 50       # 50% — BTC moves 5-10% per day, allow room
+      min_recent_volume_usd: 100        # HL HIP-4 binaries are inherently thin; 1000 vetoed every trade
+      stale_data_halt_seconds: 30       # HIP-4 books update on bursts not steady streams; 5s vetoed every trade
+      reconcile_interval_seconds: 60
 
-  defaults:
-    match: {}
-    max_position_usd: 100
-    stop_loss_pct: null
-    tte_min_seconds: 0
-    tte_max_seconds: 7200
-    price_extreme_threshold: 0.85
-    price_extreme_max: 0.999
-    min_safety_d: 1.0
-    vol_lookback_seconds: 3600
-    exit_safety_d: 1.0
-    vol_ewma_lambda: 0.85
-    distance_from_strike_usd_min: 0
-    vol_max: 100
-    # See per-allowlist entries above; engine `build_late_resolution_config`
-    # reads from defaults here, so the strategy instance always sees this cap.
-    size_cap_near_strike_pct: 1.0
-    size_cap_max_dist_pct: 1.5
-    size_cap_min_ask: 0.88
-
-  global:
-    max_total_inventory_usd: 500
-    max_concurrent_positions: 5
-    daily_loss_cap_usd: 200
-    max_strike_distance_pct: 50         # 50% — BTC moves 5-10% per day, allow room
-    min_recent_volume_usd: 100          # HL HIP-4 binaries are inherently thin; 1000 vetoed every trade
-    stale_data_halt_seconds: 30         # HIP-4 books update on bursts not steady streams; 5s vetoed every trade
-    reconcile_interval_seconds: 60
+  # --- v3.1 theta_harvester ---
+  # Uncomment and fund the v31 account before enabling. Each entry gets its own
+  # HL signing key (deploy.hl_accounts.v31 → HL_API_SECRET_KEY_V31).
+  # Risk envelopes are per-(strategy, account): the v1 daily_loss_cap and
+  # inventory limits above do NOT apply here.
+  #
+  # - name: theta_harvester
+  #   account_alias: v31
+  #   strategy_type: theta_harvester
+  #   paper_mode: false
+  #   allowlist:
+  #     - match:
+  #         class: priceBinary
+  #         underlying: BTC
+  #       max_position_usd: 100
+  #       stop_loss_pct: null
+  #       tte_min_seconds: 0
+  #       tte_max_seconds: 86400
+  #       price_extreme_threshold: 0.0   # theta_harvester drives entries off edge, not extreme price
+  #       price_extreme_max: 1.0
+  #       distance_from_strike_usd_min: 0
+  #       vol_max: 100
+  #   blocklist_question_idxs: []
+  #   defaults:
+  #     match: {}
+  #     max_position_usd: 100
+  #     stop_loss_pct: null
+  #     tte_min_seconds: 0
+  #     tte_max_seconds: 86400
+  #     price_extreme_threshold: 0.0
+  #     price_extreme_max: 1.0
+  #     distance_from_strike_usd_min: 0
+  #     vol_max: 100
+  #   global:
+  #     max_total_inventory_usd: 500
+  #     max_concurrent_positions: 5
+  #     daily_loss_cap_usd: 200
+  #     max_strike_distance_pct: 50
+  #     min_recent_volume_usd: 100
+  #     stale_data_halt_seconds: 30
+  #     reconcile_interval_seconds: 60
+  #   theta:
+  #     vol_lookback_seconds: 3600
+  #     vol_sampling_dt_seconds: 60
+  #     edge_buffer: 0.02
+  #     fee_taker: 0.00035
+  #     half_spread_assumption: 0.005
+  #     favorite_threshold: 0.85
+  #     edge_max: 0.20                    # v3.1 upper-edge filter (commit 0578a11)
+  #     exit_edge_threshold: 0.0
+  #     time_stop_seconds: 0
