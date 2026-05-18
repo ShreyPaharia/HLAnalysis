@@ -262,6 +262,7 @@ class KalshiDataSource:
                 outcome=no_outcome, symbol=f"{market}|no",
             ))
 
+        leg_events.sort(key=lambda e: e.ts_ns)
         yield from heapq.merge(
             iter(leg_events), iter(ref_events), iter(settle),
             key=lambda e: e.ts_ns,
