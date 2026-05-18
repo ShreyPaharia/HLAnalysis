@@ -269,7 +269,12 @@ def cmd_tune(args: argparse.Namespace) -> int:
             os.environ[_ENV_HL_DATA] = str(args.cache_root)
 
     data_source = _resolve_data_source(args.data_source, cache_root=args.cache_root)
-    descriptors = list(data_source.discover(start=args.start or "", end=args.end or ""))
+    discover_kwargs: dict = {}
+    if args.data_source == "polymarket" and args.kind != "both":
+        discover_kwargs["kind"] = args.kind
+    descriptors = list(data_source.discover(
+        start=args.start or "", end=args.end or "", **discover_kwargs,
+    ))
     if args.max_markets is not None:
         descriptors = descriptors[args.skip_markets : args.skip_markets + args.max_markets]
     elif args.skip_markets:
@@ -428,6 +433,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     pt.add_argument("--skip-markets", type=int, default=0)
     pt.add_argument("--max-markets", type=int, default=None)
     pt.add_argument("--top-k", type=int, default=10)
+    pt.add_argument(
+        "--kind",
+        choices=["binary", "bucket", "both"],
+        default="both",
+        help="(polymarket) Filter discovery to this question kind. "
+        "Avoids mixing binary and bucket markets in one walk-forward.",
+    )
     pt.set_defaults(func=cmd_tune)
 
     ptr = sp.add_parser("trace", help="Per-question diagnostic trace plot")

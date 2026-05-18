@@ -53,6 +53,11 @@ class AllowlistEntry(BaseModel):
     # (0 = legacy sample stdev). Layered on top of the entry gates above.
     exit_safety_d: float = 0.0
     vol_ewma_lambda: float = 0.0
+    # Targeted size cap (Plan: v1-buckets-and-sizing). Defaults preserve pre-cap
+    # behavior (pct=0 disables). See LateResolutionConfig docstring.
+    size_cap_near_strike_pct: float = 0.0
+    size_cap_max_dist_pct: float = 1.5
+    size_cap_min_ask: float = 0.88
 
 
 class GlobalRiskConfig(BaseModel):

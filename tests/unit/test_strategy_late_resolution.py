@@ -637,3 +637,161 @@ def test_entry_notional_never_exceeds_max_position_usd():
     assert notional <= cfg.max_position_usd, (
         f"notional {notional} would trip risk gate cap {cfg.max_position_usd}"
     )
+
+
+# --- Targeted near-strike low-ask size cap ---
+
+
+def _cap_books(yes_ask: float, no_ask: float, ts_ns: int) -> dict[str, BookState]:
+    return {
+        "@30": _ref_book("@30", ask=yes_ask, bid=yes_ask - 0.01, ts_ns=ts_ns),
+        "@31": _ref_book("@31", ask=no_ask, bid=no_ask - 0.01, ts_ns=ts_ns),
+    }
+
+
+def test_size_cap_disabled_by_default_no_change_in_size():
+    # Near-strike low-ask entry with default cap (pct=0) should produce the
+    # same size as if the cap weren't there: floor(100 / max(0.86, 1.0) * 100)/100
+    # = 100 contracts.
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = _cap_books(yes_ask=0.86, no_ask=0.14, ts_ns=now - 100)
+    cfg = _cfg(price_extreme_threshold=0.80, min_recent_volume_usd=0.0)
+    d = LateResolutionStrategy(cfg).evaluate(
+        question=q, books=books, reference_price=80_100.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=None, now_ns=now,
+    )
+    assert d.action is Action.ENTER
+    intent = d.intents[0]
+    assert intent.symbol == "@30"
+    # Uncapped size_usd = 100, sizing_px = max(0.86, 1.0) = 1.0
+    # → floor(100/1.0 * 100)/100 = 100.
+    assert math.isclose(intent.size, 100.0, abs_tol=1e-9)
+
+
+def test_size_cap_halves_size_on_near_strike_low_ask_entry():
+    # BTC at 80_100, strike 80_000 → dist_pct = 0.125% < 1.5%.
+    # YES ask 0.86 < 0.88 (min_ask). pct=0.5 → scale 0.5 → size 50.
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = _cap_books(yes_ask=0.86, no_ask=0.14, ts_ns=now - 100)
+    cfg = _cfg(
+        price_extreme_threshold=0.80,
+        min_recent_volume_usd=0.0,
+        size_cap_near_strike_pct=0.5,
+        size_cap_max_dist_pct=1.5,
+        size_cap_min_ask=0.88,
+    )
+    d = LateResolutionStrategy(cfg).evaluate(
+        question=q, books=books, reference_price=80_100.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=None, now_ns=now,
+    )
+    assert d.action is Action.ENTER
+    intent = d.intents[0]
+    assert intent.symbol == "@30"
+    # Capped size_usd = 50, sizing_px = max(0.86, 1.0) = 1.0
+    # → floor(50/1.0 * 100)/100 = 50.
+    assert math.isclose(intent.size, 50.0, abs_tol=1e-9)
+
+
+def test_size_cap_does_not_apply_when_ask_above_min_ask():
+    # Same near-strike setup but ask 0.95 ≥ 0.88 → cap does NOT apply.
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = _cap_books(yes_ask=0.95, no_ask=0.05, ts_ns=now - 100)
+    cfg = _cfg(
+        price_extreme_threshold=0.80,
+        min_recent_volume_usd=0.0,
+        size_cap_near_strike_pct=0.5,
+        size_cap_max_dist_pct=1.5,
+        size_cap_min_ask=0.88,
+    )
+    d = LateResolutionStrategy(cfg).evaluate(
+        question=q, books=books, reference_price=80_100.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=None, now_ns=now,
+    )
+    assert d.action is Action.ENTER
+    intent = d.intents[0]
+    assert intent.symbol == "@30"
+    assert math.isclose(intent.size, 100.0, abs_tol=1e-9)
+    # No size_cap diagnostic emitted.
+    assert not any(d_.message == "size_cap_near_strike" for d_ in d.diagnostics)
+
+
+def test_size_cap_does_not_apply_when_far_from_strike():
+    # BTC at 81_500 → dist_pct = 1.875% > 1.5% → cap does NOT apply.
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = _cap_books(yes_ask=0.86, no_ask=0.14, ts_ns=now - 100)
+    cfg = _cfg(
+        price_extreme_threshold=0.80,
+        min_recent_volume_usd=0.0,
+        size_cap_near_strike_pct=0.5,
+        size_cap_max_dist_pct=1.5,
+        size_cap_min_ask=0.88,
+    )
+    d = LateResolutionStrategy(cfg).evaluate(
+        question=q, books=books, reference_price=81_500.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=None, now_ns=now,
+    )
+    assert d.action is Action.ENTER
+    intent = d.intents[0]
+    assert intent.symbol == "@30"
+    assert math.isclose(intent.size, 100.0, abs_tol=1e-9)
+    assert not any(d_.message == "size_cap_near_strike" for d_ in d.diagnostics)
+
+
+def test_size_cap_works_on_no_leg_for_binary():
+    # BTC just below strike → NO wins. NO ask 0.86 < 0.88 → cap applies → size halved.
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = _cap_books(yes_ask=0.14, no_ask=0.86, ts_ns=now - 100)
+    cfg = _cfg(
+        price_extreme_threshold=0.80,
+        min_recent_volume_usd=0.0,
+        size_cap_near_strike_pct=0.5,
+        size_cap_max_dist_pct=1.5,
+        size_cap_min_ask=0.88,
+    )
+    d = LateResolutionStrategy(cfg).evaluate(
+        question=q, books=books, reference_price=79_900.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=None, now_ns=now,
+    )
+    assert d.action is Action.ENTER
+    intent = d.intents[0]
+    assert intent.symbol == "@31"
+    assert math.isclose(intent.size, 50.0, abs_tol=1e-9)
+
+
+def test_size_cap_emits_diagnostic_when_active():
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = _cap_books(yes_ask=0.86, no_ask=0.14, ts_ns=now - 100)
+    cfg = _cfg(
+        price_extreme_threshold=0.80,
+        min_recent_volume_usd=0.0,
+        size_cap_near_strike_pct=0.5,
+        size_cap_max_dist_pct=1.5,
+        size_cap_min_ask=0.88,
+    )
+    d = LateResolutionStrategy(cfg).evaluate(
+        question=q, books=books, reference_price=80_100.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=None, now_ns=now,
+    )
+    assert d.action is Action.ENTER
+    cap_diags = [d_ for d_ in d.diagnostics if d_.message == "size_cap_near_strike"]
+    assert len(cap_diags) == 1
+    kv = dict(cap_diags[0].fields)
+    assert "dist_pct" in kv and "ask" in kv and "scale_after" in kv
