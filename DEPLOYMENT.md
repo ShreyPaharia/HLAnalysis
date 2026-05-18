@@ -361,3 +361,157 @@ Look for: `active (running)`, no `restart_blocked` flag, journal lines showing `
 3. Confirm caps: `$100/position, $500 global, 5 concurrent, $200 daily-loss cap, 10% stop-loss`.
 4. Restart engine; watch Telegram for first entry/exit.
 5. If anything looks wrong: `touch data/engine/halt` immediately.
+
+## Multi-account topology
+
+The engine runs N `(strategy, account)` pairs concurrently in **one process**,
+sharing one Hyperliquid WebSocket feed and one MarketState. Each pair is
+otherwise fully isolated: separate signing key, state DB, risk gate, cloid
+prefix, kill switch, and daily-loss cap.
+
+### Design decisions
+
+**Config schema = A** (one YAML, list of strategies). The fields across v1 and
+v3.1 overlap heavily (allowlist matchers, defaults, global risk block), so a
+single `strategies: [...]` list under `config/strategy.yaml` is more ergonomic
+than juggling two files with a `--config A --config B` invocation.
+
+**Process model = Y** (one process, N strategies). The t4g.micro has 1 GB RAM
+plus 1 GB swap — running two engine processes would double the WS connection
+count, SDK footprint, and Python interpreter overhead. The existing per-loop
+`try/except` already provides per-strategy crash isolation; a stray exception
+in `theta_harvester.evaluate()` is caught by `_scan_loop` and only that slot's
+tick is dropped, never the WS feed or sibling strategies.
+
+### Config layout
+
+`config/strategy.yaml`:
+
+```yaml
+strategies:
+  - name: late_resolution
+    account_alias: v1                # → deploy.hl_accounts.v1
+    strategy_type: late_resolution
+    paper_mode: false
+    allowlist: [...]
+    defaults: {...}
+    global: {...}
+
+  - name: theta_harvester
+    account_alias: v31
+    strategy_type: theta_harvester
+    paper_mode: false
+    allowlist: [...]
+    defaults: {...}
+    global: {...}
+    theta: { edge_max: 0.20, ... }   # v3.1-specific knobs
+```
+
+`config/deploy.yaml`:
+
+```yaml
+deploy:
+  hl_accounts:
+    v1:
+      account_address: ${HL_ACCOUNT_ADDRESS}
+      api_secret_key: ${HL_API_SECRET_KEY}
+      base_url: https://api.hyperliquid.xyz
+    v31:
+      account_address: ${HL_ACCOUNT_ADDRESS_V31}
+      api_secret_key: ${HL_API_SECRET_KEY_V31}
+      base_url: https://api.hyperliquid.xyz
+```
+
+`.env.local` (or AWS SSM in prod):
+
+```
+HL_ACCOUNT_ADDRESS=0x...
+HL_API_SECRET_KEY=0x...
+HL_ACCOUNT_ADDRESS_V31=0x...
+HL_API_SECRET_KEY_V31=0x...
+```
+
+### What gets namespaced per account
+
+When `hl_accounts` has more than one entry (or any non-`default` alias), the
+engine namespaces local artifacts under the alias:
+
+| Path                              | Single-account default          | Multi-account                              |
+| --------------------------------- | ------------------------------- | ------------------------------------------ |
+| State DB                          | `data/engine/state.db`          | `data/engine/<alias>/state.db`             |
+| Kill switch                       | `data/engine/halt`              | `data/engine/<alias>/halt`                 |
+| Restart-drift block file          | `data/engine/restart_blocked`   | `data/engine/<alias>/restart_blocked`      |
+| Cloid prefix (DB + venue)         | `hla-<uuid>`                    | `hla-<alias>-<hex>`                        |
+
+Kill one strategy without touching the other:
+
+```bash
+touch data/engine/v1/halt        # only v1 halts; v31 keeps running
+```
+
+Clear restart drift on one strategy:
+
+```bash
+rm data/engine/v31/restart_blocked
+```
+
+### Migration from a single-account deployment
+
+If you're upgrading an existing engine that used `data/engine/state.db`:
+
+1. Stop the engine.
+2. Decide your alias for the existing strategy (e.g. `v1`).
+3. Move state into the new namespaced layout:
+   ```bash
+   mkdir -p data/engine/v1
+   mv data/engine/state.db   data/engine/v1/state.db
+   mv data/engine/state.db-wal  data/engine/v1/  2>/dev/null
+   mv data/engine/state.db-shm  data/engine/v1/  2>/dev/null
+   ```
+4. Update `config/strategy.yaml` to the new `strategies:` list shape with
+   `account_alias: v1`.
+5. Restart. The reconcile loop will pick up live positions/orders that were
+   placed before the migration, because the venue still has them.
+
+Alternatively, set `account_alias: default` in `strategy.yaml` and
+`hl_accounts.default:` in `deploy.yaml` — that keeps the legacy flat paths
+(`data/engine/state.db`) and avoids the move. You lose alias-tagged cloids
+on the venue but the engine still runs.
+
+### Engine lifecycle in multi-account
+
+| Event                               | Effect                                                                 |
+| ----------------------------------- | ---------------------------------------------------------------------- |
+| v1's daily_loss_cap breached        | v1 latches halted; v31 keeps trading. Engine exits when ALL halted.    |
+| v1 hits `halt` kill switch          | Same — only v1 stops; v31 keeps trading.                               |
+| v1's restart-drift gate trips       | v1's `_scan_loop` doesn't start; v31's does.                           |
+| SIGINT / SIGTERM                    | Both slots cancelled; clean shutdown.                                  |
+| New question (`QuestionMetaEvent`)  | One Telegram alert, marked seen in BOTH slots' DBs (per-alias rows).   |
+| WS reconnect                        | One reconnect — shared across all slots.                               |
+
+### Heartbeat output
+
+The heartbeat line is now one-per-slot. Expect output like:
+
+```
+heartbeat alias=v1  events=12000 (+340) scans=120 (+12) decisions=3  | btc=$80300.42 questions=8 positions=1 live_orders=0
+heartbeat alias=v31 events=12000 (+340) scans=120 (+12) decisions=1  | btc=$80300.42 questions=8 positions=0 live_orders=0 HALTED
+```
+
+`events` is shared (one WS feed); `scans` / `decisions` / positions / live
+orders are per slot. `HALTED` is appended when the slot has latched its kill
+switch or daily-loss halt.
+
+### Capital and HL API rate limits
+
+**Out of scope for the engine — flag for ops:**
+
+- Capital allocation between accounts: the engine does NOT redistribute funds
+  between v1 and v31. Each account's HL wallet must be funded independently
+  (USDC deposit per wallet).
+- HL rate limits: with two strategies on shared market data, the WS read load
+  is unchanged. The write load (place/cancel) is up to 2× the single-account
+  baseline — currently well below HL's documented limits for retail accounts.
+  Monitor if order volume increases substantially.
+- The engine's `_reconcile_loop` runs once per slot per `reconcile_interval_seconds`
+  (default 60s). With 2 accounts that's 2 read calls/min to HL — negligible.

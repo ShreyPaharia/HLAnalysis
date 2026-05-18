@@ -107,8 +107,10 @@ def cfgs(tmp_path):
     )
     deploy = DeployConfig(
         env="dev",
-        hl=HLConfig(account_address="0x", api_secret_key="0x",
-                    base_url="https://api.hyperliquid.xyz"),
+        hl_accounts={"default": HLConfig(
+            account_address="0x", api_secret_key="0x",
+            base_url="https://api.hyperliquid.xyz",
+        )},
         alerts=AlertsConfig(telegram=TelegramConfig(bot_token="x", chat_id="y")),
         state_db_path=str(tmp_path / "state.db"),
         kill_switch_path=str(tmp_path / "halt"),
@@ -121,7 +123,7 @@ async def test_paper_loop_enters_and_exits_on_settlement(cfgs, tmp_path):
     strategy_cfg, deploy_cfg = cfgs
     fake_tg = _FakeTelegram()
 
-    runtime = EngineRuntime(
+    runtime = EngineRuntime.from_single(
         strategy_cfg=strategy_cfg,
         deploy_cfg=deploy_cfg,
         adapter_factory=_FakeAdapter,

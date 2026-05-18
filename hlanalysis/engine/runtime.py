@@ -15,7 +15,7 @@ from loguru import logger
 from ..adapters.base import VenueAdapter
 from ..config import Subscription
 from ..events import NormalizedEvent
-from .config import DeployConfig, StrategyConfig
+from .config import DeployConfig, HLConfig, StrategyConfig
 from .event_bus import EventBus
 from .hl_client import HLClient
 from .market_state import MarketState
@@ -30,8 +30,12 @@ from .scanner import Scanner
 from .state import StateDAL
 from ..alerts.rules import AlertRules
 from ..alerts.telegram import TelegramClient
+from ..strategy.base import Strategy
 from ..strategy.late_resolution import (
     LateResolutionConfig, LateResolutionStrategy,
+)
+from ..strategy.theta_harvester import (
+    ThetaHarvesterConfig, ThetaHarvesterStrategy,
 )
 
 
@@ -65,65 +69,179 @@ def build_late_resolution_config(cfg: StrategyConfig) -> LateResolutionConfig:
     )
 
 
+def build_theta_harvester_config(cfg: StrategyConfig) -> ThetaHarvesterConfig:
+    """Construct ThetaHarvesterConfig from the YAML `theta:` block.
+
+    Falls back to allowlist-defaults for fields the theta block omits so the
+    strategy always sees a fully-populated config.
+    """
+    d = cfg.defaults
+    t = cfg.theta
+    if t is None:
+        raise ValueError(
+            f"strategy '{cfg.name}' (alias={cfg.account_alias}) is "
+            "strategy_type=theta_harvester but no `theta:` block was supplied",
+        )
+    return ThetaHarvesterConfig(
+        vol_lookback_seconds=t.vol_lookback_seconds,
+        vol_sampling_dt_seconds=t.vol_sampling_dt_seconds,
+        vol_clip_min=t.vol_clip_min,
+        vol_clip_max=t.vol_clip_max,
+        edge_buffer=t.edge_buffer,
+        fee_taker=t.fee_taker,
+        half_spread_assumption=t.half_spread_assumption,
+        drift_lookback_seconds=t.drift_lookback_seconds,
+        drift_blend=t.drift_blend,
+        max_position_usd=d.max_position_usd,
+        favorite_threshold=t.favorite_threshold,
+        tte_min_seconds=d.tte_min_seconds,
+        tte_max_seconds=d.tte_max_seconds,
+        stop_loss_pct=d.stop_loss_pct,
+        exit_edge_threshold=t.exit_edge_threshold,
+        take_profit_price=t.take_profit_price,
+        time_stop_seconds=t.time_stop_seconds,
+        edge_max=t.edge_max,
+    )
+
+
+def _build_strategy_for_slot(cfg: StrategyConfig) -> Strategy:
+    """Dispatch on strategy_type. Add new strategies here as they're surfaced
+    for live trading."""
+    if cfg.strategy_type == "late_resolution":
+        return LateResolutionStrategy(build_late_resolution_config(cfg))
+    if cfg.strategy_type == "theta_harvester":
+        return ThetaHarvesterStrategy(build_theta_harvester_config(cfg))
+    raise ValueError(f"unknown strategy_type: {cfg.strategy_type!r}")
+
+
+@dataclass
+class AccountSlot:
+    """One (strategy, account) pair. Owns its own DAL, HL client, risk gate,
+    router, reconciler, and strategy instance. The only thing shared with
+    sibling slots is the engine's MarketState + WS feed.
+    """
+    cfg: StrategyConfig
+    hl_cfg: HLConfig
+    state_db_path: Path
+    kill_switch_path: Path
+    cloid_prefix: str           # e.g. "hla-v1-" or "hla-v31-"
+    dal: StateDAL
+    hl: HLClient
+    risk: RiskGate
+    router: Router
+    strategy: Strategy
+    scanner: Scanner
+    # Restart-drift gate result for this slot — if True, the scanner does NOT
+    # run for this slot but other slots may still trade.
+    blocked: bool = False
+    last_reconcile_ns: int = 0
+    scans_completed: int = 0
+    decisions_emitted: int = 0
+    halted: bool = False         # daily-loss / kill-switch latched
+
+    @property
+    def alias(self) -> str:
+        return self.cfg.account_alias
+
+
 @dataclass
 class EngineRuntime:
-    strategy_cfg: StrategyConfig
+    # New multi-strategy entrypoint. Pass one StrategyConfig per
+    # (strategy, account) pair; the engine builds one AccountSlot for each.
+    strategies: list[StrategyConfig]
     deploy_cfg: DeployConfig
     adapter_factory: Callable[[], VenueAdapter]
     subscriptions: list[Subscription]
     # Optional dependency injections so tests can swap real components for fakes.
-    hl_client_factory: Callable[[bool], HLClient] | None = None
+    # The factory is called once per slot with (alias, hl_cfg, paper_mode).
+    hl_client_factory: Callable[[str, HLConfig, bool], HLClient] | None = None
     telegram_factory: Callable[[aiohttp.ClientSession], TelegramClient] | None = None
     market_state: MarketState = field(default_factory=MarketState)
     bus: EventBus = field(default_factory=EventBus)
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
-    last_reconcile_ns: int = 0
     heartbeat_interval_s: float = 30.0
-    # Observability counters — reset to 0 at process start, monotonic thereafter.
+    # Process-wide counter for events ingested (one WS feed, shared).
     events_ingested: int = 0
-    scans_completed: int = 0
-    decisions_emitted: int = 0  # non-HOLD decisions handed to the router
+    # Populated by run() so external observers (heartbeat consumers, tests)
+    # can read live slot state without rebuilding clones.
+    slots: list[AccountSlot] = field(default_factory=list)
+
+    # ---------- legacy single-strategy compatibility ----------
+
+    @classmethod
+    def from_single(
+        cls,
+        *,
+        strategy_cfg: StrategyConfig,
+        deploy_cfg: DeployConfig,
+        adapter_factory: Callable[[], VenueAdapter],
+        subscriptions: list[Subscription],
+        hl_client_factory: Callable[[bool], HLClient] | None = None,
+        telegram_factory: Callable[[aiohttp.ClientSession], TelegramClient] | None = None,
+    ) -> EngineRuntime:
+        """Convenience constructor for tests / single-strategy use.
+
+        Wraps the per-slot HLClient factory so callers that only care about
+        paper_mode can keep passing a unary lambda.
+        """
+        wrapped_factory: Callable[[str, HLConfig, bool], HLClient] | None = None
+        if hl_client_factory is not None:
+            def wrapped_factory(_alias: str, _hl: HLConfig, paper: bool) -> HLClient:
+                return hl_client_factory(paper)
+        return cls(
+            strategies=[strategy_cfg],
+            deploy_cfg=deploy_cfg,
+            adapter_factory=adapter_factory,
+            subscriptions=subscriptions,
+            hl_client_factory=wrapped_factory,
+            telegram_factory=telegram_factory,
+        )
+
+    # ---------- main entrypoint ----------
 
     async def run(self) -> None:
-        # 1) Build collaborators
-        dal = StateDAL(Path(self.deploy_cfg.state_db_path))
-        dal.run_migrations()
-
-        hl = self._make_hl_client()
-        block_path = Path(self.deploy_cfg.kill_switch_path).parent / "restart_blocked"
-        gate = RestartDriftGate(dal=dal, block_path=block_path)
+        if not self.strategies:
+            raise ValueError("EngineRuntime requires at least one strategy")
+        # 1) Build slots — store on self so observers (tests, heartbeat) can
+        # read live state.
+        self.slots = [self._build_slot(s_cfg) for s_cfg in self.strategies]
+        slots = self.slots
+        if len({s.alias for s in slots}) != len(slots):
+            raise ValueError(
+                "Duplicate account_alias across slots — each (strategy, account) "
+                "pair must use a distinct alias",
+            )
 
         async with aiohttp.ClientSession() as http:
             tg = self._make_telegram(http)
             rules = AlertRules(bus=self.bus, telegram=tg)
-            risk = RiskGate(self.strategy_cfg)
-            router = Router(dal=dal, gate=risk, bus=self.bus, hl=hl,
-                            strategy_cfg=self.strategy_cfg)
 
-            # Strategy runtime config from the matched defaults entry
-            rcfg = build_late_resolution_config(self.strategy_cfg)
-            strategy = LateResolutionStrategy(rcfg)
-
-            # 2) Restart-drift gate
-            self.last_reconcile_ns = self._now_ns()
-            drift_res = gate.run(
-                venue_open=hl.open_orders(),
-                venue_state=hl.clearinghouse_state(),
-                fills_lookup=lambda c: hl.user_fills(),
-                now_ns=self.last_reconcile_ns,
-            )
-            for ev in drift_res.drift_events:
-                await self.bus.publish(ev)
-            if drift_res.blocked:
-                logger.warning("RESTART BLOCKED — scanner suspended\n{}", drift_res.summary)
-                await tg.send(f"*RESTART BLOCKED*\n```\n{drift_res.summary[:3500]}\n```")
-
-            scanner = Scanner(
-                strategy=strategy, cfg=self.strategy_cfg,
-                market_state=self.market_state, dal=dal,
-                kill_switch_path=Path(self.deploy_cfg.kill_switch_path),
-                last_reconcile_ns=self.last_reconcile_ns,
-            )
+            # 2) Per-slot restart-drift gate
+            now_ns0 = self._now_ns()
+            for slot in slots:
+                slot.last_reconcile_ns = now_ns0
+                gate = RestartDriftGate(
+                    dal=slot.dal,
+                    block_path=slot.kill_switch_path.parent / "restart_blocked",
+                )
+                drift_res = gate.run(
+                    venue_open=slot.hl.open_orders(),
+                    venue_state=slot.hl.clearinghouse_state(),
+                    fills_lookup=lambda c, _hl=slot.hl: _hl.user_fills(),
+                    now_ns=now_ns0,
+                )
+                for ev in drift_res.drift_events:
+                    await self.bus.publish(ev)
+                if drift_res.blocked:
+                    slot.blocked = True
+                    logger.warning(
+                        "RESTART BLOCKED alias={} — scanner suspended\n{}",
+                        slot.alias, drift_res.summary,
+                    )
+                    await tg.send(
+                        f"*RESTART BLOCKED* (alias={slot.alias})\n"
+                        f"```\n{drift_res.summary[:3500]}\n```"
+                    )
 
             # 3) Wire signal handlers
             loop = asyncio.get_running_loop()
@@ -131,29 +249,81 @@ class EngineRuntime:
                 with suppress(NotImplementedError):
                     loop.add_signal_handler(sig, self.stop_event.set)
 
-            # 4) Spawn tasks
+            # 4) Spawn tasks. Market data is shared (one WS); scan / reconcile /
+            # continuous-checks loops run per-slot.
             alerts_sub = self.bus.subscribe()
-            tasks = [
-                asyncio.create_task(self._ingest_loop(dal)),
-                asyncio.create_task(self._reconcile_loop(hl, dal)),
-                asyncio.create_task(self._continuous_checks_loop(dal, risk, router)),
+            tasks: list[asyncio.Task] = [
+                asyncio.create_task(self._ingest_loop(slots)),
                 asyncio.create_task(rules.run(alerts_sub)),
-                asyncio.create_task(self._heartbeat_loop(dal)),
+                asyncio.create_task(self._heartbeat_loop(slots)),
             ]
-            if not drift_res.blocked:
-                tasks.append(asyncio.create_task(self._scan_loop(scanner, router)))
+            for slot in slots:
+                tasks.append(asyncio.create_task(self._reconcile_loop(slot)))
+                tasks.append(asyncio.create_task(self._continuous_checks_loop(slot)))
+                if not slot.blocked:
+                    tasks.append(asyncio.create_task(self._scan_loop(slot)))
 
             await self.stop_event.wait()
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    # ---- task bodies ----
+    # ---------- slot construction ----------
 
-    async def _ingest_loop(self, dal: StateDAL) -> None:
+    def _build_slot(self, s_cfg: StrategyConfig) -> AccountSlot:
+        alias = s_cfg.account_alias
+        if alias not in self.deploy_cfg.hl_accounts:
+            raise ValueError(
+                f"strategy '{s_cfg.name}' references account_alias={alias!r} but "
+                f"deploy.hl_accounts has only {list(self.deploy_cfg.hl_accounts)}",
+            )
+        hl_cfg = self.deploy_cfg.hl_accounts[alias]
+        state_db_path = Path(self.deploy_cfg.state_db_path_for(alias))
+        kill_switch_path = Path(self.deploy_cfg.kill_switch_path_for(alias))
+        cloid_prefix = f"hla-{alias}-"
+
+        dal = StateDAL(state_db_path)
+        dal.run_migrations()
+
+        if self.hl_client_factory is not None:
+            hl = self.hl_client_factory(alias, hl_cfg, s_cfg.paper_mode)
+        else:
+            hl = HLClient(
+                account_address=hl_cfg.account_address,
+                api_secret_key=hl_cfg.api_secret_key,
+                base_url=hl_cfg.base_url,
+                paper_mode=s_cfg.paper_mode,
+            )
+
+        risk = RiskGate(s_cfg)
+        router = Router(
+            dal=dal, gate=risk, bus=self.bus, hl=hl,
+            strategy_cfg=s_cfg, strategy_id=s_cfg.name,
+            cloid_prefix=cloid_prefix,
+        )
+        strategy = _build_strategy_for_slot(s_cfg)
+        scanner = Scanner(
+            strategy=strategy, cfg=s_cfg,
+            market_state=self.market_state, dal=dal,
+            kill_switch_path=kill_switch_path,
+            last_reconcile_ns=0,
+        )
+        return AccountSlot(
+            cfg=s_cfg, hl_cfg=hl_cfg,
+            state_db_path=state_db_path, kill_switch_path=kill_switch_path,
+            cloid_prefix=cloid_prefix,
+            dal=dal, hl=hl, risk=risk, router=router,
+            strategy=strategy, scanner=scanner,
+        )
+
+    # ---------- task bodies ----------
+
+    async def _ingest_loop(self, slots: list[AccountSlot]) -> None:
+        """Single shared WS subscription feeding MarketState. The
+        SeenQuestion-dedup table is replicated across slots (one row per slot),
+        which is fine — each slot's DB is independent and the in-process cache
+        below short-circuits the DB hit after the first emit per question."""
         adapter = self.adapter_factory()
-        # In-process cache to avoid a DB hit on every QuestionMetaEvent;
-        # the SeenQuestion table is the source of truth across restarts.
         seen_questions: set[int] = set()
         from ..events import QuestionMetaEvent
         try:
@@ -166,45 +336,55 @@ class EngineRuntime:
                     qidx = ev.question_idx
                     if qidx not in seen_questions:
                         seen_questions.add(qidx)
-                        if not dal.has_seen_question(qidx):
-                            qv = self.market_state.question(qidx)
-                            if qv is not None:
-                                from ..strategy.render import question_description
-                                now_ns = self._now_ns()
-                                await self.bus.publish(NewQuestion(
-                                    ts_ns=now_ns,
-                                    question_idx=qidx,
-                                    klass=qv.klass,
-                                    description=question_description(qv),
-                                    expiry_ns=qv.expiry_ns,
-                                    leg_count=len(qv.leg_symbols),
-                                ))
-                                dal.mark_question_seen(qidx, now_ns=now_ns)
+                        qv = self.market_state.question(qidx)
+                        if qv is None:
+                            continue
+                        from ..strategy.render import question_description
+                        now_ns = self._now_ns()
+                        new_q_event = NewQuestion(
+                            ts_ns=now_ns,
+                            question_idx=qidx,
+                            klass=qv.klass,
+                            description=question_description(qv),
+                            expiry_ns=qv.expiry_ns,
+                            leg_count=len(qv.leg_symbols),
+                        )
+                        # Mark seen in EVERY slot's DB so the alert doesn't
+                        # re-fire after restart, then emit one alert globally.
+                        any_unseen = False
+                        for slot in slots:
+                            if not slot.dal.has_seen_question(qidx):
+                                slot.dal.mark_question_seen(qidx, now_ns=now_ns)
+                                any_unseen = True
+                        if any_unseen:
+                            await self.bus.publish(new_q_event)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("adapter ingest crashed")
 
-    async def _scan_loop(self, scanner: Scanner, router: Router) -> None:
+    async def _scan_loop(self, slot: AccountSlot) -> None:
         while not self.stop_event.is_set():
+            if slot.halted:
+                await self._sleep_or_stop(1.0)
+                continue
             try:
                 now = self._now_ns()
-                scanner.last_reconcile_ns = self.last_reconcile_ns
-                for sd in scanner.scan(now_ns=now):
-                    self.decisions_emitted += 1
-                    await router.handle(sd.decision, inputs=sd.inputs, now_ns=now)
-                self.scans_completed += 1
+                slot.scanner.last_reconcile_ns = slot.last_reconcile_ns
+                for sd in slot.scanner.scan(now_ns=now):
+                    slot.decisions_emitted += 1
+                    await slot.router.handle(sd.decision, inputs=sd.inputs, now_ns=now)
+                slot.scans_completed += 1
             except Exception:
-                logger.exception("scan tick crashed")
+                logger.exception("scan tick crashed alias={}", slot.alias)
             await self._sleep_or_stop(1.0)
 
-    async def _heartbeat_loop(self, dal: StateDAL) -> None:
-        """Periodic visibility into engine health. Without this the engine is
-        silent on calm markets (strategy gates filter out almost everything;
-        adapter doesn't log INFO during normal flow). One line every N seconds
-        is the cheapest way to confirm the loops are alive."""
+    async def _heartbeat_loop(self, slots: list[AccountSlot]) -> None:
+        """Periodic visibility into engine health, one line per slot. Without
+        this the engine is silent on calm markets (strategy gates filter out
+        almost everything; adapter doesn't log INFO during normal flow)."""
         prev_events = 0
-        prev_scans = 0
+        prev_scans = {s.alias: 0 for s in slots}
         while not self.stop_event.is_set():
             await self._sleep_or_stop(self.heartbeat_interval_s)
             if self.stop_event.is_set():
@@ -212,37 +392,36 @@ class EngineRuntime:
             try:
                 btc_mark = self.market_state.last_mark("BTC")
                 n_questions = len(self.market_state.all_questions())
-                n_positions = len(dal.all_positions())
-                n_live = len(dal.live_orders())
                 d_events = self.events_ingested - prev_events
-                d_scans = self.scans_completed - prev_scans
                 prev_events = self.events_ingested
-                prev_scans = self.scans_completed
-                logger.info(
-                    "heartbeat events={} (+{}) scans={} (+{}) decisions={} | "
-                    "btc={} questions={} positions={} live_orders={}",
-                    self.events_ingested, d_events,
-                    self.scans_completed, d_scans,
-                    self.decisions_emitted,
-                    f"${btc_mark:.2f}" if btc_mark else "none",
-                    n_questions, n_positions, n_live,
-                )
+                for slot in slots:
+                    n_positions = len(slot.dal.all_positions())
+                    n_live = len(slot.dal.live_orders())
+                    d_scans = slot.scans_completed - prev_scans[slot.alias]
+                    prev_scans[slot.alias] = slot.scans_completed
+                    logger.info(
+                        "heartbeat alias={} events={} (+{}) scans={} (+{}) "
+                        "decisions={} | btc={} questions={} positions={} live_orders={}"
+                        "{}",
+                        slot.alias,
+                        self.events_ingested, d_events,
+                        slot.scans_completed, d_scans,
+                        slot.decisions_emitted,
+                        f"${btc_mark:.2f}" if btc_mark else "none",
+                        n_questions, n_positions, n_live,
+                        " HALTED" if slot.halted else "",
+                    )
             except Exception:
                 logger.exception("heartbeat crashed")
 
-    async def _reconcile_loop(self, hl: HLClient, dal: StateDAL) -> None:
-        interval = self.strategy_cfg.global_.reconcile_interval_seconds
+    async def _reconcile_loop(self, slot: AccountSlot) -> None:
+        interval = slot.cfg.global_.reconcile_interval_seconds
         while not self.stop_event.is_set():
             await self._sleep_or_stop(float(interval))
             if self.stop_event.is_set():
                 return
             try:
                 now = self._now_ns()
-                # Build symbol→question_idx from the current market state so
-                # the reconciler can attribute venue-orphan HIP-4 positions to
-                # their question rows when adopting them into the DB. Without
-                # this mapping the reconciler can only emit unattributed drift
-                # events and the gate stays blind to the venue position.
                 sym_to_q: dict[str, int] = {}
                 for q in self.market_state.all_questions():
                     legs = q.leg_symbols or (
@@ -252,40 +431,45 @@ class EngineRuntime:
                         if sym:
                             sym_to_q[sym] = q.question_idx
                 rec = Reconciler(
-                    dal,
-                    fills_lookup=lambda c: hl.user_fills(),
+                    slot.dal,
+                    fills_lookup=lambda c, _hl=slot.hl: _hl.user_fills(),
                     symbol_to_question=sym_to_q,
+                    cloid_prefix=slot.cloid_prefix,
                 )
                 res = rec.run(
-                    venue_open=hl.open_orders(),
-                    venue_state=hl.clearinghouse_state(),
+                    venue_open=slot.hl.open_orders(),
+                    venue_state=slot.hl.clearinghouse_state(),
                     now_ns=now,
                 )
                 for ev in res.drift_events:
                     await self.bus.publish(ev)
                 for cloid, symbol in res.orphans_to_cancel:
-                    hl.cancel(cloid=cloid, symbol=symbol)
-                self.last_reconcile_ns = now
+                    slot.hl.cancel(cloid=cloid, symbol=symbol)
+                slot.last_reconcile_ns = now
             except Exception:
-                logger.exception("reconcile crashed")
+                logger.exception("reconcile crashed alias={}", slot.alias)
 
-    async def _continuous_checks_loop(
-        self, dal: StateDAL, risk: RiskGate, router: Router,
-    ) -> None:
-        kill_path = Path(self.deploy_cfg.kill_switch_path)
+    async def _continuous_checks_loop(self, slot: AccountSlot) -> None:
+        kill_path = slot.kill_switch_path
         while not self.stop_event.is_set():
             try:
+                if slot.halted:
+                    await self._sleep_or_stop(1.0)
+                    continue
                 now = self._now_ns()
-                # Kill switch
-                if risk.kill_switch_active(kill_path):
+                # Kill switch — per-slot path. Operator can halt one strategy
+                # without killing the other; we only set self.stop_event if
+                # ALL slots are halted (handled below in the loop).
+                if slot.risk.kill_switch_active(kill_path):
                     await self.bus.publish(KillSwitchActivated(
                         ts_ns=now, path=str(kill_path),
                     ))
-                    self.stop_event.set()
-                    return
+                    slot.halted = True
+                    self._maybe_stop_all_halted(slot)
+                    continue
 
                 # Stop-loss enforcer
-                positions_db = dal.all_positions()
+                positions_db = slot.dal.all_positions()
                 if positions_db:
                     books = {}
                     from ..strategy.types import Position as SPos
@@ -299,33 +483,28 @@ class EngineRuntime:
                               last_update_ts_ns=p.last_update_ts_ns)
                         for p in positions_db
                     ]
-                    breached = risk.breached_stops(sps, books)
+                    breached = slot.risk.breached_stops(sps, books)
                     for sp in breached:
                         await self.bus.publish(StopLossTriggered(
                             ts_ns=now, question_idx=sp.question_idx,
                             symbol=sp.symbol, qty=sp.qty,
                             trigger_px=sp.stop_loss_price,
                         ))
-                        # Force-exit via router using a manual EXIT decision
                         from ..strategy.types import (
                             Action, Decision, OrderIntent,
                         )
                         b = books.get(sp.symbol)
                         if b is None or b.bid_px is None:
                             continue
+                        # cloid carries the slot's account prefix so a stop-loss
+                        # exit is attributable to this slot in venue logs.
                         intent = OrderIntent(
                             question_idx=sp.question_idx, symbol=sp.symbol,
                             side="sell" if sp.qty > 0 else "buy",
                             size=abs(sp.qty), limit_price=b.bid_px,
-                            # Pure-uuid hex cloid; HLClient maps hla-{uuid} → 32-char
-                            # hex via Cloid.from_str. Earlier 'hla-stop-{q}-{ns}'
-                            # produced non-hex characters (s/t/o/p/-) and silently
-                            # crashed Cloid.from_str → stop-loss never sent in live.
-                            cloid=f"hla-{uuid.uuid4()}",
+                            cloid=f"{slot.cloid_prefix}{uuid.uuid4().hex}",
                             time_in_force="ioc", reduce_only=True,
                         )
-                        # Inputs stub for the gate (size_invalid is the only check
-                        # that fires on exits; everything else short-circuits).
                         from .risk import RiskInputs
                         inp = RiskInputs(
                             question=self.market_state.question(sp.question_idx) or _stub_question(sp),
@@ -333,32 +512,29 @@ class EngineRuntime:
                             recent_volume_usd=0.0, positions=sps,
                             live_orders_total_notional=0.0,
                             realized_pnl_today=0.0, kill_switch_active=False,
-                            last_reconcile_ns=self.last_reconcile_ns, now_ns=now,
+                            last_reconcile_ns=slot.last_reconcile_ns, now_ns=now,
                         )
-                        await router.handle(
+                        await slot.router.handle(
                             Decision(action=Action.EXIT, intents=(intent,)),
                             inputs=inp, now_ns=now,
                         )
 
-                # Daily loss
+                # Daily loss — per slot (each slot's DAL covers only its fills/positions)
                 from datetime import datetime, timezone
                 midnight_ns = int(datetime.fromtimestamp(now / 1e9, tz=timezone.utc).replace(
                     hour=0, minute=0, second=0, microsecond=0,
                 ).timestamp() * 1_000_000_000)
-                pnl = dal.realized_pnl_since(midnight_ns)
-                if pnl < -self.strategy_cfg.global_.daily_loss_cap_usd:
+                pnl = slot.dal.realized_pnl_since(midnight_ns)
+                if pnl < -slot.cfg.global_.daily_loss_cap_usd:
                     await self.bus.publish(DailyLossHalt(
                         ts_ns=now, realized_pnl=pnl,
-                        cap=self.strategy_cfg.global_.daily_loss_cap_usd,
+                        cap=slot.cfg.global_.daily_loss_cap_usd,
                     ))
-                    self.stop_event.set()
-                    return
+                    slot.halted = True
+                    self._maybe_stop_all_halted(slot)
+                    continue
 
                 # Stale-data halt is per-trade; we also surface it as an alert here.
-                # Iterate held position legs (avoids spam on unsubscribed markets).
-                # Skip legs whose underlying question has settled — the venue
-                # legitimately stops quoting once a market is resolved, and the
-                # close happens on the SettlementEvent path (router._close_settled).
                 if positions_db:
                     settled_qidxs = {
                         q.question_idx for q in self.market_state.all_questions() if q.settled
@@ -369,33 +545,35 @@ class EngineRuntime:
                     }
                     books_only_held = {sym: self.market_state.book(sym) for sym in held_symbols}
                     books_only_held = {s: b for s, b in books_only_held.items() if b is not None}
-                    for sym in risk.stale_books(books_only_held, now_ns=now):
+                    for sym in slot.risk.stale_books(books_only_held, now_ns=now):
                         b = books_only_held[sym]
                         await self.bus.publish(StaleDataHalt(
                             ts_ns=now, symbol=sym,
                             age_seconds=(now - b.last_l2_ts_ns) / 1e9,
                         ))
             except Exception:
-                logger.exception("continuous checks crashed")
+                logger.exception("continuous checks crashed alias={}", slot.alias)
             await self._sleep_or_stop(1.0)
 
-    # ---- helpers ----
+    # ---------- helpers ----------
+
+    def _maybe_stop_all_halted(self, just_halted: AccountSlot) -> None:
+        """If every slot has latched halted, drop the global stop event so
+        the engine exits cleanly. A single-strategy halt no longer kills the
+        whole engine (that's the point of multi-account isolation)."""
+        # Tracked via attribute on self to avoid walking slots twice.
+        if not hasattr(self, "_slot_halt_count"):
+            self._slot_halt_count = 0
+            self._slot_total = len(self.strategies)
+        self._slot_halt_count += 1
+        if self._slot_halt_count >= self._slot_total:
+            self.stop_event.set()
 
     async def _sleep_or_stop(self, seconds: float) -> None:
         try:
             await asyncio.wait_for(self.stop_event.wait(), timeout=seconds)
         except asyncio.TimeoutError:
             return
-
-    def _make_hl_client(self) -> HLClient:
-        if self.hl_client_factory is not None:
-            return self.hl_client_factory(self.strategy_cfg.paper_mode)
-        return HLClient(
-            account_address=self.deploy_cfg.hl.account_address,
-            api_secret_key=self.deploy_cfg.hl.api_secret_key,
-            base_url=self.deploy_cfg.hl.base_url,
-            paper_mode=self.strategy_cfg.paper_mode,
-        )
 
     def _make_telegram(self, http: aiohttp.ClientSession) -> TelegramClient:
         if self.telegram_factory is not None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace as _dc_replace
 
 from loguru import logger
 
@@ -36,6 +37,7 @@ class Router:
         hl: HLClient,
         strategy_cfg: StrategyConfig,
         strategy_id: str = "late_resolution",
+        cloid_prefix: str = "hla-",
     ) -> None:
         self.dal = dal
         self.gate = gate
@@ -43,11 +45,36 @@ class Router:
         self.hl = hl
         self.strategy_cfg = strategy_cfg
         self.strategy_id = strategy_id
+        # Per-account prefix used for both DB storage and venue-side identification
+        # of orders this Router placed. e.g. 'hla-v1-' or 'hla-v31-'. Default
+        # 'hla-' preserves legacy single-account behavior.
+        self.cloid_prefix = cloid_prefix
+
+    def _stamp_cloid(self, intent: OrderIntent) -> OrderIntent:
+        """Rewrite a strategy-issued `hla-<uuid>` cloid into `<prefix><uuid_hex>`.
+
+        Strategies don't know which account they're routed to, so they emit a
+        neutral `hla-<uuid>` cloid. The router stamps the account prefix here so
+        the cloid is account-tagged from the moment it lands in the DB and on
+        the venue. Idempotent: if the cloid already starts with self.cloid_prefix
+        the intent is returned unchanged.
+        """
+        if intent.cloid.startswith(self.cloid_prefix):
+            return intent
+        # Extract a hex tail: strip 'hla-' if present, then collapse remaining
+        # hyphens (uuid str form has 4 of them) to land on a contiguous hex run.
+        tail = intent.cloid
+        if tail.startswith("hla-"):
+            tail = tail[len("hla-"):]
+        tail = tail.replace("-", "")
+        new_cloid = f"{self.cloid_prefix}{tail}"
+        return _dc_replace(intent, cloid=new_cloid)
 
     async def handle(self, decision: Decision, *, inputs: RiskInputs, now_ns: int) -> None:
         if decision.action is Action.HOLD:
             return
         for intent in decision.intents:
+            intent = self._stamp_cloid(intent)
             verdict = self.gate.check_pre_trade(intent, inputs)
             if not verdict.approved:
                 await self.bus.publish(RiskVeto(

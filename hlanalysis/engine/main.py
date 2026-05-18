@@ -10,7 +10,7 @@ from loguru import logger
 
 from ..adapters.hyperliquid import HyperliquidAdapter
 from ..config import load_config
-from .config import load_deploy_config, load_strategy_config
+from .config import load_deploy_config, load_strategies_config
 from .runtime import EngineRuntime
 
 
@@ -48,7 +48,7 @@ def main() -> None:
     # only WARNING+ leaks to stderr via Python's lastResort handler.
     logging.basicConfig(handlers=[_InterceptHandler()], level=args.log_level.upper(), force=True)
 
-    strategy_cfg = load_strategy_config(args.strategy_config)
+    strategies_cfg = load_strategies_config(args.strategy_config)
     deploy_cfg = load_deploy_config(args.deploy_config)
     sym_cfg = load_config(args.symbols_config)
 
@@ -56,15 +56,23 @@ def main() -> None:
     hl_subs = [s for s in sym_cfg.subscriptions if s.venue == "hyperliquid"]
 
     runtime = EngineRuntime(
-        strategy_cfg=strategy_cfg,
+        strategies=strategies_cfg.strategies,
         deploy_cfg=deploy_cfg,
         adapter_factory=HyperliquidAdapter,
         subscriptions=hl_subs,
     )
-    if strategy_cfg.paper_mode:
-        logger.warning("PAPER MODE — no real orders will be placed")
-    else:
-        logger.error("LIVE MODE — real money at stake; ensure caps in strategy.yaml are correct")
+    for s in strategies_cfg.strategies:
+        if s.paper_mode:
+            logger.warning(
+                "PAPER MODE alias={} ({}) — no real orders will be placed",
+                s.account_alias, s.strategy_type,
+            )
+        else:
+            logger.error(
+                "LIVE MODE alias={} ({}) — real money at stake; "
+                "ensure caps in strategy.yaml are correct",
+                s.account_alias, s.strategy_type,
+            )
 
     asyncio.run(runtime.run())
 

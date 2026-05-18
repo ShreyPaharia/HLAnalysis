@@ -72,6 +72,35 @@ class RestError(Exception):
     pass
 
 
+_HEX_CHARS = set("0123456789abcdefABCDEF")
+
+
+def _extract_cloid_hex32(internal_cloid: str) -> str:
+    """Pull the trailing 32-char hex run out of an internal cloid string.
+
+    Internal forms (single-account legacy and multi-account):
+      hla-<uuid>                      → uuid hex (uuid str has 4 hyphens; strip them)
+      hla-<alias>-<hex>               → <hex>; alias may contain any chars
+      <bare-hex>                      → already hex
+
+    Strategy: take the substring after the last hyphen — that is the hex tail
+    in the multi-account form. If it's shorter than 32 hex chars (legacy
+    uuid str with dashes throughout), fall back to "strip all hyphens and take
+    first 32". Final string is left-padded with zeros to 32 hex chars.
+    """
+    # Strip a leading 'hla-' anchor if present, then prefer the tail after the
+    # last remaining hyphen (multi-account form).
+    s = internal_cloid
+    if s.startswith("hla-"):
+        s = s[len("hla-"):]
+    if "-" in s:
+        tail = s.rsplit("-", 1)[1]
+        if len(tail) >= 32 and all(c in _HEX_CHARS for c in tail[:32]):
+            return tail[:32].lower()
+    flat = s.replace("-", "")
+    return flat[:32].zfill(32).lower()
+
+
 class HLClient:
     """Wraps the official hyperliquid-python-sdk for engine use.
 
@@ -245,15 +274,16 @@ class HLClient:
                     cloid=req.cloid, venue_oid="", status="rejected",
                     error=f"size {req.size} flooring to {sz_decimals} decimals → 0",
                 )
-            # SDK expects cloid as a Cloid object (32-byte hex). Accept both
-            # 0x-prefixed hex and our internal 'hla-{uuid}' format and adapt.
+            # SDK expects cloid as a Cloid object (32-byte hex). Accept three
+            # internal cloid shapes:
+            #   - 0x<hex32>                  (already wire-form)
+            #   - hla-<uuid>                 (legacy single-account)
+            #   - hla-<alias>-<hex>          (multi-account; alias may contain non-hex chars)
+            # The wire form drops the alias — HL only needs the 32-char hex tail.
             from hyperliquid.utils.types import Cloid  # type: ignore[import-not-found]
             cloid_str = req.cloid
             if not cloid_str.startswith("0x"):
-                # Map 'hla-<uuid>' (or any non-hex prefix) to a 32-char hex by
-                # taking the trailing hex digits — uuid4 hex is 32 chars.
-                hex_only = cloid_str.replace("hla-", "").replace("-", "")[:32]
-                cloid_str = f"0x{hex_only.zfill(32)}"
+                cloid_str = f"0x{_extract_cloid_hex32(cloid_str)}"
             cloid_obj = Cloid.from_str(cloid_str)
             resp = self._exchange.order(
                 req.symbol, req.side == "buy", sized, req.price,
@@ -292,7 +322,7 @@ class HLClient:
     def _live_cancel(self, *, cloid: str, symbol: str) -> bool:
         assert self._exchange is not None
         from hyperliquid.utils.types import Cloid  # type: ignore[import-not-found]
-        cloid_str = cloid if cloid.startswith("0x") else f"0x{cloid.replace('hla-', '').replace('-', '')[:32].zfill(32)}"
+        cloid_str = cloid if cloid.startswith("0x") else f"0x{_extract_cloid_hex32(cloid)}"
         cloid_obj = Cloid.from_str(cloid_str)
         try:
             resp = self._exchange.cancel_by_cloid(symbol, cloid_obj)

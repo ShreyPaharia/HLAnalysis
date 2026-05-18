@@ -30,6 +30,10 @@ class Reconciler:
       - `fills_lookup(cloid)` → list[UserFillRow] for resolving local-ghost cases
       - `symbol_to_question` → optional mapping from venue symbol to question_idx
         for position-row attribution.
+      - `cloid_prefix` → restricts venue-side prefix matching so a multi-account
+        deployment doesn't adopt orders/orphans from sibling strategies. DB-side
+        isolation comes from the per-account state.db (each account has its own
+        DAL), so `live_orders()` already returns only this account's rows.
     """
 
     def __init__(
@@ -38,10 +42,12 @@ class Reconciler:
         *,
         fills_lookup: Callable[[str], list[UserFillRow]],
         symbol_to_question: dict[str, int] | None = None,
+        cloid_prefix: str = CLOID_PREFIX,
     ) -> None:
         self.dal = dal
         self.fills_lookup = fills_lookup
         self.symbol_to_question = symbol_to_question or {}
+        self.cloid_prefix = cloid_prefix
 
     def run(
         self,
@@ -54,7 +60,7 @@ class Reconciler:
         orphans: list[tuple[str, str]] = []
 
         # --- orders ---
-        venue_by_cloid = {r.cloid: r for r in venue_open if r.cloid.startswith(CLOID_PREFIX)}
+        venue_by_cloid = {r.cloid: r for r in venue_open if r.cloid.startswith(self.cloid_prefix)}
         local_live = {o.cloid: o for o in self.dal.live_orders()}
 
         # local-ghost: in DB live, not on venue
