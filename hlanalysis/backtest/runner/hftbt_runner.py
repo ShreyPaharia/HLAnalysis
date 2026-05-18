@@ -581,10 +581,70 @@ def run_one_question(
                 fill_question_idx[cloid] = q.question_idx
                 pos = None
 
+        # Route hedge intents first (independent of binary action / pos state).
+        if hedge_asset_no is not None and cfg.hedge_symbol and decision.intents:
+            for h_intent in decision.intents:
+                if h_intent.symbol != cfg.hedge_symbol:
+                    continue
+                if cfg.hedge_symbol not in books:
+                    continue
+                h_book = books[cfg.hedge_symbol]
+                h_fee_rate = cfg.hedge_fee_bps / 1e4
+                if h_intent.side == "buy":
+                    h_slipped = h_book.ask_px * (1.0 + cfg.hedge_slippage_bps / 1e4) if h_book.ask_px is not None else 0.0
+                    h_oid = _next_oid()
+                    hbt.submit_buy_order(
+                        hedge_asset_no,
+                        h_oid,
+                        h_slipped,
+                        h_intent.size,
+                        hb_order.IOC,
+                        hb_order.LIMIT,
+                        True,
+                    )
+                    h_side = "buy"
+                else:
+                    h_slipped = h_book.bid_px * (1.0 - cfg.hedge_slippage_bps / 1e4) if h_book.bid_px is not None else 0.0
+                    h_oid = _next_oid()
+                    hbt.submit_sell_order(
+                        hedge_asset_no,
+                        h_oid,
+                        h_slipped,
+                        h_intent.size,
+                        hb_order.IOC,
+                        hb_order.LIMIT,
+                        True,
+                    )
+                    h_side = "sell"
+                h_fill = _record_fill_from_order(
+                    h_oid, hedge_asset_no, cfg.hedge_symbol, h_side, h_intent.cloid, h_intent.size,
+                )
+                if h_fill is not None:
+                    # Build a hedge fill with is_hedge=True and hedge fee.
+                    h_fill = Fill(
+                        cloid=h_fill.cloid,
+                        symbol=h_fill.symbol,
+                        side=h_fill.side,
+                        price=h_fill.price,
+                        size=h_fill.size,
+                        fee=h_fill.price * h_fill.size * h_fee_rate,
+                        partial=h_fill.partial,
+                        is_hedge=True,
+                    )
+                    result.fills.append(h_fill)
+                    fill_ts[h_fill.cloid] = now_ns
+                    fill_question_idx[h_fill.cloid] = q.question_idx
+
         if decision.action == Action.ENTER and decision.intents and pos is None:
             intent = decision.intents[0]
-            asset_no = leg_to_asset.get(intent.symbol)
-            if asset_no is not None and intent.symbol in books:
+            # Skip hedge intents for binary position management.
+            if cfg.hedge_enabled and intent.symbol == cfg.hedge_symbol:
+                intent = next(
+                    (i for i in decision.intents if i.symbol != cfg.hedge_symbol), None
+                )
+            if intent is not None:
+                asset_no = leg_to_asset.get(intent.symbol)
+            if intent is not None and asset_no is not None and intent.symbol in books:
                 book = books[intent.symbol]
                 slipped = _slipped_buy_price(book, intent.limit_price, cfg.slippage_bps)
                 # Submit IOC limit at the slipped/limit price.
@@ -632,14 +692,19 @@ def run_one_question(
                     )
         elif decision.action == Action.EXIT and decision.intents and pos is not None:
             intent = decision.intents[0]
-            asset_no = leg_to_asset.get(intent.symbol)
-            if asset_no is not None and intent.symbol in books:
+            # Skip hedge intents for binary position management.
+            if cfg.hedge_enabled and intent.symbol == cfg.hedge_symbol:
+                intent = next(
+                    (i for i in decision.intents if i.symbol != cfg.hedge_symbol), None
+                )
+            if intent is not None and leg_to_asset.get(intent.symbol) is not None and intent.symbol in books:
+                exit_asset_no = leg_to_asset[intent.symbol]
                 book = books[intent.symbol]
                 size = min(intent.size, abs(pos.qty))
                 slipped = _slipped_sell_price(book, intent.limit_price, cfg.slippage_bps)
                 oid = _next_oid()
                 hbt.submit_sell_order(
-                    asset_no,
+                    exit_asset_no,
                     oid,
                     slipped,
                     size,
@@ -649,7 +714,7 @@ def run_one_question(
                 )
                 fill = _record_fill_from_order(
                     oid,
-                    asset_no,
+                    exit_asset_no,
                     intent.symbol,
                     "sell",
                     intent.cloid,
