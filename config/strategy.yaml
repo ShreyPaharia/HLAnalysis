@@ -28,7 +28,7 @@ strategies:
       - match:
           class: priceBinary
           underlying: BTC
-        max_position_usd: 100
+        max_position_usd: 200
         stop_loss_pct: null              # disabled — 1y PM tuning showed any stop hurts net PnL
         tte_min_seconds: 0
         tte_max_seconds: 7200
@@ -60,7 +60,7 @@ strategies:
       - match:
           class: priceBucket
           underlying: BTC
-        max_position_usd: 100
+        max_position_usd: 200
         stop_loss_pct: null              # disabled — 1y PM tuning showed any stop hurts net PnL
         tte_min_seconds: 0
         tte_max_seconds: 7200
@@ -78,7 +78,7 @@ strategies:
 
     defaults:
       match: {}
-      max_position_usd: 100
+      max_position_usd: 200
       stop_loss_pct: null
       tte_min_seconds: 0
       tte_max_seconds: 7200
@@ -121,7 +121,7 @@ strategies:
       - match:
           class: priceBinary
           underlying: BTC
-        max_position_usd: 100
+        max_position_usd: 200
         stop_loss_pct: null              # theta_harvester drives exits off edge, not stop-loss
         tte_min_seconds: 0
         tte_max_seconds: 86400           # full 24h HIP-4 expiry window
@@ -132,7 +132,7 @@ strategies:
       - match:
           class: priceBucket
           underlying: BTC
-        max_position_usd: 100
+        max_position_usd: 200
         stop_loss_pct: null
         tte_min_seconds: 0
         tte_max_seconds: 86400
@@ -145,7 +145,7 @@ strategies:
 
     defaults:
       match: {}
-      max_position_usd: 100
+      max_position_usd: 200
       stop_loss_pct: null
       tte_min_seconds: 0
       tte_max_seconds: 86400
