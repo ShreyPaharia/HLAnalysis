@@ -53,6 +53,9 @@ class DeltaHedgedStrategy(Strategy):
         self.cfg = cfg
         self._binary = ThetaHarvesterStrategy(cfg.binary)
         self._hedge_state = _HedgeState()
+        # Track which question this strategy instance last saw so we can reset
+        # per-question state when the runner reuses one instance across markets.
+        self._last_question_idx: int | None = None
 
     def evaluate(
         self,
@@ -66,6 +69,11 @@ class DeltaHedgedStrategy(Strategy):
         now_ns: int,
         recent_hl_bars: tuple[tuple[float, float], ...] = (),
     ) -> Decision:
+        # Reset hedge ledger when the runner advances to a new question.
+        if self._last_question_idx != question.question_idx:
+            self._hedge_state = _HedgeState()
+            self._last_question_idx = question.question_idx
+
         binary_decision = self._binary.evaluate(
             question=question, books=books, reference_price=reference_price,
             recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
