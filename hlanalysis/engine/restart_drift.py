@@ -56,9 +56,28 @@ class RestartDriftGate:
         )
         res = rec.run(venue_open=venue_open, venue_state=venue_state, now_ns=now_ns)
 
-        loud = [d for d in res.drift_events if d.case in self.LOUD_CASES
+        def _is_loud(d: ReconcileDrift) -> bool:
+            if d.case == "state_mismatch":
                 # state_mismatch with a fills resolution is a quiet auto-fix.
-                or (d.case == "state_mismatch" and (d.detail or {}).get("resolution") != "filled_via_user_fills")]
+                return (d.detail or {}).get("resolution") != "filled_via_user_fills"
+            if d.case == "position_mismatch":
+                # A venue position with no local DB row AND no known
+                # symbol→question mapping is the structural outcome of starting
+                # with a fresh per-account state.db: MarketState hasn't streamed
+                # in any QuestionMetaEvent yet, so the reconciler can't attribute
+                # the position to a qidx. It will be cleanly adopted on the next
+                # reconcile tick once the WS catches up. Treating this as loud
+                # blocks the scanner indefinitely on every multi-account restart
+                # where one of the slots holds an open venue position — defeats
+                # the whole point of crash-recovery via the gate. The genuine
+                # drift signal (local position GONE from venue) is still loud
+                # because that emits "deleted_local_position_not_on_venue", and
+                # a real qty/avg_entry mismatch emits a hl_qty/db_qty detail.
+                if (d.detail or {}).get("resolution") == "venue_orphan_unattributed":
+                    return False
+            return d.case in self.LOUD_CASES
+
+        loud = [d for d in res.drift_events if _is_loud(d)]
 
         existing_block = self.block_path.exists()
         if loud:
