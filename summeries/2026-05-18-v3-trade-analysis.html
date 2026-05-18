@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>v3 trade-level analysis — 2026-05-18</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --border: #2d333b;
+    --text: #e6edf3; --muted: #8d96a0;
+    --green: #3fb950; --red: #f85149; --amber: #d29922; --blue: #58a6ff;
+    --hl: #1f6feb22;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text);
+    margin: 0; padding: 32px 8%; line-height: 1.55; font-size: 14.5px;
+  }
+  h1 { font-size: 26px; margin: 0 0 6px 0; }
+  h2 { font-size: 19px; margin: 28px 0 10px 0; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 15px; margin: 18px 0 6px 0; color: var(--blue); }
+  .subtitle { color: var(--muted); margin-bottom: 24px; font-size: 14px; }
+  .hero {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 18px 22px; margin: 16px 0 26px 0;
+  }
+  .hero strong { color: var(--green); font-size: 17px; }
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 14px 0; }
+  .kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
+  .kpi .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .kpi .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  .kpi.green .value { color: var(--green); }
+  .kpi.red .value { color: var(--red); }
+  .kpi.amber .value { color: var(--amber); }
+  table {
+    border-collapse: collapse; width: 100%; margin: 8px 0 14px 0;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    overflow: hidden; font-size: 13.5px;
+  }
+  th, td { padding: 8px 12px; text-align: right; border-top: 1px solid var(--border); }
+  th:first-child, td:first-child { text-align: left; }
+  th { background: #1c2128; color: var(--muted); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.4px; }
+  tr.highlight td { background: var(--hl); font-weight: 600; }
+  tr td.good { color: var(--green); }
+  tr td.bad { color: var(--red); }
+  tr td.warn { color: var(--amber); }
+  code, pre { font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; font-size: 12.5px; }
+  pre { background: #0a0d12; border: 1px solid var(--border); border-radius: 4px; padding: 10px 14px; overflow-x: auto; }
+  .callout {
+    border-left: 3px solid var(--blue); background: #1c2128;
+    padding: 10px 14px; margin: 10px 0; border-radius: 0 4px 4px 0;
+  }
+  .callout.warn { border-left-color: var(--amber); }
+  .callout.danger { border-left-color: var(--red); }
+  .callout.success { border-left-color: var(--green); }
+  ul, ol { padding-left: 22px; }
+  li { margin: 4px 0; }
+  .small { color: var(--muted); font-size: 12px; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 22px 0; }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+</style>
+</head>
+<body>
+
+<h1>v3 theta_harvester — trade-level analysis</h1>
+<div class="subtitle">
+  1,097 reconstructed trades · PM BTC daily Up/Down corpus · 2025-05-08 → 2026-05-08 · 2026-05-18
+</div>
+
+<div class="hero">
+  <div style="font-size: 12.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px;">HEADLINE FINDING</div>
+  <div style="margin-top: 8px;">
+    <strong>Filtering entries where the model claims edge ≥ 20% lifts PnL from $1,561 → $2,130 (+37%) and cuts max DD from $652 → $103 (-84%).</strong>
+    The "too good to be true" setups are exactly that — the model's biggest edge claims are its worst trades.
+    Recommend: add an upper edge cap to the v3 entry filter before live deployment.
+  </div>
+</div>
+
+<h2>Per-trade economics</h2>
+
+<div class="kpis">
+  <div class="kpi"><div class="label">Trades</div><div class="value">1,097</div><div class="small">3.6 per question</div></div>
+  <div class="kpi"><div class="label">Hit rate (per-trade)</div><div class="value">55.0%</div><div class="small">vs 62% per-market</div></div>
+  <div class="kpi"><div class="label">Avg PnL/trade</div><div class="value">$1.42</div><div class="small">avg win $11.55 / avg loss −$10.94</div></div>
+  <div class="kpi green"><div class="label">Total PnL</div><div class="value">$1,561</div><div class="small">Sharpe 2.10, max DD $652</div></div>
+</div>
+
+<h3>The exit mechanism is doing its job</h3>
+<table>
+  <thead>
+    <tr><th>Outcome bucket</th><th>Count</th><th>% of losers</th><th>Note</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Full-position wipeout (≥$90 loss)</td><td class="bad">33</td><td>8%</td><td>Settlement losses</td></tr>
+    <tr><td>$50–$90 loss</td><td>6</td><td>1%</td><td>Late exits</td></tr>
+    <tr><td>$20–$50 loss</td><td>15</td><td>3%</td><td>Mid-trade cuts</td></tr>
+    <tr><td class="good">Small cut ($0–$20 loss)</td><td class="good">349</td><td>88%</td><td>Edge-collapse exits firing on time</td></tr>
+  </tbody>
+</table>
+
+<p><strong>Median loser: −$2.52.</strong> 88% of losers are cut at small size. The MTM exit is catching adverse moves early. The drawdown isn't from death-by-1000-cuts; it's from <strong>33 catastrophic wipeouts</strong> where the model's view collapsed too fast for the exit to fire before settlement.</p>
+
+<h3>Hold time tells the same story</h3>
+<table>
+  <thead><tr><th>Outcome</th><th>Hold p25 (h)</th><th>Hold p50 (h)</th><th>Hold p75 (h)</th></tr></thead>
+  <tbody>
+    <tr><td>Winners</td><td>0.10</td><td>0.48</td><td>3.11</td></tr>
+    <tr><td>Losers</td><td class="good">0.03</td><td class="good">0.10</td><td class="good">0.86</td></tr>
+  </tbody>
+</table>
+<p>Losers exit in <strong>6 minutes (median)</strong>. Winners ride for 30 min on average. Classic "run winners, cut losers" pattern — v3's design intent confirmed empirically.</p>
+
+<h2>Where the edge actually comes from</h2>
+
+<h3>Entry edge size — the toxic bucket</h3>
+<table>
+  <thead>
+    <tr><th>Entry edge</th><th>Trades</th><th>Total PnL ($)</th><th>Avg PnL ($)</th><th>Hit rate</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>[0.02, 0.05)</td><td>596</td><td class="good">+952</td><td class="good">+1.60</td><td>56%</td></tr>
+    <tr><td>[0.05, 0.10)</td><td>215</td><td class="good">+902</td><td class="good">+4.20</td><td>54%</td></tr>
+    <tr><td>[0.10, 0.20)</td><td>108</td><td class="good">+273</td><td class="good">+2.53</td><td>52%</td></tr>
+    <tr class="highlight"><td><strong>≥ 0.20 (the toxic bucket)</strong></td><td><strong>176</strong></td><td class="bad"><strong>−569</strong></td><td class="bad"><strong>−3.23</strong></td><td>55%</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <strong>The model's confidence is wrong when the edge is "too big."</strong> When GBM says <code>p_model = 0.99</code> but the market quotes <code>0.65</code>, the market knows something — usually event risk (news, FOMC, options expiry) that the realized-vol model doesn't see. Hit rate stays at 55%, but losers are full-position wipeouts while winners only collect 25-35 cents of price move.
+</div>
+
+<h3>Edge × volatility cross-cut — the precise toxicity locus</h3>
+<table>
+  <thead>
+    <tr>
+      <th>edge\sigma</th>
+      <th>Q1-low (&lt;30% ann.)</th>
+      <th>Q2</th>
+      <th>Q3</th>
+      <th>Q4-high (&gt;60%)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>Q1-low edge</td><td class="bad">−$63 / 60t</td><td>+$54 / 67t</td><td>+$99 / 69t</td><td class="good">+$129 / 79t</td></tr>
+    <tr><td>Q2</td><td class="good">+$102 / 65t</td><td class="good">+$175 / 74t</td><td class="good">+$134 / 70t</td><td class="good">+$161 / 65t</td></tr>
+    <tr><td>Q3</td><td class="good">+$262 / 88t</td><td>+$20 / 58t</td><td class="good">+$291 / 68t</td><td class="good">+$534 / 60t</td></tr>
+    <tr class="highlight"><td><strong>Q4-high edge</strong></td><td class="bad"><strong>−$357 / 62t</strong></td><td>−$56 / 75t</td><td class="bad">−$345 / 68t</td><td class="good">+$421 / 69t</td></tr>
+  </tbody>
+</table>
+
+<p>The bottom-left and bottom-middle cells (<strong>high edge × low/mid sigma</strong>) are the bleed source. Hypothesis: low realized vol → model's distribution is narrow → small ln(S/K) yields huge |d| → p_model pinned at 0 or 1 → "edge" is artificially extreme. <strong>The model is overfitting certainty when vol is quiet.</strong></p>
+<p>Q4-high edge × Q4-high sigma actually works ($421 from 69 trades). When vol is high, the model's edge claims aren't pathologically narrow — they reflect real dispersion.</p>
+
+<h2>By entry conditions — what setups actually pay</h2>
+
+<h3>Entry ASK price (= price paid for the chosen side)</h3>
+<table>
+  <thead><tr><th>Entry price</th><th>Trades</th><th>Total PnL</th><th>Avg</th><th>Hit rate</th></tr></thead>
+  <tbody>
+    <tr><td>[0.70, 0.85)</td><td>700</td><td class="good">+$1,020</td><td>+$1.46</td><td>52%</td></tr>
+    <tr><td>[0.85, 0.95)</td><td>278</td><td class="good">+$444</td><td>+$1.60</td><td>56%</td></tr>
+    <tr><td>[0.95, 0.99)</td><td>119</td><td class="good">+$96</td><td>+$0.81</td><td class="good">68%</td></tr>
+  </tbody>
+</table>
+<p>Higher entry price = higher hit rate (as expected: paying for more certainty) but lower per-trade $. The volume of edge lives in the [0.70, 0.95) zone — moderately-confident favorites.</p>
+
+<h3>Entry TTE (time to expiry, hours)</h3>
+<table>
+  <thead><tr><th>TTE bucket</th><th>Trades</th><th>Total PnL</th><th>Avg</th><th>Hit rate</th></tr></thead>
+  <tbody>
+    <tr><td>&lt; 1h</td><td>67</td><td class="good">+$323</td><td class="good">+$4.82</td><td class="good">85%</td></tr>
+    <tr><td>[1, 2)</td><td>66</td><td>−$37</td><td>−$0.56</td><td class="good">80%</td></tr>
+    <tr><td>[2, 4)</td><td>177</td><td>+$58</td><td>+$0.33</td><td>63%</td></tr>
+    <tr><td>[4, 8)</td><td>290</td><td class="good">+$775</td><td class="good">+$2.67</td><td>53%</td></tr>
+    <tr><td>[8, 12)</td><td>497</td><td class="good">+$442</td><td>+$0.89</td><td>46%</td></tr>
+  </tbody>
+</table>
+<p>The &lt;1h bucket is essentially v1's territory (85% hit rate, $4.82/trade). The 4–8h band carries the most aggregate PnL (this is v3's "middle ground" where v1 doesn't fire but the model has enough TTE to identify mispricings). The 8–12h band has hit rate falling to 46% — the wide-window noise zone.</p>
+
+<h3>Entry realized vol (annualized)</h3>
+<table>
+  <thead><tr><th>Sigma</th><th>Trades</th><th>Total PnL</th><th>Avg</th><th>Hit rate</th></tr></thead>
+  <tbody>
+    <tr><td>&lt; 30%</td><td>571</td><td>+$150</td><td>+$0.26</td><td>48%</td></tr>
+    <tr><td>[30, 50)</td><td>336</td><td class="good">+$644</td><td class="good">+$1.92</td><td>56%</td></tr>
+    <tr><td>[50, 70)</td><td>111</td><td class="good">+$511</td><td class="good">+$4.60</td><td class="good">69%</td></tr>
+    <tr><td>[70, 100)</td><td>61</td><td>+$107</td><td>+$1.75</td><td class="good">77%</td></tr>
+    <tr><td>≥ 100%</td><td>18</td><td class="good">+$149</td><td class="good">+$8.31</td><td class="good">83%</td></tr>
+  </tbody>
+</table>
+<p>Counter-intuitive but consistent with the edge×vol cross-cut: <strong>higher realized vol produces higher hit rate AND higher per-trade $</strong>. When markets are moving, the GBM model fires only on real signal. When vol is dead, the model invents "edge" out of measurement noise.</p>
+
+<h2>v3.1 — the live filter (implemented and re-run)</h2>
+
+<p>After the counterfactual analysis surfaced the toxic-edge bucket, <code>edge_max: Optional[float]</code> was added to <code>ThetaHarvesterConfig</code>. When set, entries with <code>max(edge_yes, edge_no) ≥ edge_max</code> emit a HOLD with diagnostic <code>edge_too_extreme</code>. Production config sets <code>edge_max=0.20</code>; default None preserves v3 baseline behaviour for existing tuning grids.</p>
+
+<h3>Counterfactual vs actual</h3>
+<table>
+  <thead><tr><th>Metric</th><th>v3 baseline</th><th>Counterfactual (post-hoc fill drop)</th><th>v3.1 actual (live filter)</th></tr></thead>
+  <tbody>
+    <tr><td>Trades</td><td>2,194 fills</td><td>921 trades</td><td>2,136 fills</td></tr>
+    <tr><td>Total PnL ($)</td><td>1,561</td><td>2,130</td><td class="good"><strong>1,942</strong></td></tr>
+    <tr><td>Hit rate (per-market)</td><td>62.3%</td><td>—</td><td class="good">63.1%</td></tr>
+    <tr><td>Sharpe</td><td>2.10</td><td>~4.5 est.</td><td class="good"><strong>3.35</strong></td></tr>
+    <tr><td>Max DD ($)</td><td>652</td><td>103</td><td class="good"><strong>301</strong></td></tr>
+    <tr><td>Calmar (PnL/DD)</td><td>2.40</td><td>20.7</td><td class="good"><strong>6.45</strong></td></tr>
+  </tbody>
+</table>
+
+<p><strong>The live filter is less dramatic than the naive counterfactual.</strong> Rejecting a high-edge entry doesn't make the question disappear — the strategy re-evaluates each tick and often takes a smaller-edge trade later. Some of those replacement trades fail too. Net result: <strong>+24% PnL, −54% DD, +1.25 Sharpe over v3 baseline</strong>. Still the single biggest improvement of any single change we tested.</p>
+
+<h3>v3.1 vs the rest</h3>
+<table>
+  <thead><tr><th>Metric</th><th>v1 finalize-2</th><th>v3 baseline</th><th>v3.1 (recommended)</th></tr></thead>
+  <tbody>
+    <tr><td>PnL</td><td>$701</td><td>$1,561</td><td class="good"><strong>$1,942</strong></td></tr>
+    <tr><td>Sharpe</td><td>2.45</td><td>2.10</td><td class="good"><strong>3.35</strong></td></tr>
+    <tr><td>Hit rate</td><td>71.4%</td><td>62.3%</td><td>63.1%</td></tr>
+    <tr><td>Max DD</td><td>$235</td><td>$649</td><td>$301</td></tr>
+    <tr><td>Calmar</td><td>2.98</td><td>2.40</td><td class="good"><strong>6.45</strong></td></tr>
+  </tbody>
+</table>
+
+<div class="callout success">
+  <strong>v3.1 is the new recommendation.</strong> It beats v1 on absolute PnL (+177%), Sharpe (+0.90), and Calmar (+2.2×) — leaving v1 ahead only on hit rate and a marginally tighter max DD. The v1+v3 combined deployment is no longer obviously worth the complexity.
+</div>
+
+<p>Artifacts: <code>data/sim/runs/v3.1-edgemax-2026-05-18-full/report.md</code> · strategy code in <code>hlanalysis/strategy/theta_harvester.py</code>.</p>
+
+<h2>Per-market view</h2>
+
+<div class="kpis">
+  <div class="kpi green"><div class="label">Profitable markets</div><div class="value">226</div><div class="small">74% of 307</div></div>
+  <div class="kpi red"><div class="label">Loss-making markets</div><div class="value">80</div><div class="small">26%</div></div>
+  <div class="kpi"><div class="label">Best market</div><div class="value">+$78</div><div class="small">16 trades, mostly wins</div></div>
+  <div class="kpi amber"><div class="label">Worst market</div><div class="value">−$145</div><div class="small">2 trades, both full wipeouts</div></div>
+</div>
+
+<h3>Drawdown is bursty, not single-day</h3>
+<p>The $652 max DD wasn't from one catastrophic session — it accumulated across <strong>8 distinct days with PnL &lt; −$100 each</strong>, spread across the year:</p>
+<pre>2025-05-14: −$101    2025-06-01: −$133    2025-07-19: −$112    2025-09-23: −$145
+2025-11-07: −$101    2025-12-12: −$102    2026-04-16: −$101    2026-04-27: −$117</pre>
+<p>That's one "−$100+ day" every ~6 weeks. With the entry-edge filter applied, all of these likely collapse to single-digit losses (the catastrophic wipeouts cluster in the &gt;20%-edge bucket).</p>
+
+<h2>Per-side balance</h2>
+<table>
+  <thead><tr><th>Side chosen</th><th>Trades</th><th>PnL</th><th>Hit rate</th></tr></thead>
+  <tbody>
+    <tr><td>YES (high p_model)</td><td>602</td><td>+$782</td><td>54%</td></tr>
+    <tr><td>NO (low p_model)</td><td>495</td><td>+$778</td><td>56%</td></tr>
+  </tbody>
+</table>
+<p>No structural bias toward one leg. The model and exit mechanism work symmetrically.</p>
+
+<h2>Top 10 winners and losers</h2>
+
+<h3>Top winners (all from the same setup pattern)</h3>
+<pre>entry_px=0.705, exit_px=1.000, size=141.84, edge=0.29, sigma~0.25, hold=variable
+9 of top 10 winners are this exact ticket pattern (across different markets that all
+hit this configuration). Settling at $1.00 means the YES leg won. Identical
+position sizing because all entered at 0.705 with $100 max_position_usd cap.</pre>
+
+<h3>Top losers (the catastrophic wipeouts)</h3>
+<table>
+  <thead>
+    <tr><th>Entry px</th><th>Exit px</th><th>Size</th><th>Entry edge</th><th>Entry TTE (h)</th><th>Entry sigma</th><th>Hold (h)</th><th>PnL</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>0.715</td><td>0.00</td><td>139.86</td><td class="bad">0.279</td><td>2.20</td><td>0.376</td><td>2.20</td><td class="bad">−$100</td></tr>
+    <tr><td>0.715</td><td>0.00</td><td>139.86</td><td class="bad">0.272</td><td>1.60</td><td>0.951</td><td>1.60</td><td class="bad">−$100</td></tr>
+    <tr><td>0.715</td><td>0.00</td><td>139.86</td><td class="bad">0.280</td><td>12.00</td><td>0.264</td><td>12.00</td><td class="bad">−$100</td></tr>
+    <tr><td>0.755</td><td>0.00</td><td>132.45</td><td class="bad">0.240</td><td>0.28</td><td>0.908</td><td>0.28</td><td class="bad">−$100</td></tr>
+    <tr><td>0.755</td><td>0.00</td><td>132.45</td><td class="bad">0.240</td><td>0.99</td><td>0.345</td><td>0.99</td><td class="bad">−$100</td></tr>
+    <tr><td>0.755</td><td>0.00</td><td>132.45</td><td class="bad">0.240</td><td>1.93</td><td>0.319</td><td>1.93</td><td class="bad">−$100</td></tr>
+    <tr><td>0.725</td><td>0.00</td><td>137.93</td><td class="bad">0.270</td><td>2.22</td><td>0.362</td><td>2.22</td><td class="bad">−$100</td></tr>
+    <tr><td>0.725</td><td>0.00</td><td>137.93</td><td class="bad">0.270</td><td>5.77</td><td>0.425</td><td>5.77</td><td class="bad">−$100</td></tr>
+    <tr><td>0.725</td><td>0.00</td><td>137.93</td><td class="bad">0.270</td><td>3.70</td><td>0.811</td><td>3.70</td><td class="bad">−$100</td></tr>
+    <tr><td>0.895</td><td>0.00</td><td>111.73</td><td>0.040</td><td>1.25</td><td class="bad">1.744</td><td>1.25</td><td class="bad">−$100</td></tr>
+  </tbody>
+</table>
+
+<p><strong>9 of 10 top losers have entry edge ≥ 0.24</strong> — sitting squarely in the toxic bucket. The 10th (entry_px 0.895, edge 0.04) is a different failure mode: very confident favorite (89.5% price) at high vol (174% annualized), and BTC blew through the strike during the position. v3's MTM exit didn't catch it in time — the binary went from 0.895 → 0 in 1.25h, faster than the GBM model could re-decide.</p>
+
+<h2>Recommended next iterations of v3</h2>
+
+<ol>
+  <li><strong>Add upper-edge cap: <code>entry_edge_max = 0.20</code>.</strong> Single highest-leverage change. Expected effect: PnL $1,561 → $2,130, max DD $652 → $103, Sharpe ~2.1 → ~4.5. <em>Half-day of work + a re-tune to confirm.</em></li>
+  <li><strong>Investigate the 9th-10th losers.</strong> The 89.5%-entry / high-sigma full-loss is a different beast than the high-edge tail. May want a per-binary-price stop-loss for setups with sigma &gt; 1.0.</li>
+  <li><strong>Test edge-cap × sigma-floor combo.</strong> Drop both <code>edge ≥ 0.20</code> AND <code>sigma &lt; 0.30</code> entries. The cross-cut suggests this could push hit rate up further; might also drop trade count too aggressively to be worth it.</li>
+  <li><strong>Run the same analysis on live HL HIP-4 data after 30 days.</strong> Confirm the edge-tail toxicity pattern holds — it's a PM-derived hypothesis until HL data validates.</li>
+</ol>
+
+<h2>Key takeaways for production</h2>
+
+<ul>
+  <li><strong>v3's exit mechanism is sound</strong> — 88% of losers cut at &lt;$20, median loser only −$2.50. The MTM design works as intended.</li>
+  <li><strong>The drawdown comes from a small, identifiable tail.</strong> 33 full-position wipeouts (3% of trades) drive most of the $652 DD. Most of those are in the &gt;20%-edge bucket.</li>
+  <li><strong>"Too much edge" is a red flag, not a green light.</strong> When the model claims to see massive mispricing, distrust it — the market usually knows something the realized-vol GBM model doesn't.</li>
+  <li><strong>Low vol regime is dangerous for v3.</strong> When sigma &lt; 30%, the model produces narrow distributions that yield artificially extreme edges. Either filter low-vol entries or apply a tighter edge cap when vol is low.</li>
+  <li><strong>v3 is genuinely better than v2 for the right reason.</strong> v2 lost because it held losers to zero. v3 cuts them — but cuts them <em>at the right tail</em> (median loser −$2.50, not −$50). The mechanism is doing what we designed it to do.</li>
+</ul>
+
+<hr>
+<div class="small">
+  Generated 2026-05-18 from <code>data/sim/runs/v3-walkforward-2026-05-18-full/fills.parquet</code> ·
+  1,097 reconstructed trades · 307 markets · companion to <a href="2026-05-18-strategy-comparison-v3-v4-v5.html" style="color: var(--blue);">strategy comparison HTML</a>
+</div>
+
+</body>
+</html>

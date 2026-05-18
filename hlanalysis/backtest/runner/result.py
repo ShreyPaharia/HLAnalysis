@@ -30,6 +30,7 @@ class Fill:
     size: float
     fee: float
     partial: bool
+    is_hedge: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +137,7 @@ FILLS_SCHEMA = pa.schema(
         pa.field("entry_tau_yr", pa.float64()),
         pa.field("realized_pnl_at_settle", pa.float64()),
         pa.field("resolved_outcome", pa.string()),
+        pa.field("is_hedge", pa.bool_()),
     ]
 )
 
@@ -182,6 +184,7 @@ class FillRow:
     entry_tau_yr: Optional[float]
     realized_pnl_at_settle: float
     resolved_outcome: Optional[str] = None
+    is_hedge: bool = False
 
 
 def _parse_edge_fields(decision: Decision) -> dict[str, Optional[float]]:
@@ -297,6 +300,7 @@ def write_fills(rows: list[FillRow], path: Path) -> None:
         "resolved_outcome": pa.array(
             [r.resolved_outcome for r in rows], type=pa.string()
         ),
+        "is_hedge": pa.array([r.is_hedge for r in rows], type=pa.bool_()),
     }
     pq.write_table(pa.table(arrays, schema=FILLS_SCHEMA), path)
 

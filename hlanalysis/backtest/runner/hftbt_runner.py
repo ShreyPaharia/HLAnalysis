@@ -83,6 +83,13 @@ class RunConfig:
     book_depth_assumption: float = 10_000.0
     vol_lookback_seconds: int = 86_400
     last_trades_capacity: int = 256
+    # Hedge leg config (used by v5_delta_hedged; ignored by all other strategies)
+    hedge_enabled: bool = False
+    hedge_symbol: str = ""
+    hedge_tick_size: float = 0.1
+    hedge_lot_size: float = 0.001
+    hedge_slippage_bps: float = 10.0
+    hedge_fee_bps: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +237,22 @@ def _build_asset(arr: np.ndarray, cfg: RunConfig):
     )
 
 
+def _build_hedge_asset(arr: np.ndarray, cfg: RunConfig):
+    """Like _build_asset but uses hedge-specific tick/lot sizes."""
+    return (
+        hb.BacktestAsset()
+        .data(arr)
+        .linear_asset(1.0)
+        .constant_order_latency(0, 0)
+        .risk_adverse_queue_model()
+        .no_partial_fill_exchange()
+        .trading_value_fee_model(0.0, 0.0)
+        .tick_size(cfg.hedge_tick_size)
+        .lot_size(cfg.hedge_lot_size)
+        .last_trades_capacity(cfg.last_trades_capacity)
+    )
+
+
 def _book_state(
     hbt: Any, asset_no: int, symbol: str, *, last_l2_ts_ns: int = 0
 ) -> BookState | None:
@@ -283,6 +306,7 @@ def run_one_question(
     diagnostics_dir: Path | None = None,
     fills_dir: Path | None = None,
     strike: float = 0.0,
+    hedge_events: list[BookSnapshot] | None = None,
 ) -> RunResult:
     """Run one question end-to-end through hftbacktest."""
 
@@ -333,11 +357,25 @@ def run_one_question(
         assets.append(_build_asset(full, cfg))
         leg_to_asset[sym] = i
 
+    # Hedge leg: build a third BacktestAsset when hedge_enabled and events provided.
+    hedge_asset_no: int | None = None
+    if cfg.hedge_enabled and hedge_events is not None:
+        hedge_arr = _build_leg_event_array(hedge_events, [])
+        hedge_clear = _initial_clear_array(q.start_ts_ns)
+        hedge_full = (
+            np.concatenate([hedge_clear, hedge_arr]) if len(hedge_arr) > 0 else hedge_clear
+        )
+        _data_keepalive.append(hedge_full)
+        hedge_asset_no = len(assets)
+        assets.append(_build_hedge_asset(hedge_full, cfg))
+
     hbt = hb.HashMapMarketDepthBacktest(assets)
 
     state = MarketState()
     result = RunResult()
     pos: Position | None = None
+    # Hedge positions are tracked independently; they do NOT affect binary pos.
+    hedge_positions: dict[str, Position] = {}
     diag_rows: list[DiagnosticRow] = []
     fill_meta: dict[str, dict[str, Any]] = {}
     fill_ts: dict[str, int] = {}
@@ -393,6 +431,44 @@ def run_one_question(
             partial=exec_qty < intent_size,
         )
 
+    def _record_hedge_fill_from_order(
+        oid: int,
+        asset_no: int,
+        symbol: str,
+        side: str,
+        cloid: str,
+        intent_size: float,
+    ) -> Fill | None:
+        """Like _record_fill_from_order but for hedge leg.
+
+        Differences vs binary recorder:
+        - No [0, 1] price clamp (BTC perp is ~100k).
+        - Uses cfg.hedge_fee_bps for fee rate.
+        - Sets is_hedge=True on the returned Fill.
+        """
+        order = hbt.orders(asset_no).get(oid)
+        if order is None:
+            return None
+        if order.status not in (3, 5):
+            return None
+        exec_qty = float(order.exec_qty)
+        if exec_qty <= 0.0:
+            return None
+        exec_px = float(order.exec_price)
+        exec_qty = min(exec_qty, intent_size)
+        fee_rate = cfg.hedge_fee_bps / 1e4
+        fee = exec_px * exec_qty * fee_rate
+        return Fill(
+            cloid=cloid,
+            symbol=symbol,
+            side=side,
+            price=exec_px,
+            size=exec_qty,
+            fee=fee,
+            partial=exec_qty < intent_size,
+            is_hedge=True,
+        )
+
     # --- Scan loop ---------------------------------------------------------
     # Fixed 60s grid (mirrors `hl-sim`'s scan cadence in spirit; legacy
     # ran event-driven but PM trade density is high enough that the two
@@ -442,6 +518,12 @@ def run_one_question(
                         asks=((bs.ask_px, bs.ask_sz or 0.0),) if bs.ask_px is not None else (),
                     )
                 )
+
+        # Inject hedge book into the books mapping so strategies can read it.
+        if hedge_asset_no is not None and cfg.hedge_symbol:
+            hbs = _book_state(hbt, hedge_asset_no, cfg.hedge_symbol)
+            if hbs is not None:
+                books[cfg.hedge_symbol] = hbs
 
         # Update last_scan_ns BEFORE the `continue` so we don't loop forever
         # re-targeting the same ts when books are missing.
@@ -539,10 +621,79 @@ def run_one_question(
                 fill_question_idx[cloid] = q.question_idx
                 pos = None
 
+        # Route hedge intents first (independent of binary action / pos state).
+        if hedge_asset_no is not None and cfg.hedge_symbol and decision.intents:
+            for h_intent in decision.intents:
+                if h_intent.symbol != cfg.hedge_symbol:
+                    continue
+                if cfg.hedge_symbol not in books:
+                    continue
+                h_book = books[cfg.hedge_symbol]
+                if h_intent.side == "buy":
+                    h_slipped = h_book.ask_px * (1.0 + cfg.hedge_slippage_bps / 1e4) if h_book.ask_px is not None else 0.0
+                    h_oid = _next_oid()
+                    hbt.submit_buy_order(
+                        hedge_asset_no,
+                        h_oid,
+                        h_slipped,
+                        h_intent.size,
+                        hb_order.IOC,
+                        hb_order.LIMIT,
+                        True,
+                    )
+                    h_side = "buy"
+                else:
+                    h_slipped = h_book.bid_px * (1.0 - cfg.hedge_slippage_bps / 1e4) if h_book.bid_px is not None else 0.0
+                    h_oid = _next_oid()
+                    hbt.submit_sell_order(
+                        hedge_asset_no,
+                        h_oid,
+                        h_slipped,
+                        h_intent.size,
+                        hb_order.IOC,
+                        hb_order.LIMIT,
+                        True,
+                    )
+                    h_side = "sell"
+                h_fill = _record_hedge_fill_from_order(
+                    h_oid, hedge_asset_no, cfg.hedge_symbol, h_side, h_intent.cloid, h_intent.size,
+                )
+                if h_fill is not None:
+                    result.fills.append(h_fill)
+                    fill_ts[h_fill.cloid] = now_ns
+                    fill_question_idx[h_fill.cloid] = q.question_idx
+                    # Track hedge position independently.
+                    h_pos = hedge_positions.get(cfg.hedge_symbol)
+                    if h_pos is None:
+                        hedge_positions[cfg.hedge_symbol] = Position(
+                            question_idx=q.question_idx,
+                            symbol=cfg.hedge_symbol,
+                            qty=h_fill.size if h_fill.side == "buy" else -h_fill.size,
+                            avg_entry=h_fill.price,
+                            stop_loss_price=0.0,
+                            last_update_ts_ns=now_ns,
+                        )
+                    else:
+                        new_qty = h_pos.qty + (h_fill.size if h_fill.side == "buy" else -h_fill.size)
+                        hedge_positions[cfg.hedge_symbol] = Position(
+                            question_idx=q.question_idx,
+                            symbol=cfg.hedge_symbol,
+                            qty=new_qty,
+                            avg_entry=h_fill.price,
+                            stop_loss_price=0.0,
+                            last_update_ts_ns=now_ns,
+                        )
+
         if decision.action == Action.ENTER and decision.intents and pos is None:
             intent = decision.intents[0]
-            asset_no = leg_to_asset.get(intent.symbol)
-            if asset_no is not None and intent.symbol in books:
+            # Skip hedge intents for binary position management.
+            if cfg.hedge_enabled and intent.symbol == cfg.hedge_symbol:
+                intent = next(
+                    (i for i in decision.intents if i.symbol != cfg.hedge_symbol), None
+                )
+            if intent is not None:
+                asset_no = leg_to_asset.get(intent.symbol)
+            if intent is not None and asset_no is not None and intent.symbol in books:
                 book = books[intent.symbol]
                 slipped = _slipped_buy_price(book, intent.limit_price, cfg.slippage_bps)
                 # Submit IOC limit at the slipped/limit price.
@@ -590,14 +741,19 @@ def run_one_question(
                     )
         elif decision.action == Action.EXIT and decision.intents and pos is not None:
             intent = decision.intents[0]
-            asset_no = leg_to_asset.get(intent.symbol)
-            if asset_no is not None and intent.symbol in books:
+            # Skip hedge intents for binary position management.
+            if cfg.hedge_enabled and intent.symbol == cfg.hedge_symbol:
+                intent = next(
+                    (i for i in decision.intents if i.symbol != cfg.hedge_symbol), None
+                )
+            if intent is not None and leg_to_asset.get(intent.symbol) is not None and intent.symbol in books:
+                exit_asset_no = leg_to_asset[intent.symbol]
                 book = books[intent.symbol]
                 size = min(intent.size, abs(pos.qty))
                 slipped = _slipped_sell_price(book, intent.limit_price, cfg.slippage_bps)
                 oid = _next_oid()
                 hbt.submit_sell_order(
-                    asset_no,
+                    exit_asset_no,
                     oid,
                     slipped,
                     size,
@@ -607,7 +763,7 @@ def run_one_question(
                 )
                 fill = _record_fill_from_order(
                     oid,
-                    asset_no,
+                    exit_asset_no,
                     intent.symbol,
                     "sell",
                     intent.cloid,
@@ -686,6 +842,7 @@ def run_one_question(
                     entry_tau_yr=meta.get("entry_tau_yr"),
                     realized_pnl_at_settle=realized,
                     resolved_outcome=meta.get("resolved_outcome"),
+                    is_hedge=f.is_hedge,
                 )
             )
         write_fills(fill_rows, fills_dir / f"{q.question_id}.parquet")
