@@ -10,16 +10,27 @@ Design doc: ``docs/superpowers/specs/2026-05-18-kalshi-buckets-design.md``.
 """
 from __future__ import annotations
 
+import heapq
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Iterator
+
+import pyarrow.parquet as pq
 
 from hlanalysis.strategy.types import QuestionView
 
 from ..core.data_source import QuestionDescriptor
-from ..core.events import MarketEvent
+from ..core.events import (
+    BookSnapshot,
+    MarketEvent,
+    ReferenceEvent,
+    SettlementEvent,
+    TradeEvent,
+)
+from ._synthetic_l2 import L2Snapshot, trade_to_l2
 
 _HALF_SPREAD_DEFAULT = 0.005
 _DEPTH_DEFAULT = 10_000.0
@@ -152,9 +163,112 @@ class KalshiDataSource:
         )
 
     def events(self, q: QuestionDescriptor) -> Iterator[MarketEvent]:
-        # Implemented in Task 6. For now, an empty iterator keeps `discover`
-        # smoke-callable.
-        return iter(())
+        manifest = self._load_manifest()
+        entry = manifest.get(q.question_id)
+        if entry is None:
+            return iter(())
+        b = entry.get("bucket") or {}
+        leg_markets: list[str] = list(b.get("leg_markets") or [])
+        leg_settlements: list[str] = list(b.get("leg_settlements") or [])
+        return self._build_stream(
+            q=q,
+            leg_markets=leg_markets,
+            leg_settlements=leg_settlements,
+            end_ts_ns=q.end_ts_ns,
+        )
+
+    def _build_stream(
+        self,
+        *,
+        q: QuestionDescriptor,
+        leg_markets: list[str],
+        leg_settlements: list[str],
+        end_ts_ns: int,
+    ) -> Iterator[MarketEvent]:
+        cfg = self._stream_cfg
+
+        # 1) Per-market trades → BookSnapshot + TradeEvent + within-market parity.
+        leg_events: list[MarketEvent] = []
+        for market in leg_markets:
+            trades = self._read_market_trades(market)
+            for t in sorted(trades, key=lambda r: int(r["ts_ns"])):
+                ts_ns = int(t["ts_ns"])
+                p_yes = max(_P_CLIP_LO, min(_P_CLIP_HI, float(t["yes_price"])))
+                size = float(t["size"])
+                taker_side = str(t["taker_side"])
+                yes_sym = f"{market}|yes"
+                no_sym = f"{market}|no"
+                yes_snap = trade_to_l2(
+                    ts_ns=ts_ns, token_id=yes_sym, price=p_yes,
+                    half_spread=cfg.half_spread, depth=cfg.depth,
+                )
+                leg_events.append(_book_from_l2(yes_snap))
+                leg_events.append(TradeEvent(
+                    ts_ns=ts_ns, symbol=yes_sym,
+                    side="buy" if taker_side == "yes" else "sell",
+                    price=p_yes, size=size,
+                ))
+                # Within-market parity: NO leg book at 1 - p_yes.
+                no_price = max(_P_CLIP_LO, min(_P_CLIP_HI, 1.0 - p_yes))
+                no_snap = trade_to_l2(
+                    ts_ns=ts_ns, token_id=no_sym, price=no_price,
+                    half_spread=cfg.half_spread, depth=cfg.depth,
+                )
+                leg_events.append(_book_from_l2(no_snap))
+
+        # 2) BTC ReferenceEvent stream from cached klines.
+        klines = self._load_klines_window(q.start_ts_ns, end_ts_ns)
+        ref_events = [
+            ReferenceEvent(
+                ts_ns=int(k["ts_ns"]), symbol="BTC",
+                high=float(k["high"]), low=float(k["low"]),
+                close=float(k["close"]), open=float(k["open"]),
+            )
+            for k in sorted(klines, key=lambda k: int(k["ts_ns"]))
+        ]
+
+        # 3) Per-leg settlement at end_ts_ns.
+        settle: list[SettlementEvent] = []
+        for market, market_settlement in zip(leg_markets, leg_settlements):
+            yes_outcome = "yes" if market_settlement == "yes" else "no"
+            no_outcome = "no" if market_settlement == "yes" else "yes"
+            settle.append(SettlementEvent(
+                ts_ns=end_ts_ns, question_idx=q.question_idx,
+                outcome=yes_outcome, symbol=f"{market}|yes",
+            ))
+            settle.append(SettlementEvent(
+                ts_ns=end_ts_ns, question_idx=q.question_idx,
+                outcome=no_outcome, symbol=f"{market}|no",
+            ))
+
+        yield from heapq.merge(
+            iter(leg_events), iter(ref_events), iter(settle),
+            key=lambda e: e.ts_ns,
+        )
+
+    def _read_market_trades(self, market: str) -> list[dict]:
+        path = self._cache_root / "kalshi_trades" / f"{market}.parquet"
+        if not path.exists():
+            return []
+        return pq.read_table(path).to_pylist()
+
+    def _load_klines_window(self, start_ns: int, end_ns: int) -> list[dict]:
+        # Load all cached 1m BTC klines; the cache is filtered to a ~1y window
+        # in practice, so loading the lot is fine and matches PM.
+        if self._klines_cache is None:
+            klines_root = Path(
+                os.environ.get("HLBT_BINANCE_KLINES", "data/binance_klines")
+            )
+            all_rows: list[dict] = []
+            if klines_root.exists():
+                for p in sorted(klines_root.glob("BTCUSDT-1m*.json")):
+                    try:
+                        all_rows.extend(json.loads(p.read_text()))
+                    except Exception:
+                        continue
+            self._klines_cache = all_rows
+        return [k for k in self._klines_cache
+                if start_ns <= int(k["ts_ns"]) <= end_ns]
 
     # ---- public: audit --------------------------------------------------
 
@@ -257,3 +371,12 @@ class KalshiDataSource:
         p = self._manifest_path()
         self._manifest_cache = json.loads(p.read_text()) if p.exists() else {}
         return self._manifest_cache
+
+
+def _book_from_l2(s: L2Snapshot) -> BookSnapshot:
+    return BookSnapshot(
+        ts_ns=s.ts_ns,
+        symbol=s.token_id,
+        bids=((s.bid_px, s.bid_sz),),
+        asks=((s.ask_px, s.ask_sz),),
+    )
