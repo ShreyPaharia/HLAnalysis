@@ -18,7 +18,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+import pyarrow as pa
 import pyarrow.parquet as pq
+
+from ._kalshi_client import (
+    fetch_event_detail,
+    fetch_events_page,
+    iter_events,
+    iter_market_trades,
+)
 
 from hlanalysis.strategy.types import QuestionView
 
@@ -33,6 +41,10 @@ from ..core.events import (
 from ._synthetic_l2 import L2Snapshot, trade_to_l2
 
 _HALF_SPREAD_DEFAULT = 0.005
+
+# Known aliases — Kalshi has migrated tickers historically. Probe in order
+# until one returns a non-empty page.
+_SERIES_TICKER_CANDIDATES = ("KXBTCD", "BTCD", "BTC-D")
 _DEPTH_DEFAULT = 10_000.0
 _P_CLIP_LO = 1e-6
 _P_CLIP_HI = 1.0 - 1e-6
@@ -87,6 +99,15 @@ def _thresholds_from_markets(markets: list[dict]) -> tuple[list[float], list[dic
             )
         thresholds.append(cap_f)
     return thresholds, ordered
+
+
+def _parse_iso_ns(s: str) -> int:
+    if not s:
+        return 0
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1e9)
 
 
 def _question_idx(qid: str) -> int:
@@ -333,6 +354,135 @@ class KalshiDataSource:
         }
         (self._cache_root / "fetch_summary.json").write_text(json.dumps(summary, indent=2))
         return summary
+
+    # ---- public: fetch --------------------------------------------------
+
+    def fetch_and_cache(
+        self,
+        *,
+        start: str,
+        end: str,
+        series_ticker: str | None = None,
+        refresh: bool = False,
+    ) -> list[QuestionDescriptor]:
+        """Discover from Kalshi public REST + cache trades. Returns descriptors
+        of cached questions in [start, end).
+        """
+        self._cache_root.mkdir(parents=True, exist_ok=True)
+        (self._cache_root / "kalshi_trades").mkdir(parents=True, exist_ok=True)
+
+        resolved = self._resolve_series_ticker(series_ticker)
+        manifest = self._load_manifest()
+
+        for ev_summary in iter_events(series_ticker=resolved, status="settled"):
+            event_ticker = ev_summary.get("event_ticker")
+            if not event_ticker:
+                continue
+            exp = ev_summary.get("expiration_time") or ""
+            end_ts_ns = _parse_iso_ns(exp)
+            if end_ts_ns == 0:
+                continue
+            if not _ts_ns_in_iso_window(end_ts_ns, start, end):
+                continue
+            if event_ticker in manifest and not refresh:
+                continue
+            event, markets = fetch_event_detail(event_ticker)
+            try:
+                thresholds, ordered_markets = _thresholds_from_markets(markets)
+            except ContiguityError as e:
+                from loguru import logger
+                logger.warning(f"kalshi {event_ticker}: contiguity error: {e}")
+                continue
+
+            leg_market_tickers = [m["ticker"] for m in ordered_markets]
+            leg_settlements = [
+                str(m.get("settlement_value") or "unknown")
+                for m in ordered_markets
+            ]
+            leg_strike_ranges = [
+                [m.get("floor_strike"), m.get("cap_strike")]
+                for m in ordered_markets
+            ]
+            start_ts_ns = min(
+                (_parse_iso_ns(m.get("open_time") or "") for m in ordered_markets),
+                default=end_ts_ns - 86_400 * 1_000_000_000,
+            )
+
+            n_rows = 0
+            for market in leg_market_tickers:
+                rows = self._fetch_market_trades_cached(
+                    market, refresh=refresh,
+                )
+                n_rows += len(rows)
+
+            yes_count = sum(1 for s in leg_settlements if s == "yes")
+            manifest[event_ticker] = {
+                "n_rows": n_rows,
+                "last_pull_ts_ns": int(datetime.now(timezone.utc).timestamp() * 1e9),
+                "kind": "bucket",
+                "bucket": {
+                    "event_ticker": event_ticker,
+                    "series_ticker": resolved,
+                    "start_ts_ns": int(start_ts_ns),
+                    "end_ts_ns": int(end_ts_ns),
+                    "thresholds": thresholds,
+                    "leg_markets": leg_market_tickers,
+                    "leg_strike_ranges": leg_strike_ranges,
+                    "leg_settlements": leg_settlements,
+                    "mutex_verified": yes_count == 1,
+                    "settlement_close_price": None,
+                },
+            }
+
+        self._write_manifest(manifest)
+        return self.discover(start=start, end=end)
+
+    def _resolve_series_ticker(self, override: str | None) -> str:
+        if override:
+            return override
+        for cand in _SERIES_TICKER_CANDIDATES:
+            page, _ = fetch_events_page(
+                series_ticker=cand, status="settled", limit=1,
+            )
+            if page:
+                return cand
+        raise SystemExit(
+            f"kalshi: no series_ticker probe succeeded among "
+            f"{_SERIES_TICKER_CANDIDATES}; pass --series-ticker explicitly."
+        )
+
+    def _fetch_market_trades_cached(
+        self, market: str, *, refresh: bool,
+    ) -> list[dict]:
+        path = self._cache_root / "kalshi_trades" / f"{market}.parquet"
+        existing: list[dict] = []
+        last_ts_ns: int | None = None
+        if path.exists() and not refresh:
+            existing = pq.read_table(path).to_pylist()
+            if existing:
+                last_ts_ns = max(int(r["ts_ns"]) for r in existing)
+        new_rows: list[dict] = []
+        for t in iter_market_trades(
+            market, min_ts=last_ts_ns // 1_000_000_000 if last_ts_ns else None,
+        ):
+            ts_ns = _parse_iso_ns(t.get("created_time") or "")
+            if not ts_ns:
+                continue
+            new_rows.append({
+                "ts_ns": ts_ns,
+                "yes_price": float(t.get("yes_price", 50)) / 100.0,
+                "size": float(t.get("count", 0)),
+                "taker_side": str(t.get("taker_side") or "yes"),
+            })
+        all_rows = existing + new_rows
+        if all_rows:
+            table = pa.Table.from_pylist(sorted(all_rows, key=lambda r: int(r["ts_ns"])))
+            pq.write_table(table, path)
+        return all_rows
+
+    def _write_manifest(self, manifest: dict) -> None:
+        self._manifest_path().write_text(json.dumps(manifest, indent=2))
+        self._manifest_cache = manifest
 
     # ---- internals: descriptor build ------------------------------------
 

@@ -298,3 +298,94 @@ def test_events_emits_settlement_per_leg(tmp_path, monkeypatch):
     assert by_sym["M1|no"].outcome == "yes"
     for s in settles:
         assert s.ts_ns == d.end_ts_ns
+
+
+import responses
+
+from hlanalysis.backtest.data._kalshi_client import KALSHI_BASE
+
+
+def _events_response(events: list[dict], cursor: str = "") -> dict:
+    return {"events": events, "cursor": cursor}
+
+
+def _event_detail_response(event: dict, markets: list[dict]) -> dict:
+    return {"event": event, "markets": markets}
+
+
+@responses.activate
+def test_fetch_and_cache_resolves_series_ticker_via_probe(tmp_path):
+    # Probe finds KXBTCD via the first series candidate.
+    responses.add(responses.GET, f"{KALSHI_BASE}/events",
+                  json=_events_response([{"event_ticker": "KXBTCD-26MAY18"}]),
+                  status=200)
+    # Discovery returns the same event once.
+    responses.add(responses.GET, f"{KALSHI_BASE}/events",
+                  json=_events_response([{
+                      "event_ticker": "KXBTCD-26MAY18",
+                      "expiration_time": "2026-05-18T16:00:00Z",
+                  }]),
+                  status=200)
+    # Event detail.
+    responses.add(responses.GET, f"{KALSHI_BASE}/events/KXBTCD-26MAY18",
+                  json=_event_detail_response(
+                      {"event_ticker": "KXBTCD-26MAY18",
+                       "expiration_time": "2026-05-18T16:00:00Z"},
+                      [
+                          {"ticker": "M0", "floor_strike": None,
+                           "cap_strike": 80000.0, "settlement_value": "no",
+                           "open_time": "2026-05-17T16:00:00Z"},
+                          {"ticker": "M1", "floor_strike": 80000.0,
+                           "cap_strike": None, "settlement_value": "yes",
+                           "open_time": "2026-05-17T16:00:00Z"},
+                      ]),
+                  status=200)
+    # One trades-fetch per market, both empty.
+    responses.add(responses.GET, f"{KALSHI_BASE}/markets/trades",
+                  json={"trades": [], "cursor": ""}, status=200)
+    responses.add(responses.GET, f"{KALSHI_BASE}/markets/trades",
+                  json={"trades": [], "cursor": ""}, status=200)
+
+    ds = KalshiDataSource(cache_root=tmp_path)
+    descs = ds.fetch_and_cache(start="2026-05-17", end="2026-05-19")
+    assert len(descs) == 1
+    m = json.loads((tmp_path / "manifest.json").read_text())
+    entry = m["KXBTCD-26MAY18"]
+    assert entry["kind"] == "bucket"
+    assert entry["bucket"]["thresholds"] == [80000.0]
+    assert entry["bucket"]["leg_settlements"] == ["no", "yes"]
+    assert entry["bucket"]["mutex_verified"] is True
+
+
+@responses.activate
+def test_fetch_and_cache_skips_event_with_non_mutex_settlement(tmp_path):
+    responses.add(responses.GET, f"{KALSHI_BASE}/events",
+                  json=_events_response([{"event_ticker": "BAD"}]), status=200)
+    responses.add(responses.GET, f"{KALSHI_BASE}/events",
+                  json=_events_response([{
+                      "event_ticker": "BAD",
+                      "expiration_time": "2026-05-18T16:00:00Z",
+                  }]),
+                  status=200)
+    responses.add(responses.GET, f"{KALSHI_BASE}/events/BAD",
+                  json=_event_detail_response(
+                      {"event_ticker": "BAD"},
+                      [
+                          {"ticker": "M0", "floor_strike": None,
+                           "cap_strike": 80000.0, "settlement_value": "yes",
+                           "open_time": "2026-05-17T16:00:00Z"},
+                          {"ticker": "M1", "floor_strike": 80000.0,
+                           "cap_strike": None, "settlement_value": "yes",
+                           "open_time": "2026-05-17T16:00:00Z"},
+                      ]),
+                  status=200)
+    responses.add(responses.GET, f"{KALSHI_BASE}/markets/trades",
+                  json={"trades": [], "cursor": ""}, status=200)
+    responses.add(responses.GET, f"{KALSHI_BASE}/markets/trades",
+                  json={"trades": [], "cursor": ""}, status=200)
+
+    ds = KalshiDataSource(cache_root=tmp_path)
+    descs = ds.fetch_and_cache(start="2026-05-17", end="2026-05-19")
+    m = json.loads((tmp_path / "manifest.json").read_text())
+    # Event is still cached so audit can report on it, but mutex_verified=False.
+    assert m["BAD"]["bucket"]["mutex_verified"] is False
