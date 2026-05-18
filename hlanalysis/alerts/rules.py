@@ -6,9 +6,17 @@ import time
 from typing import Protocol
 
 
-def _e(s: str) -> str:
-    """Escape an untrusted string for HTML-mode Telegram messages."""
-    return html.escape(s, quote=False)
+def _e(s) -> str:
+    """Escape an untrusted value for HTML-mode Telegram messages.
+
+    Tolerates None (e.g. ReconcileDrift.cloid is None for position-mismatch
+    events that aren't tied to a single order). Without the None guard, every
+    position-mismatch drift event would AttributeError its way out of the
+    alert worker and silently drop from Telegram.
+    """
+    if s is None:
+        return ""
+    return html.escape(str(s), quote=False)
 
 from loguru import logger
 
