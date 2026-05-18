@@ -244,24 +244,38 @@ def _strike_for_data_source(name: str) -> Callable[[QuestionDescriptor], float]:
 
 
 def cmd_fetch(args: argparse.Namespace) -> int:
-    """Populate the polymarket cache (Gamma + CLOB + Binance klines)."""
-    if args.data_source != "polymarket":
-        raise SystemExit(f"fetch supports --data-source polymarket only, got {args.data_source!r}")
+    """Populate the cache for the chosen data source."""
+    if args.data_source == "polymarket":
+        from .data.polymarket import PolymarketDataSource
 
-    from .data.polymarket import PolymarketDataSource
+        cache_root = Path(args.cache_root or os.environ.get(_ENV_PM_CACHE, "data/sim"))
+        ds = PolymarketDataSource(cache_root=cache_root)
+        descs = ds.fetch_and_cache(
+            start=args.start,
+            end=args.end,
+            kind=args.kind,
+            min_trades=args.min_trades,
+            min_volume_usd=args.min_volume_usd,
+            refresh=args.refresh,
+        )
+        logger.info(f"PM cache populated: {len(descs)} question(s)")
+        return 0
 
-    cache_root = Path(args.cache_root or os.environ.get(_ENV_PM_CACHE, "data/sim"))
-    ds = PolymarketDataSource(cache_root=cache_root)
-    descs = ds.fetch_and_cache(
-        start=args.start,
-        end=args.end,
-        kind=args.kind,
-        min_trades=args.min_trades,
-        min_volume_usd=args.min_volume_usd,
-        refresh=args.refresh,
-    )
-    logger.info(f"PM cache populated: {len(descs)} question(s) in [{args.start}, {args.end})")
-    return 0
+    if args.data_source == "kalshi":
+        from .data.kalshi import KalshiDataSource
+
+        cache_root = Path(args.cache_root or os.environ.get(_ENV_KALSHI_CACHE, "data/kalshi"))
+        ds = KalshiDataSource(cache_root=cache_root)
+        descs = ds.fetch_and_cache(
+            start=args.start,
+            end=args.end,
+            series_ticker=args.series_ticker,
+            refresh=args.refresh,
+        )
+        logger.info(f"Kalshi cache populated: {len(descs)} question(s)")
+        return 0
+
+    raise SystemExit(f"fetch does not support --data-source {args.data_source!r}")
 
 
 def cmd_tune(args: argparse.Namespace) -> int:
@@ -408,20 +422,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     pr.set_defaults(func=cmd_run)
 
-    pf = sp.add_parser("fetch", help="Populate polymarket cache from Gamma + CLOB")
+    pf = sp.add_parser("fetch", help="Populate a data-source cache")
     pf.add_argument(
         "--data-source",
-        choices=["polymarket"],
+        choices=["polymarket", "kalshi"],
         default="polymarket",
-        help="Only polymarket supports fetch; HL HIP-4 is consumed from the recorder directly.",
     )
     pf.add_argument("--start", required=True, help="ISO date YYYY-MM-DD")
     pf.add_argument("--end", required=True, help="ISO date YYYY-MM-DD")
-    pf.add_argument("--kind", choices=["binary", "bucket", "both"], default="both")
-    pf.add_argument("--cache-root", default=None, help="Override env HLBT_PM_CACHE_ROOT")
-    pf.add_argument("--min-trades", type=int, default=30)
-    pf.add_argument("--min-volume-usd", type=float, default=1000.0)
+    pf.add_argument("--kind", choices=["binary", "bucket", "both"], default="both",
+                    help="polymarket-only; ignored for other sources.")
+    pf.add_argument("--cache-root", default=None,
+                    help="Override env (HLBT_PM_CACHE_ROOT / HLBT_KALSHI_CACHE_ROOT)")
+    pf.add_argument("--min-trades", type=int, default=30,
+                    help="polymarket-only; ignored for other sources.")
+    pf.add_argument("--min-volume-usd", type=float, default=1000.0,
+                    help="polymarket-only; ignored for other sources.")
     pf.add_argument("--refresh", action="store_true")
+    pf.add_argument("--series-ticker", default=None,
+                    help="kalshi-only; override the auto-probed series ticker.")
     pf.set_defaults(func=cmd_fetch)
 
     pt = sp.add_parser("tune", help="Walk-forward parallel grid sweep")
