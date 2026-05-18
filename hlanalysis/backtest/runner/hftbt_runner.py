@@ -374,6 +374,8 @@ def run_one_question(
     state = MarketState()
     result = RunResult()
     pos: Position | None = None
+    # Hedge positions are tracked independently; they do NOT affect binary pos.
+    hedge_positions: dict[str, Position] = {}
     diag_rows: list[DiagnosticRow] = []
     fill_meta: dict[str, dict[str, Any]] = {}
     fill_ts: dict[str, int] = {}
@@ -427,6 +429,44 @@ def run_one_question(
             size=exec_qty,
             fee=fee,
             partial=exec_qty < intent_size,
+        )
+
+    def _record_hedge_fill_from_order(
+        oid: int,
+        asset_no: int,
+        symbol: str,
+        side: str,
+        cloid: str,
+        intent_size: float,
+    ) -> Fill | None:
+        """Like _record_fill_from_order but for hedge leg.
+
+        Differences vs binary recorder:
+        - No [0, 1] price clamp (BTC perp is ~100k).
+        - Uses cfg.hedge_fee_bps for fee rate.
+        - Sets is_hedge=True on the returned Fill.
+        """
+        order = hbt.orders(asset_no).get(oid)
+        if order is None:
+            return None
+        if order.status not in (3, 5):
+            return None
+        exec_qty = float(order.exec_qty)
+        if exec_qty <= 0.0:
+            return None
+        exec_px = float(order.exec_price)
+        exec_qty = min(exec_qty, intent_size)
+        fee_rate = cfg.hedge_fee_bps / 1e4
+        fee = exec_px * exec_qty * fee_rate
+        return Fill(
+            cloid=cloid,
+            symbol=symbol,
+            side=side,
+            price=exec_px,
+            size=exec_qty,
+            fee=fee,
+            partial=exec_qty < intent_size,
+            is_hedge=True,
         )
 
     # --- Scan loop ---------------------------------------------------------
@@ -589,7 +629,6 @@ def run_one_question(
                 if cfg.hedge_symbol not in books:
                     continue
                 h_book = books[cfg.hedge_symbol]
-                h_fee_rate = cfg.hedge_fee_bps / 1e4
                 if h_intent.side == "buy":
                     h_slipped = h_book.ask_px * (1.0 + cfg.hedge_slippage_bps / 1e4) if h_book.ask_px is not None else 0.0
                     h_oid = _next_oid()
@@ -616,24 +655,34 @@ def run_one_question(
                         True,
                     )
                     h_side = "sell"
-                h_fill = _record_fill_from_order(
+                h_fill = _record_hedge_fill_from_order(
                     h_oid, hedge_asset_no, cfg.hedge_symbol, h_side, h_intent.cloid, h_intent.size,
                 )
                 if h_fill is not None:
-                    # Build a hedge fill with is_hedge=True and hedge fee.
-                    h_fill = Fill(
-                        cloid=h_fill.cloid,
-                        symbol=h_fill.symbol,
-                        side=h_fill.side,
-                        price=h_fill.price,
-                        size=h_fill.size,
-                        fee=h_fill.price * h_fill.size * h_fee_rate,
-                        partial=h_fill.partial,
-                        is_hedge=True,
-                    )
                     result.fills.append(h_fill)
                     fill_ts[h_fill.cloid] = now_ns
                     fill_question_idx[h_fill.cloid] = q.question_idx
+                    # Track hedge position independently.
+                    h_pos = hedge_positions.get(cfg.hedge_symbol)
+                    if h_pos is None:
+                        hedge_positions[cfg.hedge_symbol] = Position(
+                            question_idx=q.question_idx,
+                            symbol=cfg.hedge_symbol,
+                            qty=h_fill.size if h_fill.side == "buy" else -h_fill.size,
+                            avg_entry=h_fill.price,
+                            stop_loss_price=0.0,
+                            last_update_ts_ns=now_ns,
+                        )
+                    else:
+                        new_qty = h_pos.qty + (h_fill.size if h_fill.side == "buy" else -h_fill.size)
+                        hedge_positions[cfg.hedge_symbol] = Position(
+                            question_idx=q.question_idx,
+                            symbol=cfg.hedge_symbol,
+                            qty=new_qty,
+                            avg_entry=h_fill.price,
+                            stop_loss_price=0.0,
+                            last_update_ts_ns=now_ns,
+                        )
 
         if decision.action == Action.ENTER and decision.intents and pos is None:
             intent = decision.intents[0]
