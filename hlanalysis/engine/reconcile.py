@@ -138,17 +138,40 @@ class Reconciler:
                     detail={"hl_qty": f"{vp.qty}", "db_qty": f"{lp.qty}"},
                 ))
 
-        # Position on venue we don't track locally. Attribution uses
-        # symbol_to_question; if we can't attribute, we still alert.
+        # Position on venue we don't track locally — adopt it into the DB so
+        # the risk gate's caps and the strategy's `have_position` HOLD branch
+        # both see it. Without adoption the strategy re-fires entries each
+        # scan tick and the venue rejects them for insufficient quote balance.
+        # Stop-loss is disabled on adopted rows: we have no entry context to
+        # compute it from, and the alternative (exit-at-bid panic) would dump
+        # a position we may want to hold to settlement. Settlement-driven
+        # exits still work via _close_settled.
+        _STOP_DISABLED_SENTINEL = -1.0
         for sym, vp in venue_by_symbol.items():
             qidx = self.symbol_to_question.get(sym)
             if qidx is None:
+                # No question mapping yet (e.g. meta event not ingested). We
+                # cannot invent a question_idx — it's the position table's
+                # primary key, and collisions would corrupt accounting. Emit
+                # an unattributed drift event so the orphan is visible.
+                drift.append(ReconcileDrift(
+                    ts_ns=now_ns, case="position_mismatch", question_idx=0,
+                    detail={"resolution": "venue_orphan_unattributed",
+                            "symbol": sym, "qty": f"{vp.qty}"},
+                ))
                 continue
             if qidx in local_by_qidx:
                 continue
+            self.dal.upsert_position(Position(
+                question_idx=qidx, symbol=sym, qty=vp.qty,
+                avg_entry=vp.avg_entry, realized_pnl=0.0,
+                last_update_ts_ns=now_ns,
+                stop_loss_price=_STOP_DISABLED_SENTINEL,
+            ))
             drift.append(ReconcileDrift(
                 ts_ns=now_ns, case="position_mismatch", question_idx=qidx,
-                detail={"resolution": "venue_orphan_position", "symbol": sym},
+                detail={"resolution": "adopted_venue_orphan", "symbol": sym,
+                        "qty": f"{vp.qty}", "avg_entry": f"{vp.avg_entry}"},
             ))
 
         return ReconcileResult(drift_events=drift, orphans_to_cancel=orphans)

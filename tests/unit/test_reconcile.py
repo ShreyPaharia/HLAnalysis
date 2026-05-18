@@ -106,3 +106,53 @@ def test_position_disappearance_drops_local_position(dal):
     )
     assert dal.get_position(42) is None
     assert any(d.case == "position_mismatch" for d in res.drift_events)
+
+
+def test_venue_orphan_position_is_adopted_into_local_db(dal):
+    # HL has #551 with 500 shares but the local DB is empty (e.g. fills booked
+    # before a restart that wiped the DB, or filled while the engine was
+    # blind to HIP-4 spot balances). The reconciler must adopt the venue
+    # position so the gate's caps and strategy's have_position branch see it,
+    # otherwise the strategy re-fires entries the venue then rejects.
+    venue_state = ClearinghouseState(
+        positions=(VenuePosition(symbol="#551", qty=500.0, avg_entry=0.988,
+                                  unrealized_pnl=0.0),),
+        account_value_usd=0,
+    )
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"#551": 10},
+    ).run(venue_open=[], venue_state=venue_state, now_ns=2)
+
+    booked = dal.get_position(10)
+    assert booked is not None, "venue-orphan position was not adopted"
+    assert booked.symbol == "#551"
+    assert booked.qty == 500.0
+    assert booked.avg_entry == 0.988
+    assert any(
+        d.case == "position_mismatch"
+        and (d.detail or {}).get("resolution") == "adopted_venue_orphan"
+        for d in res.drift_events
+    )
+
+
+def test_venue_orphan_position_without_mapping_does_not_corrupt_db(dal):
+    # If we can't map symbol→question_idx (e.g. the question meta hasn't been
+    # ingested yet) we must NOT insert a Position row with a guessed/sentinel
+    # question_idx — that would corrupt the table. Just emit a drift event.
+    venue_state = ClearinghouseState(
+        positions=(VenuePosition(symbol="#999", qty=10.0, avg_entry=0.5,
+                                  unrealized_pnl=0.0),),
+        account_value_usd=0,
+    )
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={},
+    ).run(venue_open=[], venue_state=venue_state, now_ns=2)
+
+    # No new position rows created
+    assert dal.all_positions() == []
+    # But the drift event must surface so we can act on it
+    assert any(
+        d.case == "position_mismatch"
+        and (d.detail or {}).get("symbol") == "#999"
+        for d in res.drift_events
+    )

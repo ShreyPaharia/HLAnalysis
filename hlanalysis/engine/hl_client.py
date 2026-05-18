@@ -348,6 +348,35 @@ class HLClient:
                 avg_entry=float(p.get("entryPx", 0)),
                 unrealized_pnl=float(p.get("unrealizedPnl", 0)),
             ))
+        # HIP-4 outcome shares are classified as spot on HL and live in
+        # spotClearinghouseState.balances as coin="+N", NOT in the perp
+        # assetPositions list above. Without merging them the reconciler's
+        # "vanished from venue" branch deletes every locally-booked HIP-4
+        # position each cycle, the strategy then sees position=None and
+        # re-fires entries that the venue rejects for insufficient USDH —
+        # which is exactly the rejection storm we observed in live.
+        try:
+            spot = self._info.spot_user_state(self.account_address)
+        except Exception as e:
+            raise RestError(str(e)) from e
+        for bal in spot.get("balances", []):
+            coin = str(bal.get("coin", ""))
+            if not coin.startswith("+"):
+                continue
+            n_str = coin[1:]
+            if not n_str.isdigit():
+                continue
+            qty = float(bal.get("total", 0))
+            if qty == 0:
+                continue
+            entry_ntl = float(bal.get("entryNtl", 0))
+            avg_entry = entry_ntl / qty if qty > 0 else 0.0
+            positions.append(VenuePosition(
+                symbol=f"#{n_str}",
+                qty=qty,
+                avg_entry=avg_entry,
+                unrealized_pnl=0.0,
+            ))
         return ClearinghouseState(
             positions=tuple(positions),
             account_value_usd=float(data.get("marginSummary", {}).get("accountValue", 0)),
