@@ -191,7 +191,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     data_source = _resolve_data_source(args.data_source, cache_root=args.cache_root)
     start = args.start or ""
     end = args.end or ""
-    descriptors = list(data_source.discover(start=start, end=end))
+    discover_kwargs: dict = {}
+    kind = getattr(args, "kind", "both")
+    if kind != "both":
+        if args.data_source == "polymarket":
+            discover_kwargs["kind"] = kind
+        elif args.data_source == "hl_hip4":
+            discover_kwargs["kinds"] = (
+                "priceBinary" if kind == "binary" else "priceBucket",
+            )
+    descriptors = list(data_source.discover(start=start, end=end, **discover_kwargs))
     if args.max_markets is not None:
         descriptors = descriptors[args.skip_markets : args.skip_markets + args.max_markets]
     elif args.skip_markets:
@@ -494,6 +503,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="Path to Binance perp/spot kline JSON for the hedge leg (v5 only). "
         "When omitted, hedge_enabled in --config is ignored.",
+    )
+    pr.add_argument(
+        "--kind",
+        choices=["binary", "bucket", "both"],
+        default="both",
+        help="Filter discovery to this question class. "
+        "For hl_hip4: binary→priceBinary, bucket→priceBucket. "
+        "For polymarket: pass-through.",
     )
     pr.set_defaults(func=cmd_run)
 

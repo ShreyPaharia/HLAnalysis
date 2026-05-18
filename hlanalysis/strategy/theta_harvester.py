@@ -237,12 +237,19 @@ class ThetaHarvesterStrategy(Strategy):
 
         # Determine candidate legs. For binaries we keep the historical
         # (yes_symbol, no_symbol) ordering so behavior is bit-for-bit unchanged
-        # and existing tests stay green. For buckets we iterate leg_symbols.
+        # and existing tests stay green. For buckets we iterate leg_symbols
+        # but restrict to YES legs only (even indices). The NO of bucket k is
+        # structurally redundant with the union of YES legs of all other
+        # buckets, and on small HL HIP-4 bucket corpora entering both YES of
+        # bucket A and NO of bucket B can produce contradictory bets that
+        # net to a guaranteed loss after fees. Mirrors v1 (late_resolution.py).
         legs: tuple[str, ...] = (
             question.leg_symbols
             if question.leg_symbols and question.klass != "priceBinary"
             else (question.yes_symbol, question.no_symbol)
         )
+        if question.klass == "priceBucket" and legs:
+            legs = tuple(legs[i] for i in range(0, len(legs), 2))
         if not legs:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_legs"),))
 
@@ -369,7 +376,7 @@ class ThetaHarvesterStrategy(Strategy):
         self, *, question: QuestionView, books: Mapping[str, BookState], reference_price: float, sigma: float, mu_eff: float, tau_yr: float, tau_s: float, position: Position,
     ) -> Decision:
         held = books.get(position.symbol)
-        if held is None or held.bid_px is None:
+        if held is None or held.bid_px is None or held.ask_px is None:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_book_exit"),))
 
         # Rule 1: hard price stop (v2 legacy)

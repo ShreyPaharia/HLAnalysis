@@ -534,9 +534,12 @@ def run_one_question(
 
         # Defer to the data source for the QuestionView (it knows the
         # market's resolution convention — e.g. PM Up/Down strike = Binance
-        # close 24h pre-expiry). The runner's `strike` kwarg now only acts
-        # as an override when the caller explicitly passes a non-zero value.
-        if strike > 0.0:
+        # close 24h pre-expiry, HL HIP-4 buckets carry priceThresholds in kv).
+        # The runner's `strike` kwarg only acts as an override for binary
+        # markets where the override is meaningful; for buckets we always
+        # need the data source's view because the strategy reads kv for the
+        # per-leg winning region.
+        if strike > 0.0 and q.klass == "priceBinary":
             qv = build_question_view(q, now_ns=now_ns, strike=strike, settled=False)
         else:
             qv = data_source.question_view(q, now_ns=now_ns, settled=False)
@@ -778,13 +781,14 @@ def run_one_question(
     # --- Settlement -------------------------------------------------------
     if pos is not None:
         outcome = data_source.resolved_outcome(q)
-        # For binaries: held leg wins iff outcome matches. Bucket markets emit
-        # per-leg SettlementEvents (spec §3.4) but lack a `symbol` on the event;
-        # source implementations expose the winning leg via `resolved_outcome`
-        # using a stable encoding ("leg_<idx>" for buckets) — task C owns the
-        # encoding and task E reconciles. For binaries we use the literal
-        # "yes"/"no" path below.
-        settle_px = _settle_px_for_outcome(pos, q, outcome)
+        # Prefer the data source's per-leg payoff when it provides one (HL
+        # HIP-4 handles bucket markets here). Fall back to the binary-only
+        # leg_symbols[0]/[1] lookup when the source doesn't expose it.
+        leg_payoff = getattr(data_source, "leg_payoff", None)
+        if leg_payoff is not None:
+            settle_px = float(leg_payoff(q, pos.symbol))
+        else:
+            settle_px = _settle_px_for_outcome(pos, q, outcome)
         settle_fill = Fill(
             cloid="settle",
             symbol=pos.symbol,
