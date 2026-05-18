@@ -174,6 +174,8 @@ def _run_one_cell(args: tuple) -> dict:
         te_ids_with_strikes,
         run_cfg_kwargs,
         data_source_dotted,
+        hedge_data_path,
+        hedge_half_spread_bps,
     ) = args
 
     import importlib
@@ -184,6 +186,19 @@ def _run_one_cell(args: tuple) -> dict:
 
     strategy = build_strategy(strategy_id, params)
     run_cfg = RunConfig(**run_cfg_kwargs)
+
+    # Build hedge source lazily (one per worker process, re-used across questions).
+    # We ship the file path rather than the parsed list to avoid pickle overhead.
+    hedge_source = None
+    if run_cfg.hedge_enabled and hedge_data_path:
+        from pathlib import Path as _Path
+        from hlanalysis.backtest.data.binance_perp import BinancePerpKlinesSource
+        hedge_source = BinancePerpKlinesSource(
+            path=_Path(hedge_data_path),
+            symbol=run_cfg.hedge_symbol,
+            half_spread_bps=hedge_half_spread_bps,
+        )
+
     pnl: list[float] = []
     n_trades = 0
     # Use a wide window so cache-driven sources (e.g. PolymarketDataSource,
@@ -199,7 +214,17 @@ def _run_one_cell(args: tuple) -> dict:
         )
         if match is None:
             continue
-        res = run_one_question(strategy, data_source, match, run_cfg, strike=strike)
+        hedge_events = None
+        if hedge_source is not None:
+            hedge_events = list(
+                hedge_source.book_events(
+                    start_ts_ns=match.start_ts_ns, end_ts_ns=match.end_ts_ns
+                )
+            )
+        res = run_one_question(
+            strategy, data_source, match, run_cfg,
+            strike=strike, hedge_events=hedge_events,
+        )
         pnl.append(res.realized_pnl_usd or 0.0)
         n_trades += len(res.fills)
     summary = summarise_run(pnl, n_trades=n_trades)
@@ -226,6 +251,8 @@ def run_tuning_parallel(
     out_dir: Path,
     n_workers: int,
     strike_for: Callable[[QuestionDescriptor], float] = lambda _q: 0.0,
+    hedge_data_path: str | None = None,
+    hedge_half_spread_bps: float = 1.0,
 ) -> Iterator[dict]:
     out_dir.mkdir(parents=True, exist_ok=True)
     splits = list(
@@ -252,6 +279,8 @@ def run_tuning_parallel(
                     tuple(te_with_strikes),
                     run_cfg_kwargs,
                     data_source_factory_dotted,
+                    hedge_data_path,
+                    hedge_half_spread_bps,
                 )
             )
 
