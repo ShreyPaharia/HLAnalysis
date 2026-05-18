@@ -14,6 +14,7 @@ from .types import (
 # bespoke imports.
 from . import late_resolution  # noqa: F401
 from . import model_edge  # noqa: F401
+from . import theta_harvester  # noqa: F401
 
 __all__ = [
     "Action",
