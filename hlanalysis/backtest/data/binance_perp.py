@@ -17,6 +17,20 @@ from ..core.events import BookSnapshot
 
 _HEDGE_DEPTH = 1_000_000.0  # treat hedge venue as infinitely deep at top-of-book
 
+# Module-level cache: path → parsed list[dict].  The JSON file is 40-60 MB for
+# a year of 1m klines; re-parsing it per question (363 markets) costs ~minutes.
+# Keyed by the resolved absolute path string so different Path objects pointing
+# to the same file share the same cache entry.
+_KLINES_CACHE: dict[str, list[dict]] = {}
+
+
+def _load_klines(path: Path) -> list[dict]:
+    """Return cached parsed rows for ``path``, loading once on first call."""
+    key = str(path.resolve())
+    if key not in _KLINES_CACHE:
+        _KLINES_CACHE[key] = json.loads(path.read_text())
+    return _KLINES_CACHE[key]
+
 
 @dataclass(frozen=True, slots=True)
 class BinancePerpKlinesSource:
@@ -25,7 +39,7 @@ class BinancePerpKlinesSource:
     half_spread_bps: float = 1.0
 
     def book_events(self, *, start_ts_ns: int, end_ts_ns: int) -> Iterator[BookSnapshot]:
-        rows = json.loads(self.path.read_text())
+        rows = _load_klines(self.path)
         h = self.half_spread_bps / 1e4
         for row in rows:
             ts = int(row["ts_ns"])
