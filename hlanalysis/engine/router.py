@@ -49,6 +49,11 @@ class Router:
         # of orders this Router placed. e.g. 'hla-v1-' or 'hla-v31-'. Default
         # 'hla-' preserves legacy single-account behavior.
         self.cloid_prefix = cloid_prefix
+        # account_alias derived from the cloid_prefix. We strip the leading
+        # "hla-" and trailing "-" so messages carry the bare alias (e.g. "v1").
+        # Legacy single-account default ("hla-") becomes "" — alerts read as
+        # cross-slot, matching the pre-multi-account behavior.
+        self.account_alias = cloid_prefix.removeprefix("hla-").rstrip("-")
 
     def _stamp_cloid(self, intent: OrderIntent) -> OrderIntent:
         """Rewrite a strategy-issued `hla-<uuid>` cloid into `<prefix><uuid_hex>`.
@@ -78,7 +83,8 @@ class Router:
             verdict = self.gate.check_pre_trade(intent, inputs)
             if not verdict.approved:
                 await self.bus.publish(RiskVeto(
-                    ts_ns=now_ns, reason=verdict.reason,
+                    ts_ns=now_ns, account_alias=self.account_alias,
+                    reason=verdict.reason,
                     question_idx=intent.question_idx,
                     detail=verdict.detail or {},
                 ))
@@ -127,7 +133,7 @@ class Router:
                 intent.limit_price, ack.error or "<no_error_field>",
             )
             await self.bus.publish(OrderRejected(
-                ts_ns=now_ns,
+                ts_ns=now_ns, account_alias=self.account_alias,
                 cloid=intent.cloid,
                 question_idx=intent.question_idx,
                 symbol=intent.symbol,
@@ -193,7 +199,8 @@ class Router:
                 ),
             ))
             await self.bus.publish(Entry(
-                ts_ns=now_ns, cloid=intent.cloid,
+                ts_ns=now_ns, account_alias=self.account_alias,
+                cloid=intent.cloid,
                 question_idx=intent.question_idx, symbol=intent.symbol,
                 side=intent.side, size=size, price=price,
                 question_description=q_desc, outcome_description=o_desc,
@@ -205,7 +212,8 @@ class Router:
                 realized = (price - existing.avg_entry) * existing.qty
                 self.dal.delete_position(intent.question_idx)
                 await self.bus.publish(Exit(
-                    ts_ns=now_ns, question_idx=intent.question_idx,
+                    ts_ns=now_ns, account_alias=self.account_alias,
+                    question_idx=intent.question_idx,
                     symbol=intent.symbol, qty=existing.qty,
                     realized_pnl=realized + existing.realized_pnl,
                     reason="stop_loss" if intent.reduce_only else "manual",
@@ -229,7 +237,8 @@ class Router:
         q_desc = question_description(question) if question else ""
         o_desc = outcome_description(question, p.symbol) if question else ""
         await self.bus.publish(Exit(
-            ts_ns=now_ns, question_idx=question_idx, symbol=p.symbol,
+            ts_ns=now_ns, account_alias=self.account_alias,
+            question_idx=question_idx, symbol=p.symbol,
             qty=p.qty, realized_pnl=p.realized_pnl, reason="settlement",
             question_description=q_desc, outcome_description=o_desc,
         ))

@@ -134,12 +134,15 @@ def test_allowlist_match_picks_first_matching_entry(tmp_path):
 def test_deploy_config_substitutes_env(monkeypatch, tmp_path):
     monkeypatch.setenv("HL_ACCOUNT_ADDRESS", "0xdeadbeef")
     monkeypatch.setenv("HL_API_SECRET_KEY", "secret")
+    monkeypatch.setenv("HL_ACCOUNT_ADDRESS_V31", "0xv31")
+    monkeypatch.setenv("HL_API_SECRET_KEY_V31", "secret-v31")
     monkeypatch.setenv("TG_BOT_TOKEN", "tg-token")
     monkeypatch.setenv("TG_CHAT_ID", "12345")
     p = tmp_path / "deploy.yaml"
     p.write_text(Path("config/deploy.yaml").read_text())
     cfg = load_deploy_config(p)
-    assert cfg.hl.account_address == "0xdeadbeef"
+    assert cfg.hl_accounts["v1"].account_address == "0xdeadbeef"
+    assert cfg.hl_accounts["v31"].account_address == "0xv31"
     assert cfg.alerts.telegram.bot_token == "tg-token"
 
 

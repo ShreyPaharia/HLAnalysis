@@ -35,10 +35,12 @@ class RestartDriftGate:
         dal: StateDAL,
         block_path: Path,
         auto_clear_on_clean: bool = False,
+        account_alias: str = "",
     ) -> None:
         self.dal = dal
         self.block_path = block_path
         self.auto_clear = auto_clear_on_clean
+        self.account_alias = account_alias
 
     def run(
         self,
@@ -48,7 +50,10 @@ class RestartDriftGate:
         fills_lookup: Callable[[str], list[UserFillRow]],
         now_ns: int,
     ) -> RestartDriftResult:
-        rec = Reconciler(self.dal, fills_lookup=fills_lookup)
+        rec = Reconciler(
+            self.dal, fills_lookup=fills_lookup,
+            account_alias=self.account_alias,
+        )
         res = rec.run(venue_open=venue_open, venue_state=venue_state, now_ns=now_ns)
 
         loud = [d for d in res.drift_events if d.case in self.LOUD_CASES

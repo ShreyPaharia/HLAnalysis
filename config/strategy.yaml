@@ -106,53 +106,74 @@ strategies:
       reconcile_interval_seconds: 60
 
   # --- v3.1 theta_harvester ---
-  # Uncomment and fund the v31 account before enabling. Each entry gets its own
-  # HL signing key (deploy.hl_accounts.v31 → HL_API_SECRET_KEY_V31).
+  # Live shadow alongside v1. Backtest on HL HIP-4 corpus (2026-05-06 → 18):
+  #   v3.1 binary: +$57.28 / 62% hit / $37 max DD
+  #   v3.1 bucket: +$29.93 / 80% hit / $71 max DD (YES-only entries; per commit 6fbc78e)
+  # Each entry gets its own HL signing key (deploy.hl_accounts.v31).
   # Risk envelopes are per-(strategy, account): the v1 daily_loss_cap and
   # inventory limits above do NOT apply here.
-  #
-  # - name: theta_harvester
-  #   account_alias: v31
-  #   strategy_type: theta_harvester
-  #   paper_mode: false
-  #   allowlist:
-  #     - match:
-  #         class: priceBinary
-  #         underlying: BTC
-  #       max_position_usd: 100
-  #       stop_loss_pct: null
-  #       tte_min_seconds: 0
-  #       tte_max_seconds: 86400
-  #       price_extreme_threshold: 0.0   # theta_harvester drives entries off edge, not extreme price
-  #       price_extreme_max: 1.0
-  #       distance_from_strike_usd_min: 0
-  #       vol_max: 100
-  #   blocklist_question_idxs: []
-  #   defaults:
-  #     match: {}
-  #     max_position_usd: 100
-  #     stop_loss_pct: null
-  #     tte_min_seconds: 0
-  #     tte_max_seconds: 86400
-  #     price_extreme_threshold: 0.0
-  #     price_extreme_max: 1.0
-  #     distance_from_strike_usd_min: 0
-  #     vol_max: 100
-  #   global:
-  #     max_total_inventory_usd: 500
-  #     max_concurrent_positions: 5
-  #     daily_loss_cap_usd: 200
-  #     max_strike_distance_pct: 50
-  #     min_recent_volume_usd: 100
-  #     stale_data_halt_seconds: 30
-  #     reconcile_interval_seconds: 60
-  #   theta:
-  #     vol_lookback_seconds: 3600
-  #     vol_sampling_dt_seconds: 60
-  #     edge_buffer: 0.02
-  #     fee_taker: 0.00035
-  #     half_spread_assumption: 0.005
-  #     favorite_threshold: 0.85
-  #     edge_max: 0.20                    # v3.1 upper-edge filter (commit 0578a11)
-  #     exit_edge_threshold: 0.0
-  #     time_stop_seconds: 0
+  - name: theta_harvester
+    account_alias: v31
+    strategy_type: theta_harvester
+    paper_mode: false                   # LIVE: real HL orders on v31 account
+
+    allowlist:
+      - match:
+          class: priceBinary
+          underlying: BTC
+        max_position_usd: 100
+        stop_loss_pct: null              # theta_harvester drives exits off edge, not stop-loss
+        tte_min_seconds: 0
+        tte_max_seconds: 86400           # full 24h HIP-4 expiry window
+        price_extreme_threshold: 0.0     # theta_harvester enters off edge, not extreme price
+        price_extreme_max: 1.0
+        distance_from_strike_usd_min: 0
+        vol_max: 100
+      - match:
+          class: priceBucket
+          underlying: BTC
+        max_position_usd: 100
+        stop_loss_pct: null
+        tte_min_seconds: 0
+        tte_max_seconds: 86400
+        price_extreme_threshold: 0.0
+        price_extreme_max: 1.0
+        distance_from_strike_usd_min: 0
+        vol_max: 100
+
+    blocklist_question_idxs: []
+
+    defaults:
+      match: {}
+      max_position_usd: 100
+      stop_loss_pct: null
+      tte_min_seconds: 0
+      tte_max_seconds: 86400
+      price_extreme_threshold: 0.0
+      price_extreme_max: 1.0
+      distance_from_strike_usd_min: 0
+      vol_max: 100
+
+    global:
+      max_total_inventory_usd: 500
+      max_concurrent_positions: 5
+      daily_loss_cap_usd: 200
+      max_strike_distance_pct: 50
+      min_recent_volume_usd: 100
+      stale_data_halt_seconds: 30
+      reconcile_interval_seconds: 60
+
+    theta:
+      vol_lookback_seconds: 3600
+      vol_sampling_dt_seconds: 60
+      vol_clip_min: 0.05
+      vol_clip_max: 5.0
+      edge_buffer: 0.02
+      fee_taker: 0.00035
+      half_spread_assumption: 0.005
+      drift_lookback_seconds: 3600
+      drift_blend: 0.0
+      favorite_threshold: 0.85
+      edge_max: 0.20                     # v3.1 upper-edge filter (commit 0578a11): +37% PnL, -84% max DD on PM
+      exit_edge_threshold: 0.0
+      time_stop_seconds: 0

@@ -223,6 +223,7 @@ class EngineRuntime:
                 gate = RestartDriftGate(
                     dal=slot.dal,
                     block_path=slot.kill_switch_path.parent / "restart_blocked",
+                    account_alias=slot.alias,
                 )
                 drift_res = gate.run(
                     venue_open=slot.hl.open_orders(),
@@ -435,6 +436,7 @@ class EngineRuntime:
                     fills_lookup=lambda c, _hl=slot.hl: _hl.user_fills(),
                     symbol_to_question=sym_to_q,
                     cloid_prefix=slot.cloid_prefix,
+                    account_alias=slot.alias,
                 )
                 res = rec.run(
                     venue_open=slot.hl.open_orders(),
@@ -462,7 +464,7 @@ class EngineRuntime:
                 # ALL slots are halted (handled below in the loop).
                 if slot.risk.kill_switch_active(kill_path):
                     await self.bus.publish(KillSwitchActivated(
-                        ts_ns=now, path=str(kill_path),
+                        ts_ns=now, account_alias=slot.alias, path=str(kill_path),
                     ))
                     slot.halted = True
                     self._maybe_stop_all_halted(slot)
@@ -486,7 +488,8 @@ class EngineRuntime:
                     breached = slot.risk.breached_stops(sps, books)
                     for sp in breached:
                         await self.bus.publish(StopLossTriggered(
-                            ts_ns=now, question_idx=sp.question_idx,
+                            ts_ns=now, account_alias=slot.alias,
+                            question_idx=sp.question_idx,
                             symbol=sp.symbol, qty=sp.qty,
                             trigger_px=sp.stop_loss_price,
                         ))
@@ -527,7 +530,8 @@ class EngineRuntime:
                 pnl = slot.dal.realized_pnl_since(midnight_ns)
                 if pnl < -slot.cfg.global_.daily_loss_cap_usd:
                     await self.bus.publish(DailyLossHalt(
-                        ts_ns=now, realized_pnl=pnl,
+                        ts_ns=now, account_alias=slot.alias,
+                        realized_pnl=pnl,
                         cap=slot.cfg.global_.daily_loss_cap_usd,
                     ))
                     slot.halted = True
@@ -548,7 +552,7 @@ class EngineRuntime:
                     for sym in slot.risk.stale_books(books_only_held, now_ns=now):
                         b = books_only_held[sym]
                         await self.bus.publish(StaleDataHalt(
-                            ts_ns=now, symbol=sym,
+                            ts_ns=now, account_alias=slot.alias, symbol=sym,
                             age_seconds=(now - b.last_l2_ts_ns) / 1e9,
                         ))
             except Exception:

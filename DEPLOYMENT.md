@@ -489,6 +489,30 @@ on the venue but the engine still runs.
 | New question (`QuestionMetaEvent`)  | One Telegram alert, marked seen in BOTH slots' DBs (per-alias rows).   |
 | WS reconnect                        | One reconnect — shared across all slots.                               |
 
+### Telegram alerts are alias-prefixed
+
+Every bus event carries the originating slot's `account_alias`, and `AlertRules`
+renders that as a bold tag at the start of each Telegram message:
+
+```
+[v1] 🟢 ENTRY
+BTC > 80,000 on 2026-05-19 @ 12:00 UTC
+YES (#30)
+BUY 100 @ $0.96  (notional $96.00)
+q=42  #30
+
+[v31] 🟢 ENTRY
+BTC > 80,000 on 2026-05-19 @ 12:00 UTC
+YES (#30)
+BUY 100 @ $0.96  (notional $96.00)
+q=42  #30
+```
+
+Dedupe keys are also scoped per alias, so v1 and v31 emitting the same shape of
+RiskVeto on the same symbol each get their own alert rather than collapsing
+into one. `NewQuestion` is cross-slot — emitted once globally on first sight —
+so it renders without an alias tag.
+
 ### Heartbeat output
 
 The heartbeat line is now one-per-slot. Expect output like:

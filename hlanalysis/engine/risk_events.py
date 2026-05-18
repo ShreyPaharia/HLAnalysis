@@ -8,6 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field
 class _Base(BaseModel):
     model_config = ConfigDict(frozen=True)
     ts_ns: int
+    # Account/strategy slot that emitted this event. Empty when the publisher is
+    # cross-slot (e.g. NewQuestion fires once globally on first sight). Alerts
+    # prefix this onto the Telegram message so v1 / v31 are visually distinct.
+    account_alias: str = ""
 
 
 class RiskVeto(_Base):

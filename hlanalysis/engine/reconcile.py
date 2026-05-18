@@ -43,11 +43,15 @@ class Reconciler:
         fills_lookup: Callable[[str], list[UserFillRow]],
         symbol_to_question: dict[str, int] | None = None,
         cloid_prefix: str = CLOID_PREFIX,
+        account_alias: str = "",
     ) -> None:
         self.dal = dal
         self.fills_lookup = fills_lookup
         self.symbol_to_question = symbol_to_question or {}
         self.cloid_prefix = cloid_prefix
+        # Stamped onto every ReconcileDrift this Reconciler emits so alerts
+        # carry the account that detected the drift.
+        self.account_alias = account_alias
 
     def run(
         self,
@@ -78,13 +82,13 @@ class Reconciler:
                     ))
                 self.dal.update_order_status(cloid, status="filled", now_ns=now_ns)
                 drift.append(ReconcileDrift(
-                    ts_ns=now_ns, case="state_mismatch", cloid=cloid,
+                    ts_ns=now_ns, account_alias=self.account_alias, case="state_mismatch", cloid=cloid,
                     detail={"resolution": "filled_via_user_fills"},
                 ))
             else:
                 self.dal.update_order_status(cloid, status="cancelled", now_ns=now_ns)
                 drift.append(ReconcileDrift(
-                    ts_ns=now_ns, case="local_ghost", cloid=cloid,
+                    ts_ns=now_ns, account_alias=self.account_alias, case="local_ghost", cloid=cloid,
                 ))
 
         # venue-orphan: on venue with our prefix, not in DB live
@@ -93,7 +97,7 @@ class Reconciler:
                 continue
             orphans.append((cloid, vo.symbol))
             drift.append(ReconcileDrift(
-                ts_ns=now_ns, case="venue_orphan", cloid=cloid,
+                ts_ns=now_ns, account_alias=self.account_alias, case="venue_orphan", cloid=cloid,
                 detail={"symbol": vo.symbol},
             ))
 
@@ -115,7 +119,7 @@ class Reconciler:
                     last_update_ts_ns=now_ns, strategy_id=db_o.strategy_id,
                 ))
                 drift.append(ReconcileDrift(
-                    ts_ns=now_ns, case="state_mismatch", cloid=cloid,
+                    ts_ns=now_ns, account_alias=self.account_alias, case="state_mismatch", cloid=cloid,
                     detail={"hl_price": f"{vo.price}", "db_price": f"{db_o.price}"},
                 ))
 
@@ -129,7 +133,7 @@ class Reconciler:
                 # Position vanished from venue. Likely settled/closed during outage.
                 self.dal.delete_position(qidx)
                 drift.append(ReconcileDrift(
-                    ts_ns=now_ns, case="position_mismatch", question_idx=qidx,
+                    ts_ns=now_ns, account_alias=self.account_alias, case="position_mismatch", question_idx=qidx,
                     detail={"resolution": "deleted_local_position_not_on_venue"},
                 ))
                 continue
@@ -140,7 +144,7 @@ class Reconciler:
                     last_update_ts_ns=now_ns, stop_loss_price=lp.stop_loss_price,
                 ))
                 drift.append(ReconcileDrift(
-                    ts_ns=now_ns, case="position_mismatch", question_idx=qidx,
+                    ts_ns=now_ns, account_alias=self.account_alias, case="position_mismatch", question_idx=qidx,
                     detail={"hl_qty": f"{vp.qty}", "db_qty": f"{lp.qty}"},
                 ))
 
@@ -161,7 +165,7 @@ class Reconciler:
                 # primary key, and collisions would corrupt accounting. Emit
                 # an unattributed drift event so the orphan is visible.
                 drift.append(ReconcileDrift(
-                    ts_ns=now_ns, case="position_mismatch", question_idx=0,
+                    ts_ns=now_ns, account_alias=self.account_alias, case="position_mismatch", question_idx=0,
                     detail={"resolution": "venue_orphan_unattributed",
                             "symbol": sym, "qty": f"{vp.qty}"},
                 ))
@@ -175,7 +179,7 @@ class Reconciler:
                 stop_loss_price=_STOP_DISABLED_SENTINEL,
             ))
             drift.append(ReconcileDrift(
-                ts_ns=now_ns, case="position_mismatch", question_idx=qidx,
+                ts_ns=now_ns, account_alias=self.account_alias, case="position_mismatch", question_idx=qidx,
                 detail={"resolution": "adopted_venue_orphan", "symbol": sym,
                         "qty": f"{vp.qty}", "avg_entry": f"{vp.avg_entry}"},
             ))

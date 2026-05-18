@@ -9,10 +9,10 @@ deploy:
       account_address: ${HL_ACCOUNT_ADDRESS}
       api_secret_key: ${HL_API_SECRET_KEY}
       base_url: https://api.hyperliquid.xyz
-    # v31:
-    #   account_address: ${HL_ACCOUNT_ADDRESS_V31}
-    #   api_secret_key: ${HL_API_SECRET_KEY_V31}
-    #   base_url: https://api.hyperliquid.xyz
+    v31:
+      account_address: ${HL_ACCOUNT_ADDRESS_V31}
+      api_secret_key: ${HL_API_SECRET_KEY_V31}
+      base_url: https://api.hyperliquid.xyz
   alerts:
     telegram:
       bot_token: ${TG_BOT_TOKEN}

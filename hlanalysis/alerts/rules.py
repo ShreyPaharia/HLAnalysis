@@ -50,6 +50,19 @@ class AlertRules:
                 if msg is None:
                     continue
                 key, text = msg
+                # Prefix the Telegram message with the originating account
+                # alias so v1 and v31 are visually distinct on the chat. Cross-
+                # slot events (NewQuestion) carry an empty alias and render
+                # unprefixed — preserves legacy behavior on single-account
+                # deployments.
+                alias = getattr(ev, "account_alias", "") or ""
+                if alias:
+                    text = f"<b>[{_e(alias)}]</b> {text}"
+                # Scope the dedupe key per account so two slots emitting
+                # identically-shaped events (same RiskVeto reason on the same
+                # symbol, etc.) each get their own alert rather than collapsing.
+                if key is not None and alias:
+                    key = f"{alias}|{key}"
                 if key is not None and self._is_deduped(key):
                     continue
                 ok = await self._tg.send(text)
