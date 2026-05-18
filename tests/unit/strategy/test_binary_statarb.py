@@ -122,10 +122,19 @@ def test_exit_when_z_inside_z_exit_band() -> None:
 
 
 def test_time_stop_flatten_near_expiry() -> None:
-    """When tau_s < time_stop_seconds and a position is held, v4 should EXIT."""
-    strat = build_strategy("v4_binary_statarb", _params(time_stop_seconds=600))
+    """When tau_s < time_stop_seconds and a position is held, v4 should EXIT.
+
+    Warmup note: lookback=600, sampling_dt=60 → warmup_needed=10. Feed 12 stable ticks
+    starting at ts=60e9 (sampling gate skips ts=0 since no dt has elapsed from last_sample_ns=0).
+    Ticks at 60e9..660e9 yield 11 samples, clearing the warmup gate.
+    The final evaluate uses now_ns=0 so tau_s=(500e9-0)/1e9=500s < time_stop_seconds=600.
+    No new sample is taken (now_ns=0 < last_sample_ns=660e9) but warmup is already satisfied.
+    """
+    strat = build_strategy("v4_binary_statarb", _params(
+        lookback_seconds=600, sampling_dt_seconds=60, time_stop_seconds=600,
+    ))
     qv = _qv(expiry_ns=500 * 10**9)
-    # Warm up
+    # Warm up: 12 ticks at ts=0..660e9; sampling gate fires for ticks at 60e9..660e9 (11 samples)
     for i in range(12):
         ts = i * 60_000_000_000
         books = {"YES": _book("YES", 0.495, 0.505), "NO": _book("NO", 0.495, 0.505)}
