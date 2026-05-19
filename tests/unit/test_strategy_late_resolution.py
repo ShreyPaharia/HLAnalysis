@@ -795,3 +795,101 @@ def test_size_cap_emits_diagnostic_when_active():
     assert len(cap_diags) == 1
     kv = dict(cap_diags[0].fields)
     assert "dist_pct" in kv and "ask" in kv and "scale_after" in kv
+
+
+# --- 2026-05-19 churn fixes: bid-based gate, bid-notional sanity ---
+
+
+def test_ask_based_gate_still_default_when_use_bid_for_entry_gate_false():
+    """Regression guard: without the new flag, late_resolution should behave
+    exactly as before — gate on ask, accept the stale-quote pattern that
+    burned production today."""
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    # Wide-spread book: ask 0.999 (the "stale" quote), bid 0.55. The legacy
+    # ask-based gate sees ask >= 0.95 → enter. The new bid-based gate would
+    # reject because bid < 0.95.
+    books = {
+        "@30": _ref_book("@30", ask=0.999, bid=0.55, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.06, bid=0.04, ts_ns=now - 100),
+    }
+    s = LateResolutionStrategy(_cfg())  # flag default False
+    d = s.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=None, now_ns=now,
+    )
+    assert d.action is Action.ENTER  # legacy behavior preserved
+
+
+def test_bid_based_gate_rejects_wide_spread_stale_ask():
+    """The key fix: with use_bid_for_entry_gate=True, a wide-spread book
+    where ask is stale-high but bid has caved should NOT trigger an entry.
+    Exactly the regime that drove the 7-cycle churn on #601 today."""
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = {
+        "@30": _ref_book("@30", ask=0.999, bid=0.55, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.06, bid=0.04, ts_ns=now - 100),
+    }
+    s = LateResolutionStrategy(_cfg(use_bid_for_entry_gate=True))
+    d = s.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=None, now_ns=now,
+    )
+    assert d.action is Action.HOLD
+    assert any(diag.message == "no_extreme_leg" for diag in d.diagnostics)
+
+
+def test_bid_based_gate_allows_tight_spread_real_favourite():
+    """Symmetric: when both sides are at the favourite level (a real, deep
+    market consensus), the bid-based gate should still allow entry. The
+    threshold semantics are preserved on tight books — only the stale-ask
+    artefact is filtered."""
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = {
+        # Tight market at the favourite level — bid=0.96, ask=0.97. The
+        # bid-based gate sees bid >= 0.95 → enter.
+        "@30": _ref_book("@30", ask=0.97, bid=0.96, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.04, bid=0.03, ts_ns=now - 100),
+    }
+    s = LateResolutionStrategy(_cfg(use_bid_for_entry_gate=True))
+    d = s.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=None, now_ns=now,
+    )
+    assert d.action is Action.ENTER
+    assert d.intents[0].symbol == "@30"
+
+
+def test_min_bid_notional_blocks_spoof_size_1_bid():
+    """A bid of 0.95 × 1 share passes the numeric bid threshold but is a 95¢
+    stake — clearly not real buying interest. The min_bid_notional_usd gate
+    must reject it."""
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    spoof_book = BookState(
+        symbol="@30", bid_px=0.95, bid_sz=1.0, ask_px=0.97, ask_sz=100.0,
+        last_trade_ts_ns=now - 100, last_l2_ts_ns=now - 100,
+    )
+    books = {
+        "@30": spoof_book,
+        "@31": _ref_book("@31", ask=0.04, bid=0.03, ts_ns=now - 100),
+    }
+    s = LateResolutionStrategy(_cfg(
+        use_bid_for_entry_gate=True, min_bid_notional_usd=10.0,
+    ))
+    d = s.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=None, now_ns=now,
+    )
+    assert d.action is Action.HOLD
+

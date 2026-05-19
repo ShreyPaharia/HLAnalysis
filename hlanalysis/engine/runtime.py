@@ -66,6 +66,8 @@ def build_late_resolution_config(cfg: StrategyConfig) -> LateResolutionConfig:
         size_cap_near_strike_pct=getattr(d, "size_cap_near_strike_pct", 0.0),
         size_cap_max_dist_pct=getattr(d, "size_cap_max_dist_pct", 1.5),
         size_cap_min_ask=getattr(d, "size_cap_min_ask", 0.88),
+        use_bid_for_entry_gate=getattr(d, "use_bid_for_entry_gate", False),
+        min_bid_notional_usd=getattr(d, "min_bid_notional_usd", 0.0),
     )
 
 
@@ -101,6 +103,8 @@ def build_theta_harvester_config(cfg: StrategyConfig) -> ThetaHarvesterConfig:
         take_profit_price=t.take_profit_price,
         time_stop_seconds=t.time_stop_seconds,
         edge_max=t.edge_max,
+        min_distance_pct=getattr(t, "min_distance_pct", None),
+        min_bid_notional_usd=getattr(t, "min_bid_notional_usd", 0.0),
     )
 
 
@@ -303,6 +307,11 @@ class EngineRuntime:
             cloid_prefix=cloid_prefix,
         )
         strategy = _build_strategy_for_slot(s_cfg)
+        # Gate-decision log sibling of state.db. Operators tail this during
+        # forward-testing to see which gates are firing without combing
+        # through journal heartbeats. State-change-debounced, so file size
+        # stays small (one line per question per transition).
+        gate_log_path = state_db_path.parent / "gate_decisions.jsonl"
         scanner = Scanner(
             strategy=strategy, cfg=s_cfg,
             market_state=self.market_state, dal=dal,
@@ -313,6 +322,7 @@ class EngineRuntime:
             # persisted on the happy path and closed positions are deleted —
             # so without this the cap would never fire.
             pnl_provider=hl.realized_pnl_since,
+            gate_log_path=gate_log_path,
         )
         return AccountSlot(
             cfg=s_cfg, hl_cfg=hl_cfg,

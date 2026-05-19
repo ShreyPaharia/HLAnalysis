@@ -226,6 +226,24 @@ class LateResolutionConfig:
     # Ask ceiling below which the cap kicks in (favorites that are still cheap
     # enough to flip catastrophically).
     size_cap_min_ask: float = 0.88
+    # Entry-gate price source. When True, the favorite-leg filter checks bid
+    # against price_extreme_threshold instead of ask. Sizing and IOC limit
+    # still use ask, so fills happen at-or-below ask as before — only the
+    # *entry signal* changes.
+    #
+    # Why bid: on thin HL HIP-4 books, a stale "sell at $0.999" sign on the
+    # ask can persist for hours (it costs the seller nothing). A stale bid at
+    # the same level is a free option to any seller and gets lifted in
+    # milliseconds. So the bid is a much more reliable indicator that the
+    # market actually values the leg at that level. PM tuning (the 0.85
+    # threshold) was on tight-spread books where bid≈ask, so this change
+    # tightens the gate on HL without affecting the PM backtest.
+    use_bid_for_entry_gate: bool = False
+    # Veto entries when the best-bid notional (bid_px × bid_sz) is below this
+    # USD floor. Catches single-share "spoof" bids that pass a numeric
+    # bid-price threshold but represent no real buying interest. Default 0
+    # disables (legacy behavior); set to ~$10–20 for a meaningful filter.
+    min_bid_notional_usd: float = 0.0
 
 
 class LateResolutionStrategy(Strategy):
@@ -537,17 +555,36 @@ class LateResolutionStrategy(Strategy):
         stale_ns = self.cfg.stale_data_halt_seconds * 1_000_000_000
         best_symbol: str | None = None
         best_book: BookState | None = None
-        best_ask = -1.0
+        best_gate_px = -1.0
+        # On HL HIP-4 the ask quote is structurally unreliable (lonely sellers
+        # leave stale high asks that persist for hours). The bid is harder to
+        # fake — any stale-high bid is a free option that gets lifted in
+        # milliseconds. When `use_bid_for_entry_gate` is set, we gate on bid
+        # and require a non-trivial bid notional. Sizing and IOC limit still
+        # use ask (we still take the ask to enter), so this changes the
+        # *entry signal*, not the *execution price*. PM corpus tunings of
+        # price_extreme_threshold were calibrated on tight-spread books where
+        # bid ≈ ask, so flipping this flag is a net-tighten on HL only.
+        gate_min = self.cfg.price_extreme_threshold
+        gate_max = self.cfg.price_extreme_max
         for sym in eligible:
             b = books.get(sym)
             if b is None or b.ask_px is None or b.bid_px is None:
                 continue
             if now_ns - b.last_l2_ts_ns > stale_ns:
                 continue
-            if not (self.cfg.price_extreme_threshold <= b.ask_px <= self.cfg.price_extreme_max):
+            gate_px = b.bid_px if self.cfg.use_bid_for_entry_gate else b.ask_px
+            if not (gate_min <= gate_px <= gate_max):
                 continue
-            if b.ask_px > best_ask:
-                best_ask = b.ask_px
+            # Bid-notional sanity gate. A bid of 0.85 × 1 share passes a
+            # bid_px filter but is essentially a 85¢ stake — no real buying
+            # interest. We require bid notional ≥ floor; default 0 disables.
+            if self.cfg.min_bid_notional_usd > 0.0:
+                bid_notional = (b.bid_px or 0.0) * (b.bid_sz or 0.0)
+                if bid_notional < self.cfg.min_bid_notional_usd:
+                    continue
+            if gate_px > best_gate_px:
+                best_gate_px = gate_px
                 best_symbol = sym
                 best_book = b
 

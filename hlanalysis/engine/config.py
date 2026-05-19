@@ -62,6 +62,25 @@ class AllowlistEntry(BaseModel):
     size_cap_near_strike_pct: float = 0.0
     size_cap_max_dist_pct: float = 1.5
     size_cap_min_ask: float = 0.88
+    # When True, late_resolution gates entry on bid_px instead of ask_px.
+    # Sizing and IOC limit still use ask. Recommended for HL HIP-4 only —
+    # PM corpus has tight enough spreads that this is a no-op there. See
+    # LateResolutionConfig.use_bid_for_entry_gate.
+    use_bid_for_entry_gate: bool = False
+    # Minimum bid notional (bid_px × bid_sz) in USD for the favourite-leg
+    # filter to accept an entry. Catches single-share spoof bids that pass
+    # a numeric bid_px threshold but represent no real buying interest. 0
+    # disables (legacy behavior); set to ~$10–20 for a meaningful filter.
+    min_bid_notional_usd: float = 0.0
+    # Veto entries when |reference_price − question.strike| / reference_price
+    # is below this fraction. Only meaningful on priceBinary questions.
+    # PM corpus tuning showed v3.1 entries below 0.20% lose -$7.68/entry
+    # across 57 entries; v1's existing min_safety_d filters most of this
+    # zone so the gate is OFF by default for v1. None disables.
+    min_distance_pct: float | None = None
+    # Post-exit cooldown in seconds. Router refuses to enter on a question
+    # for this long after a position close. 0 disables (legacy behavior).
+    entry_cooldown_seconds: int = 0
 
 
 class GlobalRiskConfig(BaseModel):
@@ -96,6 +115,10 @@ class ThetaParams(BaseModel):
     take_profit_price: float | None = None
     time_stop_seconds: int = 0
     edge_max: float | None = None
+    # See ThetaHarvesterConfig.min_distance_pct — None disables.
+    min_distance_pct: float | None = None
+    # See ThetaHarvesterConfig.min_bid_notional_usd — 0 disables.
+    min_bid_notional_usd: float = 0.0
 
 
 class StrategyConfig(BaseModel):
