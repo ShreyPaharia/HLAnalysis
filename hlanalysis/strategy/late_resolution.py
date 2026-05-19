@@ -370,6 +370,7 @@ class LateResolutionStrategy(Strategy):
                     cloid=f"hla-{uuid.uuid4()}",
                     time_in_force="ioc",
                     reduce_only=True,
+                    exit_reason="exit_bid_below_floor",
                 )
                 return Decision(
                     action=Action.EXIT,
@@ -424,6 +425,7 @@ class LateResolutionStrategy(Strategy):
                                 cloid=f"hla-{uuid.uuid4()}",
                                 time_in_force="ioc",
                                 reduce_only=True,
+                                exit_reason="exit_safety_d_5m",
                             )
                             return Decision(
                                 action=Action.EXIT,
@@ -474,6 +476,7 @@ class LateResolutionStrategy(Strategy):
                                 cloid=f"hla-{uuid.uuid4()}",
                                 time_in_force="ioc",
                                 reduce_only=True,
+                                exit_reason="exit_safety_d",
                             )
                             return Decision(
                                 action=Action.EXIT,
@@ -497,6 +500,7 @@ class LateResolutionStrategy(Strategy):
                         cloid=f"hla-{uuid.uuid4()}",
                         time_in_force="ioc",
                         reduce_only=True,
+                        exit_reason="exit_stop_loss",
                     )
                     return Decision(
                         action=Action.EXIT,

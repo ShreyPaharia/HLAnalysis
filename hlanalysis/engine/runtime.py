@@ -308,6 +308,11 @@ class EngineRuntime:
             market_state=self.market_state, dal=dal,
             kill_switch_path=kill_switch_path,
             last_reconcile_ns=0,
+            # Daily-loss cap reads from HL (venue truth) rather than the local
+            # DB. The DB's realized_pnl is structurally near-zero — fills aren't
+            # persisted on the happy path and closed positions are deleted —
+            # so without this the cap would never fire.
+            pnl_provider=hl.realized_pnl_since,
         )
         return AccountSlot(
             cfg=s_cfg, hl_cfg=hl_cfg,
@@ -507,6 +512,7 @@ class EngineRuntime:
                             size=abs(sp.qty), limit_price=b.bid_px,
                             cloid=f"{slot.cloid_prefix}{uuid.uuid4().hex}",
                             time_in_force="ioc", reduce_only=True,
+                            exit_reason="stop_loss",
                         )
                         from .risk import RiskInputs
                         inp = RiskInputs(
@@ -522,12 +528,22 @@ class EngineRuntime:
                             inputs=inp, now_ns=now,
                         )
 
-                # Daily loss — per slot (each slot's DAL covers only its fills/positions)
+                # Daily loss — per slot. Read from HL (venue truth) instead of
+                # the local DB; same reasoning as Scanner._pnl_provider — the
+                # local fills table is empty on the happy path and closed
+                # Positions are deleted, so the DB-side calculation is
+                # structurally near-zero and the cap would never fire. On HL
+                # outage, fall back to the DAL so the engine doesn't halt
+                # itself on a transient network blip.
                 from datetime import datetime, timezone
                 midnight_ns = int(datetime.fromtimestamp(now / 1e9, tz=timezone.utc).replace(
                     hour=0, minute=0, second=0, microsecond=0,
                 ).timestamp() * 1_000_000_000)
-                pnl = slot.dal.realized_pnl_since(midnight_ns)
+                try:
+                    pnl = slot.hl.realized_pnl_since(midnight_ns)
+                except Exception:
+                    logger.warning("hl.realized_pnl_since failed alias={}; falling back to DAL", slot.alias)
+                    pnl = slot.dal.realized_pnl_since(midnight_ns)
                 if pnl < -slot.cfg.global_.daily_loss_cap_usd:
                     await self.bus.publish(DailyLossHalt(
                         ts_ns=now, account_alias=slot.alias,

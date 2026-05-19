@@ -10,7 +10,7 @@ from .event_bus import EventBus
 from .hl_client import HLClient, PlaceRequest
 from .risk import RiskGate, RiskInputs
 from .risk_events import Entry, Exit, OrderRejected, RiskVeto
-from .state import OpenOrder, Position, StateDAL
+from .state import Fill, OpenOrder, Position, StateDAL
 from ..strategy.render import outcome_description, question_description
 from ..strategy.types import Action, Decision, OrderIntent, QuestionView
 
@@ -189,6 +189,20 @@ class Router:
         o_desc = outcome_description(question, intent.symbol) if question else ""
         existing = self.dal.get_position(intent.question_idx)
         signed = size if intent.side == "buy" else -size
+        # Realized PnL on this fill (0 on opens, signed on reduces). Computed
+        # here so we can record it on the Fill row and the Exit event with one
+        # source of truth. For reduce/close legs, PnL = (close_px − avg_entry) × |closed_qty|
+        # with sign matching the direction of the position being reduced.
+        realized_this_fill = 0.0
+        if existing is not None and (
+            (existing.qty > 0 and intent.side == "sell")
+            or (existing.qty < 0 and intent.side == "buy")
+        ):
+            closed_qty = min(size, abs(existing.qty))
+            if existing.qty > 0:
+                realized_this_fill = (price - existing.avg_entry) * closed_qty
+            else:
+                realized_this_fill = (existing.avg_entry - price) * closed_qty
         if existing is None:
             self.dal.upsert_position(Position(
                 question_idx=intent.question_idx, symbol=intent.symbol,
@@ -211,21 +225,48 @@ class Router:
                 # Closed
                 realized = (price - existing.avg_entry) * existing.qty
                 self.dal.delete_position(intent.question_idx)
+                # Use the strategy-supplied exit_reason when present so the
+                # Telegram alert distinguishes safety_d / edge / time_stop /
+                # true stop_loss exits. Legacy fallback: reduce_only without a
+                # reason was historically tagged "stop_loss" — preserved for
+                # callers that haven't been updated.
+                exit_reason = intent.exit_reason or (
+                    "stop_loss" if intent.reduce_only else "manual"
+                )
                 await self.bus.publish(Exit(
                     ts_ns=now_ns, account_alias=self.account_alias,
                     question_idx=intent.question_idx,
                     symbol=intent.symbol, qty=existing.qty,
                     realized_pnl=realized + existing.realized_pnl,
-                    reason="stop_loss" if intent.reduce_only else "manual",
+                    reason=exit_reason,
                     question_description=q_desc, outcome_description=o_desc,
                 ))
             else:
+                # Reduce-only partial or add-on. Carry realized PnL forward on
+                # the position so later closes don't lose this partial's PnL.
                 avg = (existing.qty * existing.avg_entry + signed * price) / new_qty if new_qty else 0.0
                 self.dal.upsert_position(Position(
                     question_idx=intent.question_idx, symbol=intent.symbol,
-                    qty=new_qty, avg_entry=avg, realized_pnl=existing.realized_pnl,
+                    qty=new_qty, avg_entry=avg,
+                    realized_pnl=existing.realized_pnl + realized_this_fill,
                     last_update_ts_ns=now_ns, stop_loss_price=existing.stop_loss_price,
                 ))
+        # Persist a Fill row regardless of branch so the local DB has a
+        # coherent trade history for diagnostics. fill_id is derived from the
+        # cloid + timestamp to be unique per actual venue fill even when one
+        # cloid produces multiple partial fills.
+        self.dal.append_fill(Fill(
+            fill_id=f"{intent.cloid}-{now_ns}",
+            cloid=intent.cloid,
+            question_idx=intent.question_idx,
+            symbol=intent.symbol,
+            side=intent.side,
+            price=price,
+            size=size,
+            fee=0.0,  # HL fee is reported on user_fills; not surfaced in OrderAck
+            ts_ns=now_ns,
+            closed_pnl=realized_this_fill,
+        ))
 
     async def _close_settled(self, question_idx: int, *, now_ns: int, question: QuestionView | None = None) -> None:
         p = self.dal.get_position(question_idx)

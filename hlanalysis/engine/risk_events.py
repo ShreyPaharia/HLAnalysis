@@ -77,7 +77,10 @@ class Exit(_Base):
     symbol: str
     qty: float
     realized_pnl: float
-    reason: Literal["settlement", "stop_loss", "manual"]
+    # Free-form reason from the strategy (exit_safety_d, exit_edge, exit_time_stop,
+    # exit_stop_loss, settlement, manual, ...). Telegram renderer maps known
+    # prefixes to emojis and falls back to a generic close icon.
+    reason: str
     question_description: str = ""
     outcome_description: str = ""
 

@@ -133,7 +133,22 @@ class AlertRules:
                 # Dedup by cloid so reconciler-driven double-Entry collapses.
                 return f"entry:{ev.cloid}", "\n".join(lines)
             case Exit():
-                emoji = {"settlement": "🏁", "stop_loss": "🛑", "manual": "↩️"}.get(ev.reason, "🔚")
+                # Map known reasons to emojis. Fall back to a generic close icon
+                # for strategy-specific reasons (exit_safety_d_5m, exit_edge,
+                # exit_time_stop, exit_take_profit, ...). Keeps Telegram
+                # parseable even as strategies grow new exit branches.
+                _EXIT_EMOJI = {
+                    "settlement": "🏁",
+                    "stop_loss": "🛑",
+                    "exit_stop_loss": "🛑",
+                    "manual": "↩️",
+                    "exit_safety_d": "⚠️",
+                    "exit_safety_d_5m": "⚠️",
+                    "exit_edge": "📉",
+                    "exit_time_stop": "⏱️",
+                    "exit_take_profit": "💰",
+                }
+                emoji = _EXIT_EMOJI.get(ev.reason, "🔚")
                 pnl_sign = "+" if ev.realized_pnl >= 0 else ""
                 lines = [f"{emoji} <b>EXIT</b> ({_e(ev.reason)})"]
                 if ev.question_description:

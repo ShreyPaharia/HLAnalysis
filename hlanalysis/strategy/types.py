@@ -30,6 +30,11 @@ class OrderIntent:
     cloid: str  # client order id, "hla-..." prefix
     time_in_force: Literal["ioc", "gtc"] = "ioc"
     reduce_only: bool = False
+    # Strategy-supplied exit reason. Plumbed to Exit.reason on close so Telegram
+    # alerts distinguish safety_d / edge / time_stop / true stop_loss exits.
+    # Empty on entries; router falls back to legacy "stop_loss" if reduce_only
+    # but no reason was supplied (for older strategies).
+    exit_reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)

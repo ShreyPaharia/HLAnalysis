@@ -428,6 +428,7 @@ class ThetaHarvesterStrategy(Strategy):
             cloid=f"hla-{uuid.uuid4()}",
             time_in_force="ioc",
             reduce_only=True,
+            exit_reason=reason,
         )
         return Decision(
             action=Action.EXIT, intents=(intent,),
