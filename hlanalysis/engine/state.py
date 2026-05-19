@@ -41,6 +41,10 @@ class Fill(SQLModel, table=True):
     size: float
     fee: float
     ts_ns: int
+    # HL-reported realized PnL on this fill (0 on opens, signed on reduces).
+    # Populated by Router._book_fill from the venue ack so the local DB stays
+    # diagnosable even though the daily-loss gate now reads from HL directly.
+    closed_pnl: float = 0.0
 
 
 class Session_(SQLModel, table=True):
@@ -220,12 +224,23 @@ class StateDAL:
     # ---- realized pnl helpers ----
 
     def realized_pnl_since(self, since_ts_ns: int) -> float:
+        """Local-DB realized PnL. Diagnostic fallback only — the live daily-loss
+        gate now reads from HL (HLClient.realized_pnl_since) because the local
+        fill table was historically empty on the happy path and closed
+        positions were deleted before their realized PnL could be summed here.
+
+        With the 0003 migration, Router._book_fill writes a Fill row on every
+        venue fill (including closed_pnl on reduces), so this calc is finally
+        meaningful for post-hoc analysis. We sum (closed_pnl - fee) across
+        today's fills plus any residual realized_pnl on still-open positions
+        (intra-cycle partial closes).
+        """
         with _Session(self._engine) as s:
             stmt = select(Fill).where(Fill.ts_ns >= since_ts_ns)
             fills = list(s.exec(stmt).all())
-        # Phase 1 uses fill.fee as the only material PnL component pre-settlement;
-        # closed-position PnL is realized into Position.realized_pnl on close, and
-        # we sum that here too.
         with _Session(self._engine) as s:
             positions = list(s.exec(select(Position)).all())
-        return -sum(f.fee for f in fills) + sum(p.realized_pnl for p in positions)
+        return (
+            sum(getattr(f, "closed_pnl", 0.0) - f.fee for f in fills)
+            + sum(p.realized_pnl for p in positions)
+        )
