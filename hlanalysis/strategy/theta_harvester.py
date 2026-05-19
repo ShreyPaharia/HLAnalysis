@@ -150,6 +150,19 @@ class ThetaHarvesterConfig:
     # Filtering edge >= 0.20 lifted PnL +37% and cut max DD -84% on PM.
     # None disables the filter (preserves v3 baseline behavior).
     edge_max: Optional[float] = None
+    # Near-strike hover veto. When set, entries with
+    # |reference_price − question.strike| / reference_price below this
+    # fraction are vetoed. Only meaningful on priceBinary (the strike concept
+    # is well-defined). PM corpus evidence: entries below 0.20% lose
+    # -$7.68/entry across 57 entries (~2.7% of all v3.1 entries); the
+    # 0.20–0.50% band immediately above is the *best* band (+$16.10/entry).
+    # The sharp discontinuity concentrates v3.1's losses. None disables.
+    min_distance_pct: Optional[float] = None
+    # Bid-notional sanity gate. When > 0, entries where the chosen leg's
+    # bid_px × bid_sz is below this USD floor are vetoed. Catches single-
+    # share spoof bids that pass numeric thresholds with no real interest.
+    # 0 disables (legacy behavior).
+    min_bid_notional_usd: float = 0.0
 
 
 class ThetaHarvesterStrategy(Strategy):
@@ -235,6 +248,29 @@ class ThetaHarvesterStrategy(Strategy):
                 Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tau_s:.0f}"),)),
             ))
 
+        # Near-strike hover veto. PM corpus shows entries below 0.20% lose
+        # -$7.68/entry on average across 57 entries, while the 0.20-0.50%
+        # band immediately above is the *best* band (+$16.10/entry). The
+        # sharp discontinuity is consistent: at this distance the implied
+        # probability is too close to 50/50 for the model's edge claim to
+        # survive a coin-flip move. We compute the gate from priceBinary's
+        # strike only — buckets have multiple boundaries and the "near a
+        # bucket boundary" check would need a different formulation.
+        if (
+            self.cfg.min_distance_pct is not None
+            and self.cfg.min_distance_pct > 0.0
+            and question.klass == "priceBinary"
+            and reference_price > 0
+            and question.strike > 0
+        ):
+            dist_pct = abs(reference_price - question.strike) / reference_price
+            if dist_pct < self.cfg.min_distance_pct:
+                return Decision(action=Action.HOLD, diagnostics=(
+                    Diagnostic("info", "near_strike_hover",
+                               (("dist_pct", f"{dist_pct:.5f}"),
+                                ("min_dist_pct", f"{self.cfg.min_distance_pct:.5f}"))),
+                ))
+
         # Determine candidate legs. For binaries we keep the historical
         # (yes_symbol, no_symbol) ordering so behavior is bit-for-bit unchanged
         # and existing tests stay green. For buckets we iterate leg_symbols
@@ -288,6 +324,20 @@ class ThetaHarvesterStrategy(Strategy):
             per_leg = [t for t in per_leg if _mid(t[3]) >= self.cfg.favorite_threshold]
             if not per_leg:
                 return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_favorite"),))
+
+        # Bid-notional sanity gate. A leg with bid_px × bid_sz below the
+        # configured floor probably has only spoof / penny-stake buying
+        # interest — passing the mid threshold doesn't mean the price is real.
+        # 0 disables.
+        if self.cfg.min_bid_notional_usd > 0.0:
+            def _bid_ntl(b: BookState) -> float:
+                return (b.bid_px or 0.0) * (b.bid_sz or 0.0)
+            per_leg = [t for t in per_leg if _bid_ntl(t[3]) >= self.cfg.min_bid_notional_usd]
+            if not per_leg:
+                return Decision(action=Action.HOLD, diagnostics=(
+                    Diagnostic("info", "bid_notional_too_thin",
+                               (("min_usd", f"{self.cfg.min_bid_notional_usd:.2f}"),)),
+                ))
 
         # Pick the leg with the highest edge.
         chosen_sym, chosen_p, chosen_edge, chosen_book = max(per_leg, key=lambda t: t[2])
@@ -460,5 +510,11 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         take_profit_price=(float(params["take_profit_price"]) if params.get("take_profit_price") is not None else None),
         time_stop_seconds=int(params.get("time_stop_seconds", 0)),
         edge_max=(float(params["edge_max"]) if params.get("edge_max") is not None else None),
+        min_distance_pct=(
+            float(params["min_distance_pct"])
+            if params.get("min_distance_pct") is not None
+            else None
+        ),
+        min_bid_notional_usd=float(params.get("min_bid_notional_usd", 0.0)),
     )
     return ThetaHarvesterStrategy(cfg)

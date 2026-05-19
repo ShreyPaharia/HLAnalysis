@@ -379,3 +379,93 @@ def test_bucket_holds_when_no_leg_passes_favorite_gate() -> None:
     )
     assert decision.action == Action.HOLD
     assert "no_favorite" in [d.message for d in decision.diagnostics]
+
+
+# --- 2026-05-19 fixes: near-strike hover veto, bid-notional sanity ---
+
+
+def test_min_distance_pct_vetoes_entries_too_close_to_strike() -> None:
+    """PM corpus evidence: v3.1 entries within 0.20% of strike lose
+    -$7.68/entry on average across 57 entries. The 0.20-0.50% band is the
+    *best* band. With min_distance_pct=0.002, an entry attempt at 0.10%
+    distance must HOLD, not ENTER, with the dist_pct in the diagnostic."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        min_distance_pct=0.002,  # 0.20%
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    # Reference price 100,100 is exactly 0.10% above strike — below the gate.
+    ref = 100_100.0
+    books = {"YES": _book("YES", bid=0.50, ask=0.51), "NO": _book("NO", bid=0.49, ask=0.50)}
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=ref, recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    assert decision.action == Action.HOLD
+    assert any(d.message == "near_strike_hover" for d in decision.diagnostics)
+
+
+def test_min_distance_pct_allows_entries_beyond_threshold() -> None:
+    """Symmetric: at 0.30% distance (just above the gate), v3.1 should still
+    evaluate the entry through the normal edge / favourite path. We don't
+    assert ENTER here (depends on σ × τ), we just assert the near-strike
+    diagnostic is NOT in the result — i.e. the gate passed."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        min_distance_pct=0.002,
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    ref = 100_300.0  # 0.30% above strike — clears 0.20% gate
+    books = {"YES": _book("YES", bid=0.49, ask=0.50), "NO": _book("NO", bid=0.49, ask=0.50)}
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=ref, recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    assert not any(d.message == "near_strike_hover" for d in decision.diagnostics)
+
+
+def test_min_distance_pct_none_disables_gate() -> None:
+    """min_distance_pct=None preserves v3 baseline behavior — no near-strike
+    veto. Backstop against an accidental tightening from a default change."""
+    strat = build_strategy("v3_theta_harvester", _params())  # default None
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    ref = 100_050.0  # 0.05% — would be vetoed if gate were active
+    books = {"YES": _book("YES", bid=0.50, ask=0.51), "NO": _book("NO", bid=0.49, ask=0.50)}
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=ref, recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    assert not any(d.message == "near_strike_hover" for d in decision.diagnostics)
+
+
+def test_min_bid_notional_filters_spoof_bids() -> None:
+    """A leg quoting bid=0.95×1 share has $0.95 of buying interest — a numeric
+    threshold pass but operationally meaningless. The bid-notional gate must
+    HOLD; otherwise we'd happily pay 0.50 ask for a leg with no real bidder."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        favorite_threshold=0.5,
+        min_bid_notional_usd=10.0,
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    # Both legs pass favorite_threshold=0.5; YES has tiny bid size.
+    yes = BookState(
+        symbol="YES", bid_px=0.95, bid_sz=1.0, ask_px=0.50, ask_sz=100.0,
+        last_trade_ts_ns=0, last_l2_ts_ns=0,
+    )
+    no_book = BookState(
+        symbol="NO", bid_px=0.95, bid_sz=1.0, ask_px=0.50, ask_sz=100.0,
+        last_trade_ts_ns=0, last_l2_ts_ns=0,
+    )
+    books = {"YES": yes, "NO": no_book}
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=120_000.0, recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    assert decision.action == Action.HOLD
+    assert any(d.message == "bid_notional_too_thin" for d in decision.diagnostics)
