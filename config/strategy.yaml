@@ -33,7 +33,11 @@ strategies:
         tte_min_seconds: 0
         tte_max_seconds: 7200
         price_extreme_threshold: 0.85
-        price_extreme_max: 0.999          # HL HIP-4 favorites trade 0.98-0.9999; 0.97 cap blocked every trade live
+        # 2026-05-19 edge-and-tuning memo P2: tighten upper bound from 0.999 → 0.99.
+        # The 0.001 band contributes zero PnL after the [0,1] fill clamp but is
+        # exactly where stale-high asks live. HL backtest unchanged (no entries
+        # in [0.99, 0.999] in 13-day corpus); strictly defensive.
+        price_extreme_max: 0.99
         min_safety_d: 1.0
         vol_lookback_seconds: 3600
         exit_safety_d: 1.0
@@ -55,7 +59,11 @@ strategies:
         # because stale-high-bids get arbed in ms while stale-high-asks
         # persist. Sizing and IOC limit still use ask; only the gate moves.
         use_bid_for_entry_gate: true
-        min_bid_notional_usd: 10.0
+        # 2026-05-19 edge-and-tuning memo P1: raise from 10 → 25.
+        # HL microstructure profile (3.83M ticks, §3 of memo): only 1.4% of v1
+        # entry-gate ticks have bid notional <$10; $25 catches ~18% of thin-book
+        # ticks. PM bid notionals are routinely $thousands → no PM impact.
+        min_bid_notional_usd: 25.0
         # 60s cooldown after exit on the same question_idx — would have
         # prevented every churn cycle observed today regardless of which
         # other gate was misfiring.
@@ -85,7 +93,7 @@ strategies:
         vol_max: 100
         # See priceBinary entry above for rationale on these three.
         use_bid_for_entry_gate: true
-        min_bid_notional_usd: 10.0
+        min_bid_notional_usd: 25.0
         entry_cooldown_seconds: 60
       # Add more class entries as new question classes are approved for trading
 
@@ -146,7 +154,15 @@ strategies:
         max_position_usd: 100             # tightened from 200 for 48h forward-test after 2026-05-19 churn
         stop_loss_pct: null              # theta_harvester drives exits off edge, not stop-loss
         tte_min_seconds: 0
-        tte_max_seconds: 86400           # full 24h HIP-4 expiry window
+        # 2026-05-19 edge-and-tuning memo P3: shorten from 86400 → 14400 (4h).
+        # Long-TTE entries (4-12h band) are v3.1's biggest loss class on HL —
+        # drift-through-strike during the multi-hour hold (Q1000020/25/30 in the
+        # 13-day corpus). Restricting to last 4h: HL PnL -$5.98 → +$36.89,
+        # max DD $94 → $19 (validated 2026-05-19, run v3.1-hl-prod-tte4h).
+        # PM tuning (separate JSON configs under data/sim/configs/) keeps 86400;
+        # this is an HL-only override accepting PM hypothetical degradation
+        # because PM is a tuning proxy, not a live venue.
+        tte_max_seconds: 14400
         price_extreme_threshold: 0.0     # theta_harvester enters off edge, not extreme price
         price_extreme_max: 1.0
         distance_from_strike_usd_min: 0
@@ -173,7 +189,7 @@ strategies:
       max_position_usd: 100
       stop_loss_pct: null
       tte_min_seconds: 0
-      tte_max_seconds: 86400
+      tte_max_seconds: 14400              # mirror priceBinary allowlist (P3) — engine reads ThetaHarvesterConfig.tte_max from defaults
       price_extreme_threshold: 0.0
       price_extreme_max: 1.0
       distance_from_strike_usd_min: 0
