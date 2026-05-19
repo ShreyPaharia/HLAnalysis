@@ -92,6 +92,12 @@ class GlobalRiskConfig(BaseModel):
     min_recent_volume_usd: float
     stale_data_halt_seconds: int
     reconcile_interval_seconds: int
+    # Hour-of-day in UTC when the "daily" PnL accounting window resets.
+    # Default 0 = UTC midnight (legacy). Set to 6 to align with HL HIP-4
+    # binary settlement (markets resolve at 06:00 UTC = 11:30 IST). Aligning
+    # the window with settlement means losses from a market that just
+    # settled don't carry into the next market cycle's cap.
+    daily_window_start_hour_utc: int = 0
 
 
 class ThetaParams(BaseModel):

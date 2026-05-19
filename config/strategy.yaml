@@ -122,6 +122,10 @@ strategies:
       min_recent_volume_usd: 100        # HL HIP-4 binaries are inherently thin; 1000 vetoed every trade
       stale_data_halt_seconds: 30       # HIP-4 books update on bursts not steady streams; 5s vetoed every trade
       reconcile_interval_seconds: 60
+      # Align the daily PnL window with HL HIP-4 binary settlement
+      # (06:00 UTC = 11:30 IST). Losses on a market that just settled
+      # don't carry into the next cycle's cap.
+      daily_window_start_hour_utc: 6
 
   # --- v3.1 theta_harvester ---
   # Live shadow alongside v1. Backtest on HL HIP-4 corpus (2026-05-06 → 18):
@@ -184,6 +188,8 @@ strategies:
       min_recent_volume_usd: 100
       stale_data_halt_seconds: 30
       reconcile_interval_seconds: 60
+      # Same rationale as v1 — settlement-aligned window.
+      daily_window_start_hour_utc: 6
 
     theta:
       vol_lookback_seconds: 3600

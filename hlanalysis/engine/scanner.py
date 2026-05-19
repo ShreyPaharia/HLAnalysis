@@ -77,9 +77,13 @@ class Scanner:
         ]
         live_orders = self.dal.live_orders()
         live_notional = sum(o.price * o.size for o in live_orders)
-        # Daily loss: realized PnL since UTC midnight of `now_ns`. Prefer the
-        # injected provider (HL truth) over the local DB; see _pnl_provider doc.
-        midnight_ns = self._utc_midnight_ns(now_ns)
+        # Daily loss: realized PnL since the configured daily window start
+        # (default UTC midnight, set to 06:00 UTC to align with HL HIP-4
+        # binary settlement). Prefer the injected provider (HL truth) over
+        # the local DB; see _pnl_provider doc.
+        midnight_ns = self._daily_window_start_ns(
+            now_ns, hour=self.cfg.global_.daily_window_start_hour_utc,
+        )
         if self._pnl_provider is not None:
             try:
                 realized_today = self._pnl_provider(midnight_ns)
@@ -237,8 +241,23 @@ class Scanner:
 
     @staticmethod
     def _utc_midnight_ns(now_ns: int) -> int:
-        from datetime import datetime, timezone
-        dt = datetime.fromtimestamp(now_ns / 1e9, tz=timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        return int(dt.timestamp() * 1_000_000_000)
+        """Backwards-compatible alias used by older callers / tests; equivalent
+        to `_daily_window_start_ns(now_ns, hour=0)`. New callers should pass an
+        explicit hour from GlobalRiskConfig.daily_window_start_hour_utc."""
+        return Scanner._daily_window_start_ns(now_ns, hour=0)
+
+    @staticmethod
+    def _daily_window_start_ns(now_ns: int, *, hour: int) -> int:
+        """Most-recent timestamp at HH:00:00 UTC at-or-before `now_ns`.
+
+        If `now_ns` is already past today's HH:00 UTC, returns today's HH:00.
+        Otherwise rolls back to yesterday's HH:00. This is the cutoff the
+        daily-loss gate uses to query HL fills with — it must be a stable
+        boundary so the same fill never appears in two consecutive windows.
+        """
+        from datetime import datetime, timezone, timedelta
+        dt = datetime.fromtimestamp(now_ns / 1e9, tz=timezone.utc)
+        boundary = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if dt < boundary:
+            boundary = boundary - timedelta(days=1)
+        return int(boundary.timestamp() * 1_000_000_000)

@@ -545,15 +545,19 @@ class EngineRuntime:
                 # structurally near-zero and the cap would never fire. On HL
                 # outage, fall back to the DAL so the engine doesn't halt
                 # itself on a transient network blip.
-                from datetime import datetime, timezone
-                midnight_ns = int(datetime.fromtimestamp(now / 1e9, tz=timezone.utc).replace(
-                    hour=0, minute=0, second=0, microsecond=0,
-                ).timestamp() * 1_000_000_000)
+                #
+                # The window cutoff is `daily_window_start_hour_utc` (default
+                # 0 = UTC midnight; set to 6 to align with HL HIP-4 binary
+                # settlement at 06:00 UTC / 11:30 IST so the cap resets in
+                # lockstep with the market cycle).
+                window_start_ns = Scanner._daily_window_start_ns(
+                    now, hour=slot.cfg.global_.daily_window_start_hour_utc,
+                )
                 try:
-                    pnl = slot.hl.realized_pnl_since(midnight_ns)
+                    pnl = slot.hl.realized_pnl_since(window_start_ns)
                 except Exception:
                     logger.warning("hl.realized_pnl_since failed alias={}; falling back to DAL", slot.alias)
-                    pnl = slot.dal.realized_pnl_since(midnight_ns)
+                    pnl = slot.dal.realized_pnl_since(window_start_ns)
                 if pnl < -slot.cfg.global_.daily_loss_cap_usd:
                     await self.bus.publish(DailyLossHalt(
                         ts_ns=now, account_alias=slot.alias,

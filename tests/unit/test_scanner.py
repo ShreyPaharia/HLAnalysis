@@ -116,3 +116,49 @@ def test_scanner_skips_blocklisted_question(tmp_path):
     decisions = scanner.scan(now_ns=now)
     enters = [d for d in decisions if d.decision.action is Action.ENTER]
     assert enters == []
+
+
+# --- Daily PnL-window boundary (06:00 UTC for HL HIP-4) ---
+
+from hlanalysis.engine.scanner import Scanner as _Scanner
+import datetime as _dt
+
+
+def test_daily_window_start_at_midnight_utc_is_today_when_after_midnight():
+    # 2026-05-19 12:34:56 UTC → window started at 2026-05-19 00:00:00 UTC.
+    now_dt = _dt.datetime(2026, 5, 19, 12, 34, 56, tzinfo=_dt.timezone.utc)
+    now_ns = int(now_dt.timestamp() * 1_000_000_000)
+    start_ns = _Scanner._daily_window_start_ns(now_ns, hour=0)
+    expected = _dt.datetime(2026, 5, 19, 0, 0, 0, tzinfo=_dt.timezone.utc)
+    assert start_ns == int(expected.timestamp() * 1_000_000_000)
+
+
+def test_daily_window_start_at_06_utc_rolls_back_when_before_boundary():
+    # 2026-05-19 03:00:00 UTC with hour=6 → window started at 2026-05-18 06:00:00 UTC,
+    # not at 2026-05-19 06:00:00 UTC (which is in the FUTURE relative to now).
+    now_dt = _dt.datetime(2026, 5, 19, 3, 0, 0, tzinfo=_dt.timezone.utc)
+    now_ns = int(now_dt.timestamp() * 1_000_000_000)
+    start_ns = _Scanner._daily_window_start_ns(now_ns, hour=6)
+    expected = _dt.datetime(2026, 5, 18, 6, 0, 0, tzinfo=_dt.timezone.utc)
+    assert start_ns == int(expected.timestamp() * 1_000_000_000)
+
+
+def test_daily_window_start_at_06_utc_uses_today_when_past_boundary():
+    # 2026-05-19 07:00:00 UTC with hour=6 → window started at 2026-05-19 06:00:00 UTC.
+    # The HIP-4 settlement happened at 06:00:00–06:00:06 today; PnL from
+    # earlier 24h closes is now in the previous window.
+    now_dt = _dt.datetime(2026, 5, 19, 7, 0, 0, tzinfo=_dt.timezone.utc)
+    now_ns = int(now_dt.timestamp() * 1_000_000_000)
+    start_ns = _Scanner._daily_window_start_ns(now_ns, hour=6)
+    expected = _dt.datetime(2026, 5, 19, 6, 0, 0, tzinfo=_dt.timezone.utc)
+    assert start_ns == int(expected.timestamp() * 1_000_000_000)
+
+
+def test_legacy_utc_midnight_helper_still_works():
+    # Backward-compatibility: existing callers (tests, older code) that call
+    # _utc_midnight_ns(now) must still get the legacy UTC-midnight behavior.
+    now_dt = _dt.datetime(2026, 5, 19, 12, 34, 56, tzinfo=_dt.timezone.utc)
+    now_ns = int(now_dt.timestamp() * 1_000_000_000)
+    legacy = _Scanner._utc_midnight_ns(now_ns)
+    new = _Scanner._daily_window_start_ns(now_ns, hour=0)
+    assert legacy == new
