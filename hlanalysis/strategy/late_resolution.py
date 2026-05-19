@@ -765,5 +765,7 @@ def build_v1_late_resolution(params: dict) -> LateResolutionStrategy:
         size_cap_near_strike_pct=float(params.get("size_cap_near_strike_pct", 0.0)),
         size_cap_max_dist_pct=float(params.get("size_cap_max_dist_pct", 1.5)),
         size_cap_min_ask=float(params.get("size_cap_min_ask", 0.88)),
+        use_bid_for_entry_gate=bool(params.get("use_bid_for_entry_gate", False)),
+        min_bid_notional_usd=float(params.get("min_bid_notional_usd", 0.0)),
     )
     return LateResolutionStrategy(cfg)
