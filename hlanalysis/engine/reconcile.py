@@ -6,7 +6,9 @@ from dataclasses import dataclass, field
 
 from loguru import logger
 
-from .hl_client import ClearinghouseState, OpenOrderRow, UserFillRow
+from .hl_client import (
+    ClearinghouseState, OpenOrderRow, UserFillRow, _extract_cloid_hex32,
+)
 from .risk_events import ReconcileDrift
 from .state import Fill, OpenOrder, Position, StateDAL
 
@@ -30,10 +32,12 @@ class Reconciler:
       - `fills_lookup(cloid)` → list[UserFillRow] for resolving local-ghost cases
       - `symbol_to_question` → optional mapping from venue symbol to question_idx
         for position-row attribution.
-      - `cloid_prefix` → restricts venue-side prefix matching so a multi-account
-        deployment doesn't adopt orders/orphans from sibling strategies. DB-side
-        isolation comes from the per-account state.db (each account has its own
-        DAL), so `live_orders()` already returns only this account's rows.
+      - `cloid_prefix` → retained for backward compatibility but no longer used
+        for matching. HL normalizes the engine's `hla-vN-<hex32>` cloid to
+        `0x<hex32>`, so the join is now done on the 32-hex tail
+        (via `_extract_cloid_hex32`). Per-account isolation comes from
+        `info.open_orders(account_address)` being address-scoped on the venue
+        side and from the per-account `state.db` on the local side.
     """
 
     def __init__(
@@ -64,13 +68,30 @@ class Reconciler:
         orphans: list[tuple[str, str]] = []
 
         # --- orders ---
-        venue_by_cloid = {r.cloid: r for r in venue_open if r.cloid.startswith(self.cloid_prefix)}
-        local_live = {o.cloid: o for o in self.dal.live_orders()}
+        # Match local↔venue by the 32-hex tail of the cloid. HL normalizes
+        # the engine's `hla-v1-<hex32>` form to `0x<hex32>` on its side, so a
+        # literal prefix filter would exclude every venue order. Normalizing
+        # both sides to the bare hex makes the join work regardless of which
+        # form HL hands back. The per-account isolation that the legacy
+        # cloid_prefix filter was guarding is already provided by
+        # info.open_orders(account_address) being address-scoped (and by the
+        # per-account state.db on the local side).
+        def _hex(c: str) -> str:
+            return _extract_cloid_hex32(c)
+
+        venue_by_hex = {_hex(r.cloid): r for r in venue_open}
+        local_live = list(self.dal.live_orders())
+        local_by_hex = {_hex(o.cloid): o for o in local_live}
 
         # local-ghost: in DB live, not on venue
-        for cloid, db_o in local_live.items():
-            if cloid in venue_by_cloid:
+        for cloid_hex, db_o in local_by_hex.items():
+            if cloid_hex in venue_by_hex:
                 continue
+            # We pass the LOCAL cloid (the internal form) to fills_lookup so
+            # downstream filters that key off the engine's cloid work; HL
+            # returns its normalized form on the rows themselves and the
+            # caller compares hex tails when matching.
+            cloid = db_o.cloid
             fills = self.fills_lookup(cloid)
             if fills:
                 # Mark filled, replay fills into DB
@@ -91,19 +112,22 @@ class Reconciler:
                     ts_ns=now_ns, account_alias=self.account_alias, case="local_ghost", cloid=cloid,
                 ))
 
-        # venue-orphan: on venue with our prefix, not in DB live
-        for cloid, vo in venue_by_cloid.items():
-            if cloid in local_live:
+        # venue-orphan: on venue, not in DB live. Orphan cloid is reported in
+        # the venue's form (HL hex) — that's what cancel() needs to address it.
+        for cloid_hex, vo in venue_by_hex.items():
+            if cloid_hex in local_by_hex:
                 continue
-            orphans.append((cloid, vo.symbol))
+            orphans.append((vo.cloid, vo.symbol))
             drift.append(ReconcileDrift(
-                ts_ns=now_ns, account_alias=self.account_alias, case="venue_orphan", cloid=cloid,
+                ts_ns=now_ns, account_alias=self.account_alias, case="venue_orphan", cloid=vo.cloid,
                 detail={"symbol": vo.symbol},
             ))
 
-        # state-mismatch: both, fields differ — HL wins
-        for cloid, vo in venue_by_cloid.items():
-            db_o = local_live.get(cloid)
+        # state-mismatch: both, fields differ — HL wins. Keyed by hex tail; we
+        # carry the local cloid through to upsert_order so the DB row keeps its
+        # internal identity.
+        for cloid_hex, vo in venue_by_hex.items():
+            db_o = local_by_hex.get(cloid_hex)
             if db_o is None:
                 continue
             if (
@@ -113,13 +137,13 @@ class Reconciler:
                 or db_o.venue_oid != vo.venue_oid
             ):
                 self.dal.upsert_order(OpenOrder(
-                    cloid=cloid, venue_oid=vo.venue_oid, question_idx=db_o.question_idx,
+                    cloid=db_o.cloid, venue_oid=vo.venue_oid, question_idx=db_o.question_idx,
                     symbol=vo.symbol, side=db_o.side, price=vo.price, size=vo.size,
                     status="open", placed_ts_ns=db_o.placed_ts_ns,
                     last_update_ts_ns=now_ns, strategy_id=db_o.strategy_id,
                 ))
                 drift.append(ReconcileDrift(
-                    ts_ns=now_ns, account_alias=self.account_alias, case="state_mismatch", cloid=cloid,
+                    ts_ns=now_ns, account_alias=self.account_alias, case="state_mismatch", cloid=db_o.cloid,
                     detail={"hl_price": f"{vo.price}", "db_price": f"{db_o.price}"},
                 ))
 

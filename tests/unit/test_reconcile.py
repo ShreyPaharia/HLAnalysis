@@ -135,6 +135,55 @@ def test_venue_orphan_position_is_adopted_into_local_db(dal):
     )
 
 
+def test_reconciler_matches_cloid_by_hex_tail_not_prefix(dal):
+    # HL normalizes our `hla-v1-<hex>` cloid to `0x<hex>` on the venue side.
+    # Without the hex-tail normalization in the reconciler, the join misses
+    # every venue order: local rows look like `hla-v1-2626…` while venue rows
+    # come back as `0x2626…`. The two-cloid views below describe the same
+    # order; reconciler must see them as a match (no drift). The shared
+    # venue_oid models the post-place-ack state — both sides agree on HL's oid.
+    HEX = "2626f31a8d1348b5828826a8baef96c8"
+    SHARED_OID = "venue-oid-7"
+    dal.upsert_order(OpenOrder(
+        cloid=f"hla-v1-{HEX}", venue_oid=SHARED_OID, question_idx=42, symbol="@30",
+        side="buy", price=0.95, size=10.0, status="open",
+        placed_ts_ns=1, last_update_ts_ns=1, strategy_id="x",
+    ))
+    venue_open = [OpenOrderRow(cloid=f"0x{HEX}", venue_oid=SHARED_OID, symbol="@30",
+                                side="buy", price=0.95, size=10.0, placed_ts_ns=1)]
+    res = Reconciler(dal, fills_lookup=lambda _: [], cloid_prefix="hla-v1-").run(
+        venue_open=venue_open,
+        venue_state=ClearinghouseState(positions=(), account_value_usd=0),
+        now_ns=2,
+    )
+    # Same order, just different cloid forms — no drift.
+    assert res.drift_events == []
+    assert res.orphans_to_cancel == []
+
+
+def test_reconciler_state_mismatch_preserves_local_cloid_after_hex_match(dal):
+    # A field-level drift on a cross-form cloid pair must update the DB row
+    # using the LOCAL cloid (DB primary key), not the venue's `0x<hex>` form,
+    # otherwise upsert_order would insert a duplicate row.
+    HEX = "deadbeefdeadbeefdeadbeefdeadbeef"
+    SHARED_OID = "venue-oid-8"
+    dal.upsert_order(OpenOrder(
+        cloid=f"hla-v1-{HEX}", venue_oid=SHARED_OID, question_idx=42, symbol="@30",
+        side="buy", price=0.95, size=10.0, status="open",
+        placed_ts_ns=1, last_update_ts_ns=1, strategy_id="x",
+    ))
+    venue_open = [OpenOrderRow(cloid=f"0x{HEX}", venue_oid=SHARED_OID, symbol="@30",
+                                side="buy", price=0.97, size=10.0, placed_ts_ns=1)]
+    Reconciler(dal, fills_lookup=lambda _: [], cloid_prefix="hla-v1-").run(
+        venue_open=venue_open,
+        venue_state=ClearinghouseState(positions=(), account_value_usd=0),
+        now_ns=2,
+    )
+    # The local row was updated in-place — no duplicate row under the 0x form.
+    assert dal.get_order(f"hla-v1-{HEX}").price == 0.97
+    assert dal.get_order(f"0x{HEX}") is None
+
+
 def test_venue_orphan_position_without_mapping_does_not_corrupt_db(dal):
     # If we can't map symbol→question_idx (e.g. the question meta hasn't been
     # ingested yet) we must NOT insert a Position row with a guessed/sentinel
