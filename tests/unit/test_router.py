@@ -204,3 +204,136 @@ async def test_vetoed_decision_publishes_veto_and_does_not_call_place(tmp_path):
     assert dal.get_order("hla-router-1") is None
     ev = await asyncio.wait_for(sub.get(), timeout=0.5)
     assert isinstance(ev, RiskVeto)
+
+
+def _cfg_with_cooldown(seconds: int) -> StrategyConfig:
+    """Return a strategy config whose defaults set entry_cooldown_seconds."""
+    base = _strategy_cfg()
+    new_defaults = base.defaults.model_copy(update={"entry_cooldown_seconds": seconds})
+    return base.model_copy(update={"defaults": new_defaults})
+
+
+@pytest.mark.asyncio
+async def test_post_exit_cooldown_blocks_immediate_reentry(tmp_path):
+    """After a close, ENTER decisions on the same question_idx within the
+    cooldown window must be vetoed with reason=post_exit_cooldown — not the
+    risk gate's normal rejection path. Catches the v1 churn pattern observed
+    on 2026-05-19 where the strategy re-bought 200 shares ~1 second after
+    selling, paying the spread on every cycle."""
+    from hlanalysis.engine.risk_events import Entry, Exit, RiskVeto
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    sub = bus.subscribe()
+    client = HLClient(account_address="0x", api_secret_key="0x",
+                      base_url="x", paper_mode=True)
+    cfg = _cfg_with_cooldown(60)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+
+    # 1) Open position.
+    await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=1_000_000_000)
+    assert isinstance(await asyncio.wait_for(sub.get(), timeout=0.5), Entry)
+
+    # 2) Close it (publishes Exit).
+    exit_intent = OrderIntent(
+        question_idx=42, symbol="@30", side="sell", size=10.0,
+        limit_price=0.95, cloid="hla-router-close", time_in_force="ioc",
+        reduce_only=True, exit_reason="exit_safety_d",
+    )
+    close_ts = 2_000_000_000
+    await router.handle(Decision(action=Action.EXIT, intents=(exit_intent,)),
+                        inputs=_approval_inputs(), now_ns=close_ts)
+    assert isinstance(await asyncio.wait_for(sub.get(), timeout=0.5), Exit)
+
+    # 3) Try to re-enter 5 seconds later — should be vetoed by cooldown.
+    reentry = Decision(
+        action=Action.ENTER,
+        intents=(OrderIntent(
+            question_idx=42, symbol="@30", side="buy", size=10.0,
+            limit_price=0.95, cloid="hla-router-reentry", time_in_force="ioc",
+        ),),
+    )
+    await router.handle(reentry, inputs=_approval_inputs(),
+                        now_ns=close_ts + 5_000_000_000)
+    veto = await asyncio.wait_for(sub.get(), timeout=0.5)
+    assert isinstance(veto, RiskVeto)
+    assert veto.reason == "post_exit_cooldown"
+    # The reentry order must NOT have been persisted.
+    assert dal.get_order("hla-router-reentry") is None
+
+
+@pytest.mark.asyncio
+async def test_post_exit_cooldown_expires_and_allows_reentry(tmp_path):
+    """After the cooldown window has elapsed, ENTER decisions on the same
+    question_idx must proceed through the risk gate as normal."""
+    from hlanalysis.engine.risk_events import Entry, Exit
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    sub = bus.subscribe()
+    client = HLClient(account_address="0x", api_secret_key="0x",
+                      base_url="x", paper_mode=True)
+    cfg = _cfg_with_cooldown(60)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=1_000_000_000)
+    await asyncio.wait_for(sub.get(), timeout=0.5)
+    exit_intent = OrderIntent(
+        question_idx=42, symbol="@30", side="sell", size=10.0,
+        limit_price=0.95, cloid="hla-router-close-2", time_in_force="ioc",
+        reduce_only=True, exit_reason="exit_safety_d",
+    )
+    close_ts = 2_000_000_000
+    await router.handle(Decision(action=Action.EXIT, intents=(exit_intent,)),
+                        inputs=_approval_inputs(), now_ns=close_ts)
+    await asyncio.wait_for(sub.get(), timeout=0.5)  # drain exit
+
+    # 61 seconds later — cooldown expired.
+    reentry = Decision(
+        action=Action.ENTER,
+        intents=(OrderIntent(
+            question_idx=42, symbol="@30", side="buy", size=10.0,
+            limit_price=0.95, cloid="hla-router-reentry-2", time_in_force="ioc",
+        ),),
+    )
+    await router.handle(reentry, inputs=_approval_inputs(),
+                        now_ns=close_ts + 61_000_000_000)
+    # Should have placed and got back an Entry event (paper client fills immediately).
+    ev = await asyncio.wait_for(sub.get(), timeout=0.5)
+    assert isinstance(ev, Entry)
+
+
+@pytest.mark.asyncio
+async def test_post_exit_cooldown_disabled_when_seconds_is_zero(tmp_path):
+    """Default config (entry_cooldown_seconds=0) preserves legacy behavior:
+    re-entry can fire on the very next scan tick. Regression guard so the
+    feature doesn't quietly become mandatory."""
+    from hlanalysis.engine.risk_events import Entry
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    sub = bus.subscribe()
+    client = HLClient(account_address="0x", api_secret_key="0x",
+                      base_url="x", paper_mode=True)
+    cfg = _strategy_cfg()  # default cooldown=0
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=1_000_000_000)
+    await asyncio.wait_for(sub.get(), timeout=0.5)
+    exit_intent = OrderIntent(
+        question_idx=42, symbol="@30", side="sell", size=10.0,
+        limit_price=0.95, cloid="hla-router-close-3", time_in_force="ioc",
+        reduce_only=True, exit_reason="exit_safety_d",
+    )
+    await router.handle(Decision(action=Action.EXIT, intents=(exit_intent,)),
+                        inputs=_approval_inputs(), now_ns=2_000_000_000)
+    await asyncio.wait_for(sub.get(), timeout=0.5)
+    # 1 ns later — should re-enter immediately.
+    reentry = Decision(
+        action=Action.ENTER,
+        intents=(OrderIntent(
+            question_idx=42, symbol="@30", side="buy", size=10.0,
+            limit_price=0.95, cloid="hla-router-reentry-3", time_in_force="ioc",
+        ),),
+    )
+    await router.handle(reentry, inputs=_approval_inputs(), now_ns=2_000_000_001)
+    ev = await asyncio.wait_for(sub.get(), timeout=0.5)
+    assert isinstance(ev, Entry)

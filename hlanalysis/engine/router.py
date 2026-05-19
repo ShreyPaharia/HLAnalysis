@@ -54,6 +54,14 @@ class Router:
         # Legacy single-account default ("hla-") becomes "" — alerts read as
         # cross-slot, matching the pre-multi-account behavior.
         self.account_alias = cloid_prefix.removeprefix("hla-").rstrip("-")
+        # Per-question last-exit timestamp (ns). Populated from _book_fill's
+        # close branch. Used by the post-exit cooldown guard in handle() to
+        # block re-entries on the same question_idx within
+        # `cfg.defaults.entry_cooldown_seconds` after a close. Lives in
+        # process memory only — that's fine because the cooldown is on the
+        # order of a minute; a restart that loses it is the same as "cooldown
+        # already expired", which is the safe direction.
+        self._last_exit_ts: dict[int, int] = {}
 
     def _stamp_cloid(self, intent: OrderIntent) -> OrderIntent:
         """Rewrite a strategy-issued `hla-<uuid>` cloid into `<prefix><uuid_hex>`.
@@ -80,6 +88,35 @@ class Router:
             return
         for intent in decision.intents:
             intent = self._stamp_cloid(intent)
+            # Post-exit cooldown — applies to ENTRIES only (reduce_only exits
+            # are always allowed, otherwise we couldn't close fast on a flip).
+            # Catches v1-style churn where the strategy re-enters at the top
+            # of the book ~1 second after exiting at the bid, paying the
+            # spread on every cycle. Lives in the router because the strategy
+            # doesn't see realized fills; the router does, in _book_fill.
+            cooldown_s = getattr(self.strategy_cfg.defaults, "entry_cooldown_seconds", 0)
+            if (
+                cooldown_s > 0
+                and not intent.reduce_only
+                and decision.action is Action.ENTER
+            ):
+                last_exit = self._last_exit_ts.get(intent.question_idx, 0)
+                elapsed_s = (now_ns - last_exit) / 1e9
+                if last_exit > 0 and elapsed_s < cooldown_s:
+                    await self.bus.publish(RiskVeto(
+                        ts_ns=now_ns, account_alias=self.account_alias,
+                        reason="post_exit_cooldown",
+                        question_idx=intent.question_idx,
+                        detail={
+                            "cooldown_s": f"{cooldown_s}",
+                            "elapsed_s": f"{elapsed_s:.1f}",
+                        },
+                    ))
+                    logger.info(
+                        "post_exit_cooldown veto q={} elapsed_s={:.1f} cooldown_s={}",
+                        intent.question_idx, elapsed_s, cooldown_s,
+                    )
+                    continue
             verdict = self.gate.check_pre_trade(intent, inputs)
             if not verdict.approved:
                 await self.bus.publish(RiskVeto(
@@ -225,6 +262,9 @@ class Router:
                 # Closed
                 realized = (price - existing.avg_entry) * existing.qty
                 self.dal.delete_position(intent.question_idx)
+                # Stamp the post-exit cooldown clock. Read in handle() before
+                # the next ENTER on the same question_idx is allowed through.
+                self._last_exit_ts[intent.question_idx] = now_ns
                 # Use the strategy-supplied exit_reason when present so the
                 # Telegram alert distinguishes safety_d / edge / time_stop /
                 # true stop_loss exits. Legacy fallback: reduce_only without a
@@ -272,6 +312,10 @@ class Router:
         p = self.dal.get_position(question_idx)
         if p is None:
             return
+        # Settlement closes are conceptually exits too — stamp the cooldown so
+        # we don't immediately re-enter on a question whose post-settlement
+        # rollover gets ingested in the same tick.
+        self._last_exit_ts[question_idx] = now_ns
         # Settlement: caller has already confirmed the question settled. We
         # simply delete the local position; venue truth handles PnL.
         self.dal.delete_position(question_idx)
