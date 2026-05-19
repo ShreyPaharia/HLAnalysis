@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+from loguru import logger
 
 from .config import StrategyConfig, match_question
 from .market_state import MarketState
@@ -37,6 +40,7 @@ class Scanner:
         last_reconcile_ns: int,
         reference_symbol: str = "BTC",
         pnl_provider: Callable[[int], float] | None = None,
+        gate_log_path: Path | None = None,
     ) -> None:
         self.strategy = strategy
         self.cfg = cfg
@@ -51,6 +55,15 @@ class Scanner:
         # so the daily-loss gate sees venue truth rather than the local DB
         # (which loses information on every position close).
         self._pnl_provider = pnl_provider
+        # Structured gate-decision log. When set, the scanner writes a JSONL
+        # line every time a (question_idx, decision_action, primary_diag_name)
+        # tuple changes from the previous tick — i.e. on STATE TRANSITIONS,
+        # not every scan. This gives operators a forensic trail of "which
+        # gate was blocking each candidate" without flooding the disk at
+        # the 1Hz scan rate. Used for the 48h forward test after introducing
+        # the bid-gate / cooldown / near-strike filters.
+        self.gate_log_path = gate_log_path
+        self._last_logged_state: dict[int, tuple[str, str]] = {}
 
     def scan(self, *, now_ns: int) -> list[ScannedDecision]:
         out: list[ScannedDecision] = []
@@ -112,6 +125,9 @@ class Scanner:
                 position=strat_pos,
                 now_ns=now_ns,
             )
+            self._maybe_log_gate_transition(
+                question=q, decision=decision, books=books, now_ns=now_ns,
+            )
             if decision.action is Action.HOLD:
                 continue
             for intent in decision.intents:
@@ -150,6 +166,64 @@ class Scanner:
                 )
                 out.append(ScannedDecision(decision=decision, inputs=inputs))
         return out
+
+    def _maybe_log_gate_transition(
+        self, *, question: QuestionView, decision: Decision,
+        books: dict[str, BookState], now_ns: int,
+    ) -> None:
+        """Append a JSONL line when the (action, primary_diag) tuple changes
+        for this question_idx vs the last scan tick.
+
+        Steady-state ticks (same blocking reason for hours) produce nothing.
+        Transitions (entered/exited/changed gate) produce one line. Disk-cheap
+        and forensically useful — operators can answer "why didn't we enter
+        on #601 at 04:47?" by tailing this file.
+        """
+        if self.gate_log_path is None:
+            return
+        # Reduce diagnostics to a stable identifier. Strategies emit one or
+        # more Diagnostic objects per decision; the first one is the
+        # human-readable label of why this scan tick ended where it did.
+        diag_name = (
+            decision.diagnostics[0].message if decision.diagnostics else ""
+        )
+        key = (decision.action.value, diag_name)
+        prev = self._last_logged_state.get(question.question_idx)
+        if prev == key:
+            return
+        self._last_logged_state[question.question_idx] = key
+        # Snapshot book state for the first leg with quotes (used by the
+        # strategy's gate). Lets the operator see bid/ask/mid at the moment
+        # of the decision without having to cross-join recorder data.
+        sample_book: BookState | None = next(iter(books.values()), None)
+        bid = sample_book.bid_px if sample_book else None
+        ask = sample_book.ask_px if sample_book else None
+        mid = (bid + ask) / 2.0 if (bid is not None and ask is not None) else None
+        row = {
+            "ts_ns": now_ns,
+            "question_idx": question.question_idx,
+            "klass": question.klass,
+            "action": decision.action.value,
+            "reason": diag_name,
+            "bid_px": bid,
+            "ask_px": ask,
+            "mid_px": mid,
+            "bid_sz": sample_book.bid_sz if sample_book else None,
+            "ask_sz": sample_book.ask_sz if sample_book else None,
+            "strike": question.strike if question.strike == question.strike else None,
+            "diag_fields": [
+                {"k": k, "v": v}
+                for d in decision.diagnostics
+                for (k, v) in d.fields
+            ] or None,
+        }
+        try:
+            self.gate_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.gate_log_path.open("a") as f:
+                f.write(json.dumps(row) + "\n")
+        except OSError as e:
+            # Best-effort logging — never block trading on a filesystem hiccup.
+            logger.warning("gate log write failed path={} err={}", self.gate_log_path, e)
 
     @staticmethod
     def _db_pos_to_strategy(p: object | None) -> Position | None:
