@@ -105,6 +105,7 @@ def build_theta_harvester_config(cfg: StrategyConfig) -> ThetaHarvesterConfig:
         edge_max=t.edge_max,
         min_distance_pct=getattr(t, "min_distance_pct", None),
         min_bid_notional_usd=getattr(t, "min_bid_notional_usd", 0.0),
+        gamma_lambda=getattr(t, "gamma_lambda", None),
     )
 
 

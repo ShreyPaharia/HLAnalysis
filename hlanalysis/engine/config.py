@@ -125,6 +125,8 @@ class ThetaParams(BaseModel):
     min_distance_pct: float | None = None
     # See ThetaHarvesterConfig.min_bid_notional_usd — 0 disables.
     min_bid_notional_usd: float = 0.0
+    # See ThetaHarvesterConfig.gamma_lambda — None disables.
+    gamma_lambda: float | None = None
 
 
 class StrategyConfig(BaseModel):

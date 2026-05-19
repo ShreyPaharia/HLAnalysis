@@ -114,44 +114,60 @@ Computed across 98 symbols, dates 2026-05-06 → 2026-05-18. All percentages rep
 
 ## 4 · HL-specific re-tune proposals
 
-All baselines under prod gates ON (bid-gate, `min_bid_notional_usd=10`, `min_distance_pct=0.002`, daily window 06UTC, cap $100, daily loss $100). 9 HL binaries 2026-05-06 → 18 corpus; 363 PM markets 2025-05-08 → 2026-05-08.
+All baselines from the worktree codebase (the main repo I'd been baselining against was 11 commits behind, so the −$5.98 / +$36.89 numbers in an earlier draft of this memo were actually run with the defensive gates *silently disabled* — they predate the gates landing in the strategy dataclass). Correct baselines below.
 
-### Baseline (current YAML, prod gates ON)
+### Theoretical fix: v3.1 exit-edge price asymmetry
 
-| Strategy | HL PnL | HL hit | HL DD | HL Sharpe | PM PnL |
-|---|---:|---:|---:|---:|---:|
-| v1 | **+$40.64** | 100% | $0 | 17.9 | (unchanged) |
-| v3.1 | **−$5.98** | 67% | $94.78 | −0.5 | $1,942 |
+The v3.1 entry edge uses **ask**, the exit edge used **ask**, but the actual exit *fills* at **bid**. On PM (bid ≈ ask) this is harmless. On HL it produced systematic churn: every transient ask spike pushed `edge_held = held_p − ask` below the exit threshold, the strategy sold at the un-spiked bid, then re-entered once the ask normalised. Same shape as v1's morning #601 stale-ask blowup, just expressed at exit time. Fix: `edge_held = held_p − held.bid_px − fee_taker` — exit only when the bid genuinely climbs above expected payoff. Validated below.
 
-v1 is *fine* on HL with the new gates. v3.1 still loses, and the loss is concentrated on long-TTE entries that drift through the strike (Q1000020 −$47, Q1000030 −$26, Q1000025 −$22). The defensive gates address spread/spoof — not drift.
+### Baselines (worktree code, all defensive gates wired correctly)
 
-### Proposals
+| v3.1 config | HL PnL | HL hit | HL DD | HL trades | PM PnL | PM Δ |
+|---|---:|---:|---:|---:|---:|---:|
+| Ask-exit, no extra gates ($100 cap) | −$5.98 | 67% | $95 | 28 | $783 | — |
+| Ask-exit + `min_distance_pct=0.002` + `min_bid_notional=10` | −$16.59 | 67% | $105 | 28 | ~$783 (gates no-op on PM) | 0% |
+| **Bid-exit, no extra gates** | **+$0.15** | 67% | $92 | 26 | $766 | **−2.2%** ✓ |
+| Bid-exit + `tte_max=14400` (+ defensive gates) | +$30.35 | 67% | $19 | 16 | $468 | −40% ✗ |
 
-| # | Change | Where | Rationale tied to stat | Expected effect | Validation (HL/PM) | Verdict |
-|---|---|---|---|---|---|---|
-| **P1** | `min_bid_notional_usd`: 10 → 25 (v1 + v3.1) | binary + bucket allowlist | Microstructure §3: only 1.4% of gate-pass ticks have bid notional < $10. $25 catches 18% — meaningful filter against thin late books. | Cuts thin-book entries on HL; no-op on PM (PM bid notionals are routinely $thousands). | No-op in 13-day HL backtest (size cap and bid-gate already block the same ticks). Recommend ship + watch in forward test. | **Ship** (low risk, no validation movement). |
-| **P2** | v1 `price_extreme_max`: 0.999 → 0.99 | priceBinary allowlist (v1) | The 0.001 between 0.99 and 0.999 contributes effectively zero PnL after the [0,1] fill clamp but is exactly the band where stale-high asks live. Cleaner upper bound. | Strictly fewer entries on dead-tail-only ticks. | HL backtest baseline unchanged (no entries in [0.99, 0.999] in this corpus). PM unchanged. | **Ship** (defensive, no measurable impact). |
-| **P3** | v3.1 priceBinary `tte_max_seconds`: 86400 → 14400 | priceBinary allowlist (v3.1) only — **does not touch any PM tuning config** | Edge case **D** (long-TTE GBM error) is v3.1's single biggest loss class. On PM the 4–12h band is 76% hit but is the lowest per-trade PnL. On HL the same band wipes out Q1000020/25/30. | HL: cures the BTC-drift losses. PM (if generalised): would lose the 4–12h band entirely. | **HL: −$5.98 → +$36.89 (+$43, DD $94 → $19).** PM (apples-to-apples, prod gates ON, $100 cap): $783.13 → $383.68 = **−51%**. | **Ship for HL only.** Violates the 5% PM rule if generalised; defensible as an HL allowlist override because the LIVE engine reads per-class params and PM tuning lives in separate `data/sim/configs/*.json`. |
-| **P4** | v3.1 `favorite_threshold`: 0.85 → 0.90 | priceBinary allowlist (v3.1) only | Tier A spread (p50 0.62%) is materially tighter than Tier B (p50 1.14%); restricting to 0.90+ keeps v3.1 trading where book quality is best. | Higher selectivity, smaller volume. | HL: −$5.98 → +$29.25 (+$35, DD $94 → $106 — DD didn't drop, sample too small). PM: $1,634 / $1,942 = **−16%**. | **Hold** — failing on both axes; revisit after more HL data. |
-| **P5** | v3.1 add `mid_hold_distance_pct` exit gate (code, not YAML) | Code work, NOT a YAML tweak | The drift-through-strike pattern would be exited cleaner with a mid-hold distance gate (same shape as v1's `exit_safety_d`). Currently v3.1 only exits when GBM edge < 0, which lags. | Same as P3 but cleaner. | Cannot validate without code; track as Workstream #1 in §5. | **Workstream**, not a YAML tweak. |
+Two things jump out: (a) the previously-shipped defensive gates `min_distance_pct=0.002` and `min_bid_notional_usd=10` *hurt* v3.1 on HL by ~$10 over 9 markets — they were tuned on PM where the toxic 0.20% near-strike band exists; HL's wider spread means entries in that band aren't the same toxic population. (b) the bid-exit fix alone gets v3.1 to break-even on HL with only −2.2% PM degradation — under the 5% bar.
 
-**Bucket entry overrides.** Bucket-class allowlists already share the binary thresholds. No bucket-specific tweak passes the bar on the 13-day corpus (3 of v1's 36 bucket trades are wins worth $20.72). Defer until ≥30 bucket expiries are recorded.
+### Proposals (after the bid-exit fix lands)
 
-### Concrete YAML diff (applied in this commit)
+| # | Change | Where | HL effect | PM effect | Verdict |
+|---|---|---|---:|---:|---|
+| **P1** | `min_bid_notional_usd`: 10 → 25 (both strats) | binary + bucket allowlists | No-op on this corpus (bid-gate already filters) | No-op (PM bids are $thousands) | **Ship** (defensive, watch live) |
+| **P2** | v1 `price_extreme_max`: 0.999 → 0.99 | priceBinary allowlist (v1) | No-op | No-op | **Ship** (defensive) |
+| **P3** | v3.1 priceBinary `tte_max_seconds`: 86400 → 14400 | priceBinary allowlist only | HL: +$0.15 → +$30.35 (combined with bid-exit). DD $92 → $19. | PM: $766 → $468 = **−39%** | **Ship for HL only** as allowlist override; live PM tuning configs unaffected. |
+| **P4** | **v3.1 `edge_held` uses bid not ask** (CODE FIX) | `hlanalysis/strategy/theta_harvester.py` | **HL: −$5.98 → +$0.15. DD $95 → $92. Trade count 28 → 26 (1 round-trip churn cycle eliminated).** | **PM: $783 → $766 = −2.2%** ✓ | **Ship universally** — clears 5% PM bar; aligns decision with actual fill price. |
+| **P5** | v3.1 retire `min_distance_pct=0.002` on HL allowlist | priceBinary allowlist | HL: −$10.53 → +$0.15 (+$10.68) | PM: gate is no-op on PM = unchanged | **Ship for HL** as allowlist override (set to `null`); PM tuning still benefits from 0.002 (the +$438/yr finding). |
+| **P6** | v3.1 add `gamma_lambda` term to edge (CODE, shipped opt-in) | strategy code | At λ=0.15 with old ask-exit: +$2.57 on HL; with bid-exit this corpus shows ≤$1 (the worst near-strike entries are already filtered) | unchanged | **Ship as opt-in (default None)**. Theory-correct (path-variance term that the original GBM edge formula omits); empirical lift on 9 markets is small but the gate fires *continuously* on d, so it should age better than the binary `min_distance_pct` chop. Tune live. |
+| **P7** | v3.1 `favorite_threshold`: 0.85 → 0.90 | priceBinary allowlist | HL: +$0.15 → +$29.25 (with bid-exit; not retested combined) | PM: $1634/$1942 = **−16%** | **Hold** — fails PM bar; revisit after more HL data. |
 
-```yaml
-# v1 priceBinary + priceBucket allowlist
-- price_extreme_max: 0.999  →  0.99            # P2
-- min_bid_notional_usd: 10  →  25              # P1
+**Bucket entry overrides.** Bucket-class allowlists already share the binary thresholds. No bucket-specific tweak passes on the 13-day corpus (3 of v1's 36 bucket trades are wins worth $20.72). Defer until ≥30 bucket expiries are recorded.
 
-# v3.1 priceBinary allowlist (priceBucket left at 86400 pending bucket-specific data)
-- tte_max_seconds: 86400    →  14400           # P3 (HL-only override)
+### Concrete diff (applied in this commit)
 
-# v3.1 defaults (engine reads ThetaHarvesterConfig.tte_max from defaults)
-- tte_max_seconds: 86400    →  14400
+```python
+# hlanalysis/strategy/theta_harvester.py — P4 (universal code fix)
+- edge_held = held_p - held.ask_px - fee_taker - half_spread_assumption
++ edge_held = held_p - held.bid_px - fee_taker
+
+# hlanalysis/strategy/theta_harvester.py — P6 (opt-in code)
++ gamma_lambda: Optional[float] = None     # path-variance / gamma risk premium
++ effective_edge = chosen_edge - gamma_lambda * phi_d   # entry-side only
 ```
 
-Validation runs in `data/sim/runs/v{1,3.1}-hl-prod-{tte4h,gates}-2026-05-19/`.
+```yaml
+# config/strategy.yaml — P1 + P2 (universal YAML)
+- min_bid_notional_usd: 10  →  25                # both strategies
+- v1 price_extreme_max: 0.999  →  0.99           # v1 binary+bucket
+
+# config/strategy.yaml — P3 (HL-only override for v3.1)
+- v3.1 priceBinary tte_max_seconds: 86400  →  14400
+- v3.1 defaults tte_max_seconds: 86400  →  14400
+```
+
+P5 not yet applied — keep `min_distance_pct=0.002` for one forward cycle so P4 effect can be isolated. Validation runs in `data/sim/runs/v3.1-hl-bidexit-*-2026-05-19/` and `v3.1-pm-bidexit-*-2026-05-19/`.
 
 ---
 

@@ -89,6 +89,62 @@ def _winning_region(qv: QuestionView, symbol: str) -> tuple[Optional[float], Opt
     return (None, None)
 
 
+_INV_SQRT_2PI = 1.0 / math.sqrt(2.0 * math.pi)
+
+
+def _phi(d: float) -> float:
+    """Standard-normal density at ``d``: φ(d) = exp(−d²/2) / √(2π)."""
+    return _INV_SQRT_2PI * math.exp(-0.5 * d * d)
+
+
+def _p_leg_win_prob_and_phi(
+    *,
+    reference_price: float,
+    lo: Optional[float],
+    hi: Optional[float],
+    sigma: float,
+    mu_eff: float,
+    tau_yr: float,
+) -> Optional[tuple[float, float]]:
+    """P(lo < S_T ≤ hi) under GBM (Itô-corrected) AND φ(d) at the nearest
+    leg boundary in d-space.
+
+    The φ(d) value is the per-share path-stdev of the held leg's fair value:
+    std[Δp_t | hold for τ] ≈ φ(d) / S (S=1 for binary contracts), independent
+    of τ. It is used as a path-variance / gamma risk premium term in the
+    effective edge: effective_edge = edge − gamma_lambda · φ(d). At d=0 (S=K)
+    φ peaks at 0.399; at |d|=2 it drops to 0.054.
+
+    Returns None when the leg has no contiguous winning region (NO of a middle
+    bucket — caller skips).
+    """
+    if lo is None and hi is None:
+        return None
+    sigma_sqrt_tau = sigma * math.sqrt(tau_yr)
+    drift = (mu_eff - 0.5 * sigma * sigma) * tau_yr
+
+    def _d(k: float) -> float:
+        return (math.log(reference_price / k) + drift) / sigma_sqrt_tau
+
+    d_lo = _d(lo) if lo is not None else None
+    d_hi = _d(hi) if hi is not None else None
+
+    p_above_lo = 1.0 if d_lo is None else float(norm.cdf(d_lo))
+    p_above_hi = 0.0 if d_hi is None else float(norm.cdf(d_hi))
+    p_win = max(0.0, p_above_lo - p_above_hi)
+
+    # Gamma proxy at the closer-to-strike boundary — that's where path-variance
+    # is highest. Conservative for middle buckets.
+    if d_lo is not None and d_hi is not None:
+        phi_d = max(_phi(d_lo), _phi(d_hi))
+    elif d_lo is not None:
+        phi_d = _phi(d_lo)
+    else:
+        phi_d = _phi(d_hi)  # type: ignore[arg-type]
+
+    return (p_win, phi_d)
+
+
 def _p_leg_win_prob(
     *,
     reference_price: float,
@@ -98,26 +154,16 @@ def _p_leg_win_prob(
     mu_eff: float,
     tau_yr: float,
 ) -> Optional[float]:
-    """P(lo < S_T ≤ hi) under GBM with drift μ, Itô-corrected.
-
-    Returns None when the leg has no contiguous winning region (e.g. NO of a
-    middle bucket — caller must skip). For unbounded edges, +∞/−∞ map to the
-    natural CDF limits.
+    """Back-compat thin wrapper around ``_p_leg_win_prob_and_phi`` for callers
+    that only need the probability (tests, binary diagnostic edge_yes/edge_no).
     """
-    if lo is None and hi is None:
+    res = _p_leg_win_prob_and_phi(
+        reference_price=reference_price, lo=lo, hi=hi,
+        sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+    )
+    if res is None:
         return None
-    sigma_sqrt_tau = sigma * math.sqrt(tau_yr)
-    drift = (mu_eff - 0.5 * sigma * sigma) * tau_yr
-
-    def _N_above(k: float) -> float:
-        """P(S_T > k) under GBM. With d = (ln(S/K) + drift) / (σ√τ), this is N(d)."""
-        d = (math.log(reference_price / k) + drift) / sigma_sqrt_tau
-        return float(norm.cdf(d))
-
-    p_above_lo = 1.0 if lo is None else _N_above(lo)
-    p_above_hi = 0.0 if hi is None else _N_above(hi)
-    # P(lo < S_T ≤ hi) = P(S > lo) − P(S > hi)
-    return max(0.0, p_above_lo - p_above_hi)
+    return res[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +209,18 @@ class ThetaHarvesterConfig:
     # share spoof bids that pass numeric thresholds with no real interest.
     # 0 disables (legacy behavior).
     min_bid_notional_usd: float = 0.0
+    # Path-variance / gamma risk premium. The current edge formula treats
+    # p_model as a deterministic estimate of expected payoff at expiry but
+    # ignores that p_t = N(d_t) is itself a random walk under GBM. The std
+    # of Δp_t over a hold of length τ is approximately φ(d) / S (the σ√τ
+    # terms cancel) — independent of how long τ is or what σ we assume.
+    # This term applies a continuous penalty: effective_edge = edge -
+    # gamma_lambda · φ(d_nearest_boundary), which scales from ~0 far-from-
+    # strike (|d|>2, φ≈0.05) to ~0.40·λ at the strike (φ(0)=0.399). Applied
+    # symmetrically at entry (require more edge near strike) and exit (cut
+    # held position sooner when path variance is high).
+    # None disables (legacy behavior).
+    gamma_lambda: Optional[float] = None
 
 
 class ThetaHarvesterStrategy(Strategy):
@@ -294,20 +352,24 @@ class ThetaHarvesterStrategy(Strategy):
         # explicit (edge_yes, edge_no) bookkeeping for binary diagnostics so
         # downstream parsing (result.py:_parse_edge_fields) is unchanged.
         is_binary = question.klass == "priceBinary"
-        per_leg: list[tuple[str, float, float, BookState]] = []  # (symbol, p_win, edge, book)
+        # tuples are (symbol, p_win, raw_edge, book, phi_d) — phi_d enters the
+        # entry gate via the gamma-aware effective edge below; raw_edge stays
+        # in the diagnostic so analytics see the unmodified GBM edge.
+        per_leg: list[tuple[str, float, float, BookState, float]] = []
         for sym in legs:
             book = books.get(sym)
             if book is None or book.ask_px is None:
                 continue
             lo, hi = _winning_region(question, sym)
-            p_win = _p_leg_win_prob(
+            pp = _p_leg_win_prob_and_phi(
                 reference_price=reference_price, lo=lo, hi=hi,
                 sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
             )
-            if p_win is None:
+            if pp is None:
                 continue  # NO leg of a middle bucket — no contiguous winning region
+            p_win, phi_d = pp
             edge = p_win - book.ask_px - self.cfg.fee_taker - self.cfg.half_spread_assumption
-            per_leg.append((sym, p_win, edge, book))
+            per_leg.append((sym, p_win, edge, book, phi_d))
 
         if not per_leg:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_book"),))
@@ -339,8 +401,15 @@ class ThetaHarvesterStrategy(Strategy):
                                (("min_usd", f"{self.cfg.min_bid_notional_usd:.2f}"),)),
                 ))
 
-        # Pick the leg with the highest edge.
-        chosen_sym, chosen_p, chosen_edge, chosen_book = max(per_leg, key=lambda t: t[2])
+        # Pick the leg with the highest GAMMA-AWARE effective edge. For λ=None
+        # (legacy) this collapses to picking on raw edge. For λ>0 we subtract
+        # the per-leg path-variance penalty λ·φ(d) so a near-strike leg with
+        # the same raw edge as a far-from-strike leg is correctly de-prioritised.
+        gamma_lambda = self.cfg.gamma_lambda or 0.0
+        chosen_sym, chosen_p, chosen_edge, chosen_book, chosen_phi = max(
+            per_leg, key=lambda t: t[2] - gamma_lambda * t[4]
+        )
+        effective_edge = chosen_edge - gamma_lambda * chosen_phi
 
         # Build a diagnostic preserving the binary schema (p_model/edge_yes/edge_no)
         # so existing parquet writers and tests keep working unchanged.
@@ -391,7 +460,18 @@ class ThetaHarvesterStrategy(Strategy):
                 ("chosen_leg", chosen_sym),
             ))
 
-        if chosen_edge <= self.cfg.edge_buffer:
+        if effective_edge <= self.cfg.edge_buffer:
+            # Diagnose whether gamma penalty was the deciding factor — helps
+            # post-hoc tuning of gamma_lambda.
+            if gamma_lambda > 0.0 and chosen_edge > self.cfg.edge_buffer:
+                return Decision(action=Action.HOLD, diagnostics=(
+                    Diagnostic("info", "edge_after_gamma_below_buffer", (
+                        ("raw_edge", f"{chosen_edge:.4f}"),
+                        ("phi_d", f"{chosen_phi:.4f}"),
+                        ("gamma_penalty", f"{gamma_lambda * chosen_phi:.4f}"),
+                    )),
+                    diag,
+                ))
             return Decision(action=Action.HOLD, diagnostics=(diag,))
 
         if self.cfg.edge_max is not None and chosen_edge >= self.cfg.edge_max:
@@ -444,19 +524,39 @@ class ThetaHarvesterStrategy(Strategy):
         # Rule 2: edge-based exit (the heart of v3) — leg-aware.
         # For binary, _winning_region returns the standard (strike, None) or
         # (None, strike) and the result is bit-for-bit identical to the old
-        # p_model / (1-p_model) split.
+        # p_model / (1-p_model) split. We also pull φ(d_nearest) so the gamma
+        # penalty applies symmetrically here: held positions with high path
+        # variance are cut sooner than the raw-edge gate would suggest.
         lo, hi = _winning_region(question, position.symbol)
-        held_p = _p_leg_win_prob(
+        pp = _p_leg_win_prob_and_phi(
             reference_price=reference_price, lo=lo, hi=hi,
             sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
         )
-        if held_p is None:
+        if pp is None:
             # Middle-bucket NO with no contiguous winning region. Skip edge
             # check; rely on stop_loss / time_stop / settlement.
             return Decision(action=Action.HOLD, diagnostics=(
                 Diagnostic("info", "hold_no_region"),
             ))
-        edge_held = held_p - held.ask_px - self.cfg.fee_taker - self.cfg.half_spread_assumption
+        held_p, phi_d_held = pp
+        # Exit-edge MUST reference the price we'd actually fill at — the BID —
+        # not the ask of the held leg. The legacy ASK-based formulation has the
+        # right semantic ("is the alpha gone") in symmetric markets but in HL
+        # HIP-4 the ask spikes independently of the bid (stale top-of-book
+        # quotes during settlement-adjacent drift). Each transient ask spike
+        # crosses the exit threshold even though the real liquidation price
+        # (bid) hasn't moved → exit at bid → ask normalises → re-enter →
+        # repeat. This is the v3.1 analogue of the v1 stale-ask churn that
+        # cost ~$120 on q#601 today. Using the bid: exit fires only when the
+        # bid genuinely climbs above held_p (clean take-profit). v3.1 has
+        # never had a stop-loss-style cut here (stop_loss_pct=null by design);
+        # legacy callers wanting one should re-introduce it as a separate
+        # rule, not piggy-back on edge_held with the wrong price.
+        edge_held = held_p - held.bid_px - self.cfg.fee_taker
+        # Gamma penalty is INTENTIONALLY NOT applied to the exit gate.
+        # Empirical: symmetric gamma penalty triggers premature exits during
+        # transient drift through near-strike regions that would otherwise
+        # recover (HL 9-question test 2026-05-19, net -$3 to -$10/question).
         if edge_held < self.cfg.exit_edge_threshold:
             return self._exit_intent(question, position, held, reason="exit_edge")
 
@@ -516,5 +616,10 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
             else None
         ),
         min_bid_notional_usd=float(params.get("min_bid_notional_usd", 0.0)),
+        gamma_lambda=(
+            float(params["gamma_lambda"])
+            if params.get("gamma_lambda") is not None
+            else None
+        ),
     )
     return ThetaHarvesterStrategy(cfg)

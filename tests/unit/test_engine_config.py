@@ -41,7 +41,9 @@ def test_load_strategy_yaml_from_repo():
     btc_binary = next(
         e for e in cfg.allowlist if e.match.get("class") == "priceBinary"
     )
-    assert btc_binary.price_extreme_max == 0.999
+    # 2026-05-19 edge-and-tuning memo P2: tightened 0.999 → 0.99 (no PnL
+    # contribution after [0,1] fill clamp; defensive against stale-high asks).
+    assert btc_binary.price_extreme_max == 0.99
     assert btc_binary.min_safety_d == 1.0
     assert btc_binary.vol_lookback_seconds == 3600
     assert btc_binary.exit_safety_d == 1.0
