@@ -66,6 +66,12 @@ class UserFillRow:
     size: float
     fee: float
     ts_ns: int
+    # HL-reported realized PnL on this fill (0 for opens, signed for reduces).
+    # Sourced from the `closedPnl` field on /info user_fills. The daily-loss
+    # gate sums (closed_pnl - fee) across today's fills instead of trying to
+    # reconstruct PnL from the local DB, which loses information whenever a
+    # position closes (the row is deleted, taking its realized_pnl with it).
+    closed_pnl: float = 0.0
 
 
 class RestError(Exception):
@@ -76,23 +82,26 @@ _HEX_CHARS = set("0123456789abcdefABCDEF")
 
 
 def _extract_cloid_hex32(internal_cloid: str) -> str:
-    """Pull the trailing 32-char hex run out of an internal cloid string.
+    """Pull the trailing 32-char hex run out of a cloid in any of the forms
+    we encounter on the wire.
 
-    Internal forms (single-account legacy and multi-account):
+    Forms handled:
       hla-<uuid>                      → uuid hex (uuid str has 4 hyphens; strip them)
       hla-<alias>-<hex>               → <hex>; alias may contain any chars
+      0x<hex>                         → <hex> (HL's normalized cloid)
       <bare-hex>                      → already hex
 
-    Strategy: take the substring after the last hyphen — that is the hex tail
-    in the multi-account form. If it's shorter than 32 hex chars (legacy
-    uuid str with dashes throughout), fall back to "strip all hyphens and take
-    first 32". Final string is left-padded with zeros to 32 hex chars.
+    Strategy: strip the leading `hla-` or `0x` anchor, then prefer the substring
+    after the last remaining hyphen (multi-account form). If that tail is
+    shorter than 32 hex chars (legacy uuid str with internal dashes), fall back
+    to "strip all hyphens and take the first 32". Final string is left-padded
+    with zeros to 32 hex chars so equality always compares fixed-width.
     """
-    # Strip a leading 'hla-' anchor if present, then prefer the tail after the
-    # last remaining hyphen (multi-account form).
     s = internal_cloid
     if s.startswith("hla-"):
         s = s[len("hla-"):]
+    elif s.startswith("0x") or s.startswith("0X"):
+        s = s[2:]
     if "-" in s:
         tail = s.rsplit("-", 1)[1]
         if len(tail) >= 32 and all(c in _HEX_CHARS for c in tail[:32]):
@@ -116,6 +125,7 @@ class HLClient:
         api_secret_key: str,
         base_url: str,
         paper_mode: bool,
+        pnl_cache_ttl_s: float = 10.0,
     ) -> None:
         self.account_address = account_address
         self.base_url = base_url
@@ -125,6 +135,10 @@ class HLClient:
         self._paper_open: dict[str, OpenOrderRow] = {}
         self._paper_positions: dict[str, VenuePosition] = {}
         self._paper_fills: list[UserFillRow] = []
+        # realized_pnl_since() short-TTL cache (bounded REST load when scanner
+        # ticks at 1Hz). Layout: (since_ts_ns, cached_at_monotonic, pnl).
+        self._pnl_cache: tuple[int, float, float] | None = None
+        self._pnl_cache_ttl_s = pnl_cache_ttl_s
         self._exchange = None
         self._info = None
         if not paper_mode:
@@ -435,5 +449,26 @@ class HLClient:
                 size=float(r.get("sz", 0)),
                 fee=float(r.get("fee", 0)),
                 ts_ns=ts_ns,
+                closed_pnl=float(r.get("closedPnl", 0) or 0),
             ))
         return out
+
+    def realized_pnl_since(self, since_ts_ns: int) -> float:
+        """Sum (closedPnl - fee) across this account's fills since the cutoff.
+
+        Source of truth for the daily-loss gate. Reads directly from HL so the
+        cap survives DB rotations (e.g. multi-account migration leaving v31
+        with a fresh state.db while live positions persist).
+
+        Cached for `_pnl_cache_ttl_s` to avoid hammering HL every scan tick.
+        """
+        cache = getattr(self, "_pnl_cache", None)
+        now = time.time()
+        if cache is not None:
+            cached_since, cached_at, cached_val = cache
+            if cached_since == since_ts_ns and (now - cached_at) < self._pnl_cache_ttl_s:
+                return cached_val
+        fills = self.user_fills(since_ts_ns=since_ts_ns)
+        pnl = sum(f.closed_pnl - f.fee for f in fills)
+        self._pnl_cache = (since_ts_ns, now, pnl)
+        return pnl

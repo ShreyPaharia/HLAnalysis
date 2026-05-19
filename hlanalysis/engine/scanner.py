@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +36,7 @@ class Scanner:
         kill_switch_path: Path,
         last_reconcile_ns: int,
         reference_symbol: str = "BTC",
+        pnl_provider: Callable[[int], float] | None = None,
     ) -> None:
         self.strategy = strategy
         self.cfg = cfg
@@ -43,6 +45,12 @@ class Scanner:
         self.kill_switch_path = kill_switch_path
         self.last_reconcile_ns = last_reconcile_ns
         self.ref_symbol = reference_symbol
+        # Source of truth for today's realized PnL. When None, falls back to
+        # the local DAL — used in tests / paper-mode where there's no HL
+        # connection. Live runtime wires this to HLClient.realized_pnl_since
+        # so the daily-loss gate sees venue truth rather than the local DB
+        # (which loses information on every position close).
+        self._pnl_provider = pnl_provider
 
     def scan(self, *, now_ns: int) -> list[ScannedDecision]:
         out: list[ScannedDecision] = []
@@ -56,9 +64,20 @@ class Scanner:
         ]
         live_orders = self.dal.live_orders()
         live_notional = sum(o.price * o.size for o in live_orders)
-        # Daily loss: realized PnL since UTC midnight of `now_ns`
+        # Daily loss: realized PnL since UTC midnight of `now_ns`. Prefer the
+        # injected provider (HL truth) over the local DB; see _pnl_provider doc.
         midnight_ns = self._utc_midnight_ns(now_ns)
-        realized_today = self.dal.realized_pnl_since(midnight_ns)
+        if self._pnl_provider is not None:
+            try:
+                realized_today = self._pnl_provider(midnight_ns)
+            except Exception:
+                # If HL is unreachable, fall back to local DB rather than
+                # halting the scan. The DAL value is a structural under-estimate
+                # of losses today (see state.py), so this is the safer side to
+                # err on: continue trading rather than freeze on a network blip.
+                realized_today = self.dal.realized_pnl_since(midnight_ns)
+        else:
+            realized_today = self.dal.realized_pnl_since(midnight_ns)
         kill = self.kill_switch_path.exists()
 
         for q in self.ms.all_questions():

@@ -83,15 +83,19 @@ def test_live_mode_requires_sdk(monkeypatch):
 class _FakeInfo:
     """Stub for hyperliquid.info.Info used in clearinghouse_state tests."""
 
-    def __init__(self, *, perp_state: dict, spot_state: dict) -> None:
+    def __init__(self, *, perp_state: dict, spot_state: dict, fills: list[dict] | None = None) -> None:
         self._perp = perp_state
         self._spot = spot_state
+        self._fills = fills or []
 
     def user_state(self, _addr):  # noqa: D401 - mimics SDK shape
         return self._perp
 
     def spot_user_state(self, _addr):
         return self._spot
+
+    def user_fills(self, _addr):
+        return self._fills
 
 
 def _live_client_with(perp_state: dict, spot_state: dict) -> HLClient:
@@ -140,6 +144,63 @@ def test_clearinghouse_state_merges_hip4_spot_balances():
     assert "o468" not in by_sym
     # Zero qty HIP-4 entries skipped.
     assert "#581" not in by_sym
+
+
+def test_realized_pnl_since_sums_closedpnl_minus_fee():
+    """The daily-loss gate now sources PnL from HL user_fills (closedPnl - fee)
+    instead of the local DB. This is the contract: any fill at-or-after the
+    cutoff contributes, anything older is excluded."""
+    # closedPnl shape mirrors HL's spec: 0 on opens, signed on reduces.
+    perp = {"assetPositions": [], "marginSummary": {"accountValue": "0.0"}}
+    spot = {"balances": []}
+    fills = [
+        # Older than cutoff — excluded.
+        {"time": 999, "hash": "f0", "cloid": "0x0", "coin": "#601",
+         "side": "B", "px": "0.99", "sz": "200", "fee": "0.10",
+         "closedPnl": "0"},
+        # Open at midnight+1ms — closed_pnl=0, fee=0.07 → contributes -0.07.
+        {"time": 1001, "hash": "f1", "cloid": "0x1", "coin": "#601",
+         "side": "B", "px": "0.99", "sz": "200", "fee": "0.07",
+         "closedPnl": "0"},
+        # Reduce later → closedPnl=-10.0, fee=0.02 → contributes -10.02.
+        {"time": 2000, "hash": "f2", "cloid": "0x2", "coin": "#601",
+         "side": "A", "px": "0.94", "sz": "200", "fee": "0.02",
+         "closedPnl": "-10.0"},
+    ]
+    c = HLClient(account_address="0xtest", api_secret_key="0xfake",
+                 base_url="https://api.hyperliquid.xyz", paper_mode=False,
+                 pnl_cache_ttl_s=0.0)
+    c._info = _FakeInfo(perp_state=perp, spot_state=spot, fills=fills)  # type: ignore[assignment]
+    cutoff_ns = 1000 * 1_000_000  # 1000 ms in ns
+    pnl = c.realized_pnl_since(cutoff_ns)
+    assert pnl == pytest.approx(-10.09)
+
+
+def test_realized_pnl_since_is_cached_to_bound_rest_calls():
+    """The scanner runs at 1Hz; we cannot hit HL every tick. realized_pnl_since
+    must reuse a recent result while the TTL is live."""
+    perp = {"assetPositions": [], "marginSummary": {"accountValue": "0.0"}}
+    spot = {"balances": []}
+    fills = [
+        {"time": 1000, "hash": "f1", "cloid": "0x1", "coin": "#601",
+         "side": "B", "px": "0.99", "sz": "200", "fee": "0.10",
+         "closedPnl": "0"},
+    ]
+    c = HLClient(account_address="0xtest", api_secret_key="0xfake",
+                 base_url="https://api.hyperliquid.xyz", paper_mode=False,
+                 pnl_cache_ttl_s=60.0)
+    fake = _FakeInfo(perp_state=perp, spot_state=spot, fills=fills)
+    c._info = fake  # type: ignore[assignment]
+    # Count REST calls by wrapping user_fills.
+    call_count = {"n": 0}
+    orig = fake.user_fills
+    def counted(addr):  # noqa: ANN001
+        call_count["n"] += 1
+        return orig(addr)
+    fake.user_fills = counted  # type: ignore[assignment]
+    for _ in range(5):
+        c.realized_pnl_since(0)
+    assert call_count["n"] == 1  # cache hit on the next four
 
 
 def test_clearinghouse_state_empty_spot_balances_ok():
