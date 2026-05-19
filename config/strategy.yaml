@@ -221,10 +221,16 @@ strategies:
       edge_max: 0.20                     # v3.1 upper-edge filter (commit 0578a11): +37% PnL, -84% max DD on PM
       exit_edge_threshold: 0.0
       time_stop_seconds: 0
-      # PM corpus tuning: entries at |S−K|/S < 0.20% lose −$7.68/entry across
-      # 57 entries; the 0.20–0.50% band immediately above is the *best* band
-      # (+$16.10/entry). Sharp discontinuity → veto below 0.20%. See PM
-      # near-strike analysis report attached to the same commit as this fix.
-      min_distance_pct: 0.002
-      # Catches single-share spoof bids on the favourite-leg filter.
-      min_bid_notional_usd: 10.0
+      # 2026-05-19 edge-and-tuning memo §4 P5: disabled on HL. The
+      # `min_distance_pct=0.002` floor was PM-derived (+$438/yr expected)
+      # but on the HL 9-day corpus it cost ~$10 vs running ungated (the
+      # 0.20% near-strike band that loses on PM doesn't lose on HL —
+      # wider HL spread already prices the gamma risk). PM tuning configs
+      # live separately under data/sim/configs/ and keep 0.002.
+      min_distance_pct: null
+      # 2026-05-19 edge-and-tuning memo §4 P5: disabled on HL alongside
+      # min_distance_pct. The bid-based exit edge change (commit c16c0c1)
+      # is the primary safety mechanism; the bid-notional floor was
+      # belt-and-braces and barely fires (only 1.4% of v1 gate-pass ticks
+      # have bid_notional <$10 per the microstructure profile).
+      min_bid_notional_usd: 0.0
