@@ -28,7 +28,7 @@ strategies:
       - match:
           class: priceBinary
           underlying: BTC
-        max_position_usd: 200
+        max_position_usd: 100             # tightened from 200 for 48h forward-test after 2026-05-19 churn
         stop_loss_pct: null              # disabled — 1y PM tuning showed any stop hurts net PnL
         tte_min_seconds: 0
         tte_max_seconds: 7200
@@ -49,6 +49,17 @@ strategies:
         size_cap_near_strike_pct: 1.0
         size_cap_max_dist_pct: 1.5
         size_cap_min_ask: 0.88
+        # 2026-05-19 churn fixes — see fixes commit. HL HIP-4 books have
+        # stale top-of-book asks that drove v1 to enter at 0.999 ask and
+        # fill at 0.55-0.60. The bid is structurally a more reliable signal
+        # because stale-high-bids get arbed in ms while stale-high-asks
+        # persist. Sizing and IOC limit still use ask; only the gate moves.
+        use_bid_for_entry_gate: true
+        min_bid_notional_usd: 10.0
+        # 60s cooldown after exit on the same question_idx — would have
+        # prevented every churn cycle observed today regardless of which
+        # other gate was misfiring.
+        entry_cooldown_seconds: 60
       # priceBucket — same per-leg consensus rule across all bucket legs.
       # NOTE: Polymarket bucket data uses an "above-X binary stack" layout that
       # is incompatible with the strategy's HL mutually-exclusive bucket
@@ -60,7 +71,7 @@ strategies:
       - match:
           class: priceBucket
           underlying: BTC
-        max_position_usd: 200
+        max_position_usd: 100             # tightened from 200 for 48h forward-test after 2026-05-19 churn
         stop_loss_pct: null              # disabled — 1y PM tuning showed any stop hurts net PnL
         tte_min_seconds: 0
         tte_max_seconds: 7200
@@ -72,13 +83,17 @@ strategies:
         vol_ewma_lambda: 0.85
         distance_from_strike_usd_min: 0
         vol_max: 100
+        # See priceBinary entry above for rationale on these three.
+        use_bid_for_entry_gate: true
+        min_bid_notional_usd: 10.0
+        entry_cooldown_seconds: 60
       # Add more class entries as new question classes are approved for trading
 
     blocklist_question_idxs: []         # explicit per-instance exclusions
 
     defaults:
       match: {}
-      max_position_usd: 200
+      max_position_usd: 100               # mirrors allowlist; build_late_resolution_config reads from here
       stop_loss_pct: null
       tte_min_seconds: 0
       tte_max_seconds: 7200
@@ -95,11 +110,14 @@ strategies:
       size_cap_near_strike_pct: 1.0
       size_cap_max_dist_pct: 1.5
       size_cap_min_ask: 0.88
+      use_bid_for_entry_gate: true        # 2026-05-19 churn fix; see allowlist comment
+      min_bid_notional_usd: 10.0
+      entry_cooldown_seconds: 60          # router uses this for the post-exit veto
 
     global:
       max_total_inventory_usd: 500
       max_concurrent_positions: 5
-      daily_loss_cap_usd: 200
+      daily_loss_cap_usd: 100             # tightened from 200 in lockstep with per-position cap
       max_strike_distance_pct: 50       # 50% — BTC moves 5-10% per day, allow room
       min_recent_volume_usd: 100        # HL HIP-4 binaries are inherently thin; 1000 vetoed every trade
       stale_data_halt_seconds: 30       # HIP-4 books update on bursts not steady streams; 5s vetoed every trade
@@ -121,7 +139,7 @@ strategies:
       - match:
           class: priceBinary
           underlying: BTC
-        max_position_usd: 200
+        max_position_usd: 100             # tightened from 200 for 48h forward-test after 2026-05-19 churn
         stop_loss_pct: null              # theta_harvester drives exits off edge, not stop-loss
         tte_min_seconds: 0
         tte_max_seconds: 86400           # full 24h HIP-4 expiry window
@@ -129,10 +147,12 @@ strategies:
         price_extreme_max: 1.0
         distance_from_strike_usd_min: 0
         vol_max: 100
+        # Router-side cooldown after a close; same value as v1 for symmetry.
+        entry_cooldown_seconds: 60
       - match:
           class: priceBucket
           underlying: BTC
-        max_position_usd: 200
+        max_position_usd: 100
         stop_loss_pct: null
         tte_min_seconds: 0
         tte_max_seconds: 86400
@@ -140,12 +160,13 @@ strategies:
         price_extreme_max: 1.0
         distance_from_strike_usd_min: 0
         vol_max: 100
+        entry_cooldown_seconds: 60
 
     blocklist_question_idxs: []
 
     defaults:
       match: {}
-      max_position_usd: 200
+      max_position_usd: 100
       stop_loss_pct: null
       tte_min_seconds: 0
       tte_max_seconds: 86400
@@ -153,11 +174,12 @@ strategies:
       price_extreme_max: 1.0
       distance_from_strike_usd_min: 0
       vol_max: 100
+      entry_cooldown_seconds: 60          # router reads from defaults
 
     global:
       max_total_inventory_usd: 500
       max_concurrent_positions: 5
-      daily_loss_cap_usd: 200
+      daily_loss_cap_usd: 100             # tightened in lockstep with per-position cap
       max_strike_distance_pct: 50
       min_recent_volume_usd: 100
       stale_data_halt_seconds: 30
@@ -177,3 +199,10 @@ strategies:
       edge_max: 0.20                     # v3.1 upper-edge filter (commit 0578a11): +37% PnL, -84% max DD on PM
       exit_edge_threshold: 0.0
       time_stop_seconds: 0
+      # PM corpus tuning: entries at |S−K|/S < 0.20% lose −$7.68/entry across
+      # 57 entries; the 0.20–0.50% band immediately above is the *best* band
+      # (+$16.10/entry). Sharp discontinuity → veto below 0.20%. See PM
+      # near-strike analysis report attached to the same commit as this fix.
+      min_distance_pct: 0.002
+      # Catches single-share spoof bids on the favourite-leg filter.
+      min_bid_notional_usd: 10.0

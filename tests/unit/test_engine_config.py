@@ -20,7 +20,9 @@ def test_load_strategy_yaml_from_repo():
     assert cfg.name == "late_resolution"
     assert cfg.paper_mode is False
     assert cfg.global_.max_total_inventory_usd == 500
-    assert cfg.global_.daily_loss_cap_usd == 200
+    # 2026-05-19: dropped from 200 → 100 in lockstep with per-position cap
+    # while the bid-gate / cooldown / near-strike fixes are forward-tested.
+    assert cfg.global_.daily_loss_cap_usd == 100
     # v1-final values from the 1y PM walk-forward + focused (thr,max,stop) sweep.
     assert cfg.defaults.tte_max_seconds == 7200
     assert cfg.defaults.price_extreme_threshold == 0.85
