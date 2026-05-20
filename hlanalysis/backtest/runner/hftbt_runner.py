@@ -797,7 +797,28 @@ def run_one_question(
                     result.fills.append(fill)
                     fill_ts[fill.cloid] = now_ns
                     fill_question_idx[fill.cloid] = q.question_idx
-                    pos = None
+                    # Partial exit: when fill.size is capped below abs(pos.qty)
+                    # by book_depth_assumption, keep the residual position open
+                    # so settlement (or a subsequent exit) closes the remainder.
+                    # Pre-topup this branch was always a full close because
+                    # entry was also depth-capped; topup can grow pos > depth,
+                    # so the partial-exit case now matters.
+                    # Threshold: anything below one lot is unfillable; treat
+                    # as closed to avoid an infinite-exit loop where each
+                    # tick sells <lot and the residual never goes to zero.
+                    remaining = abs(pos.qty) - fill.size
+                    if remaining < cfg.lot_size:
+                        pos = None
+                    else:
+                        new_qty = pos.qty - fill.size if pos.qty > 0 else pos.qty + fill.size
+                        pos = Position(
+                            question_idx=pos.question_idx,
+                            symbol=pos.symbol,
+                            qty=new_qty,
+                            avg_entry=pos.avg_entry,
+                            stop_loss_price=pos.stop_loss_price,
+                            last_update_ts_ns=now_ns,
+                        )
 
     # --- Settlement -------------------------------------------------------
     if pos is not None:
