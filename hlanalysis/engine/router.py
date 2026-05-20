@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 import time
 from dataclasses import replace as _dc_replace
+from pathlib import Path
 
 from loguru import logger
 
@@ -57,11 +60,38 @@ class Router:
         # Per-question last-exit timestamp (ns). Populated from _book_fill's
         # close branch. Used by the post-exit cooldown guard in handle() to
         # block re-entries on the same question_idx within
-        # `cfg.defaults.entry_cooldown_seconds` after a close. Lives in
-        # process memory only — that's fine because the cooldown is on the
-        # order of a minute; a restart that loses it is the same as "cooldown
-        # already expired", which is the safe direction.
-        self._last_exit_ts: dict[int, int] = {}
+        # `cfg.defaults.entry_cooldown_seconds` after a close. Persisted to
+        # `<state_db_dir>/exit_cooldowns.json` and reloaded on init so the
+        # cooldown survives restarts (deploys, OOM, crashes) — without this,
+        # the first scan tick after restart sees an empty map and lets
+        # re-entries through within the cooldown window.
+        self._last_exit_ts: dict[int, int] = self._load_cooldowns()
+
+    def _cooldown_path(self) -> Path:
+        return Path(self.dal.db_path).parent / "exit_cooldowns.json"
+
+    def _load_cooldowns(self) -> dict[int, int]:
+        path = self._cooldown_path()
+        try:
+            with open(path) as f:
+                raw = json.load(f)
+            return {int(k): int(v) for k, v in raw.items()}
+        except FileNotFoundError:
+            return {}
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            logger.warning("failed to load exit_cooldowns.json ({}); starting fresh", e)
+            return {}
+
+    def _save_cooldowns(self) -> None:
+        path = self._cooldown_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        try:
+            with open(tmp, "w") as f:
+                json.dump({str(k): v for k, v in self._last_exit_ts.items()}, f)
+            os.replace(tmp, path)
+        except OSError as e:
+            logger.warning("failed to persist exit_cooldowns.json: {}", e)
 
     def _stamp_cloid(self, intent: OrderIntent) -> OrderIntent:
         """Rewrite a strategy-issued `hla-<uuid>` cloid into `<prefix><uuid_hex>`.
@@ -276,6 +306,7 @@ class Router:
                 # Stamp the post-exit cooldown clock. Read in handle() before
                 # the next ENTER on the same question_idx is allowed through.
                 self._last_exit_ts[intent.question_idx] = now_ns
+                self._save_cooldowns()
                 # Use the strategy-supplied exit_reason when present so the
                 # Telegram alert distinguishes safety_d / edge / time_stop /
                 # true stop_loss exits. Legacy fallback: reduce_only without a
@@ -327,6 +358,7 @@ class Router:
         # we don't immediately re-enter on a question whose post-settlement
         # rollover gets ingested in the same tick.
         self._last_exit_ts[question_idx] = now_ns
+        self._save_cooldowns()
         # Settlement: caller has already confirmed the question settled. We
         # simply delete the local position; venue truth handles PnL.
         self.dal.delete_position(question_idx)
