@@ -576,8 +576,9 @@ def run_one_question(
             qv = build_question_view(q, now_ns=now_ns, strike=strike, settled=False)
         else:
             qv = data_source.question_view(q, now_ns=now_ns, settled=False)
-        recent_returns = state.recent_returns(now_ns=now_ns, lookback_seconds=cfg.vol_lookback_seconds)
-        recent_hl = state.recent_hl_bars(now_ns=now_ns, lookback_seconds=cfg.vol_lookback_seconds)
+        recent_returns, recent_hl = state.recent_returns_and_hl(
+            now_ns=now_ns, lookback_seconds=cfg.vol_lookback_seconds
+        )
         ref_close = state.latest_btc_close() or qv.strike
 
         decision = strategy.evaluate(
