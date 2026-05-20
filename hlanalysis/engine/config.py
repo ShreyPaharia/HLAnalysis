@@ -81,6 +81,14 @@ class AllowlistEntry(BaseModel):
     # Post-exit cooldown in seconds. Router refuses to enter on a question
     # for this long after a position close. 0 disables (legacy behavior).
     entry_cooldown_seconds: int = 0
+    # Strategy-side position topup knobs. When a held position is under-filled
+    # (e.g. IOC partial-fill on a thin HL HIP-4 book), the strategy emits a
+    # second ENTER intent at the current ask to top up. Exit-eval runs first;
+    # exits always win over topup. See strategy modules' _evaluate_topup for
+    # the full gate flow.
+    topup_enabled: bool = True
+    topup_threshold_pct: float = 0.2          # trigger when shortfall ≥ 20% of target
+    topup_min_notional_usd: float = 11.0      # HL per-order min is $10; buffer 11
 
 
 class GlobalRiskConfig(BaseModel):
@@ -127,6 +135,12 @@ class ThetaParams(BaseModel):
     min_bid_notional_usd: float = 0.0
     # See ThetaHarvesterConfig.gamma_lambda — None disables.
     gamma_lambda: float | None = None
+    # See ThetaHarvesterConfig.topup_* — strategy-side topup of partial-fill
+    # positions. Defaults match AllowlistEntry; tune via the YAML `theta:` block
+    # when v3.1 needs different topup behavior than v1.
+    topup_enabled: bool = True
+    topup_threshold_pct: float = 0.2
+    topup_min_notional_usd: float = 11.0
 
 
 class StrategyConfig(BaseModel):

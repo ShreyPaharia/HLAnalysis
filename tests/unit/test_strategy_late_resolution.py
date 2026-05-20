@@ -893,3 +893,248 @@ def test_min_bid_notional_blocks_spoof_size_1_bid():
     )
     assert d.action is Action.HOLD
 
+
+# ---------------------------------------------------------------------------
+# Position-topup tests (2026-05-20): partial-fill recovery on thin HL HIP-4
+# books. Symmetric with theta_harvester's topup suite but uses v1's gates.
+# ---------------------------------------------------------------------------
+
+
+def _topup_cfg(**over):
+    """v1 cfg with stops/safety/cooldowns relaxed so the entry gates don't
+    interfere with isolated topup scenarios."""
+    base = dict(
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200.0,
+        vol_max=0.5,
+        max_position_usd=100.0,
+        stop_loss_pct=1e9,            # disabled — focus on topup
+        max_strike_distance_pct=10.0,
+        min_recent_volume_usd=1000.0,
+        stale_data_halt_seconds=5,
+        min_safety_d=0.0,             # disable safety_d for clarity
+        exit_safety_d=0.0,            # no exit_safety_d; isolate topup
+    )
+    base.update(over)
+    return LateResolutionConfig(**base)
+
+
+def test_topup_emits_enter_when_held_under_target():
+    """Position $48 ntl on $100 target → 52% shortfall ≥ 20% threshold; all
+    v1 gates pass → ENTER with limit_price=current_ask."""
+    from hlanalysis.strategy.types import Position
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = {
+        "@30": _ref_book("@30", ask=0.96, bid=0.95, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.06, bid=0.04, ts_ns=now - 100),
+    }
+    # qty 50 × ask 0.96 = $48 ntl on $100 target → 52% shortfall.
+    pos = Position(
+        question_idx=q.question_idx, symbol="@30", qty=50.0, avg_entry=0.96,
+        stop_loss_price=0.0, last_update_ts_ns=now - 1_000_000,
+    )
+    s = LateResolutionStrategy(_topup_cfg())
+    d = s.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=pos, now_ns=now,
+    )
+    assert d.action is Action.ENTER
+    assert d.intents[0].symbol == "@30"
+    assert d.intents[0].side == "buy"
+    # shortfall $52 / ask 0.96 = floor(52/0.96 * 100) / 100 = 54.16 contracts.
+    assert math.isclose(d.intents[0].size, 54.16, abs_tol=0.01)
+    assert math.isclose(d.intents[0].limit_price, 0.96, abs_tol=1e-9)
+    assert any(diag.message == "topup_emit" for diag in d.diagnostics)
+
+
+def test_topup_holds_when_shortfall_below_threshold():
+    """Held $96 ntl on $100 target → 4% shortfall < 20% threshold → HOLD
+    with the legacy have_position diag (no topup attempt made)."""
+    from hlanalysis.strategy.types import Position
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = {
+        "@30": _ref_book("@30", ask=0.96, bid=0.95, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.06, bid=0.04, ts_ns=now - 100),
+    }
+    pos = Position(
+        question_idx=q.question_idx, symbol="@30", qty=100.0, avg_entry=0.96,
+        stop_loss_price=0.0, last_update_ts_ns=now - 1_000_000,
+    )
+    s = LateResolutionStrategy(_topup_cfg())
+    d = s.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=pos, now_ns=now,
+    )
+    assert d.action is Action.HOLD
+    # The topup attempt was skipped pre-gate-check; legacy have_position diag.
+    assert any(diag.message == "have_position" for diag in d.diagnostics)
+
+
+def test_topup_holds_when_topup_notional_below_min():
+    """max_position_usd=12, held qty 4 × 0.96 = $3.84 → shortfall ~$8 (67%)
+    triggers attempt; topup_size = floor(8.16/0.96*100)/100 = 8.50 contracts →
+    $8.16 ntl < $11 floor → HOLD with below_min_notional skip reason."""
+    from hlanalysis.strategy.types import Position
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = {
+        "@30": _ref_book("@30", ask=0.96, bid=0.95, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.06, bid=0.04, ts_ns=now - 100),
+    }
+    pos = Position(
+        question_idx=q.question_idx, symbol="@30", qty=4.0, avg_entry=0.96,
+        stop_loss_price=0.0, last_update_ts_ns=now - 1_000_000,
+    )
+    s = LateResolutionStrategy(_topup_cfg(max_position_usd=12.0))
+    d = s.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=pos, now_ns=now,
+    )
+    assert d.action is Action.HOLD
+    skip = next(diag for diag in d.diagnostics if diag.message == "topup_skip")
+    assert any(("reason", "below_min_notional") == kv for kv in skip.fields)
+
+
+def test_topup_holds_when_entry_gate_now_fails():
+    """Recent vol crosses vol_max ceiling — entry gate fails on topup attempt."""
+    from hlanalysis.strategy.types import Position
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = {
+        "@30": _ref_book("@30", ask=0.96, bid=0.95, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.06, bid=0.04, ts_ns=now - 100),
+    }
+    pos = Position(
+        question_idx=q.question_idx, symbol="@30", qty=30.0, avg_entry=0.96,
+        stop_loss_price=0.0, last_update_ts_ns=now - 1_000_000,
+    )
+    s = LateResolutionStrategy(_topup_cfg(vol_max=0.001))
+    # Alternating returns produce non-zero stdev → vol exceeds tiny vol_max.
+    spiky = tuple((0.05 if i % 2 == 0 else -0.05) for i in range(60))
+    d = s.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=spiky,
+        recent_volume_usd=5_000.0,
+        position=pos, now_ns=now,
+    )
+    assert d.action is Action.HOLD
+    skip = next(diag for diag in d.diagnostics if diag.message == "topup_skip")
+    reason_kv = next(kv for kv in skip.fields if kv[0] == "reason")
+    assert reason_kv[1].startswith("gate_failed:")
+
+
+def test_topup_holds_when_chosen_leg_differs_from_held():
+    """Hold @30 (YES) under-filled, but @31 (NO) now has a higher gate price
+    than @30 — entry picks @31; topup must NOT add to wrong leg.
+    Set @31 ask=0.99 (above @30's 0.97) so entry's max-gate-price logic
+    picks @31."""
+    from hlanalysis.strategy.types import Position
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = {
+        "@30": _ref_book("@30", ask=0.97, bid=0.96, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.99, bid=0.98, ts_ns=now - 100),
+    }
+    pos = Position(
+        question_idx=q.question_idx, symbol="@30", qty=30.0, avg_entry=0.97,
+        stop_loss_price=0.0, last_update_ts_ns=now - 1_000_000,
+    )
+    s = LateResolutionStrategy(_topup_cfg())
+    d = s.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=pos, now_ns=now,
+    )
+    assert d.action is Action.HOLD
+    skip = next(diag for diag in d.diagnostics if diag.message == "topup_skip")
+    assert any(("reason", "leg_changed") == kv for kv in skip.fields)
+
+
+def test_exit_takes_precedence_over_topup():
+    """Stop-loss bid breach must close the position even when it's under-filled
+    (which would otherwise trigger a topup)."""
+    from hlanalysis.strategy.types import Position
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    # Bid below stop_loss_price triggers exit.
+    books = {
+        "@30": _ref_book("@30", ask=0.84, bid=0.83, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.16, bid=0.15, ts_ns=now - 100),
+    }
+    pos = Position(
+        question_idx=q.question_idx, symbol="@30", qty=50.0, avg_entry=0.95,
+        stop_loss_price=0.855, last_update_ts_ns=now - 1_000_000,
+    )
+    s = LateResolutionStrategy(_topup_cfg(stop_loss_pct=10.0))
+    d = s.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=pos, now_ns=now,
+    )
+    assert d.action is Action.EXIT
+    assert d.intents[0].reduce_only is True
+
+
+def test_topup_disabled_via_config_keeps_legacy_have_position():
+    from hlanalysis.strategy.types import Position
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = {
+        "@30": _ref_book("@30", ask=0.96, bid=0.95, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.06, bid=0.04, ts_ns=now - 100),
+    }
+    pos = Position(
+        question_idx=q.question_idx, symbol="@30", qty=50.0, avg_entry=0.96,
+        stop_loss_price=0.0, last_update_ts_ns=now - 1_000_000,
+    )
+    s = LateResolutionStrategy(_topup_cfg(topup_enabled=False))
+    d = s.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=pos, now_ns=now,
+    )
+    assert d.action is Action.HOLD
+    assert any(diag.message == "have_position" for diag in d.diagnostics)
+    assert not any(diag.message.startswith("topup_") for diag in d.diagnostics)
+
+
+def test_topup_size_floors_to_two_decimals():
+    """Sizing must use floor((shortfall/ask)*100)/100 — never overshoot target."""
+    import math as _m
+    from hlanalysis.strategy.types import Position
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = {
+        "@30": _ref_book("@30", ask=0.97, bid=0.96, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.04, bid=0.03, ts_ns=now - 100),
+    }
+    # held 50 × 0.97 = $48.5 ntl on $100 → shortfall $51.5; @0.97 →
+    # floor(51.5/0.97 * 100)/100 = floor(5309.27)/100 = 53.09 contracts.
+    pos = Position(
+        question_idx=q.question_idx, symbol="@30", qty=50.0, avg_entry=0.97,
+        stop_loss_price=0.0, last_update_ts_ns=now - 1_000_000,
+    )
+    s = LateResolutionStrategy(_topup_cfg())
+    d = s.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=pos, now_ns=now,
+    )
+    assert d.action is Action.ENTER
+    assert _m.isclose(d.intents[0].size, 53.09, abs_tol=0.01)
+

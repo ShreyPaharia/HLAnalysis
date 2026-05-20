@@ -121,6 +121,12 @@ strategies:
       use_bid_for_entry_gate: true        # 2026-05-19 churn fix; see allowlist comment
       min_bid_notional_usd: 10.0
       entry_cooldown_seconds: 60          # router uses this for the post-exit veto
+      # Position topup (2026-05-20): when an IOC partial-fill leaves the held
+      # position under target by ≥ 20%, re-run entry gates against the current
+      # book and emit a second ENTER for the shortfall. Exit-eval always wins.
+      topup_enabled: true
+      topup_threshold_pct: 0.2
+      topup_min_notional_usd: 11.0        # HL per-order min is $10; buffer to 11
 
     global:
       max_total_inventory_usd: 500
@@ -234,3 +240,8 @@ strategies:
       # belt-and-braces and barely fires (only 1.4% of v1 gate-pass ticks
       # have bid_notional <$10 per the microstructure profile).
       min_bid_notional_usd: 0.0
+      # Position topup (2026-05-20): mirrors v1 defaults — both strategies
+      # fight the same HL partial-fill problem on thin HIP-4 books.
+      topup_enabled: true
+      topup_threshold_pct: 0.2
+      topup_min_notional_usd: 11.0

@@ -68,6 +68,9 @@ def build_late_resolution_config(cfg: StrategyConfig) -> LateResolutionConfig:
         size_cap_min_ask=getattr(d, "size_cap_min_ask", 0.88),
         use_bid_for_entry_gate=getattr(d, "use_bid_for_entry_gate", False),
         min_bid_notional_usd=getattr(d, "min_bid_notional_usd", 0.0),
+        topup_enabled=getattr(d, "topup_enabled", True),
+        topup_threshold_pct=getattr(d, "topup_threshold_pct", 0.2),
+        topup_min_notional_usd=getattr(d, "topup_min_notional_usd", 11.0),
     )
 
 
@@ -106,6 +109,9 @@ def build_theta_harvester_config(cfg: StrategyConfig) -> ThetaHarvesterConfig:
         min_distance_pct=getattr(t, "min_distance_pct", None),
         min_bid_notional_usd=getattr(t, "min_bid_notional_usd", 0.0),
         gamma_lambda=getattr(t, "gamma_lambda", None),
+        topup_enabled=getattr(t, "topup_enabled", True),
+        topup_threshold_pct=getattr(t, "topup_threshold_pct", 0.2),
+        topup_min_notional_usd=getattr(t, "topup_min_notional_usd", 11.0),
     )
 
 

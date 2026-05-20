@@ -469,3 +469,182 @@ def test_min_bid_notional_filters_spoof_bids() -> None:
     )
     assert decision.action == Action.HOLD
     assert any(d.message == "bid_notional_too_thin" for d in decision.diagnostics)
+
+
+# ---------------------------------------------------------------------------
+# Position-topup tests (2026-05-20): IOC partial-fills on thin HL HIP-4 books
+# leave the strategy under-sized vs max_position_usd. _evaluate_topup must
+# emit a second ENTER intent to close the gap — but only when an exit gate
+# wouldn't fire, all entry gates still pass, and the chosen leg matches the
+# held symbol.
+# ---------------------------------------------------------------------------
+
+
+def _under_filled_pos(*, symbol: str = "YES", qty: float = 100.0,
+                     entry_px: float = 0.50) -> Position:
+    """Partial-fill scenario: intended ~200 contracts ($100 @ 0.50), got 100 ($50)."""
+    return Position(
+        question_idx=0, symbol=symbol, qty=qty,
+        avg_entry=entry_px, stop_loss_price=0.0, last_update_ts_ns=0,
+    )
+
+
+def test_topup_emits_enter_when_held_qty_below_target_and_gates_pass() -> None:
+    """Held qty=100 × ask=0.50 = $50 ntl on $100 target → 50% shortfall ≥ 20%
+    threshold. All gates pass → ENTER with topup_size at current ask."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        edge_buffer=0.02, exit_edge_threshold=-0.01,
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    # Edge stays strongly positive: ref >> strike, YES ask 0.50 → edge ~ 0.50.
+    books = {"YES": _book("YES", bid=0.49, ask=0.50), "NO": _book("NO", bid=0.49, ask=0.50)}
+    pos = _under_filled_pos()
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=120_000.0, recent_returns=rets, recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert decision.action == Action.ENTER
+    assert decision.intents[0].symbol == "YES"
+    assert decision.intents[0].side == "buy"
+    # Shortfall = $100 - $50 = $50; @0.50 → size = 100.0 contracts.
+    assert math.isclose(decision.intents[0].size, 100.0, abs_tol=0.01)
+    assert math.isclose(decision.intents[0].limit_price, 0.50, abs_tol=1e-9)
+    assert any(d.message == "topup_emit" for d in decision.diagnostics)
+
+
+def test_topup_holds_when_shortfall_below_threshold() -> None:
+    """Held qty=180 × ask=0.50 = $90 on $100 target → 10% shortfall < 20% → HOLD."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        edge_buffer=0.02, exit_edge_threshold=-0.01,
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    books = {"YES": _book("YES", bid=0.49, ask=0.50), "NO": _book("NO", bid=0.49, ask=0.50)}
+    pos = _under_filled_pos(qty=180.0)
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=120_000.0, recent_returns=rets, recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert decision.action == Action.HOLD
+    # Must NOT have a topup_skip diag — we didn't even attempt one (shortfall
+    # below threshold short-circuits without re-running entry gates).
+    skip_diags = [d for d in decision.diagnostics if d.message == "topup_skip"]
+    assert len(skip_diags) == 1
+    assert any(("reason", "not_needed") == kv for kv in skip_diags[0].fields)
+
+
+def test_topup_holds_when_topup_notional_below_min() -> None:
+    """Shortfall = $5 (held=190×0.50=$95 on $100) → triggers topup attempt
+    because 5% < 20%? No — that doesn't fire. Use a smaller target instead:
+    max_position_usd=12, held=8×0.50=$4, shortfall=$8, → 67%>20% triggers attempt;
+    but topup_size @ 0.50 = floor(8/0.50*100)/100 = 16; 16*0.50=$8 < $11 min →
+    skip below_min_notional. Wait — 16 contracts at 0.50 = $8.00, below $11."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        edge_buffer=0.02, exit_edge_threshold=-0.01,
+        max_position_usd=12.0,
+        topup_min_notional_usd=11.0,
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    books = {"YES": _book("YES", bid=0.49, ask=0.50), "NO": _book("NO", bid=0.49, ask=0.50)}
+    pos = _under_filled_pos(qty=8.0)
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=120_000.0, recent_returns=rets, recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert decision.action == Action.HOLD
+    skip = next(d for d in decision.diagnostics if d.message == "topup_skip")
+    assert any(("reason", "below_min_notional") == kv for kv in skip.fields)
+
+
+def test_topup_holds_when_edge_max_gate_now_fails() -> None:
+    """edge_max=0.20 vetoes fresh entries with >0.20 edge. A held position with
+    fresh edge >0.20 (e.g. market gapped favourably) must NOT top up — the gate
+    fails and we report gate_failed:edge_too_extreme."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        edge_buffer=0.02, edge_max=0.20, exit_edge_threshold=-0.01,
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    # YES ask 0.50, ref massively above strike → edge ~0.50 > 0.20.
+    books = {"YES": _book("YES", bid=0.49, ask=0.50), "NO": _book("NO", bid=0.49, ask=0.50)}
+    pos = _under_filled_pos()
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=120_000.0, recent_returns=rets, recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert decision.action == Action.HOLD
+    skip = next(d for d in decision.diagnostics if d.message == "topup_skip")
+    reason_kv = next(kv for kv in skip.fields if kv[0] == "reason")
+    assert reason_kv[1].startswith("gate_failed:")
+
+
+def test_topup_holds_when_chosen_leg_now_different_from_held() -> None:
+    """Hold YES, but BTC has dropped below strike so the strategy now picks NO.
+    Topup must NOT add to the wrong leg — emit leg_changed skip."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        edge_buffer=0.02, exit_edge_threshold=-1.0,  # disable exit; isolate topup
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    # YES leg dead (ask 0.99 → tiny edge); NO leg cheap (ask 0.05 with ref <<
+    # strike → P(NO wins) ~ 1 → edge ~0.95).
+    books = {"YES": _book("YES", bid=0.98, ask=0.99), "NO": _book("NO", bid=0.04, ask=0.05)}
+    pos = _under_filled_pos(symbol="YES", qty=50.0, entry_px=0.50)
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=80_000.0,
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert decision.action == Action.HOLD
+    skip = next(d for d in decision.diagnostics if d.message == "topup_skip")
+    assert any(("reason", "leg_changed") == kv for kv in skip.fields)
+
+
+def test_exit_takes_precedence_over_topup() -> None:
+    """Exit edge has gone negative (held YES, BTC below strike). Exit fires
+    before topup is even considered — under-filled position still gets closed."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        edge_buffer=0.02, exit_edge_threshold=-0.01,
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    # Same setup as test_edge_exit_fires: ref<strike collapses held YES edge.
+    books = {"YES": _book("YES", bid=0.45, ask=0.46), "NO": _book("NO", bid=0.54, ask=0.55)}
+    pos = _under_filled_pos(qty=50.0)  # under-filled — would otherwise trigger topup
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=99_000.0,
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert decision.action == Action.EXIT
+    assert decision.intents[0].reduce_only is True
+    # No topup intent should appear.
+    assert len(decision.intents) == 1
+
+
+def test_topup_disabled_via_config_keeps_hold() -> None:
+    """topup_enabled=False preserves legacy "have_position HOLD" behavior."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        edge_buffer=0.02, exit_edge_threshold=-0.01,
+        topup_enabled=False,
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    books = {"YES": _book("YES", bid=0.49, ask=0.50), "NO": _book("NO", bid=0.49, ask=0.50)}
+    pos = _under_filled_pos()
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=120_000.0, recent_returns=rets, recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert decision.action == Action.HOLD
+    # No topup diagnostics should appear when disabled.
+    assert not any(d.message.startswith("topup_") for d in decision.diagnostics)

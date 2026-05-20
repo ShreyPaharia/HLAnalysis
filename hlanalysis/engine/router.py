@@ -190,6 +190,17 @@ class Router:
                     intent.cloid, ack.fill_size, ack.fill_price,
                 )
                 return
+            # Surface IOC partial fills explicitly. Strategy-side topup
+            # (theta_harvester / late_resolution) closes the resulting size gap
+            # on subsequent ticks, but the partial itself is invisible without
+            # this log — symptoms are "position smaller than intended; no
+            # visible reason". Threshold ≥ 1.0 avoids logspam on rounding.
+            shortfall = intent.size - ack.fill_size
+            if shortfall >= 1.0:
+                logger.info(
+                    "partial_fill cloid={} intent_size={} fill_size={} shortfall={}",
+                    intent.cloid, intent.size, ack.fill_size, shortfall,
+                )
             await self._book_fill(intent, ack.fill_price, ack.fill_size,
                                   now_ns=now_ns, question=question,
                                   question_fields=question_fields)

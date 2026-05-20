@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
+from loguru import logger
 
 from ._numba.safety import safety_d_for_region_core as _nb_safety_d_core
 from ._numba.vol import (
@@ -244,6 +245,16 @@ class LateResolutionConfig:
     # bid-price threshold but represent no real buying interest. Default 0
     # disables (legacy behavior); set to ~$10–20 for a meaningful filter.
     min_bid_notional_usd: float = 0.0
+    # Strategy-side position topup. When a held position's notional (qty × ask)
+    # is below max_position_usd by at least topup_threshold_pct (e.g. 20%), the
+    # strategy re-runs all entry gates against the CURRENT state and, if the
+    # same leg is still the favourite, emits a second IOC ENTER intent sized to
+    # fill the shortfall. Exit-eval always runs first — an exit signal overrides
+    # any topup. Designed to recover the size shortfall left by HL IOC partial
+    # fills on thin HIP-4 books. Set topup_enabled=False to disable.
+    topup_enabled: bool = True
+    topup_threshold_pct: float = 0.2
+    topup_min_notional_usd: float = 11.0
 
 
 class LateResolutionStrategy(Strategy):
@@ -357,8 +368,6 @@ class LateResolutionStrategy(Strategy):
         now_ns: int,
         recent_hl_bars: tuple[tuple[float, float], ...] = (),
     ) -> Decision:
-        diags: list[Diagnostic] = []
-
         if question.settled:
             if position is not None:
                 # Settlement-driven exit: no order needed; engine resolves PnL via venue.
@@ -525,7 +534,42 @@ class LateResolutionStrategy(Strategy):
                         intents=(intent,),
                         diagnostics=(Diagnostic("warn", "exit_stop_loss"),),
                     )
+            # No exit gate fired. If topup is enabled, see if we should add to
+            # the held position to recover from an IOC partial-fill shortfall.
+            # Exit-eval already ran above and chose not to fire — topup is safe.
+            if self.cfg.topup_enabled:
+                topup_dec = self._evaluate_topup(
+                    question=question, books=books, reference_price=reference_price,
+                    recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
+                    now_ns=now_ns, recent_hl_bars=recent_hl_bars, position=position,
+                )
+                if topup_dec is not None:
+                    return topup_dec
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "have_position"),))
+
+        return self._evaluate_entry(
+            question=question, books=books, reference_price=reference_price,
+            recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
+            now_ns=now_ns, recent_hl_bars=recent_hl_bars,
+        )
+
+    def _evaluate_entry(
+        self, *,
+        question: QuestionView,
+        books: Mapping[str, BookState],
+        reference_price: float,
+        recent_returns: tuple[float, ...],
+        recent_volume_usd: float,
+        now_ns: int,
+        recent_hl_bars: tuple[tuple[float, float], ...] = (),
+    ) -> Decision:
+        """Run all entry gates and return the corresponding Decision.
+
+        Shared between the no-position path (called from `evaluate`) and the
+        held-position topup path (called from `_evaluate_topup`) so the gate
+        flow is identical — a topup must clear every gate a fresh entry would.
+        """
+        diags: list[Diagnostic] = []
 
         # 1) TTE
         tte_s = (question.expiry_ns - now_ns) / 1e9
@@ -733,6 +777,116 @@ class LateResolutionStrategy(Strategy):
             diagnostics=(Diagnostic("info", "entry"), *diags),
         )
 
+    def _evaluate_topup(
+        self, *,
+        question: QuestionView,
+        books: Mapping[str, BookState],
+        reference_price: float,
+        recent_returns: tuple[float, ...],
+        recent_volume_usd: float,
+        now_ns: int,
+        recent_hl_bars: tuple[tuple[float, float], ...],
+        position: Position,
+    ) -> Decision | None:
+        """Top up an under-filled held position.
+
+        Returns:
+          - ENTER decision when the held leg is still the favourite under
+            current state AND the shortfall is large enough to justify an
+            order ≥ topup_min_notional_usd.
+          - HOLD decision (with skip-reason diagnostic) when a topup check
+            fired but was rejected.
+          - None when no topup attempt was warranted (lets the caller fall
+            through to its legacy "have_position" HOLD diagnostic so the
+            scanner log shape is unchanged for non-topup ticks).
+        """
+        held = books.get(position.symbol)
+        if held is None or held.ask_px is None or held.ask_px <= 0:
+            return None
+        ask = held.ask_px
+        current_ntl = abs(position.qty) * ask
+        target_ntl = self.cfg.max_position_usd
+        shortfall_ntl = target_ntl - current_ntl
+        if shortfall_ntl < target_ntl * self.cfg.topup_threshold_pct:
+            return None  # routine "fully sized" tick — keep legacy diagnostic
+
+        # Re-run ALL entry gates against the current state.
+        entry_dec = self._evaluate_entry(
+            question=question, books=books, reference_price=reference_price,
+            recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
+            now_ns=now_ns, recent_hl_bars=recent_hl_bars,
+        )
+        if entry_dec.action != Action.ENTER or not entry_dec.intents:
+            failed_gate = (
+                entry_dec.diagnostics[0].message
+                if entry_dec.diagnostics else "unknown"
+            )
+            logger.info(
+                "topup_skip q={} sym={} reason=gate_failed:{} current_ntl=${:.2f} target_ntl=${:.2f}",
+                question.question_idx, position.symbol, failed_gate,
+                current_ntl, target_ntl,
+            )
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "topup_skip", (
+                    ("reason", f"gate_failed:{failed_gate}"),
+                )),
+            ))
+        candidate = entry_dec.intents[0]
+        if candidate.symbol != position.symbol:
+            logger.info(
+                "topup_skip q={} sym={} reason=leg_changed chosen={} current_ntl=${:.2f} target_ntl=${:.2f}",
+                question.question_idx, position.symbol, candidate.symbol,
+                current_ntl, target_ntl,
+            )
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "topup_skip", (
+                    ("reason", "leg_changed"),
+                    ("chosen", candidate.symbol),
+                )),
+            ))
+
+        topup_size = math.floor((shortfall_ntl / ask) * 100) / 100
+        topup_ntl = topup_size * ask
+        if topup_ntl < self.cfg.topup_min_notional_usd:
+            logger.info(
+                "topup_skip q={} sym={} reason=below_min_notional topup_ntl=${:.2f} min=${:.2f}",
+                question.question_idx, position.symbol, topup_ntl,
+                self.cfg.topup_min_notional_usd,
+            )
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "topup_skip", (
+                    ("reason", "below_min_notional"),
+                    ("topup_ntl", f"{topup_ntl:.2f}"),
+                )),
+            ))
+
+        intent = OrderIntent(
+            question_idx=question.question_idx,
+            symbol=position.symbol,
+            side="buy",
+            size=topup_size,
+            limit_price=ask,
+            cloid=f"hla-{uuid.uuid4()}",
+            time_in_force="ioc",
+        )
+        logger.info(
+            "topup_emit q={} sym={} side=buy current_ntl=${:.2f} target_ntl=${:.2f} "
+            "topup_size={:.2f} ask={:.5f}",
+            question.question_idx, position.symbol, current_ntl, target_ntl,
+            topup_size, ask,
+        )
+        return Decision(
+            action=Action.ENTER, intents=(intent,),
+            diagnostics=(
+                Diagnostic("info", "topup_emit", (
+                    ("current_ntl", f"{current_ntl:.2f}"),
+                    ("target_ntl", f"{target_ntl:.2f}"),
+                    ("topup_size", f"{topup_size:.2f}"),
+                    ("ask", f"{ask:.5f}"),
+                )),
+            ),
+        )
+
 
 from hlanalysis.backtest.core.registry import register  # noqa: E402
 
@@ -767,5 +921,8 @@ def build_v1_late_resolution(params: dict) -> LateResolutionStrategy:
         size_cap_min_ask=float(params.get("size_cap_min_ask", 0.88)),
         use_bid_for_entry_gate=bool(params.get("use_bid_for_entry_gate", False)),
         min_bid_notional_usd=float(params.get("min_bid_notional_usd", 0.0)),
+        topup_enabled=bool(params.get("topup_enabled", True)),
+        topup_threshold_pct=float(params.get("topup_threshold_pct", 0.2)),
+        topup_min_notional_usd=float(params.get("topup_min_notional_usd", 11.0)),
     )
     return LateResolutionStrategy(cfg)

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+from loguru import logger
 from scipy.stats import norm  # type: ignore[import-untyped]
 
 from ._numba.vol import sample_std_returns as _nb_sample_std
@@ -221,6 +222,15 @@ class ThetaHarvesterConfig:
     # held position sooner when path variance is high).
     # None disables (legacy behavior).
     gamma_lambda: Optional[float] = None
+    # Strategy-side position topup. When a held position's notional (qty × ask)
+    # is below max_position_usd by at least topup_threshold_pct, the strategy
+    # re-runs ALL entry gates against the CURRENT state and, if the same leg is
+    # still chosen, emits a second IOC ENTER intent sized to fill the shortfall.
+    # Exit-eval always runs first — exit signals override topup. Recovers size
+    # left on the table by HL IOC partial fills on thin HIP-4 books.
+    topup_enabled: bool = True
+    topup_threshold_pct: float = 0.2
+    topup_min_notional_usd: float = 11.0
 
 
 class ThetaHarvesterStrategy(Strategy):
@@ -262,11 +272,29 @@ class ThetaHarvesterStrategy(Strategy):
 
         mu_eff = self._mu(recent_returns)
 
-        # Phase C: have-position exit rules (the v3 addition)
+        # Phase C: have-position. Exit gates run FIRST and ALWAYS WIN — if any
+        # exit fires we close immediately, never top up. If exits HOLD and topup
+        # is enabled, we consider adding to the existing position.
         if position is not None:
-            return self._evaluate_exits(
+            exit_dec = self._evaluate_exits(
                 question=question, books=books, reference_price=reference_price,
                 sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr, tau_s=tau_s, position=position,
+            )
+            if exit_dec.action == Action.EXIT:
+                return exit_dec
+            if not self.cfg.topup_enabled:
+                return exit_dec
+            topup_dec = self._evaluate_topup(
+                question=question, books=books, reference_price=reference_price,
+                sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr, position=position,
+            )
+            if topup_dec.action == Action.ENTER:
+                return topup_dec
+            # Topup HOLD diagnostics layered on top of the exit's HOLD diags so
+            # we surface both the "no exit" reason and the topup-skip reason.
+            return Decision(
+                action=Action.HOLD,
+                diagnostics=exit_dec.diagnostics + topup_dec.diagnostics,
             )
 
         # Phase D: no-position entry (v2 logic)
@@ -568,6 +596,119 @@ class ThetaHarvesterStrategy(Strategy):
             )),
         ))
 
+    def _evaluate_topup(
+        self, *, question: QuestionView, books: Mapping[str, BookState],
+        reference_price: float, sigma: float, mu_eff: float, tau_yr: float,
+        position: Position,
+    ) -> Decision:
+        """Top up an under-filled held position.
+
+        Returns ENTER when the held leg is still the favourite under current
+        state AND the shortfall vs max_position_usd is large enough to justify
+        an order ≥ topup_min_notional_usd. Otherwise returns HOLD with a
+        skip-reason diagnostic. The router's post-exit cooldown is bypassed
+        naturally — `_last_exit_ts` is 0 while a position is open.
+        """
+        held = books.get(position.symbol)
+        if held is None or held.ask_px is None or held.ask_px <= 0:
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "topup_skip", (("reason", "no_book"),)),
+            ))
+        ask = held.ask_px
+        current_ntl = abs(position.qty) * ask
+        target_ntl = self.cfg.max_position_usd
+        shortfall_ntl = target_ntl - current_ntl
+        if shortfall_ntl < target_ntl * self.cfg.topup_threshold_pct:
+            logger.info(
+                "topup_skip q={} sym={} reason=not_needed current_ntl=${:.2f} target_ntl=${:.2f}",
+                question.question_idx, position.symbol, current_ntl, target_ntl,
+            )
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "topup_skip", (
+                    ("reason", "not_needed"),
+                    ("current_ntl", f"{current_ntl:.2f}"),
+                    ("target_ntl", f"{target_ntl:.2f}"),
+                )),
+            ))
+
+        # Re-run ALL entry gates against the current state. _evaluate_entry
+        # already encodes every gate (TTE, near-strike, favorite, edge,
+        # edge_max, bid notional, etc.) so we delegate rather than duplicate.
+        entry_dec = self._evaluate_entry(
+            question=question, books=books, reference_price=reference_price,
+            sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+        )
+        if entry_dec.action != Action.ENTER or not entry_dec.intents:
+            failed_gate = (
+                entry_dec.diagnostics[0].message
+                if entry_dec.diagnostics else "unknown"
+            )
+            logger.info(
+                "topup_skip q={} sym={} reason=gate_failed:{} current_ntl=${:.2f} target_ntl=${:.2f}",
+                question.question_idx, position.symbol, failed_gate,
+                current_ntl, target_ntl,
+            )
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "topup_skip", (
+                    ("reason", f"gate_failed:{failed_gate}"),
+                )),
+            ))
+        candidate = entry_dec.intents[0]
+        if candidate.symbol != position.symbol:
+            logger.info(
+                "topup_skip q={} sym={} reason=leg_changed chosen={} current_ntl=${:.2f} target_ntl=${:.2f}",
+                question.question_idx, position.symbol, candidate.symbol,
+                current_ntl, target_ntl,
+            )
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "topup_skip", (
+                    ("reason", "leg_changed"),
+                    ("chosen", candidate.symbol),
+                )),
+            ))
+
+        topup_size = math.floor((shortfall_ntl / ask) * 100) / 100
+        topup_ntl = topup_size * ask
+        if topup_ntl < self.cfg.topup_min_notional_usd:
+            logger.info(
+                "topup_skip q={} sym={} reason=below_min_notional topup_ntl=${:.2f} min=${:.2f}",
+                question.question_idx, position.symbol, topup_ntl,
+                self.cfg.topup_min_notional_usd,
+            )
+            return Decision(action=Action.HOLD, diagnostics=(
+                Diagnostic("info", "topup_skip", (
+                    ("reason", "below_min_notional"),
+                    ("topup_ntl", f"{topup_ntl:.2f}"),
+                )),
+            ))
+
+        intent = OrderIntent(
+            question_idx=question.question_idx,
+            symbol=position.symbol,
+            side="buy",
+            size=topup_size,
+            limit_price=ask,
+            cloid=f"hla-{uuid.uuid4()}",
+            time_in_force="ioc",
+        )
+        logger.info(
+            "topup_emit q={} sym={} side=buy current_ntl=${:.2f} target_ntl=${:.2f} "
+            "topup_size={:.2f} ask={:.5f}",
+            question.question_idx, position.symbol, current_ntl, target_ntl,
+            topup_size, ask,
+        )
+        return Decision(
+            action=Action.ENTER, intents=(intent,),
+            diagnostics=(
+                Diagnostic("info", "topup_emit", (
+                    ("current_ntl", f"{current_ntl:.2f}"),
+                    ("target_ntl", f"{target_ntl:.2f}"),
+                    ("topup_size", f"{topup_size:.2f}"),
+                    ("ask", f"{ask:.5f}"),
+                )),
+            ),
+        )
+
     def _exit_intent(self, question: QuestionView, position: Position, held: BookState, *, reason: str) -> Decision:
         intent = OrderIntent(
             question_idx=question.question_idx,
@@ -621,5 +762,8 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
             if params.get("gamma_lambda") is not None
             else None
         ),
+        topup_enabled=bool(params.get("topup_enabled", True)),
+        topup_threshold_pct=float(params.get("topup_threshold_pct", 0.2)),
+        topup_min_notional_usd=float(params.get("topup_min_notional_usd", 11.0)),
     )
     return ThetaHarvesterStrategy(cfg)
