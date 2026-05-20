@@ -103,6 +103,29 @@ Wall-time impact is small (DuckDB connection setup is fast in-process) but the r
 
 Fused into the Fix 2 refactor — `_reference_iter` is now a straight `fetchall()` + `iter`, no `list(primary_iter)` round-trip. Tiny win, but it was free.
 
+### Fix 5 — numba-JIT'd stale-level diff loop
+
+**File:** `hlanalysis/backtest/data/_hl_hip4_fastpath.py`.
+
+After fix 4 landed, the next bottleneck in `build_leg_event_array_from_columns` was the per-snapshot Python set-diff loop (`set(prev) - set(new)`, 160k iters/leg). Replaced with `_diff_clears`, a `@njit(cache=True)` function that:
+- Takes the flat numpy ts/px/offsets arrays directly.
+- Linear-searches across ≤20-level books per snapshot (fast under nopython; sets aren't supported in numpy/numba's hot mode).
+- Returns the clear-event `(ts, px)` arrays as numpy slices.
+
+Bit-identical output to the previous Python implementation, verified by the existing parity test.
+
+### Fix 6 — Merged `slice_window` calls
+
+**Files:** `hlanalysis/backtest/runner/market_state.py`, `hlanalysis/backtest/runner/hftbt_runner.py`.
+
+`MarketState.recent_returns` and `MarketState.recent_hl_bars` each made an independent jitclass call to `KlineRingBuffer.slice_window`, which already returns both arrays. The scan loop did this twice per tick (2880 jitclass calls per question). Added `recent_returns_and_hl` that returns the tuple from a single `slice_window` call; the runner now uses it. Halves the per-tick jitclass boxing for these two reads.
+
+| Scenario        | Before fix 5+6 | After fix 5+6 | Δ                            |
+|-----------------|----------------|---------------|------------------------------|
+| hl_binary 1q    | 14.8 s         | **10.3 s**    | 1.44× (cum. 3.6× vs baseline) |
+| hl_bucket 1q    | 20.4 s         | **14.2 s**    | 1.44× (cum. 4.9×)             |
+| hl_bucket 3q    | 59.6 s         | **41.3 s**    | 1.44×                          |
+
 ### Fix 4 — Arrow-backed `events_arrays(q)` fast path
 
 **Files:** `hlanalysis/backtest/data/_hl_hip4_fastpath.py` (new), `hlanalysis/backtest/data/hl_hip4.py` (new method), `hlanalysis/backtest/runner/hftbt_runner.py` (fast-path branch).
@@ -133,8 +156,9 @@ hl-bt run --strategy v1_late_resolution --data-source hl_hip4 \
 
 - **Discovered:** 24 questions (15 binary + 9 bucket — the planning doc said 26 questions; 2 fall outside the discovery date filter on this branch's commit).
 - **Prior baseline (regime-breakdown-2026-05-20 v1 run):** ~70 min (from `data/sim/runs/regime-breakdown-2026-05-20/v1/fills/` file mtimes — first fill 21:54:25, last fill 23:04:27).
-- **After fix 1 + fix 2 (committed in initial PR):** 8 m 37 s (~8× vs baseline).
-- **After fix 4 added on top (arrow fast path):** **5 m 41 s** (CPU: 260 s user + 98 s sys), ~12.3× vs the ~70 min baseline, 1.52× on top of fix 1+2.
+- **After fix 1 + fix 2 (initial PR):** 8 m 37 s (~8× vs baseline).
+- **After fix 4 added (arrow fast path):** 5 m 41 s (~12.3× vs baseline).
+- **After fix 5 + fix 6 (numba diff + merged slice_window):** **3 m 54 s** (CPU: 191 s user + 73 s sys), **~17.9× vs the ~70 min baseline**, 1.46× on top of fix 1-4.
 
 The per-question raw speedup is ~2.5-3.8× (binary / bucket); the full-corpus speedup is bigger because the baseline was a cold run that paid disk + DuckDB metadata cost more steeply. A like-for-like warm-cache baseline would land at ~3-4× since per-question raw is the floor. Either way, this puts v1 tuning back in the iterative regime instead of the leave-it-overnight regime.
 

@@ -92,5 +92,19 @@ class MarketState:
         )
         return hl
 
+    def recent_returns_and_hl(
+        self, *, now_ns: int, lookback_seconds: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return ``(returns_1d, hl_2d)`` in a single ``slice_window`` call.
+
+        The runner used to invoke ``recent_returns`` + ``recent_hl_bars``
+        separately, paying the numba jitclass boxing cost twice per scan tick.
+        Merging them halves that overhead (the underlying ``slice_window``
+        already returns both arrays).
+        """
+        return self._klines.slice_window(
+            now_ns=now_ns, lookback_seconds=lookback_seconds
+        )
+
 
 __all__ = ["MarketState"]

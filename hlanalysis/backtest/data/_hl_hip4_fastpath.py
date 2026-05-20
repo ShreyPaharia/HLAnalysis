@@ -31,6 +31,7 @@ from typing import Any, Literal
 
 import duckdb
 import numpy as np
+from numba import njit
 
 from hftbacktest.types import (
     BUY_EVENT,
@@ -41,6 +42,51 @@ from hftbacktest.types import (
     TRADE_EVENT,
     event_dtype,
 )
+
+
+@njit(cache=True)
+def _diff_clears(
+    ts: np.ndarray,
+    px_flat: np.ndarray,
+    offsets: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-snapshot, return (out_ts, out_px) of stale-level clear events.
+
+    For each snapshot i, finds prices in ``px_flat[offsets[i-1]:offsets[i]]``
+    that are absent from ``px_flat[offsets[i]:offsets[i+1]]`` (linear search
+    — book depth is ≤20 levels). Emits one clear per stale price at the
+    new snapshot's timestamp ``ts[i]``.
+
+    Inputs are the flat numpy column arrays from Arrow. JIT-compiled because
+    the Python equivalent (set diffs on 160k snapshots) was 4 s / leg.
+    """
+    n_snaps = len(ts)
+    # Pre-allocate up to the previous-snapshot levels per step. Slightly
+    # over-allocated (worst case = total levels), but tractable.
+    capacity = int(offsets[-1])  # total levels across all snapshots
+    out_ts = np.empty(capacity, dtype=np.int64)
+    out_px = np.empty(capacity, dtype=np.float64)
+    n_out = 0
+    prev_start = 0
+    prev_end = 0
+    for i in range(n_snaps):
+        new_start = int(offsets[i])
+        new_end = int(offsets[i + 1])
+        snap_ts = ts[i]
+        for k in range(prev_start, prev_end):
+            p = px_flat[k]
+            found = False
+            for m in range(new_start, new_end):
+                if px_flat[m] == p:
+                    found = True
+                    break
+            if not found:
+                out_ts[n_out] = snap_ts
+                out_px[n_out] = p
+                n_out += 1
+        prev_start = new_start
+        prev_end = new_end
+    return out_ts[:n_out], out_px[:n_out]
 
 from ..core.data_source import QuestionDescriptor
 from ..core.events import ReferenceEvent, SettlementEvent
@@ -202,36 +248,22 @@ def build_leg_event_array_from_columns(
         ask_px = book_cols["ask_px"]
         ask_sz = book_cols["ask_sz"]
         ask_off = book_cols["ask_offsets"]
-        n_snaps = len(ts)
 
-        # --- Stale-level clear events: per-snapshot Python loop over set diffs.
-        # Inputs are flat numpy slices, no dataclass round-trip.
-        clear_ts: list[int] = []
-        clear_ev: list[int] = []
-        clear_px: list[float] = []
-        prev_bid_set: set[float] = set()
-        prev_ask_set: set[float] = set()
-        for i in range(n_snaps):
-            new_bid_set = set(bid_px[bid_off[i]:bid_off[i + 1]].tolist())
-            new_ask_set = set(ask_px[ask_off[i]:ask_off[i + 1]].tolist())
-            snap_ts = int(ts[i])
-            for px in prev_bid_set - new_bid_set:
-                clear_ts.append(snap_ts)
-                clear_ev.append(bid_set_ev)
-                clear_px.append(px)
-            for px in prev_ask_set - new_ask_set:
-                clear_ts.append(snap_ts)
-                clear_ev.append(ask_set_ev)
-                clear_px.append(px)
-            prev_bid_set = new_bid_set
-            prev_ask_set = new_ask_set
-
-        if clear_ts:
-            clear_n = len(clear_ts)
-            ts_chunks.append(np.asarray(clear_ts, dtype=np.int64))
-            ev_chunks.append(np.asarray(clear_ev, dtype=np.uint64))
-            px_chunks.append(np.asarray(clear_px, dtype=np.float64))
-            qty_chunks.append(np.zeros(clear_n, dtype=np.float64))
+        # --- Stale-level clear events: numba-JIT'd per-snapshot diff.
+        # Operates on flat numpy column arrays; linear search across ≤20-level
+        # books is fast under nopython.
+        bid_clear_ts, bid_clear_px = _diff_clears(ts, bid_px, bid_off)
+        ask_clear_ts, ask_clear_px = _diff_clears(ts, ask_px, ask_off)
+        if len(bid_clear_ts) > 0:
+            ts_chunks.append(bid_clear_ts)
+            ev_chunks.append(np.full(len(bid_clear_ts), bid_set_ev, dtype=np.uint64))
+            px_chunks.append(bid_clear_px)
+            qty_chunks.append(np.zeros(len(bid_clear_ts), dtype=np.float64))
+        if len(ask_clear_ts) > 0:
+            ts_chunks.append(ask_clear_ts)
+            ev_chunks.append(np.full(len(ask_clear_ts), ask_set_ev, dtype=np.uint64))
+            px_chunks.append(ask_clear_px)
+            qty_chunks.append(np.zeros(len(ask_clear_ts), dtype=np.float64))
 
         # --- Per-level SET events: fully vectorised via np.repeat.
         bid_lens = np.diff(bid_off)
