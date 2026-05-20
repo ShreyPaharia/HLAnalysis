@@ -306,22 +306,52 @@ def run_one_question(
     """Run one question end-to-end through hftbacktest."""
 
     # --- Collect events ----------------------------------------------------
-    book_events: dict[str, list[BookSnapshot]] = {sym: [] for sym in q.leg_symbols}
-    trade_events: dict[str, list[TradeEvent]] = {sym: [] for sym in q.leg_symbols}
-    ref_events: list[ReferenceEvent] = []
-    settle_events: list[SettlementEvent] = []
+    # Two paths:
+    #   1. Fast path: the data source provides ``events_arrays(q)`` returning
+    #      pre-built numpy ``event_dtype`` arrays per leg + reference/settlement
+    #      event lists. This skips the ``BookSnapshot``/``TradeEvent`` dataclass
+    #      round-trip and lets the data source build the hftbacktest event
+    #      array fully vectorised. HL HIP-4 implements this.
+    #   2. Legacy path: iterate ``events(q)`` and build per-leg arrays here via
+    #      the per-cell ``_build_leg_event_array``. Synthetic / polymarket
+    #      sources stay on this path.
+    leg_event_arrays: dict[str, np.ndarray]
+    book_ts_per_leg: dict[str, np.ndarray]
+    ref_events: list[ReferenceEvent]
+    settle_events: list[SettlementEvent]
 
-    for ev in data_source.events(q):
-        if isinstance(ev, BookSnapshot):
-            if ev.symbol in book_events:
-                book_events[ev.symbol].append(ev)
-        elif isinstance(ev, TradeEvent):
-            if ev.symbol in trade_events:
-                trade_events[ev.symbol].append(ev)
-        elif isinstance(ev, ReferenceEvent):
-            ref_events.append(ev)
-        elif isinstance(ev, SettlementEvent):
-            settle_events.append(ev)
+    fast_path_fn = getattr(data_source, "events_arrays", None)
+    if fast_path_fn is not None:
+        bundle = fast_path_fn(q)
+        leg_event_arrays = {sym: legarr.events for sym, legarr in bundle.leg_arrays.items()}
+        book_ts_per_leg = {sym: legarr.book_ts for sym, legarr in bundle.leg_arrays.items()}
+        ref_events = bundle.reference_events
+        settle_events = bundle.settlement_events
+    else:
+        book_events: dict[str, list[BookSnapshot]] = {sym: [] for sym in q.leg_symbols}
+        trade_events: dict[str, list[TradeEvent]] = {sym: [] for sym in q.leg_symbols}
+        ref_events = []
+        settle_events = []
+        for ev in data_source.events(q):
+            if isinstance(ev, BookSnapshot):
+                if ev.symbol in book_events:
+                    book_events[ev.symbol].append(ev)
+            elif isinstance(ev, TradeEvent):
+                if ev.symbol in trade_events:
+                    trade_events[ev.symbol].append(ev)
+            elif isinstance(ev, ReferenceEvent):
+                ref_events.append(ev)
+            elif isinstance(ev, SettlementEvent):
+                settle_events.append(ev)
+        leg_event_arrays = {}
+        book_ts_per_leg = {}
+        for sym in q.leg_symbols:
+            leg_event_arrays[sym] = _build_leg_event_array(
+                book_events[sym], trade_events[sym]
+            )
+            book_ts_per_leg[sym] = np.asarray(
+                [b.ts_ns for b in book_events[sym]], dtype=np.int64
+            )
 
     # Binary HIP-4 / PM markets settle relative to the reference price at
     # question start ("BTC > day_open"). When the caller hasn't supplied a
@@ -343,7 +373,7 @@ def run_one_question(
     leg_to_asset: dict[str, int] = {}
     _data_keepalive: list[np.ndarray] = []
     for i, sym in enumerate(q.leg_symbols):
-        leg_arr = _build_leg_event_array(book_events[sym], trade_events[sym])
+        leg_arr = leg_event_arrays[sym]
         clear_arr = _initial_clear_array(q.start_ts_ns)
         full = (
             np.concatenate([clear_arr, leg_arr]) if len(leg_arr) > 0 else clear_arr
@@ -471,7 +501,9 @@ def run_one_question(
     # did NOT close the v1 trade-count gap, so the simpler form stays.
 
     # Per-leg cursor into the book event stream tracks the latest L2 snap ts
-    # for the "stale data halt" gate.
+    # for the "stale data halt" gate. The cursor advances over book_ts_per_leg
+    # (an int64 array of snapshot timestamps); the previous BookSnapshot list
+    # is no longer needed by the scan loop.
     book_idx: dict[str, int] = {sym: 0 for sym in q.leg_symbols}
 
     while True:
@@ -490,18 +522,24 @@ def run_one_question(
 
         # Advance per-leg book cursors to track the latest L2 snapshot's ts.
         for sym in q.leg_symbols:
-            ev_list = book_events.get(sym, [])
+            ts_arr = book_ts_per_leg.get(sym)
+            if ts_arr is None or len(ts_arr) == 0:
+                continue
             i = book_idx[sym]
-            while i < len(ev_list) and ev_list[i].ts_ns <= now_ns:
+            n = len(ts_arr)
+            while i < n and ts_arr[i] <= now_ns:
                 i += 1
             book_idx[sym] = i
 
         # Build per-leg books.
         books: dict[str, BookState] = {}
         for sym, asset_no in leg_to_asset.items():
-            ev_list = book_events.get(sym, [])
+            ts_arr = book_ts_per_leg.get(sym)
             i = book_idx[sym]
-            last_l2_ts = ev_list[i - 1].ts_ns if i > 0 else 0
+            if ts_arr is not None and i > 0:
+                last_l2_ts = int(ts_arr[i - 1])
+            else:
+                last_l2_ts = 0
             bs = _book_state(hbt, asset_no, sym, last_l2_ts_ns=last_l2_ts)
             if bs is not None:
                 books[sym] = bs
