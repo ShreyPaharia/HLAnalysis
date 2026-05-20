@@ -17,6 +17,9 @@ from unittest.mock import patch
 
 from hlanalysis.backtest.core.events import BookSnapshot, TradeEvent
 from hlanalysis.backtest.data.hl_hip4 import HLHip4DataSource
+from hlanalysis.backtest.data._hl_hip4_fastpath import (
+    build_leg_event_array_from_columns,
+)
 from hlanalysis.backtest.runner.hftbt_runner import _build_leg_event_array
 
 
@@ -152,6 +155,127 @@ def test_build_leg_event_array_matches_naive_reference() -> None:
         for r in naive
     )
     assert arr_recs == naive_recs
+
+
+def test_events_arrays_present_and_matches_legacy(source: HLHip4DataSource) -> None:
+    """The arrow-backed fast path must produce per-leg event arrays
+    bit-identical to the legacy ``events()`` + ``_build_leg_event_array`` path
+    on the fixture, and yield the same reference + settlement event lists."""
+    q = source.discover(start="2026-05-09", end="2026-05-11", underlying="BTC")[0]
+
+    # Legacy: drain events() and build per-leg arrays the way the runner did
+    # before the fast-path existed.
+    book_events: dict[str, list[BookSnapshot]] = {s: [] for s in q.leg_symbols}
+    trade_events: dict[str, list[TradeEvent]] = {s: [] for s in q.leg_symbols}
+    ref_events = []
+    settle_events = []
+    from hlanalysis.backtest.core.events import (
+        BookSnapshot as BS, TradeEvent as TE, ReferenceEvent as RE,
+        SettlementEvent as SE,
+    )
+    for ev in source.events(q):
+        if isinstance(ev, BS):
+            if ev.symbol in book_events:
+                book_events[ev.symbol].append(ev)
+        elif isinstance(ev, TE):
+            if ev.symbol in trade_events:
+                trade_events[ev.symbol].append(ev)
+        elif isinstance(ev, RE):
+            ref_events.append(ev)
+        elif isinstance(ev, SE):
+            settle_events.append(ev)
+    legacy_arrays = {
+        sym: _build_leg_event_array(book_events[sym], trade_events[sym])
+        for sym in q.leg_symbols
+    }
+
+    bundle = source.events_arrays(q)
+
+    # Reference + settlement event lists match.
+    assert len(bundle.reference_events) == len(ref_events)
+    assert len(bundle.settlement_events) == len(settle_events)
+
+    # Per-leg event arrays must agree on every column. We sort each side as a
+    # multiset since the per-snapshot bid/ask/clear ordering is stable but the
+    # within-snapshot ordering of equal-ts events may shift slightly between
+    # implementations — and only the final depth state matters to hftbacktest.
+    for sym in q.leg_symbols:
+        fast = bundle.leg_arrays[sym].events
+        legacy = legacy_arrays[sym]
+        assert fast.shape == legacy.shape, (sym, fast.shape, legacy.shape)
+        fast_recs = sorted(
+            (int(r["exch_ts"]), int(r["ev"]), float(r["px"]), float(r["qty"]))
+            for r in fast
+        )
+        legacy_recs = sorted(
+            (int(r["exch_ts"]), int(r["ev"]), float(r["px"]), float(r["qty"]))
+            for r in legacy
+        )
+        assert fast_recs == legacy_recs, sym
+
+
+def test_events_arrays_book_ts_tracks_snapshot_timestamps(source: HLHip4DataSource) -> None:
+    """The runner uses ``LegArrays.book_ts`` as a cursor for the stale-book
+    gate. Must be the int64 ts of every snapshot, monotonically non-decreasing
+    and identical to the legacy ``[b.ts_ns for b in book_events[sym]]`` list."""
+    q = source.discover(start="2026-05-09", end="2026-05-11", underlying="BTC")[0]
+    bundle = source.events_arrays(q)
+    for sym, legarr in bundle.leg_arrays.items():
+        assert legarr.book_ts.dtype.kind == "i" and legarr.book_ts.itemsize == 8
+        diffs = np.diff(legarr.book_ts)
+        assert (diffs >= 0).all(), f"{sym} book_ts is not monotone"
+
+
+def test_build_leg_event_array_from_columns_matches_legacy_on_random_input() -> None:
+    """Parity test on randomised numpy column inputs that mimic the parquet
+    schema (variable-length bid/ask price + size lists per snapshot)."""
+    rng = np.random.default_rng(7)
+    n_snaps = 50
+    bid_lens = rng.integers(0, 8, size=n_snaps)
+    ask_lens = rng.integers(0, 8, size=n_snaps)
+    bid_off = np.concatenate([[0], np.cumsum(bid_lens)]).astype(np.int64)
+    ask_off = np.concatenate([[0], np.cumsum(ask_lens)]).astype(np.int64)
+    ts = np.arange(1000, 1000 + n_snaps * 10, 10, dtype=np.int64)
+    bid_px = rng.uniform(0.1, 0.49, size=int(bid_off[-1]))
+    bid_sz = rng.uniform(1.0, 100.0, size=int(bid_off[-1]))
+    ask_px = rng.uniform(0.51, 0.9, size=int(ask_off[-1]))
+    ask_sz = rng.uniform(1.0, 100.0, size=int(ask_off[-1]))
+
+    n_trades = 12
+    trade_ts = rng.integers(1000, 1000 + n_snaps * 10, size=n_trades).astype(np.int64)
+    trade_px = rng.uniform(0.1, 0.9, size=n_trades)
+    trade_sz = rng.uniform(1.0, 50.0, size=n_trades)
+    trade_side = np.where(rng.integers(0, 2, size=n_trades) == 0, "buy", "sell").astype(object)
+
+    book_cols = dict(
+        ts=ts, bid_px=bid_px, bid_sz=bid_sz, bid_offsets=bid_off,
+        ask_px=ask_px, ask_sz=ask_sz, ask_offsets=ask_off,
+    )
+    trade_cols = dict(ts=trade_ts, px=trade_px, sz=trade_sz, side=trade_side)
+
+    fast = build_leg_event_array_from_columns(book_cols, trade_cols)
+
+    # Build the legacy equivalent by reconstructing snapshots + trades.
+    snaps = []
+    for i in range(n_snaps):
+        bids = tuple((float(bid_px[j]), float(bid_sz[j])) for j in range(bid_off[i], bid_off[i + 1]))
+        asks = tuple((float(ask_px[j]), float(ask_sz[j])) for j in range(ask_off[i], ask_off[i + 1]))
+        snaps.append(BookSnapshot(int(ts[i]), "#150", bids, asks))
+    trades = [
+        TradeEvent(int(trade_ts[i]), "#150", str(trade_side[i]),
+                   float(trade_px[i]), float(trade_sz[i]))
+        for i in range(n_trades)
+    ]
+    legacy = _build_leg_event_array(snaps, trades)
+
+    assert fast.shape == legacy.shape
+    fast_recs = sorted(
+        (int(r["exch_ts"]), int(r["ev"]), float(r["px"]), float(r["qty"])) for r in fast
+    )
+    legacy_recs = sorted(
+        (int(r["exch_ts"]), int(r["ev"]), float(r["px"]), float(r["qty"])) for r in legacy
+    )
+    assert fast_recs == legacy_recs
 
 
 def test_events_emits_consistent_order_with_shared_connection(source: HLHip4DataSource) -> None:

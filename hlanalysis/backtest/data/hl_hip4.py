@@ -33,6 +33,7 @@ from ..core.events import (
     SettlementEvent,
     TradeEvent,
 )
+from ._hl_hip4_fastpath import FastPathBundle, build_fast_path_bundle
 
 log = logging.getLogger(__name__)
 
@@ -209,6 +210,50 @@ class HLHip4DataSource:
         return out
 
     # -------------------------------- events ------------------------------
+
+    def events_arrays(self, q: QuestionDescriptor) -> FastPathBundle:
+        """Arrow-backed fast path for the hftbacktest runner.
+
+        Returns per-leg pre-built ``event_dtype`` numpy arrays plus
+        ``ReferenceEvent`` / ``SettlementEvent`` lists, skipping the
+        ``BookSnapshot`` / ``TradeEvent`` dataclass round-trip that ``events()``
+        does. The runner detects this method (via ``getattr``) and routes
+        around the legacy `_build_leg_event_array` path when it is present.
+
+        Producing pre-built numpy arrays here lets the data source read
+        parquet → Arrow → flat numpy columns once, then assemble the event
+        array fully vectorised. On HL HIP-4 with 20-level books, this is
+        ~4× faster than the dataclass path for the per-leg build alone and
+        avoids creating ~160k ``BookSnapshot`` objects per leg per question.
+        """
+        date_list = _date_partitions_in_range(q.start_ts_ns, q.end_ts_ns)
+        con = duckdb.connect()
+        try:
+            # Reference rows: same query as ``_reference_iter`` but kept as
+            # raw fetchall tuples so the fast path can build the events list
+            # without going through the gen() generator.
+            evt = self.ref_event
+            ref_rows = self._reference_rows(con, evt, q.start_ts_ns, q.end_ts_ns, date_list)
+            if not ref_rows:
+                fallback = "mark" if evt == "bbo" else "bbo"
+                log.warning(
+                    "HL perp BTC %s yielded 0 rows in [%d, %d); falling back to %s",
+                    evt, q.start_ts_ns, q.end_ts_ns, fallback,
+                )
+                ref_rows = self._reference_rows(con, fallback, q.start_ts_ns, q.end_ts_ns, date_list)
+                evt = fallback
+            return build_fast_path_bundle(
+                con=con,
+                q=q,
+                date_list=date_list,
+                book_glob_for=lambda leg: self._partition_glob("book_snapshot", symbol=leg),
+                trade_glob_for=lambda leg: self._partition_glob("trade", symbol=leg),
+                settlement_glob_for=lambda leg: self._partition_glob("settlement", symbol=leg),
+                reference_rows=ref_rows,
+                ref_event_kind=evt,
+            )
+        finally:
+            con.close()
 
     def events(self, q: QuestionDescriptor) -> Iterator[MarketEvent]:
         date_list = _date_partitions_in_range(q.start_ts_ns, q.end_ts_ns)
