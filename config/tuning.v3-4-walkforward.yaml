@@ -1,0 +1,42 @@
+# v3.4-LMgate walk-forward: validate the k_jump=3.0 sweet spot from the
+# single-run sweep (PM 90d, 89 binaries) holds out-of-sample across splits.
+#
+# Entry params fixed at v3.1's best (regime-breakdown/v3.1.json):
+#   vol_lookback_seconds=3600, edge_buffer=0.02, edge_max=0.20,
+#   min_distance_pct=0.002, min_bid_notional_usd=10. Only lm_threshold sweeps.
+#
+# Grid: 4 cells × 5 splits = 20 jobs at 4 workers (~minutes).
+
+grids:
+  v3_4_lmgate:
+    # Entry pipeline (fixed — same as v3.1 baseline)
+    vol_lookback_seconds: [3600]
+    vol_sampling_dt_seconds: [60]
+    vol_clip_min: [0.05]
+    vol_clip_max: [5.0]
+    edge_buffer: [0.02]
+    fee_taker: [0.00035]
+    half_spread_assumption: [0.005]
+    drift_lookback_seconds: [3600]
+    drift_blend: [0.0]
+    favorite_threshold: [0.85]
+    tte_min_seconds: [0]
+    tte_max_seconds: [86400]
+    edge_max: [0.20]
+    min_distance_pct: [0.002]
+    min_bid_notional_usd: [10.0]
+    max_position_usd: [100.0]
+    # v3.4 knob under test
+    lm_threshold: [2.5, 3.0, 3.5, 4.0]
+    # Exits (fixed at v3.1 best)
+    stop_loss_pct: [null]
+    exit_edge_threshold: [0.0]
+    take_profit_price: [null]
+    time_stop_seconds: [0]
+    gamma_lambda: [0.0]
+
+run:
+  train_markets: 60
+  test_markets: 60
+  step_markets: 60
+  max_workers: 4
