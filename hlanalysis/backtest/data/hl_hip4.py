@@ -86,6 +86,12 @@ def _iso_to_ns(s: str) -> int:
     return int(datetime.fromisoformat(s).timestamp() * 1e9)
 
 
+def _sql_in(items) -> str:
+    """Render a Python iterable of strings as comma-separated SQL string literals
+    suitable for placement inside an ``IN (...)`` clause (no surrounding parens)."""
+    return ",".join(repr(x) for x in items)
+
+
 def _date_partitions_in_range(start_ns: int, end_ns: int) -> list[str]:
     """Return ``['YYYY-MM-DD', ...]`` covering the UTC days between start_ns and end_ns
     (inclusive of both edges, +1 day padding on the end side to catch tick-boundary spills).
@@ -206,34 +212,48 @@ class HLHip4DataSource:
 
     def events(self, q: QuestionDescriptor) -> Iterator[MarketEvent]:
         date_list = _date_partitions_in_range(q.start_ts_ns, q.end_ts_ns)
-        iters: list[Iterator[tuple[int, MarketEvent]]] = []
-        for leg in q.leg_symbols:
-            iters.append(self._book_iter(leg, q.start_ts_ns, q.end_ts_ns, date_list))
-            iters.append(self._trade_iter(leg, q.start_ts_ns, q.end_ts_ns, date_list))
-        iters.append(self._reference_iter(q.start_ts_ns, q.end_ts_ns, date_list))
-        iters.append(self._settlement_iter(q, q.start_ts_ns, q.end_ts_ns, date_list))
-        for _ts, ev in heapq.merge(*iters, key=lambda x: x[0]):
-            yield ev
+        # One shared duckdb connection per question. Previously each per-leg
+        # iterator opened its own; that was 14+ connections for an 8-leg bucket.
+        # Note: we tried batching all legs into a single ``read_parquet([...])``
+        # union query but it was 3-5× slower than per-leg queries on this
+        # workload — DuckDB reads each partition fast and avoids cross-leg
+        # ORDER BY work; the per-leg-then-heapq.merge path is the winner.
+        con = duckdb.connect()
+        try:
+            iters: list[Iterator[tuple[int, MarketEvent]]] = []
+            for leg in q.leg_symbols:
+                iters.append(self._book_iter(con, leg, q.start_ts_ns, q.end_ts_ns, date_list))
+                iters.append(self._trade_iter(con, leg, q.start_ts_ns, q.end_ts_ns, date_list))
+            iters.append(self._reference_iter(con, q.start_ts_ns, q.end_ts_ns, date_list))
+            iters.append(self._settlement_iter(con, q, q.start_ts_ns, q.end_ts_ns, date_list))
+            for _ts, ev in heapq.merge(*iters, key=lambda x: x[0]):
+                yield ev
+        finally:
+            con.close()
 
     def _book_iter(
-        self, leg: str, start_ns: int, end_ns: int, date_list: list[str]
+        self,
+        con: "duckdb.DuckDBPyConnection",
+        leg: str,
+        start_ns: int,
+        end_ns: int,
+        date_list: list[str],
     ) -> Iterator[tuple[int, BookSnapshot]]:
         glob = self._partition_glob("book_snapshot", symbol=leg)
         if not self._partition_has_files(glob):
             return iter(())
-        con = duckdb.connect()
-        result = con.sql(
+        rows = con.sql(
             f"""
             SELECT exchange_ts, bid_px, bid_sz, ask_px, ask_sz
             FROM read_parquet('{glob}', hive_partitioning=1)
-            WHERE date IN ({','.join(repr(d) for d in date_list)})
+            WHERE date IN ({_sql_in(date_list)})
               AND exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
             ORDER BY exchange_ts
             """
-        )
+        ).fetchall()
 
         def gen() -> Iterator[tuple[int, BookSnapshot]]:
-            for ts, bid_px, bid_sz, ask_px, ask_sz in result.fetchall():
+            for ts, bid_px, bid_sz, ask_px, ask_sz in rows:
                 bids = tuple(zip(bid_px or [], bid_sz or [], strict=False))
                 asks = tuple(zip(ask_px or [], ask_sz or [], strict=False))
                 yield int(ts), BookSnapshot(int(ts), leg, bids, asks)
@@ -241,24 +261,28 @@ class HLHip4DataSource:
         return gen()
 
     def _trade_iter(
-        self, leg: str, start_ns: int, end_ns: int, date_list: list[str]
+        self,
+        con: "duckdb.DuckDBPyConnection",
+        leg: str,
+        start_ns: int,
+        end_ns: int,
+        date_list: list[str],
     ) -> Iterator[tuple[int, TradeEvent]]:
         glob = self._partition_glob("trade", symbol=leg)
         if not self._partition_has_files(glob):
             return iter(())
-        con = duckdb.connect()
-        result = con.sql(
+        rows = con.sql(
             f"""
             SELECT exchange_ts, price, size, side
             FROM read_parquet('{glob}', hive_partitioning=1)
-            WHERE date IN ({','.join(repr(d) for d in date_list)})
+            WHERE date IN ({_sql_in(date_list)})
               AND exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
             ORDER BY exchange_ts
             """
-        )
+        ).fetchall()
 
         def gen() -> Iterator[tuple[int, TradeEvent]]:
-            for ts, price, size, side in result.fetchall():
+            for ts, price, size, side in rows:
                 # Trade side is the aggressor; recorder writes "buy" / "sell" / "unknown".
                 # Collapse "unknown" to "buy" so the type stays narrow; strategies do not
                 # rely on aggressor for HL HIP-4.
@@ -268,73 +292,70 @@ class HLHip4DataSource:
         return gen()
 
     def _reference_iter(
-        self, start_ns: int, end_ns: int, date_list: list[str]
-    ) -> Iterator[tuple[int, ReferenceEvent]]:
-        evt = self.ref_event
-        glob = self._perp_partition_glob(evt, symbol="BTC")
-        primary_iter = self._reference_iter_for(evt, glob, start_ns, end_ns, date_list)
-        # We must materialise to check emptiness without losing the first elem; the
-        # captured windows are small (~hundreds of rows) so this is cheap.
-        rows = list(primary_iter)
-        if rows:
-            return iter(rows)
-        # Fallback: try the other event type. Logs and proceeds.
-        fallback = "mark" if evt == "bbo" else "bbo"
-        log.warning(
-            "HL perp BTC %s yielded 0 rows in [%d, %d); falling back to %s",
-            evt, start_ns, end_ns, fallback,
-        )
-        glob2 = self._perp_partition_glob(fallback, symbol="BTC")
-        return self._reference_iter_for(fallback, glob2, start_ns, end_ns, date_list)
-
-    def _reference_iter_for(
         self,
-        evt: str,
-        glob: str,
+        con: "duckdb.DuckDBPyConnection",
         start_ns: int,
         end_ns: int,
         date_list: list[str],
     ) -> Iterator[tuple[int, ReferenceEvent]]:
-        if not self._partition_has_files(glob):
+        evt = self.ref_event
+        rows = self._reference_rows(con, evt, start_ns, end_ns, date_list)
+        if not rows:
+            fallback = "mark" if evt == "bbo" else "bbo"
+            log.warning(
+                "HL perp BTC %s yielded 0 rows in [%d, %d); falling back to %s",
+                evt, start_ns, end_ns, fallback,
+            )
+            rows = self._reference_rows(con, fallback, start_ns, end_ns, date_list)
+            evt = fallback
+        if not rows:
             return iter(())
-        con = duckdb.connect()
+
         if evt == "bbo":
-            result = con.sql(
-                f"""
+            def gen_bbo() -> Iterator[tuple[int, ReferenceEvent]]:
+                for ts, bid, ask in rows:
+                    mid = (float(bid) + float(ask)) / 2.0
+                    yield int(ts), ReferenceEvent(int(ts), "BTC", mid, mid, mid)
+            return gen_bbo()
+
+        def gen_mark() -> Iterator[tuple[int, ReferenceEvent]]:
+            for ts, px in rows:
+                p = float(px)
+                yield int(ts), ReferenceEvent(int(ts), "BTC", p, p, p)
+        return gen_mark()
+
+    def _reference_rows(
+        self,
+        con: "duckdb.DuckDBPyConnection",
+        evt: str,
+        start_ns: int,
+        end_ns: int,
+        date_list: list[str],
+    ) -> list[tuple]:
+        glob = self._perp_partition_glob(evt, symbol="BTC")
+        if not self._partition_has_files(glob):
+            return []
+        if evt == "bbo":
+            sql = f"""
                 SELECT exchange_ts, bid_px, ask_px
                 FROM read_parquet('{glob}', hive_partitioning=1)
-                WHERE date IN ({','.join(repr(d) for d in date_list)})
+                WHERE date IN ({_sql_in(date_list)})
                   AND exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
                 ORDER BY exchange_ts
                 """
-            )
-
-            def gen() -> Iterator[tuple[int, ReferenceEvent]]:
-                for ts, bid, ask in result.fetchall():
-                    mid = (float(bid) + float(ask)) / 2.0
-                    yield int(ts), ReferenceEvent(int(ts), "BTC", mid, mid, mid)
-
-            return gen()
-        # mark
-        result = con.sql(
-            f"""
-            SELECT exchange_ts, mark_px
-            FROM read_parquet('{glob}', hive_partitioning=1)
-            WHERE date IN ({','.join(repr(d) for d in date_list)})
-              AND exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
-            ORDER BY exchange_ts
-            """
-        )
-
-        def gen() -> Iterator[tuple[int, ReferenceEvent]]:
-            for ts, px in result.fetchall():
-                p = float(px)
-                yield int(ts), ReferenceEvent(int(ts), "BTC", p, p, p)
-
-        return gen()
+        else:
+            sql = f"""
+                SELECT exchange_ts, mark_px
+                FROM read_parquet('{glob}', hive_partitioning=1)
+                WHERE date IN ({_sql_in(date_list)})
+                  AND exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
+                ORDER BY exchange_ts
+                """
+        return con.sql(sql).fetchall()
 
     def _settlement_iter(
         self,
+        con: "duckdb.DuckDBPyConnection",
         q: QuestionDescriptor,
         start_ns: int,
         end_ns: int,
@@ -348,13 +369,12 @@ class HLHip4DataSource:
             glob = self._partition_glob("settlement", symbol=leg)
             if not self._partition_has_files(glob):
                 continue
-            con = duckdb.connect()
             try:
                 rs = con.sql(
                     f"""
                     SELECT exchange_ts, settle_ts, settled_side_idx
                     FROM read_parquet('{glob}', hive_partitioning=1)
-                    WHERE date IN ({','.join(repr(d) for d in date_list)})
+                    WHERE date IN ({_sql_in(date_list)})
                       AND exchange_ts >= {start_ns} AND exchange_ts <= {end_ns}
                     ORDER BY exchange_ts
                     """
@@ -367,9 +387,7 @@ class HLHip4DataSource:
                     "yes" if int(side_idx) == 0 else "no"
                 )
                 t = int(settle_ts or ts)
-                rows_out.append(
-                    (t, SettlementEvent(t, q.question_idx, outcome))
-                )
+                rows_out.append((t, SettlementEvent(t, q.question_idx, outcome)))
         rows_out.sort(key=lambda x: x[0])
         return iter(rows_out)
 
@@ -423,38 +441,43 @@ class HLHip4DataSource:
     def resolved_outcome(
         self, q: QuestionDescriptor
     ) -> Literal["yes", "no", "unknown"]:
-        # 1) Try real settlement events.
+        # 1) Try real settlement events. Per-leg short-circuit on first hit.
         date_list = _date_partitions_in_range(q.start_ts_ns, q.end_ts_ns)
-        for leg in q.leg_symbols:
-            glob = self._partition_glob("settlement", symbol=leg)
-            if not self._partition_has_files(glob):
-                continue
-            con = duckdb.connect()
-            try:
-                row = con.sql(
-                    f"""
-                    SELECT settled_side_idx
-                    FROM read_parquet('{glob}', hive_partitioning=1)
-                    WHERE date IN ({','.join(repr(d) for d in date_list)})
-                    ORDER BY exchange_ts
-                    LIMIT 1
-                    """
-                ).fetchone()
-            except duckdb.Error:
-                row = None
-            if row is not None:
-                return "yes" if int(row[0]) == 0 else "no"
+        con = duckdb.connect()
+        try:
+            for leg in q.leg_symbols:
+                glob = self._partition_glob("settlement", symbol=leg)
+                if not self._partition_has_files(glob):
+                    continue
+                try:
+                    row = con.sql(
+                        f"""
+                        SELECT settled_side_idx
+                        FROM read_parquet('{glob}', hive_partitioning=1)
+                        WHERE date IN ({_sql_in(date_list)})
+                        ORDER BY exchange_ts
+                        LIMIT 1
+                        """
+                    ).fetchone()
+                except duckdb.Error:
+                    row = None
+                if row is not None:
+                    return "yes" if int(row[0]) == 0 else "no"
 
-        # 2) Fallback: infer for binaries from final HL perp BTC mark/mid.
-        if q.klass == "priceBinary":
-            last_btc = self._last_btc_ref_at_or_before(q.end_ts_ns)
-            if last_btc is None:
-                return "unknown"
-            meta = self._load_meta(q)
-            strike = float(meta.kv.get("targetPrice") or meta.kv.get("strike") or 0.0)
-            if not strike:
-                return "unknown"
-            return "yes" if last_btc > strike else "no"
+            # 2) Fallback: infer for binaries from final HL perp BTC mark/mid.
+            # Reuse the same connection rather than opening a new one inside
+            # ``_last_btc_ref_at_or_before``.
+            if q.klass == "priceBinary":
+                last_btc = self._last_btc_ref_at_or_before(q.end_ts_ns, con=con)
+                if last_btc is None:
+                    return "unknown"
+                meta = self._load_meta(q)
+                strike = float(meta.kv.get("targetPrice") or meta.kv.get("strike") or 0.0)
+                if not strike:
+                    return "unknown"
+                return "yes" if last_btc > strike else "no"
+        finally:
+            con.close()
 
         # 3) Bucket without settlement → unknown (per-leg outcome is what runners care about).
         return "unknown"
@@ -587,18 +610,32 @@ class HLHip4DataSource:
         self._meta_cache[q.question_id] = meta
         return meta
 
-    def _last_btc_ref_at_or_before(self, ts_ns: int) -> float | None:
+    def _last_btc_ref_at_or_before(self, ts_ns: int, con: "duckdb.DuckDBPyConnection | None" = None) -> float | None:
         date_list = _date_partitions_in_range(ts_ns - int(2 * 86400 * 1e9), ts_ns)
+        owned = con is None
+        if owned:
+            con = duckdb.connect()
+        try:
+            return self._last_btc_ref_impl(con, ts_ns, date_list)
+        finally:
+            if owned:
+                con.close()
+
+    def _last_btc_ref_impl(
+        self,
+        con: "duckdb.DuckDBPyConnection",
+        ts_ns: int,
+        date_list: list[str],
+    ) -> float | None:
         for evt in ("bbo", "mark"):
             glob = self._perp_partition_glob(evt, symbol="BTC")
             if not self._partition_has_files(glob):
                 continue
-            con = duckdb.connect()
             if evt == "bbo":
                 q = f"""
                     SELECT (bid_px + ask_px)/2.0 AS mid
                     FROM read_parquet('{glob}', hive_partitioning=1)
-                    WHERE date IN ({','.join(repr(d) for d in date_list)})
+                    WHERE date IN ({_sql_in(date_list)})
                       AND exchange_ts <= {ts_ns}
                     ORDER BY exchange_ts DESC LIMIT 1
                 """
@@ -606,7 +643,7 @@ class HLHip4DataSource:
                 q = f"""
                     SELECT mark_px AS mid
                     FROM read_parquet('{glob}', hive_partitioning=1)
-                    WHERE date IN ({','.join(repr(d) for d in date_list)})
+                    WHERE date IN ({_sql_in(date_list)})
                       AND exchange_ts <= {ts_ns}
                     ORDER BY exchange_ts DESC LIMIT 1
                 """
