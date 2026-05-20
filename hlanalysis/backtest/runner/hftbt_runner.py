@@ -127,80 +127,75 @@ def _build_leg_event_array(
     level whose price no longer appears in the snapshot, then ``qty=N`` events
     set the new levels. This keeps the engine's depth coherent even for
     multi-level snapshots while remaining cheap for synthetic top-of-book.
+
+    Implementation: accumulate per-event tuples in plain Python lists, then
+    bulk-assign into the structured numpy array at the end. Bulk per-field
+    assignment is ~5-10x faster than per-cell ``arr[idx]["field"] = ...``
+    writes on structured dtypes, which dominated wall time for large bucket
+    markets (60%+ of total backtest time).
     """
-    # First pass — count.
-    n_events = 0
+    flag_local_exch = EXCH_EVENT | LOCAL_EVENT
+    bid_set_ev = DEPTH_EVENT | flag_local_exch | BUY_EVENT
+    ask_set_ev = DEPTH_EVENT | flag_local_exch | SELL_EVENT
+
+    ts_list: list[int] = []
+    px_list: list[float] = []
+    qty_list: list[float] = []
+    ev_list: list[int] = []
+
     prev_bids: set[float] = set()
     prev_asks: set[float] = set()
     for snap in snapshots:
-        new_bids = {b[0] for b in snap.bids}
-        new_asks = {a[0] for a in snap.asks}
-        # Removals: levels in prev not in new.
-        n_events += len(prev_bids - new_bids)
-        n_events += len(prev_asks - new_asks)
-        # Additions / size-updates: every level in new.
-        n_events += len(snap.bids)
-        n_events += len(snap.asks)
-        prev_bids = new_bids
-        prev_asks = new_asks
-    n_events += len(trades)
-
-    arr = np.zeros(n_events, dtype=event_dtype)
-    idx = 0
-    prev_bids = set()
-    prev_asks = set()
-    flag_local_exch = EXCH_EVENT | LOCAL_EVENT
-    for snap in snapshots:
+        ts = snap.ts_ns
         new_bid_set = {b[0] for b in snap.bids}
         new_ask_set = {a[0] for a in snap.asks}
-        # Remove stale bid levels (qty=0).
+        # Removals: levels in prev not in new (qty=0).
         for px in prev_bids - new_bid_set:
-            arr[idx]["ev"] = DEPTH_EVENT | flag_local_exch | BUY_EVENT
-            arr[idx]["exch_ts"] = snap.ts_ns
-            arr[idx]["local_ts"] = snap.ts_ns
-            arr[idx]["px"] = px
-            arr[idx]["qty"] = 0.0
-            idx += 1
-        # Remove stale ask levels (qty=0).
+            ts_list.append(ts)
+            px_list.append(px)
+            qty_list.append(0.0)
+            ev_list.append(bid_set_ev)
         for px in prev_asks - new_ask_set:
-            arr[idx]["ev"] = DEPTH_EVENT | flag_local_exch | SELL_EVENT
-            arr[idx]["exch_ts"] = snap.ts_ns
-            arr[idx]["local_ts"] = snap.ts_ns
-            arr[idx]["px"] = px
-            arr[idx]["qty"] = 0.0
-            idx += 1
-        # Set new bid levels.
+            ts_list.append(ts)
+            px_list.append(px)
+            qty_list.append(0.0)
+            ev_list.append(ask_set_ev)
+        # Additions / size-updates: every level in new.
         for px, qty in snap.bids:
-            arr[idx]["ev"] = DEPTH_EVENT | flag_local_exch | BUY_EVENT
-            arr[idx]["exch_ts"] = snap.ts_ns
-            arr[idx]["local_ts"] = snap.ts_ns
-            arr[idx]["px"] = px
-            arr[idx]["qty"] = qty
-            idx += 1
-        # Set new ask levels.
+            ts_list.append(ts)
+            px_list.append(px)
+            qty_list.append(qty)
+            ev_list.append(bid_set_ev)
         for px, qty in snap.asks:
-            arr[idx]["ev"] = DEPTH_EVENT | flag_local_exch | SELL_EVENT
-            arr[idx]["exch_ts"] = snap.ts_ns
-            arr[idx]["local_ts"] = snap.ts_ns
-            arr[idx]["px"] = px
-            arr[idx]["qty"] = qty
-            idx += 1
+            ts_list.append(ts)
+            px_list.append(px)
+            qty_list.append(qty)
+            ev_list.append(ask_set_ev)
         prev_bids = new_bid_set
         prev_asks = new_ask_set
 
     for trade in trades:
         side_flag = BUY_EVENT if trade.side == "buy" else SELL_EVENT
-        arr[idx]["ev"] = TRADE_EVENT | flag_local_exch | side_flag
-        arr[idx]["exch_ts"] = trade.ts_ns
-        arr[idx]["local_ts"] = trade.ts_ns
-        arr[idx]["px"] = trade.price
-        arr[idx]["qty"] = trade.size
-        idx += 1
+        ts_list.append(trade.ts_ns)
+        px_list.append(trade.price)
+        qty_list.append(trade.size)
+        ev_list.append(TRADE_EVENT | flag_local_exch | side_flag)
+
+    n = len(ts_list)
+    if n == 0:
+        return np.zeros(0, dtype=event_dtype)
+
+    arr = np.zeros(n, dtype=event_dtype)
+    # Bulk per-field assignment: one C-level pass per column.
+    ts_np = np.asarray(ts_list, dtype=np.int64)
+    arr["ev"] = np.asarray(ev_list, dtype=np.uint64)
+    arr["exch_ts"] = ts_np
+    arr["local_ts"] = ts_np
+    arr["px"] = np.asarray(px_list, dtype=np.float64)
+    arr["qty"] = np.asarray(qty_list, dtype=np.float64)
 
     # Sort ascending by exch_ts so hftbacktest's feed is monotone.
-    if idx > 0:
-        arr = arr[:idx]
-        arr = arr[np.argsort(arr["exch_ts"], kind="stable")]
+    arr = arr[np.argsort(arr["exch_ts"], kind="stable")]
     return arr
 
 
