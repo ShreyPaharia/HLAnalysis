@@ -49,6 +49,32 @@ def sample_std_returns(returns: np.ndarray) -> float:
 
 
 @njit(cache=True, fastmath=False)
+def bipower_variation_sigma(returns: np.ndarray) -> float:
+    """Jump-robust per-sample σ via Barndorff-Nielsen & Shephard bipower variation.
+
+    σ²_BV = (π/2) · (1/(n−1)) · Σ_{i=0..n−2} |r_i|·|r_{i+1}|
+
+    A single large |r_k| only contributes to two consecutive products
+    (|r_{k−1}|·|r_k| and |r_k|·|r_{k+1}|) — the other factor is normal-sized,
+    so wicks do not inflate σ_BV the way they inflate sample-stdev (which
+    squares the wick). In the no-jump limit BV converges to the same per-
+    sample variance as ``sample_std_returns`` (assuming zero-mean returns).
+
+    Caller must ensure ``returns`` has at least two elements.
+    """
+    n = returns.shape[0]
+    if n < 2:
+        return 0.0
+    s = 0.0
+    for i in range(n - 1):
+        s += abs(returns[i]) * abs(returns[i + 1])
+    var = (math.pi / 2.0) * s / (n - 1)
+    if var <= 0.0:
+        return 0.0
+    return math.sqrt(var)
+
+
+@njit(cache=True, fastmath=False)
 def parkinson_sigma_window(
     highs: np.ndarray, lows: np.ndarray, lam: float
 ) -> float:
