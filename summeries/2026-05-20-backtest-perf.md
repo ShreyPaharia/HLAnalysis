@@ -132,11 +132,11 @@ hl-bt run --strategy v1_late_resolution --data-source hl_hip4 \
 ```
 
 - **Discovered:** 24 questions (15 binary + 9 bucket — the planning doc said 26 questions; 2 fall outside the discovery date filter on this branch's commit).
-- **Wall time after fixes:** 8 m 37 s (CPU: 469 s user + 82 s sys).
 - **Prior baseline (regime-breakdown-2026-05-20 v1 run):** ~70 min (from `data/sim/runs/regime-breakdown-2026-05-20/v1/fills/` file mtimes — first fill 21:54:25, last fill 23:04:27).
-- **Speedup:** ~70 min → ~8.6 min ≈ **8.1× faster** end-to-end.
+- **After fix 1 + fix 2 (committed in initial PR):** 8 m 37 s (~8× vs baseline).
+- **After fix 4 added on top (arrow fast path):** **5 m 41 s** (CPU: 260 s user + 98 s sys), ~12.3× vs the ~70 min baseline, 1.52× on top of fix 1+2.
 
-The per-question raw speedup is ~2×; the full-corpus speedup is bigger because the baseline was a cold run that paid disk + DuckDB metadata cost more steeply. A like-for-like warm-cache baseline would land at ~3-4× since per-question raw is the floor. Either way, this puts v1 tuning back in the iterative regime instead of the leave-it-overnight regime.
+The per-question raw speedup is ~2.5-3.8× (binary / bucket); the full-corpus speedup is bigger because the baseline was a cold run that paid disk + DuckDB metadata cost more steeply. A like-for-like warm-cache baseline would land at ~3-4× since per-question raw is the floor. Either way, this puts v1 tuning back in the iterative regime instead of the leave-it-overnight regime.
 
 ## Files changed
 
