@@ -620,6 +620,14 @@ class LateResolutionStrategy(Strategy):
             gate_px = b.bid_px if self.cfg.use_bid_for_entry_gate else b.ask_px
             if not (gate_min <= gate_px <= gate_max):
                 continue
+            # Stale-ask sanity cap. When gating on bid (use_bid_for_entry_gate),
+            # the ASK is unchecked — a stale-high ask of 0.999 with a real bid of
+            # 0.95 would pass the bid gate but fill against the stale price if
+            # we then set limit_price=ask. Reject these explicitly so the
+            # subsequent limit_price=ask is bounded by price_extreme_max in
+            # the same way the legacy limit_price=price_extreme_max was.
+            if self.cfg.use_bid_for_entry_gate and b.ask_px > gate_max:
+                continue
             # Bid-notional sanity gate. A bid of 0.85 × 1 share passes a
             # bid_px filter but is essentially a 85¢ stake — no real buying
             # interest. We require bid notional ≥ floor; default 0 disables.
@@ -754,20 +762,24 @@ class LateResolutionStrategy(Strategy):
                     )
 
         size_usd = self.cfg.max_position_usd * scale
-        sizing_px = max(win.ask_px, self.cfg.price_extreme_max)
-        size = max(0.0, math.floor((size_usd / sizing_px) * 100) / 100)
+        # Both size and limit are pinned to top-of-book ask. Earlier behaviour
+        # set limit_price=price_extreme_max (e.g. 0.99) so the IOC could walk
+        # the book up to the cap; that's how v1 entries used to fill multiple
+        # ask levels in one shot. New behaviour mirrors v3.1: limit_price=ask
+        # consumes ONLY the top-of-book level and lets _evaluate_topup recover
+        # any shortfall on the next tick. The stale-ask sanity cap inside the
+        # gate loop above already rejects entries where ask > price_extreme_max,
+        # so the protection that the old limit ceiling provided is preserved.
+        size = max(0.0, math.floor((size_usd / win.ask_px) * 100) / 100)
         if size <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"),))
 
-        # limit_price = price_extreme_max so realized fills never exceed the cap
-        # even after slippage; sim caps fill at limit, the engine's risk gate uses
-        # the same number as its hard upper bound on entry cost.
         intent = OrderIntent(
             question_idx=question.question_idx,
             symbol=win_symbol,
             side="buy",
             size=size,
-            limit_price=self.cfg.price_extreme_max,
+            limit_price=win.ask_px,
             cloid=f"hla-{uuid.uuid4()}",
             time_in_force="ioc",
         )

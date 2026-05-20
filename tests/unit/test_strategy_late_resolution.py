@@ -114,9 +114,11 @@ def test_entry_yes_when_btc_above_strike_and_yes_book_extreme():
     assert intent.symbol == "@30"
     assert intent.side == "buy"
     assert intent.time_in_force == "ioc"
-    # limit_price is price_extreme_max (cap on entry cost), not the live ask;
-    # sim/engine clamp fills to limit so realized fills never exceed the cap.
-    assert math.isclose(intent.limit_price, 1.0, rel_tol=1e-9)
+    # limit_price is the live top-of-book ask. v1 entries no longer walk the
+    # book up to price_extreme_max — they consume only the top level (same as
+    # v3.1 entries and the topup intent). The stale-ask sanity cap in the
+    # gate loop preserves the protection the old ceiling provided.
+    assert math.isclose(intent.limit_price, 0.96, rel_tol=1e-9)
 
 
 def test_entry_no_when_btc_below_strike_and_no_book_extreme():
@@ -651,8 +653,8 @@ def _cap_books(yes_ask: float, no_ask: float, ts_ns: int) -> dict[str, BookState
 
 def test_size_cap_disabled_by_default_no_change_in_size():
     # Near-strike low-ask entry with default cap (pct=0) should produce the
-    # same size as if the cap weren't there: floor(100 / max(0.86, 1.0) * 100)/100
-    # = 100 contracts.
+    # full size: floor(100 / 0.86 * 100)/100 = 116.27 contracts. Notional
+    # = 116.27 * 0.86 = $99.99, within the $100 cap.
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
@@ -666,9 +668,7 @@ def test_size_cap_disabled_by_default_no_change_in_size():
     assert d.action is Action.ENTER
     intent = d.intents[0]
     assert intent.symbol == "@30"
-    # Uncapped size_usd = 100, sizing_px = max(0.86, 1.0) = 1.0
-    # → floor(100/1.0 * 100)/100 = 100.
-    assert math.isclose(intent.size, 100.0, abs_tol=1e-9)
+    assert math.isclose(intent.size, 116.27, abs_tol=0.01)
 
 
 def test_size_cap_halves_size_on_near_strike_low_ask_entry():
@@ -693,9 +693,8 @@ def test_size_cap_halves_size_on_near_strike_low_ask_entry():
     assert d.action is Action.ENTER
     intent = d.intents[0]
     assert intent.symbol == "@30"
-    # Capped size_usd = 50, sizing_px = max(0.86, 1.0) = 1.0
-    # → floor(50/1.0 * 100)/100 = 50.
-    assert math.isclose(intent.size, 50.0, abs_tol=1e-9)
+    # Capped size_usd = 50, sizing_px = ask 0.86 → floor(50/0.86 * 100)/100 = 58.13.
+    assert math.isclose(intent.size, 58.13, abs_tol=0.01)
 
 
 def test_size_cap_does_not_apply_when_ask_above_min_ask():
@@ -719,7 +718,8 @@ def test_size_cap_does_not_apply_when_ask_above_min_ask():
     assert d.action is Action.ENTER
     intent = d.intents[0]
     assert intent.symbol == "@30"
-    assert math.isclose(intent.size, 100.0, abs_tol=1e-9)
+    # ask 0.95 → floor(100/0.95 * 100)/100 = 105.26.
+    assert math.isclose(intent.size, 105.26, abs_tol=0.01)
     # No size_cap diagnostic emitted.
     assert not any(d_.message == "size_cap_near_strike" for d_ in d.diagnostics)
 
@@ -745,7 +745,8 @@ def test_size_cap_does_not_apply_when_far_from_strike():
     assert d.action is Action.ENTER
     intent = d.intents[0]
     assert intent.symbol == "@30"
-    assert math.isclose(intent.size, 100.0, abs_tol=1e-9)
+    # ask 0.86 → floor(100/0.86 * 100)/100 = 116.27.
+    assert math.isclose(intent.size, 116.27, abs_tol=0.01)
     assert not any(d_.message == "size_cap_near_strike" for d_ in d.diagnostics)
 
 
@@ -770,7 +771,8 @@ def test_size_cap_works_on_no_leg_for_binary():
     assert d.action is Action.ENTER
     intent = d.intents[0]
     assert intent.symbol == "@31"
-    assert math.isclose(intent.size, 50.0, abs_tol=1e-9)
+    # Capped size_usd = 50, ask 0.86 → floor(50/0.86 * 100)/100 = 58.13.
+    assert math.isclose(intent.size, 58.13, abs_tol=0.01)
 
 
 def test_size_cap_emits_diagnostic_when_active():
@@ -892,6 +894,40 @@ def test_min_bid_notional_blocks_spoof_size_1_bid():
         position=None, now_ns=now,
     )
     assert d.action is Action.HOLD
+
+
+def test_stale_ask_cap_rejects_ask_above_price_extreme_max_when_using_bid_gate():
+    """With use_bid_for_entry_gate=true, a stale-high ask (0.9995) can pair
+    with a fresh bid (0.95) — the bid passes the gate but the IOC would now
+    fill at the stale 0.9995 ask (limit_price=ask). The explicit ask cap
+    introduced alongside the top-of-book limit change rejects this case,
+    preserving the protection the old limit_price=price_extreme_max gave."""
+    from hlanalysis.strategy.types import BookState
+    now = 10_000_000_000_000
+    expiry = now + 600 * 1_000_000_000
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    # YES has fresh bid 0.95 (in [0.85, 0.99]) but stale-high ask 0.9995 > 0.99.
+    yes_book = BookState(
+        symbol="@30", bid_px=0.95, bid_sz=100.0, ask_px=0.9995, ask_sz=50.0,
+        last_trade_ts_ns=now - 100, last_l2_ts_ns=now - 100,
+    )
+    books = {
+        "@30": yes_book,
+        "@31": _ref_book("@31", ask=0.04, bid=0.03, ts_ns=now - 100),
+    }
+    s = LateResolutionStrategy(_cfg(
+        use_bid_for_entry_gate=True,
+        price_extreme_threshold=0.85,
+        price_extreme_max=0.99,
+    ))
+    d = s.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
+        position=None, now_ns=now,
+    )
+    # Neither leg eligible (YES rejected by ask cap, NO ask 0.04 < 0.85 threshold).
+    assert d.action is Action.HOLD
+    assert any(diag.message == "no_extreme_leg" for diag in d.diagnostics)
 
 
 # ---------------------------------------------------------------------------
