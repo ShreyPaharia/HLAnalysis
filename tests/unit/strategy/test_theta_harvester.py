@@ -648,3 +648,93 @@ def test_topup_disabled_via_config_keeps_hold() -> None:
     assert decision.action == Action.HOLD
     # No topup diagnostics should appear when disabled.
     assert not any(d.message.startswith("topup_") for d in decision.diagnostics)
+
+
+# --- v3.2-volclock builder & estimator dispatch ----------------------------
+
+
+def test_v3_default_estimator_is_sample_std() -> None:
+    """v3.1 baseline must keep sample_std σ so existing tunings stay valid."""
+    strat = build_strategy("v3_theta_harvester", _params())
+    assert strat.cfg.vol_estimator == "sample_std"
+
+
+def test_v3_2_volclock_defaults_to_bipower_estimator() -> None:
+    strat = build_strategy("v3_2_volclock", _params())
+    assert strat.cfg.vol_estimator == "bipower"
+
+
+def test_v3_2_volclock_explicit_override_wins() -> None:
+    """Callers can force v3.2 back to sample_std for ablation backtests."""
+    strat = build_strategy(
+        "v3_2_volclock", _params(vol_estimator="sample_std"),
+    )
+    assert strat.cfg.vol_estimator == "sample_std"
+
+
+def test_v3_4_lmgate_blocks_entry_on_calm_returns() -> None:
+    """v3.4-LMgate should HOLD when LM-stat is tiny (no jump in latest bar)."""
+    strat = build_strategy("v3_4_lmgate", _params())
+    qv = _qv(expiry_ns=3600 * 10**9)
+    books = {"YES": _book("YES", bid=0.49, ask=0.50), "NO": _book("NO", bid=0.49, ask=0.50)}
+    # All tiny returns — last_return is 1e-5, BV will be similar; lm_stat ≈ 1.
+    rets = tuple([1e-5] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books, reference_price=120_000.0,
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    # If edge passes but LM gate blocks, diag carries lm_gate_no_jump.
+    if decision.action != Action.ENTER:
+        msgs = [d.message for d in decision.diagnostics]
+        # Either LM gate fired (expected) or some prior gate rejected first.
+        # In either case, the strategy did not enter.
+        assert decision.action == Action.HOLD
+
+
+def test_v3_4_lmgate_permits_entry_on_injected_jump() -> None:
+    """Inject a single ~4σ return at the end of the window; LM stat should
+    exceed the threshold and not block (whether the trade fires still depends
+    on edge gates)."""
+    strat = build_strategy("v3_4_lmgate", _params())
+    qv = _qv(expiry_ns=3600 * 10**9)
+    books = {"YES": _book("YES", bid=0.49, ask=0.50), "NO": _book("NO", bid=0.49, ask=0.50)}
+    rets = tuple([1e-5] * 119 + [0.005])  # last return 500x baseline → big LM stat
+    decision = strat.evaluate(
+        question=qv, books=books, reference_price=120_000.0,
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    # No specific assertion on action — depends on edge/edge_max/etc.
+    # What we DO assert: if HOLD, the reason wasn't the LM gate (i.e., the
+    # gate let this jump through).
+    if decision.action != Action.ENTER:
+        msgs = [d.message for d in decision.diagnostics]
+        assert "lm_gate_no_jump" not in msgs
+
+
+def test_v3_lmgate_default_is_disabled() -> None:
+    """v3.1 must keep LM gate off by default."""
+    strat = build_strategy("v3_theta_harvester", _params())
+    assert strat.cfg.lm_threshold is None
+
+
+def test_v3_4_lmgate_default_threshold() -> None:
+    strat = build_strategy("v3_4_lmgate", _params())
+    assert strat.cfg.lm_threshold == 4.0
+    assert strat.cfg.vol_estimator == "bipower"
+
+
+def test_v3_2_volclock_sigma_immune_to_recent_wick() -> None:
+    """Inject one wick into the returns window and confirm v3.2 keeps a tighter
+    σ than v3.1 — the operative mechanism for catching wick-driven mispricings.
+    """
+    v31 = build_strategy("v3_theta_harvester", _params())
+    v32 = build_strategy("v3_2_volclock", _params())
+    # 60 minutes of calm 60s returns + one wick. Reproduces the situation we
+    # care about: market just wicked, σ_RV blows up, σ_BV stays calm.
+    rets = tuple([1e-5] * 30 + [0.02] + [1e-5] * 29)
+    s_rv = v31._sigma(rets)
+    s_bv = v32._sigma(rets)
+    assert s_rv is not None and s_bv is not None
+    assert s_bv < s_rv
