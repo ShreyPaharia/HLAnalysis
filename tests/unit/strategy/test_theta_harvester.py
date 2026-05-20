@@ -648,3 +648,118 @@ def test_topup_disabled_via_config_keeps_hold() -> None:
     assert decision.action == Action.HOLD
     # No topup diagnostics should appear when disabled.
     assert not any(d.message.startswith("topup_") for d in decision.diagnostics)
+
+
+# ---------------------------------------------------------------------------
+# exit_safety_d tests (v3.1.1, 2026-05-21): σ-normalized mid-hold distance exit
+# fires BEFORE the bid collapses, mirroring v1's safety_d gate. The point is
+# to cut LONG-TTE binaries/middle-buckets when BTC drifts toward the adverse
+# boundary while the held bid is still stale-positive (so edge_held hasn't
+# fired yet).
+# ---------------------------------------------------------------------------
+
+
+def _high_vol_returns() -> tuple[float, ...]:
+    """Alternating +/- 0.001378 → annualized σ ≈ 1.0 (well-clipped, deterministic)."""
+    return tuple((0.001378 if i % 2 == 0 else -0.001378) for i in range(120))
+
+
+def test_exit_safety_d_fires_when_d_below_threshold_with_stale_bid() -> None:
+    """Position held on YES (winning region S>K). BTC has drifted to barely
+    above K (S=100,100 vs K=100,000) under high vol so the σ-normalized
+    safety_d is small (~0.09). Bid is still stale at 0.50 so edge_held does
+    NOT fire. The new safety_d gate must fire."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        exit_edge_threshold=-0.01,
+        exit_safety_d=0.5,
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    books = {"YES": _book("YES", bid=0.50, ask=0.51), "NO": _book("NO", bid=0.49, ask=0.50)}
+    pos = _pos(symbol="YES", qty=200.0, entry_px=0.50)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=100_100.0,
+        recent_returns=_high_vol_returns(),
+        recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert decision.action == Action.EXIT
+    assert "exit_safety_d" in [d.message for d in decision.diagnostics]
+    assert decision.intents[0].exit_reason == "exit_safety_d"
+    assert decision.intents[0].reduce_only is True
+    # Fill at bid (not ask), reduce-only IOC.
+    assert decision.intents[0].limit_price == 0.50
+    assert decision.intents[0].time_in_force == "ioc"
+
+
+def test_exit_safety_d_holds_when_d_above_threshold() -> None:
+    """Same vol regime but BTC well above strike (S=110,000) → safety_d ~ 9 σ,
+    far above threshold. Must HOLD (no exit at all)."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        exit_edge_threshold=-0.01,
+        exit_safety_d=0.5,
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    books = {"YES": _book("YES", bid=0.50, ask=0.51), "NO": _book("NO", bid=0.49, ask=0.50)}
+    pos = _pos(symbol="YES", qty=200.0, entry_px=0.50)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=110_000.0,
+        recent_returns=_high_vol_returns(),
+        recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert decision.action == Action.HOLD
+    assert "exit_safety_d" not in [d.message for d in decision.diagnostics]
+
+
+def test_exit_safety_d_zero_disables_gate_preserves_legacy_hold() -> None:
+    """With exit_safety_d=0.0 (default), the new gate is disabled. Same
+    safety_d=0.09 scenario as the fire test must now HOLD (edge_held also
+    doesn't fire because bid is stale-positive)."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        exit_edge_threshold=-0.01,
+        # exit_safety_d omitted → default 0.0
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    books = {"YES": _book("YES", bid=0.50, ask=0.51), "NO": _book("NO", bid=0.49, ask=0.50)}
+    pos = _pos(symbol="YES", qty=200.0, entry_px=0.50)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=100_100.0,
+        recent_returns=_high_vol_returns(),
+        recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert decision.action == Action.HOLD
+    assert "exit_safety_d" not in [d.message for d in decision.diagnostics]
+
+
+def test_exit_safety_d_diagnostic_kvs_attached() -> None:
+    """When safety_d fires, the diagnostic carries the three kv pairs:
+    exit_reason, exit_safety_d, exit_threshold."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        exit_edge_threshold=-0.01,
+        exit_safety_d=0.5,
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    books = {"YES": _book("YES", bid=0.50, ask=0.51), "NO": _book("NO", bid=0.49, ask=0.50)}
+    pos = _pos(symbol="YES", qty=200.0, entry_px=0.50)
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=100_100.0,
+        recent_returns=_high_vol_returns(),
+        recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert decision.action == Action.EXIT
+    diag = next(d for d in decision.diagnostics if d.message == "exit_safety_d")
+    keys = {k for k, _ in diag.fields}
+    assert {"exit_reason", "exit_safety_d", "exit_threshold"}.issubset(keys)
+    reason_val = next(v for k, v in diag.fields if k == "exit_reason")
+    assert reason_val == "safety_d_below_threshold"
+    threshold_val = next(v for k, v in diag.fields if k == "exit_threshold")
+    assert float(threshold_val) == 0.5
+    d_val = float(next(v for k, v in diag.fields if k == "exit_safety_d"))
+    # d must be in (0, threshold) for fire branch with this scenario.
+    assert 0.0 < d_val < 0.5

@@ -146,6 +146,42 @@ def _p_leg_win_prob_and_phi(
     return (p_win, phi_d)
 
 
+def _safety_d_for_region(
+    *,
+    reference_price: float,
+    lo: Optional[float],
+    hi: Optional[float],
+    sigma: float,
+    mu_eff: float,
+    tau_yr: float,
+) -> Optional[float]:
+    """Signed σ-normalized distance from ``reference_price`` to the NEAREST
+    adverse boundary of the leg's winning region. Positive when BTC is safely
+    inside the winning region; negative once already on the losing side.
+
+    Uses the same Itô-corrected d-machinery as ``_p_leg_win_prob_and_phi``:
+    ``d(k) = (ln(S/k) + (μ_eff − ½σ²)·τ) / (σ√τ)`` with drift baked in.
+    Standalone helper (no dependency on v1's numba kernel) so v3.1 can diverge.
+    Returns ``None`` when neither bound is known (e.g. NO leg of a middle bucket)
+    or when σ·√τ is non-positive.
+    """
+    if lo is None and hi is None:
+        return None
+    if sigma <= 0.0 or tau_yr <= 0.0:
+        return None
+    sigma_sqrt_tau = sigma * math.sqrt(tau_yr)
+    drift = (mu_eff - 0.5 * sigma * sigma) * tau_yr
+
+    def _d(k: float) -> float:
+        return (math.log(reference_price / k) + drift) / sigma_sqrt_tau
+
+    if lo is not None and hi is not None:
+        return min(_d(lo), -_d(hi))
+    if lo is not None:
+        return _d(lo)
+    return -_d(hi)  # type: ignore[arg-type]
+
+
 def _p_leg_win_prob(
     *,
     reference_price: float,
@@ -231,6 +267,15 @@ class ThetaHarvesterConfig:
     topup_enabled: bool = True
     topup_threshold_pct: float = 0.2
     topup_min_notional_usd: float = 11.0
+    # σ-normalized mid-hold distance exit. Computes the signed distance from
+    # BTC to the leg's NEAREST adverse boundary in σ√τ units (the same Itô-
+    # corrected d-statistic the entry edge uses). When safety_d < this threshold
+    # we close the held leg IOC at bid BEFORE the bid collapses — mirrors v1's
+    # exit_safety_d. The existing ``edge_held`` gate fires only AFTER the bid
+    # has already moved adversely; this gate fires while the underlying is
+    # drifting toward the boundary, catching long-TTE losers earlier.
+    # 0.0 disables (legacy behavior). Typical values: 0.25-1.0 (σ-units).
+    exit_safety_d: float = 0.0
 
 
 class ThetaHarvesterStrategy(Strategy):
@@ -556,6 +601,42 @@ class ThetaHarvesterStrategy(Strategy):
         # penalty applies symmetrically here: held positions with high path
         # variance are cut sooner than the raw-edge gate would suggest.
         lo, hi = _winning_region(question, position.symbol)
+
+        # Rule 2.5 (v3.1.1+): σ-normalized mid-hold distance exit. Fires BEFORE
+        # the bid collapses, catching cases where BTC has drifted close to the
+        # adverse boundary while the held leg's bid is still stale-positive.
+        # Mirrors v1's exit_safety_d but uses v3.1's Itô-corrected d-machinery
+        # (drift-aware). Skipped when σ·√τ is non-positive or the leg has no
+        # contiguous winning region (middle-bucket NO).
+        if self.cfg.exit_safety_d > 0.0:
+            safety_d = _safety_d_for_region(
+                reference_price=reference_price, lo=lo, hi=hi,
+                sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+            )
+            if safety_d is not None and safety_d < self.cfg.exit_safety_d:
+                intent = OrderIntent(
+                    question_idx=question.question_idx,
+                    symbol=position.symbol,
+                    side="sell" if position.qty > 0 else "buy",
+                    size=abs(position.qty),
+                    limit_price=held.bid_px,
+                    cloid=f"hla-{uuid.uuid4()}",
+                    time_in_force="ioc",
+                    reduce_only=True,
+                    exit_reason="exit_safety_d",
+                )
+                return Decision(
+                    action=Action.EXIT,
+                    intents=(intent,),
+                    diagnostics=(
+                        Diagnostic("info", "exit_safety_d", (
+                            ("exit_reason", "safety_d_below_threshold"),
+                            ("exit_safety_d", f"{safety_d:.4f}"),
+                            ("exit_threshold", f"{self.cfg.exit_safety_d:.4f}"),
+                        )),
+                    ),
+                )
+
         pp = _p_leg_win_prob_and_phi(
             reference_price=reference_price, lo=lo, hi=hi,
             sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
@@ -765,5 +846,6 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         topup_enabled=bool(params.get("topup_enabled", True)),
         topup_threshold_pct=float(params.get("topup_threshold_pct", 0.2)),
         topup_min_notional_usd=float(params.get("topup_min_notional_usd", 11.0)),
+        exit_safety_d=float(params.get("exit_safety_d", 0.0)),
     )
     return ThetaHarvesterStrategy(cfg)
