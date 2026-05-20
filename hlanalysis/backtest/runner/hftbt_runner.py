@@ -687,13 +687,16 @@ def run_one_question(
                             last_update_ts_ns=now_ns,
                         )
 
-        if decision.action == Action.ENTER and decision.intents and pos is None:
+        if decision.action == Action.ENTER and decision.intents:
             intent = decision.intents[0]
             # Skip hedge intents for binary position management.
             if cfg.hedge_enabled and intent.symbol == cfg.hedge_symbol:
                 intent = next(
                     (i for i in decision.intents if i.symbol != cfg.hedge_symbol), None
                 )
+            # Topup intents target the held position's symbol; reject any other.
+            if intent is not None and pos is not None and intent.symbol != pos.symbol:
+                intent = None
             if intent is not None:
                 asset_no = leg_to_asset.get(intent.symbol)
             if intent is not None and asset_no is not None and intent.symbol in books:
@@ -722,7 +725,7 @@ def run_one_question(
                     result.fills.append(fill)
                     fill_ts[fill.cloid] = now_ns
                     fill_question_idx[fill.cloid] = q.question_idx
-                    if fills_dir is not None and current_diag is not None:
+                    if fills_dir is not None and current_diag is not None and pos is None:
                         edge_chosen = (
                             current_diag.edge_yes
                             if intent.symbol == (q.leg_symbols[0] if q.leg_symbols else "")
@@ -734,14 +737,32 @@ def run_one_question(
                             "entry_sigma": current_diag.sigma,
                             "entry_tau_yr": current_diag.tau_yr,
                         }
-                    pos = Position(
-                        question_idx=q.question_idx,
-                        symbol=intent.symbol,
-                        qty=fill.size,
-                        avg_entry=fill.price,
-                        stop_loss_price=_stop_price(fill.price, stop_pct),
-                        last_update_ts_ns=now_ns,
-                    )
+                    if pos is None:
+                        pos = Position(
+                            question_idx=q.question_idx,
+                            symbol=intent.symbol,
+                            qty=fill.size,
+                            avg_entry=fill.price,
+                            stop_loss_price=_stop_price(fill.price, stop_pct),
+                            last_update_ts_ns=now_ns,
+                        )
+                    else:
+                        # Topup: aggregate qty and weighted-average entry price.
+                        # Mirrors live router._book_fill's add-on branch so
+                        # backtest accounting matches production.
+                        new_qty = pos.qty + fill.size
+                        new_avg = (
+                            (pos.qty * pos.avg_entry + fill.size * fill.price)
+                            / new_qty if new_qty > 0 else pos.avg_entry
+                        )
+                        pos = Position(
+                            question_idx=pos.question_idx,
+                            symbol=pos.symbol,
+                            qty=new_qty,
+                            avg_entry=new_avg,
+                            stop_loss_price=_stop_price(new_avg, stop_pct),
+                            last_update_ts_ns=now_ns,
+                        )
         elif decision.action == Action.EXIT and decision.intents and pos is not None:
             intent = decision.intents[0]
             # Skip hedge intents for binary position management.
