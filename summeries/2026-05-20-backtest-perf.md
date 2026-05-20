@@ -2,12 +2,13 @@
 
 ## TL;DR
 
-The HL HIP-4 backtester was ~3× slower per bucket question than per binary question, even though only the leg count differs. Two cheap-to-fix bottlenecks dominated wall time:
+The HL HIP-4 backtester was ~3× slower per bucket question than per binary question, even though only the leg count differs. Three bottlenecks dominated wall time:
 
-1. **`_build_leg_event_array` in the runner** (60-65% of wall time) — was building a numpy structured array with per-cell `arr[idx]["field"] = val` writes. Replacing this with bulk per-column numpy assignment via Python list accumulators delivered the dominant speedup.
+1. **`_build_leg_event_array` in the runner** (60-65% of wall time) — was building a numpy structured array with per-cell `arr[idx]["field"] = val` writes. Replacing this with bulk per-column numpy assignment via Python list accumulators delivered the first speedup tier.
 2. **`HLHip4DataSource.events` opened a fresh `duckdb.connect()` for every per-leg iterator** (14-23 connections per question). Sharing one connection across leg iterators + the `resolved_outcome` BTC fallback is a clean structural fix that doesn't help wall time much on this workload (~1-2%) but is good hygiene.
+3. **`BookSnapshot` / `TradeEvent` dataclass round-trip** between the data source and the runner. The runner immediately unpacks them into the numpy event array; constructing ~160k `BookSnapshot` objects per leg was pure overhead. Added an arrow-backed `events_arrays(q)` fast path on `HLHip4DataSource` that returns pre-built per-leg numpy `event_dtype` arrays directly, plus a runner branch that uses it when available.
 
-End-to-end on the full HL HIP-4 corpus (24 questions, `--start 2026-05-06 --end 2026-05-21`): **prior baseline ~70 min → 8 min 37 s ≈ 8× faster** (warm-cache run). Per-question raw timings: **HL binary 1q 36.9 s → 18.5 s (2.0×); HL bucket 1q 70.1 s → 31.9 s (2.2×)**.
+End-to-end on the full HL HIP-4 corpus (24 questions, `--start 2026-05-06 --end 2026-05-21`): **prior baseline ~70 min → 8 min 37 s ≈ 8× faster** (fix 1 + fix 2; warm-cache run). Per-question raw timings after the arrow fast path stack on top: **HL binary 1q 36.9 s → 14.8 s (2.5×); HL bucket 1q 70.1 s → 20.4 s (3.4×); HL bucket 3q 224 s → 59.6 s (3.8×)**.
 
 Strategy logic and fill outputs are unchanged — verified via `scripts/perf/diff_fills.py` ignoring the random cloid UUID column.
 
@@ -101,6 +102,25 @@ Wall-time impact is small (DuckDB connection setup is fast in-process) but the r
 ### Fix 3 — Skip the `_reference_iter` list materialisation
 
 Fused into the Fix 2 refactor — `_reference_iter` is now a straight `fetchall()` + `iter`, no `list(primary_iter)` round-trip. Tiny win, but it was free.
+
+### Fix 4 — Arrow-backed `events_arrays(q)` fast path
+
+**Files:** `hlanalysis/backtest/data/_hl_hip4_fastpath.py` (new), `hlanalysis/backtest/data/hl_hip4.py` (new method), `hlanalysis/backtest/runner/hftbt_runner.py` (fast-path branch).
+
+The legacy `events(q)` path yields `BookSnapshot` / `TradeEvent` dataclasses one at a time; the runner immediately unpacks them in `_build_leg_event_array`. For HL HIP-4 with 20-level books and ~160k snapshots per leg per question, that's ~3 M dataclass allocations per question that get thrown away after one read.
+
+The new `HLHip4DataSource.events_arrays(q)` reads each leg's `book_snapshot` / `trade` parquet via DuckDB → Arrow → flat numpy column arrays, then assembles the hftbacktest `event_dtype` array with the legacy `qty=0` clear semantics preserved (the inter-snapshot stale-level diff stays in Python but operates on flat numpy slices, not dataclasses). Set events are emitted fully vectorised via `np.repeat` over the snapshot ts column. The runner detects `events_arrays` via `getattr` and routes around `_build_leg_event_array` when present; the legacy path stays intact for the synthetic / polymarket sources.
+
+We also tried emitting one `DEPTH_CLEAR_EVENT` per side per snapshot to skip the diff entirely — a Python depth-replay confirmed identical post-state at 100/100 sampled snapshot timestamps, but the actual `hftbacktest` fills diverged by a few price ticks ($0.004 / $0.07 per-share shifts on the v1 fixture). The per-level `qty=0` semantics turn out to interact with the engine's matching in some subtle way; we did not chase the root cause and kept the diff-based path. The arrow + flat-numpy + vectorised-sets pipeline still cuts wall time substantially even with the diff loop retained.
+
+| Scenario        | After fix 1+2 | After fix 1+2+4 | Δ                      |
+|-----------------|---------------|------------------|------------------------|
+| hl_binary 1q    | 18.5 s        | 14.8 s          | 1.25× (cum. 2.5× vs baseline) |
+| hl_bucket 1q    | 31.9 s        | 20.4 s          | 1.56× (cum. 3.4×)             |
+| hl_binary 3q    | 49.5 s        | 36.0 s          | 1.38×                          |
+| hl_bucket 3q    | 95.9 s        | 59.6 s          | 1.61× (cum. 3.8× vs profiler baseline) |
+
+Verified bit-equivalence to the pre-fast-path fills via `scripts/perf/diff_fills.py` on both binary and bucket fixtures.
 
 ## End-to-end full-corpus run
 
