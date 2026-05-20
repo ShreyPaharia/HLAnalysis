@@ -80,7 +80,7 @@ def test_state_mismatch_hl_wins(dal):
     assert any(d.case == "state_mismatch" for d in res.drift_events)
 
 
-def test_position_mismatch_hl_wins(dal):
+def test_position_qty_mismatch_emits_drift_and_adopts_hl(dal):
     dal.upsert_position(Position(
         question_idx=42, symbol="@30", qty=10.0, avg_entry=0.95,
         realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=0.855,
@@ -94,6 +94,54 @@ def test_position_mismatch_hl_wins(dal):
     )
     assert dal.get_position(42).qty == 8.0
     assert any(d.case == "position_mismatch" for d in res.drift_events)
+
+
+def test_position_avg_entry_only_diff_silently_adopts_no_drift(dal):
+    # Regression: HL computes avg_entry to more precision than we sent (e.g. we
+    # placed @ 0.96190 but HL reports entryNtl/qty = 0.96199619). The 1e-9
+    # tolerance trips every reconcile cycle, flooding Telegram. Since
+    # avg_entry is display-only (PnL gate reads from HL directly), we silently
+    # adopt HL's value without alerting.
+    dal.upsert_position(Position(
+        question_idx=42, symbol="@30", qty=15.0, avg_entry=0.96190,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=0.855,
+    ))
+    venue_state = ClearinghouseState(
+        positions=(VenuePosition(symbol="@30", qty=15.0, avg_entry=0.96199619,
+                                  unrealized_pnl=0.0),),
+        account_value_usd=0,
+    )
+    res = Reconciler(dal, fills_lookup=lambda _: [], symbol_to_question={"@30": 42}).run(
+        venue_open=[], venue_state=venue_state, now_ns=2,
+    )
+    # Local row was silently updated to HL's avg_entry…
+    assert dal.get_position(42).avg_entry == 0.96199619
+    # …but no drift event surfaces (would have spammed Telegram every cycle).
+    assert not any(d.case == "position_mismatch" for d in res.drift_events)
+
+
+def test_position_both_qty_and_avg_diff_emits_single_qty_drift(dal):
+    # If both fields drift, we still only fire one drift event and it carries
+    # the qty-diff detail (the load-bearing field). The local row is updated
+    # to HL's qty AND avg_entry in the same upsert.
+    dal.upsert_position(Position(
+        question_idx=42, symbol="@30", qty=10.0, avg_entry=0.95,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=0.855,
+    ))
+    venue_state = ClearinghouseState(
+        positions=(VenuePosition(symbol="@30", qty=8.0, avg_entry=0.961,
+                                  unrealized_pnl=0.0),),
+        account_value_usd=0,
+    )
+    res = Reconciler(dal, fills_lookup=lambda _: [], symbol_to_question={"@30": 42}).run(
+        venue_open=[], venue_state=venue_state, now_ns=2,
+    )
+    assert dal.get_position(42).qty == 8.0
+    assert dal.get_position(42).avg_entry == 0.961
+    pos_drift = [d for d in res.drift_events if d.case == "position_mismatch"]
+    assert len(pos_drift) == 1
+    assert pos_drift[0].detail.get("hl_qty") == "8.0"
+    assert pos_drift[0].detail.get("db_qty") == "10.0"
 
 
 def test_position_disappearance_drops_local_position(dal):

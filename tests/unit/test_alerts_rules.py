@@ -121,7 +121,9 @@ async def test_order_rejected_alerts_with_error_text():
 
 
 @pytest.mark.asyncio
-async def test_reconcile_drift_alerts_every_time():
+async def test_reconcile_drift_distinct_events_alert():
+    # Different (case, question_idx, cloid) tuples should each get their own
+    # alert — dedupe only collapses identical events.
     tg = _FakeTelegram()
     bus = EventBus()
     rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
@@ -136,4 +138,29 @@ async def test_reconcile_drift_alerts_every_time():
     except asyncio.CancelledError:
         pass
     drift_msgs = [m for m in tg.messages if "DRIFT" in m]
-    assert len(drift_msgs) == 2  # no dedupe for drift
+    assert len(drift_msgs) == 2
+
+
+@pytest.mark.asyncio
+async def test_reconcile_drift_dedupes_repeated_identical_events():
+    # Regression: every reconcile cycle (~60s) re-fires position_mismatch for
+    # the same question while HL reports a slightly-different avg_entry, so
+    # without dedupe Telegram fills with identical DRIFT spam.
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    for i in range(5):
+        await bus.publish(ReconcileDrift(
+            ts_ns=i, case="position_mismatch", question_idx=680,
+            detail={"hl_qty": "15.0", "db_qty": "15.0"},
+        ))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    drift_msgs = [m for m in tg.messages if "DRIFT" in m]
+    assert len(drift_msgs) == 1

@@ -161,16 +161,24 @@ class Reconciler:
                     detail={"resolution": "deleted_local_position_not_on_venue"},
                 ))
                 continue
-            if abs(vp.qty - lp.qty) > 1e-9 or abs(vp.avg_entry - lp.avg_entry) > 1e-9:
+            qty_diff = abs(vp.qty - lp.qty) > 1e-9
+            avg_diff = abs(vp.avg_entry - lp.avg_entry) > 1e-9
+            if qty_diff or avg_diff:
+                # avg_entry is display-only (the daily-loss gate reads PnL from
+                # HL directly), so we silently adopt HL's value without firing
+                # an alert. qty is load-bearing — it gates risk caps and the
+                # strategy's have_position branch — so any qty drift must
+                # surface as a drift event.
                 self.dal.upsert_position(Position(
                     question_idx=qidx, symbol=lp.symbol, qty=vp.qty,
                     avg_entry=vp.avg_entry, realized_pnl=lp.realized_pnl,
                     last_update_ts_ns=now_ns, stop_loss_price=lp.stop_loss_price,
                 ))
-                drift.append(ReconcileDrift(
-                    ts_ns=now_ns, account_alias=self.account_alias, case="position_mismatch", question_idx=qidx,
-                    detail={"hl_qty": f"{vp.qty}", "db_qty": f"{lp.qty}"},
-                ))
+                if qty_diff:
+                    drift.append(ReconcileDrift(
+                        ts_ns=now_ns, account_alias=self.account_alias, case="position_mismatch", question_idx=qidx,
+                        detail={"hl_qty": f"{vp.qty}", "db_qty": f"{lp.qty}"},
+                    ))
 
         # Position on venue we don't track locally — adopt it into the DB so
         # the risk gate's caps and the strategy's `have_position` HOLD branch

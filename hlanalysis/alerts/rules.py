@@ -114,7 +114,11 @@ class AlertRules:
                     f"qty={ev.qty} trigger=${ev.trigger_px:.4f}"
                 )
             case ReconcileDrift():
-                return None, (
+                # Dedupe identical drift events (same case + question + cloid)
+                # within the window. Without a key, every reconcile cycle
+                # re-fires the same alert.
+                key = f"drift:{ev.case}:{ev.question_idx}:{ev.cloid or ''}"
+                return key, (
                     f"<b>DRIFT</b> {_e(ev.case)} cloid={_e(ev.cloid)} "
                     f"q={ev.question_idx} {_e(str(ev.detail))}"
                 )
