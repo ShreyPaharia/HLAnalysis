@@ -44,12 +44,24 @@ class MarketState:
         *,
         volume_window_ns: int = 60 * 60 * 1_000_000_000,  # 1 hour
         mark_history: int = 256,
+        mark_bucket_ns: int = 60 * 1_000_000_000,  # 1 minute
     ) -> None:
         self._books: dict[str, _MutableBook] = {}
         self._questions: dict[int, QuestionView] = {}
         self._trades: dict[str, deque[TradeEvent]] = {}
         self._marks: dict[str, deque[float]] = {}
         self._last_mark: dict[str, float] = {}
+        # 2026-05-21: bucket marks into ``mark_bucket_ns``-wide windows so the
+        # strategy's σ formula (which assumes 60s-spaced returns) sees a
+        # correctly-spaced series. Without this, HL's ~1.2/s markPx feed
+        # produces 32 sub-second returns that the strategy then annualizes
+        # as if they were 32 minutes — σ collapses to the floor and
+        # p_model/safety_d go to extremes. See bug memo
+        # `engine_sigma_sampling_bug_2026_05_21.md`.
+        self._mark_bucket_ns = mark_bucket_ns
+        # Last-bucket-id we wrote to ``_marks`` per symbol; used to coalesce
+        # within-bucket markPx updates into one entry (last-tick close).
+        self._last_mark_bucket: dict[str, int] = {}
         self._volume_window_ns = volume_window_ns
         self._mark_history = mark_history
 
@@ -83,7 +95,20 @@ class MarketState:
             case MarkEvent():
                 self._last_mark[ev.symbol] = ev.mark_px
                 hist = self._marks.setdefault(ev.symbol, deque(maxlen=self._mark_history))
-                hist.append(ev.mark_px)
+                # Bucket marks to 1m windows. Within a bucket, the LAST mark
+                # wins (canonical bar close). New bucket → append a fresh
+                # entry. This keeps the strategy's ``recent_returns(n=32)``
+                # spanning ~32 minutes of price action (matching its
+                # vol_sampling_dt=60s assumption), not ~26 seconds at HL's
+                # ~1.2/s markPx tick rate.
+                ts = ev.exchange_ts or ev.local_recv_ts
+                bucket = ts // self._mark_bucket_ns
+                last_bucket = self._last_mark_bucket.get(ev.symbol)
+                if last_bucket is None or bucket != last_bucket:
+                    hist.append(ev.mark_px)
+                    self._last_mark_bucket[ev.symbol] = bucket
+                else:
+                    hist[-1] = ev.mark_px
             case QuestionMetaEvent():
                 self._update_question(ev)
             case SettlementEvent():

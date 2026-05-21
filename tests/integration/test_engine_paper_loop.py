@@ -45,12 +45,13 @@ class _FakeAdapter(VenueAdapter):
             keys=["class", "underlying", "period", "expiry", "strike"],
             values=["priceBinary", "BTC", "1h", expiry_str, "80000"],
         )
+        # 2026-05-21: MarketState buckets marks to 1m windows. Space 60s apart.
         for i in range(8):
+            ts = now - (8 - i) * 60_000_000_000
             yield MarkEvent(
                 venue="hyperliquid", product_type=ProductType.PERP,
                 mechanism=Mechanism.CLOB, symbol="BTC",
-                exchange_ts=now - (8 - i) * 1_000_000,
-                local_recv_ts=now - (8 - i) * 1_000_000,
+                exchange_ts=ts, local_recv_ts=ts,
                 mark_px=80_300.0 + i * 0.01,
             )
         yield BboEvent(

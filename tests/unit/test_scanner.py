@@ -52,11 +52,14 @@ def _seed_market(now_ns: int) -> MarketState:
         keys=["class", "underlying", "period", "expiry", "strike"],
         values=["priceBinary", "BTC", "1h", expiry_str, "80000"],
     ))
+    # 2026-05-21: MarketState now buckets marks to 1m windows. Space
+    # timestamps 60s apart so each MarkEvent populates its own bucket.
     for i in range(8):
+        ts = now_ns - (8 - i) * 60_000_000_000
         ms.apply(MarkEvent(
             venue="hyperliquid", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
-            symbol="BTC", exchange_ts=now_ns - (8 - i) * 1_000_000,
-            local_recv_ts=now_ns - (8 - i) * 1_000_000, mark_px=80_300.0 + i * 0.01,
+            symbol="BTC", exchange_ts=ts,
+            local_recv_ts=ts, mark_px=80_300.0 + i * 0.01,
         ))
     ms.apply(BboEvent(
         venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
