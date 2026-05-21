@@ -233,7 +233,11 @@ strategies:
       vol_clip_min: 0.05
       vol_clip_max: 5.0
       edge_buffer: 0.02
-      fee_taker: 0.00035
+      # 2026-05-22: entry fee zeroed alongside take-profit-mode flip. Per the
+      # exit_take_profit_mode block below, all fee accounting now lives on
+      # the exit side via `exit_fee`. PM + HL A/B (v3.1-exitflip-2026-05-22)
+      # confirmed identical trade count / hit rate / max DD with ~+1% PnL.
+      fee_taker: 0.0
       half_spread_assumption: 0.005
       drift_lookback_seconds: 3600
       drift_blend: 0.0
@@ -241,6 +245,18 @@ strategies:
       edge_max: 0.20                     # v3.1 upper-edge filter (commit 0578a11): +37% PnL, -84% max DD on PM
       exit_edge_threshold: 0.0
       time_stop_seconds: 0
+      # 2026-05-22: take-profit-style exit edge.
+      # Legacy formula `edge_held = held_p - bid - fee_taker; exit if < 0`
+      # framed the gate as "is the alpha gone?" — it exits whenever the bid
+      # creeps to within one fee of fair value, which made it fire on
+      # transient bid spikes during the v31 q=14 churn observed today.
+      # New formula `edge_held = bid - held_p - exit_fee; exit if > 0` reads
+      # the gate as "is the bid offering above-fair premium net of selling
+      # cost?" — only fires on genuine premium.
+      # PM + HL A/B (data/sim/runs/v3.1-exitflip-2026-05-22): identical
+      # trade count / hit rate / max DD; PnL +$10.70 (PM) / +$1.38 (HL).
+      exit_take_profit_mode: true
+      exit_fee: 0.0007
       # 2026-05-19 edge-and-tuning memo §4 P5: disabled on HL. The
       # `min_distance_pct=0.002` floor was PM-derived (+$438/yr expected)
       # but on the HL 9-day corpus it cost ~$10 vs running ungated (the
