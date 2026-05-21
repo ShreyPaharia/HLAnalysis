@@ -74,15 +74,48 @@ def test_settlement_marks_question_settled():
 
 def test_recent_returns_for_btc_perp_uses_marks():
     ms = MarketState()
+    # 2026-05-21: marks are now bucketed to 1m windows. Space timestamps
+    # 60s apart so each MarkEvent lands in its own bucket.
+    one_minute_ns = 60 * 1_000_000_000
     for i, px in enumerate([100.0, 100.1, 100.2, 100.05]):
         ms.apply(MarkEvent(
             venue="hyperliquid", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
-            symbol="BTC", exchange_ts=i + 1, local_recv_ts=i + 1, mark_px=px,
+            symbol="BTC", exchange_ts=(i + 1) * one_minute_ns,
+            local_recv_ts=(i + 1) * one_minute_ns, mark_px=px,
         ))
     rets = ms.recent_returns("BTC", n=3)
     assert len(rets) == 3
     assert all(math.isfinite(r) for r in rets)
     assert ms.last_mark("BTC") == 100.05
+
+
+def test_marks_bucketed_to_1m_within_bucket_last_wins():
+    """High-frequency markPx ticks within a 1m bucket should collapse to
+    one entry per bucket (last-tick close). Otherwise the strategy's σ
+    formula sees sub-second returns annualized as if they were 60s.
+    """
+    ms = MarketState()
+    one_minute_ns = 60 * 1_000_000_000
+    # Bucket 1 (t = 1m + 0..3s): 4 ticks collapse to 1 entry, last wins.
+    for i, px in enumerate([100.0, 100.1, 100.2, 100.5]):
+        ms.apply(MarkEvent(
+            venue="hyperliquid", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
+            symbol="BTC", exchange_ts=one_minute_ns + i, local_recv_ts=one_minute_ns + i,
+            mark_px=px,
+        ))
+    # Bucket 2 (t = 2m): 1 tick.
+    ms.apply(MarkEvent(
+        venue="hyperliquid", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
+        symbol="BTC", exchange_ts=2 * one_minute_ns, local_recv_ts=2 * one_minute_ns,
+        mark_px=101.0,
+    ))
+    rets = ms.recent_returns("BTC", n=10)
+    # Only 2 entries in the buffer → 1 return (between the two buckets).
+    assert len(rets) == 1
+    # Returned ln(101.0 / 100.5) — last tick of bucket 1 (100.5) is the canonical close.
+    assert math.isclose(rets[0], math.log(101.0 / 100.5), rel_tol=1e-9)
+    # last_mark still tracks the absolute latest tick, unbucketed.
+    assert ms.last_mark("BTC") == 101.0
 
 
 def test_recent_volume_usd_sums_recent_trades():

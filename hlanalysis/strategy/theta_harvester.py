@@ -10,6 +10,7 @@ import numpy as np
 from loguru import logger
 from scipy.stats import norm  # type: ignore[import-untyped]
 
+from ._numba.vol import bipower_variation_sigma as _nb_bipower
 from ._numba.vol import sample_std_returns as _nb_sample_std
 from .base import Strategy
 from .types import (
@@ -276,6 +277,21 @@ class ThetaHarvesterConfig:
     # drifting toward the boundary, catching long-TTE losers earlier.
     # 0.0 disables (legacy behavior). Typical values: 0.25-1.0 (σ-units).
     exit_safety_d: float = 0.0
+    # v3.2-volclock: vol estimator selector. "sample_std" preserves the v3.1
+    # baseline (rolling sample stdev, ddof=1). "bipower" swaps in the jump-
+    # robust Barndorff-Nielsen bipower variation σ — single-bar wicks no longer
+    # inflate σ, so the d-statistic stays large after a wick and the strategy
+    # can enter on wick-driven mispricings rather than holding while σ_RV
+    # decays. The τ·σ² term in the GBM d is unchanged in form; only σ is
+    # estimated differently. Default keeps v3.1 byte-for-byte.
+    vol_estimator: str = "sample_std"
+    # v3.4-LMgate: Lee-Mykland (2008) post-edge jump gate. When set, entries
+    # that pass the standard edge_buffer/edge_max gates must additionally have
+    # |r_last|/√BV > lm_threshold — i.e., the most recent return looks like a
+    # jump relative to the jump-robust BV vol. k≈4 is the standard threshold
+    # in the literature. None disables. This is a TRULY τ-free entry trigger:
+    # the gate compares a single recent return to recent BV, no τ involved.
+    lm_threshold: Optional[float] = None
 
 
 class ThetaHarvesterStrategy(Strategy):
@@ -332,6 +348,7 @@ class ThetaHarvesterStrategy(Strategy):
             topup_dec = self._evaluate_topup(
                 question=question, books=books, reference_price=reference_price,
                 sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr, position=position,
+                recent_returns=recent_returns,
             )
             if topup_dec.action == Action.ENTER:
                 return topup_dec
@@ -346,6 +363,7 @@ class ThetaHarvesterStrategy(Strategy):
         return self._evaluate_entry(
             question=question, books=books, reference_price=reference_price,
             sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+            recent_returns=recent_returns,
         )
 
     # -- helpers --
@@ -355,7 +373,13 @@ class ThetaHarvesterStrategy(Strategy):
         window = recent_returns[-n_keep:]
         if len(window) < 2:
             return None
-        raw = float(_nb_sample_std(np.asarray(window, dtype=np.float64)))
+        arr = np.asarray(window, dtype=np.float64)
+        if self.cfg.vol_estimator == "bipower":
+            raw = float(_nb_bipower(arr))
+        elif self.cfg.vol_estimator == "sample_std":
+            raw = float(_nb_sample_std(arr))
+        else:
+            raise ValueError(f"Unknown vol_estimator: {self.cfg.vol_estimator!r}")
         ann = math.sqrt(_ANNUAL_SECONDS / float(self.cfg.vol_sampling_dt_seconds))
         sigma = max(self.cfg.vol_clip_min, min(self.cfg.vol_clip_max, raw * ann))
         return sigma if sigma > 0 else None
@@ -370,7 +394,9 @@ class ThetaHarvesterStrategy(Strategy):
         return self.cfg.drift_blend * ann
 
     def _evaluate_entry(
-        self, *, question: QuestionView, books: Mapping[str, BookState], reference_price: float, sigma: float, mu_eff: float, tau_yr: float,
+        self, *, question: QuestionView, books: Mapping[str, BookState],
+        reference_price: float, sigma: float, mu_eff: float, tau_yr: float,
+        recent_returns: tuple[float, ...] = (),
     ) -> Decision:
         # TTE entry window
         tau_s = tau_yr * _ANNUAL_SECONDS
@@ -556,6 +582,35 @@ class ThetaHarvesterStrategy(Strategy):
                 diag,
             ))
 
+        # v3.4-LMgate: Lee-Mykland (2008) post-edge jump filter — TRULY τ-free.
+        # Stat = |r_last| / √(BV_per_sample), comparing the latest log-return
+        # to the jump-robust per-sample σ over the same window. > threshold
+        # ⇒ jump that the market may not have repriced yet. None disables.
+        if self.cfg.lm_threshold is not None and len(recent_returns) > 0:
+            n_keep = max(
+                2, self.cfg.vol_lookback_seconds // self.cfg.vol_sampling_dt_seconds
+            )
+            window = recent_returns[-n_keep:]
+            if len(window) < 2:
+                return Decision(action=Action.HOLD, diagnostics=(
+                    Diagnostic("info", "lm_no_returns"), diag,
+                ))
+            arr = np.asarray(window, dtype=np.float64)
+            bv_per_sample = float(_nb_bipower(arr))
+            if bv_per_sample <= 0.0:
+                return Decision(action=Action.HOLD, diagnostics=(
+                    Diagnostic("info", "lm_bv_zero"), diag,
+                ))
+            lm_stat = abs(float(arr[-1])) / bv_per_sample
+            if lm_stat < self.cfg.lm_threshold:
+                return Decision(action=Action.HOLD, diagnostics=(
+                    Diagnostic("info", "lm_gate_no_jump", (
+                        ("lm_stat", f"{lm_stat:.3f}"),
+                        ("lm_threshold", f"{self.cfg.lm_threshold:.3f}"),
+                    )),
+                    diag,
+                ))
+
         size = max(0.0, math.floor((self.cfg.max_position_usd / chosen_book.ask_px) * 100) / 100)
         if size <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"), diag))
@@ -681,6 +736,7 @@ class ThetaHarvesterStrategy(Strategy):
         self, *, question: QuestionView, books: Mapping[str, BookState],
         reference_price: float, sigma: float, mu_eff: float, tau_yr: float,
         position: Position,
+        recent_returns: tuple[float, ...] = (),
     ) -> Decision:
         """Top up an under-filled held position.
 
@@ -718,6 +774,7 @@ class ThetaHarvesterStrategy(Strategy):
         entry_dec = self._evaluate_entry(
             question=question, books=books, reference_price=reference_price,
             sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+            recent_returns=recent_returns,
         )
         if entry_dec.action != Action.ENTER or not entry_dec.intents:
             failed_gate = (
@@ -847,5 +904,43 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         topup_threshold_pct=float(params.get("topup_threshold_pct", 0.2)),
         topup_min_notional_usd=float(params.get("topup_min_notional_usd", 11.0)),
         exit_safety_d=float(params.get("exit_safety_d", 0.0)),
+        vol_estimator=str(params.get("vol_estimator", "sample_std")),
+        lm_threshold=(
+            float(params["lm_threshold"])
+            if params.get("lm_threshold") is not None else None
+        ),
     )
     return ThetaHarvesterStrategy(cfg)
+
+
+@register("v3_2_volclock")
+def build_v3_2_volclock(params: dict) -> ThetaHarvesterStrategy:
+    """v3.2-volclock — v3.1 with the σ estimator swapped from rolling sample
+    stdev to bipower variation (jump-robust). Identical formula otherwise.
+
+    Goal: keep p_model regime-aware without letting individual wicks inflate σ
+    and shrink the d-statistic. After a wick, σ_BV stays calm → d stays large
+    → the strategy enters on the wick-driven mispricing instead of holding.
+
+    All params flow through to ``build_v3_theta_harvester``; the only
+    difference is the default ``vol_estimator`` flips to "bipower" (callers
+    can still override).
+    """
+    params_with_default = dict(params)
+    params_with_default.setdefault("vol_estimator", "bipower")
+    return build_v3_theta_harvester(params_with_default)
+
+
+@register("v3_4_lmgate")
+def build_v3_4_lmgate(params: dict) -> ThetaHarvesterStrategy:
+    """v3.4-LMgate — v3.2-volclock plus the Lee-Mykland jump gate.
+
+    Adds a τ-free post-edge confirmation: |r_last|/√BV > k_jump (default 4.0).
+    Restricts entries to moments when the most recent return looks like a
+    jump under the no-jump null — i.e., the market hasn't yet repriced the
+    move. Should be higher-precision-lower-recall than v3.2.
+    """
+    params_with_default = dict(params)
+    params_with_default.setdefault("vol_estimator", "bipower")
+    params_with_default.setdefault("lm_threshold", 4.0)
+    return build_v3_theta_harvester(params_with_default)

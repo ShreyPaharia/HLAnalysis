@@ -172,7 +172,9 @@ def test_events_reference_mid_in_range(
         if isinstance(ev, ReferenceEvent):
             # BTC trades in the high-$70k–$80k band over the fixture window.
             assert 40_000.0 < ev.close < 200_000.0
-            assert ev.high == ev.low == ev.close  # we collapse H/L to mid
+            # 2026-05-21: reference feed now resampled to 1m OHLC bars
+            # (was per-tick mid where H=L=C). Bars must satisfy L<=C<=H.
+            assert ev.low <= ev.close <= ev.high
 
 
 def test_events_no_settlement_in_fixture(

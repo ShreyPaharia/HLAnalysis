@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from hlanalysis.strategy._numba.vol import (
+    bipower_variation_sigma,
     ewma_std,
     parkinson_sigma_window,
     sample_std_returns,
@@ -102,6 +103,70 @@ def test_parkinson_window_returns_zero_when_all_degenerate() -> None:
     l = np.array([100.0, 100.0], dtype=np.float64)
     assert parkinson_sigma_window(h, l, 0.0) == 0.0
     assert parkinson_sigma_window(h, l, 0.94) == 0.0
+
+
+def _ref_bipower(returns) -> float:
+    n = len(returns)
+    if n < 2:
+        return 0.0
+    s = 0.0
+    for i in range(n - 1):
+        s += abs(returns[i]) * abs(returns[i + 1])
+    var = (math.pi / 2.0) * s / (n - 1)
+    return math.sqrt(max(var, 0.0))
+
+
+@pytest.mark.parametrize("n", [2, 30, 1440])
+def test_bipower_matches_reference(n: int) -> None:
+    rng = np.random.default_rng(seed=4242 + n)
+    arr = rng.normal(0, 0.001, n).astype(np.float64)
+    expected = _ref_bipower(arr.tolist())
+    got = bipower_variation_sigma(arr)
+    if expected == 0.0:
+        assert got == 0.0
+    else:
+        assert math.isclose(got, expected, rel_tol=1e-12, abs_tol=0.0)
+
+
+def test_bipower_handles_short_window() -> None:
+    # 0 or 1 return: not enough adjacent products to form even one term.
+    assert bipower_variation_sigma(np.array([], dtype=np.float64)) == 0.0
+    assert bipower_variation_sigma(np.array([0.01], dtype=np.float64)) == 0.0
+
+
+def test_bipower_zero_returns_yields_zero_sigma() -> None:
+    assert bipower_variation_sigma(np.zeros(10, dtype=np.float64)) == 0.0
+
+
+def test_bipower_is_jump_robust_vs_sample_std() -> None:
+    # Calm series with one giant wick. sample_std (which squares the wick)
+    # should explode; bipower variation (which multiplies adjacent |r|) should
+    # stay close to the calm baseline because both neighbors of the wick are
+    # tiny, so the contaminated products are |wick|·|small| — not |wick|².
+    rng = np.random.default_rng(seed=2026)
+    calm = rng.normal(0, 1e-4, 200).astype(np.float64)
+    spiked = calm.copy()
+    spiked[100] = 0.05  # one ~500σ wick in middle of window
+
+    bv_calm = bipower_variation_sigma(calm)
+    bv_spiked = bipower_variation_sigma(spiked)
+    rv_calm = sample_std_returns(calm)
+    rv_spiked = sample_std_returns(spiked)
+
+    # Sample-std blows up by ~30×; bipower stays within ~3× of calm σ.
+    # (Loose bounds — point is the relative immunity, not exact ratios.)
+    assert rv_spiked / rv_calm > 20.0
+    assert bv_spiked / bv_calm < 5.0
+
+
+def test_bipower_normal_returns_consistent_with_sample_std() -> None:
+    # In a no-jump iid-normal regime BV and RV should be close to each other
+    # (asymptotically equal). With 5000 samples expect within ~10%.
+    rng = np.random.default_rng(seed=7)
+    arr = rng.normal(0, 0.001, 5000).astype(np.float64)
+    bv = bipower_variation_sigma(arr)
+    rv = sample_std_returns(arr)
+    assert math.isclose(bv, rv, rel_tol=0.10)
 
 
 def test_parkinson_window_skips_invalid_bars() -> None:

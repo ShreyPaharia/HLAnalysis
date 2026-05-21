@@ -21,12 +21,13 @@ def _events(now_ns: int):
         # Expiry 10 min after now_ns=1_700_000_000_000_000_000 (2023-11-14 22:13 UTC)
         values=["priceBinary", "BTC", "1h", "20231114-2223", "80000"],
     )
-    # Seed marks (low-vol)
+    # Seed marks (low-vol). 2026-05-21: MarketState now buckets marks to 1m
+    # windows, so space these 60s apart.
     for i in range(32):
+        ts = now_ns - (32 - i) * 60_000_000_000
         yield MarkEvent(
             venue="hyperliquid", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
-            symbol="BTC", exchange_ts=now_ns - (32 - i) * 1_000_000,
-            local_recv_ts=now_ns - (32 - i) * 1_000_000,
+            symbol="BTC", exchange_ts=ts, local_recv_ts=ts,
             mark_px=80_300.0 + i * 0.1,
         )
     yield BboEvent(

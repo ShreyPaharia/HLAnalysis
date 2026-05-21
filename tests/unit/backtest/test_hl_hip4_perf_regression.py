@@ -299,7 +299,9 @@ def test_events_emits_consistent_order_with_shared_connection(source: HLHip4Data
             n_trade += 1
         elif isinstance(ev, RE):
             n_ref += 1
-    assert n_book > 1000 and n_trade > 100 and n_ref > 1000
+    # 2026-05-21: ref feed resampled to 1m OHLC bars (was per-tick BBO mid).
+    # 2h discovered window → ~120 bars; pre-resample was 20k+ per-tick events.
+    assert n_book > 1000 and n_trade > 100 and n_ref > 50
 
 
 # ---------------------------------------------------------------------------

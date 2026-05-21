@@ -47,6 +47,53 @@ _LEG_RE = re.compile(r"^#(\d+)$")
 _HL_PREDICTION_PATH = "venue=hyperliquid/product_type=prediction_binary/mechanism=clob"
 _HL_PERP_PATH = "venue=hyperliquid/product_type=perp/mechanism=clob"
 
+# Reference-feed resampling period. Must match the strategy's
+# vol_sampling_dt_seconds contract (currently 60s). Aggregating raw
+# BBO/mark ticks into 1m OHLC bars keeps σ-annualization honest.
+_REFERENCE_RESAMPLE_NS = 60 * 1_000_000_000
+
+
+def _resample_reference_to_1m(
+    inner: Iterator[tuple[int, ReferenceEvent]],
+) -> Iterator[tuple[int, ReferenceEvent]]:
+    """Aggregate consecutive ReferenceEvents into 1-minute OHLC bars.
+
+    Why: the strategy's σ formula annualizes the last N returns assuming a
+    fixed inter-sample spacing of ``vol_sampling_dt_seconds``. Raw HL
+    BBO/mark feeds are far denser than that. Bucketing by floor(ts/60s) and
+    emitting one bar per bucket restores the assumed contract — high/low
+    track the bucket extremes, close is the bucket's last tick, ts is the
+    bucket's last-tick timestamp so monotone ordering is preserved.
+    """
+    cur_bucket: int | None = None
+    h: float = 0.0
+    l: float = 0.0
+    c: float = 0.0
+    last_ts: int = 0
+    sym: str = "BTC"
+    for ts, ev in inner:
+        bucket = ts // _REFERENCE_RESAMPLE_NS
+        if cur_bucket is None:
+            cur_bucket = bucket
+            h, l, c = ev.high, ev.low, ev.close
+            last_ts = ts
+            sym = ev.symbol
+        elif bucket != cur_bucket:
+            yield last_ts, ReferenceEvent(last_ts, sym, h, l, c)
+            cur_bucket = bucket
+            h, l, c = ev.high, ev.low, ev.close
+            last_ts = ts
+            sym = ev.symbol
+        else:
+            if ev.high > h:
+                h = ev.high
+            if ev.low < l:
+                l = ev.low
+            c = ev.close
+            last_ts = ts
+    if cur_bucket is not None:
+        yield last_ts, ReferenceEvent(last_ts, sym, h, l, c)
+
 
 def _leg_outcome_side(symbol: str) -> tuple[int, int]:
     """`#220` → `(22, 0)` (YES of outcome 22). `#221` → `(22, 1)` (NO)."""
@@ -356,18 +403,28 @@ class HLHip4DataSource:
         if not rows:
             return iter(())
 
+        # 2026-05-21: resample to 1m OHLC bars. Why: the strategy's σ formula
+        # (`theta_harvester._sigma`) takes the LAST `vol_lookback/vol_sampling_dt`
+        # = 60 returns and annualizes assuming each return spans
+        # `vol_sampling_dt_seconds`=60s. HL BTC perp BBO ticks ~6/s and markPx
+        # ~1.2/s — without resampling, those 60 returns span 5-30 seconds, but
+        # the annualization treats them as if they spanned 60 minutes, giving a
+        # ~100-650× time-scale mismatch. The σ collapses to the vol_clip_min
+        # floor (0.05) on 100% of HL ticks, making p_model→{0,1} at entry and
+        # safety_d fire on tiny BTC moves. PM's source already feeds 1m bars,
+        # so this brings HL into the same contract.
         if evt == "bbo":
-            def gen_bbo() -> Iterator[tuple[int, ReferenceEvent]]:
+            def gen_bbo_raw() -> Iterator[tuple[int, ReferenceEvent]]:
                 for ts, bid, ask in rows:
                     mid = (float(bid) + float(ask)) / 2.0
                     yield int(ts), ReferenceEvent(int(ts), "BTC", mid, mid, mid)
-            return gen_bbo()
+            return _resample_reference_to_1m(gen_bbo_raw())
 
-        def gen_mark() -> Iterator[tuple[int, ReferenceEvent]]:
+        def gen_mark_raw() -> Iterator[tuple[int, ReferenceEvent]]:
             for ts, px in rows:
                 p = float(px)
                 yield int(ts), ReferenceEvent(int(ts), "BTC", p, p, p)
-        return gen_mark()
+        return _resample_reference_to_1m(gen_mark_raw())
 
     def _reference_rows(
         self,

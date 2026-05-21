@@ -160,15 +160,18 @@ strategies:
         max_position_usd: 100             # tightened from 200 for 48h forward-test after 2026-05-19 churn
         stop_loss_pct: null              # theta_harvester drives exits off edge, not stop-loss
         tte_min_seconds: 0
-        # 2026-05-19 edge-and-tuning memo P3: shorten from 86400 → 14400 (4h).
-        # Long-TTE entries (4-12h band) are v3.1's biggest loss class on HL —
-        # drift-through-strike during the multi-hour hold (Q1000020/25/30 in the
-        # 13-day corpus). Restricting to last 4h: HL PnL -$5.98 → +$36.89,
-        # max DD $94 → $19 (validated 2026-05-19, run v3.1-hl-prod-tte4h).
-        # PM tuning (separate JSON configs under data/sim/configs/) keeps 86400;
-        # this is an HL-only override accepting PM hypothetical degradation
-        # because PM is a tuning proxy, not a live venue.
-        tte_max_seconds: 14400
+        # 2026-05-21: 14400 → 43200 (4h → 12h). The original 4h cap was
+        # calibrated against a BROKEN σ feed (HL ref ticks at 6/s, strategy
+        # assumed 60s spacing → σ_RV clipped to 0.05 floor on 100% of ticks
+        # → p_model collapsed to {0,1} → near-resolution chop dominated PnL).
+        # After fixing the σ-sampling bug (resample ref feed to 1m at the
+        # data source), the 4h cap is no longer needed and the optimum
+        # shifts to 12h: post-fix HL 26-question sweep gave
+        #   tte=4h:  PnL +$95.89, Sharpe 9.72,  maxDD $16.87
+        #   tte=12h: PnL +$177.01, Sharpe 16.22, maxDD $15.07  ← ship
+        #   tte=24h: PnL +$169.97, Sharpe 14.38, maxDD $18.15
+        # See summeries/2026-05-21-mid-hold-tte-stack.md.
+        tte_max_seconds: 43200
         price_extreme_threshold: 0.0     # theta_harvester enters off edge, not extreme price
         price_extreme_max: 1.0
         distance_from_strike_usd_min: 0
@@ -181,7 +184,11 @@ strategies:
         max_position_usd: 100
         stop_loss_pct: null
         tte_min_seconds: 0
-        tte_max_seconds: 86400
+        # 2026-05-21: 86400 → 43200. Post-σ-fix HL sweep: bucket leg at 12h
+        # cap = $101.28 PnL / $5.86 DD / 40 trades vs 24h cap = $95.57 /
+        # $10.37 / 52 trades. Buckets prefer 12h: +$6 PnL, 43% lower DD,
+        # 23% fewer trades.
+        tte_max_seconds: 43200
         price_extreme_threshold: 0.0
         price_extreme_max: 1.0
         distance_from_strike_usd_min: 0
@@ -195,7 +202,7 @@ strategies:
       max_position_usd: 100
       stop_loss_pct: null
       tte_min_seconds: 0
-      tte_max_seconds: 14400              # mirror priceBinary allowlist (P3) — engine reads ThetaHarvesterConfig.tte_max from defaults
+      tte_max_seconds: 43200              # mirror priceBinary/Bucket allowlist — engine reads ThetaHarvesterConfig.tte_max from defaults
       price_extreme_threshold: 0.0
       price_extreme_max: 1.0
       distance_from_strike_usd_min: 0
@@ -245,3 +252,8 @@ strategies:
       topup_enabled: true
       topup_threshold_pct: 0.2
       topup_min_notional_usd: 11.0
+      # 2026-05-21: σ-normalized mid-hold distance exit. PM walk-forward
+      # validated +50-68% PnL OOS over d=0.0 baseline; HL post-σ-fix at
+      # d=1.0 / tte=12h: $177 PnL / Sharpe 16. 1.0 is the production
+      # ceiling — d=1.5 triggers a re-entry cascade (see summary).
+      exit_safety_d: 1.0

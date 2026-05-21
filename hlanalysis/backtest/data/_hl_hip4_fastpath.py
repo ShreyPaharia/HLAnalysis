@@ -94,6 +94,47 @@ from ..core.events import ReferenceEvent, SettlementEvent
 log = logging.getLogger(__name__)
 
 
+_REFERENCE_RESAMPLE_NS = 60 * 1_000_000_000
+
+
+def _resample_reference_rows_to_1m(
+    events: list[ReferenceEvent],
+) -> list[ReferenceEvent]:
+    """List-input twin of ``hl_hip4._resample_reference_to_1m``. Aggregates
+    consecutive ReferenceEvents into 1-minute OHLC bars. See that function
+    for rationale.
+    """
+    out: list[ReferenceEvent] = []
+    if not events:
+        return out
+    cur_bucket: int | None = None
+    h = l = c = 0.0
+    last_ts = 0
+    sym = "BTC"
+    for ev in events:
+        bucket = ev.ts_ns // _REFERENCE_RESAMPLE_NS
+        if cur_bucket is None:
+            cur_bucket = bucket
+            h, l, c = ev.high, ev.low, ev.close
+            last_ts = ev.ts_ns
+            sym = ev.symbol
+        elif bucket != cur_bucket:
+            out.append(ReferenceEvent(last_ts, sym, h, l, c))
+            cur_bucket = bucket
+            h, l, c = ev.high, ev.low, ev.close
+            last_ts = ev.ts_ns
+            sym = ev.symbol
+        else:
+            if ev.high > h:
+                h = ev.high
+            if ev.low < l:
+                l = ev.low
+            c = ev.close
+            last_ts = ev.ts_ns
+    out.append(ReferenceEvent(last_ts, sym, h, l, c))
+    return out
+
+
 @dataclass(frozen=True, slots=True)
 class LegArrays:
     """Per-leg event array + the last book ts cursor needed by the runner."""
@@ -343,16 +384,23 @@ def build_fast_path_bundle(
         book_ts = book_cols["ts"] if book_cols is not None else np.zeros(0, dtype=np.int64)
         leg_arrays[leg] = LegArrays(events=arr, book_ts=book_ts)
 
-    # Reference events: already fetched as flat rows in legacy path. Convert here.
-    ref_events: list[ReferenceEvent] = []
+    # Reference events: already fetched as flat rows in legacy path. Convert
+    # here and resample to 1m OHLC bars so σ-annualization in the strategy
+    # (which assumes vol_sampling_dt_seconds=60 inter-sample spacing) is
+    # honest. Raw HL BBO/mark feeds tick ~1-6/s; without bucketing, the
+    # strategy's last-N returns span ~5-30s of price action while the
+    # annualization treats them as 60min. See hl_hip4.py::_resample_reference_to_1m
+    # for the legacy-path twin and the rationale memo.
+    ref_events_raw: list[ReferenceEvent] = []
     if ref_event_kind == "bbo":
         for ts, bid, ask in reference_rows:
             mid = (float(bid) + float(ask)) / 2.0
-            ref_events.append(ReferenceEvent(int(ts), "BTC", mid, mid, mid))
+            ref_events_raw.append(ReferenceEvent(int(ts), "BTC", mid, mid, mid))
     else:
         for ts, px in reference_rows:
             p = float(px)
-            ref_events.append(ReferenceEvent(int(ts), "BTC", p, p, p))
+            ref_events_raw.append(ReferenceEvent(int(ts), "BTC", p, p, p))
+    ref_events: list[ReferenceEvent] = _resample_reference_rows_to_1m(ref_events_raw)
 
     # Settlement events: per-leg.
     settle_events: list[SettlementEvent] = []
