@@ -271,8 +271,24 @@ class LateResolutionStrategy(Strategy):
 
     name = "late_resolution"
 
-    def __init__(self, cfg: LateResolutionConfig) -> None:
+    def __init__(
+        self,
+        cfg: LateResolutionConfig,
+        *,
+        cfg_by_class: Mapping[str, LateResolutionConfig] | None = None,
+    ) -> None:
+        # `cfg` is the default; `cfg_by_class` (built by the runtime from the
+        # YAML allowlist) overrides per question.klass. The active config swap
+        # happens inside evaluate() so internal helpers can keep reading
+        # self.cfg unmodified. See _cfg_for / evaluate.
         self.cfg = cfg
+        self._default_cfg = cfg
+        self._cfg_by_class: dict[str, LateResolutionConfig] = (
+            dict(cfg_by_class) if cfg_by_class else {}
+        )
+
+    def _cfg_for(self, question: QuestionView) -> LateResolutionConfig:
+        return self._cfg_by_class.get(question.klass, self._default_cfg)
 
     # 1 / (4 ln 2): kept for backward reference (consumers used to reach
     # for it before the JIT helpers landed). The Parkinson constant now lives
@@ -357,6 +373,41 @@ class LateResolutionStrategy(Strategy):
         )
 
     def evaluate(
+        self,
+        *,
+        question: QuestionView,
+        books: Mapping[str, BookState],
+        reference_price: float,
+        recent_returns: tuple[float, ...],
+        recent_volume_usd: float,
+        position: Position | None,
+        now_ns: int,
+        recent_hl_bars: tuple[tuple[float, float], ...] = (),
+    ) -> Decision:
+        # Resolve and pin the per-class config for this evaluation. The body
+        # (and every internal helper it calls) reads self.cfg directly, so the
+        # swap is the simplest correct way to honor allowlist match-specific
+        # gate overrides. Strategy.evaluate is single-threaded sync — restoring
+        # in finally keeps self.cfg stable for external readers (tests, diags).
+        resolved_cfg = self._cfg_for(question)
+        if resolved_cfg is self.cfg:
+            return self._evaluate_dispatch(
+                question=question, books=books, reference_price=reference_price,
+                recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
+                position=position, now_ns=now_ns, recent_hl_bars=recent_hl_bars,
+            )
+        prev_cfg = self.cfg
+        self.cfg = resolved_cfg
+        try:
+            return self._evaluate_dispatch(
+                question=question, books=books, reference_price=reference_price,
+                recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
+                position=position, now_ns=now_ns, recent_hl_bars=recent_hl_bars,
+            )
+        finally:
+            self.cfg = prev_cfg
+
+    def _evaluate_dispatch(
         self,
         *,
         question: QuestionView,

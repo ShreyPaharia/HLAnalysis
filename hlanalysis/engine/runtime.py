@@ -39,39 +39,74 @@ from ..strategy.theta_harvester import (
 )
 
 
-def build_late_resolution_config(cfg: StrategyConfig) -> LateResolutionConfig:
-    """Build the strategy runtime config from a loaded StrategyConfig.
-
-    Shared by EngineRuntime (live) and replay CLI. `getattr` defaults let
-    older YAMLs without the safety-gate fields keep loading.
+def _late_resolution_config_from_entry(
+    entry, *, global_,
+) -> LateResolutionConfig:
+    """Build a LateResolutionConfig from a single AllowlistEntry plus the
+    strategy's global block. Cross-cutting fields (max_strike_distance_pct,
+    min_recent_volume_usd, stale_data_halt_seconds) come from `global_`;
+    everything else comes from `entry`. `getattr` defaults let older YAMLs
+    without the safety-gate fields keep loading.
     """
-    d = cfg.defaults
     return LateResolutionConfig(
-        tte_min_seconds=d.tte_min_seconds, tte_max_seconds=d.tte_max_seconds,
-        price_extreme_threshold=d.price_extreme_threshold,
-        distance_from_strike_usd_min=d.distance_from_strike_usd_min,
-        vol_max=d.vol_max, max_position_usd=d.max_position_usd,
+        tte_min_seconds=entry.tte_min_seconds, tte_max_seconds=entry.tte_max_seconds,
+        price_extreme_threshold=entry.price_extreme_threshold,
+        distance_from_strike_usd_min=entry.distance_from_strike_usd_min,
+        vol_max=entry.vol_max, max_position_usd=entry.max_position_usd,
         # LateResolutionConfig.stop_loss_pct is a non-Optional float; the
         # strategy treats values ≥1e8 as "disabled" (matches build_v1_late_resolution
         # in strategy/late_resolution.py). Map None -> sentinel here.
-        stop_loss_pct=1e9 if d.stop_loss_pct is None else d.stop_loss_pct,
-        max_strike_distance_pct=cfg.global_.max_strike_distance_pct,
-        min_recent_volume_usd=cfg.global_.min_recent_volume_usd,
-        stale_data_halt_seconds=cfg.global_.stale_data_halt_seconds,
-        price_extreme_max=getattr(d, "price_extreme_max", 1.0),
-        min_safety_d=getattr(d, "min_safety_d", 0.0),
-        vol_lookback_seconds=getattr(d, "vol_lookback_seconds", 1800),
-        exit_safety_d=getattr(d, "exit_safety_d", 0.0),
-        vol_ewma_lambda=getattr(d, "vol_ewma_lambda", 0.0),
-        size_cap_near_strike_pct=getattr(d, "size_cap_near_strike_pct", 0.0),
-        size_cap_max_dist_pct=getattr(d, "size_cap_max_dist_pct", 1.5),
-        size_cap_min_ask=getattr(d, "size_cap_min_ask", 0.88),
-        use_bid_for_entry_gate=getattr(d, "use_bid_for_entry_gate", False),
-        min_bid_notional_usd=getattr(d, "min_bid_notional_usd", 0.0),
-        topup_enabled=getattr(d, "topup_enabled", True),
-        topup_threshold_pct=getattr(d, "topup_threshold_pct", 0.2),
-        topup_min_notional_usd=getattr(d, "topup_min_notional_usd", 11.0),
+        stop_loss_pct=1e9 if entry.stop_loss_pct is None else entry.stop_loss_pct,
+        max_strike_distance_pct=global_.max_strike_distance_pct,
+        min_recent_volume_usd=global_.min_recent_volume_usd,
+        stale_data_halt_seconds=global_.stale_data_halt_seconds,
+        price_extreme_max=getattr(entry, "price_extreme_max", 1.0),
+        min_safety_d=getattr(entry, "min_safety_d", 0.0),
+        vol_lookback_seconds=getattr(entry, "vol_lookback_seconds", 1800),
+        exit_safety_d=getattr(entry, "exit_safety_d", 0.0),
+        vol_ewma_lambda=getattr(entry, "vol_ewma_lambda", 0.0),
+        size_cap_near_strike_pct=getattr(entry, "size_cap_near_strike_pct", 0.0),
+        size_cap_max_dist_pct=getattr(entry, "size_cap_max_dist_pct", 1.5),
+        size_cap_min_ask=getattr(entry, "size_cap_min_ask", 0.88),
+        use_bid_for_entry_gate=getattr(entry, "use_bid_for_entry_gate", False),
+        min_bid_notional_usd=getattr(entry, "min_bid_notional_usd", 0.0),
+        topup_enabled=getattr(entry, "topup_enabled", True),
+        topup_threshold_pct=getattr(entry, "topup_threshold_pct", 0.2),
+        topup_min_notional_usd=getattr(entry, "topup_min_notional_usd", 11.0),
     )
+
+
+def build_late_resolution_config(cfg: StrategyConfig) -> LateResolutionConfig:
+    """Build the default LateResolutionConfig from a loaded StrategyConfig.
+
+    Shared by EngineRuntime (live) and replay CLI. Returns the config sourced
+    from `cfg.defaults`; per-class overrides land via
+    `build_late_resolution_configs_by_class`.
+    """
+    return _late_resolution_config_from_entry(cfg.defaults, global_=cfg.global_)
+
+
+def build_late_resolution_configs_by_class(
+    cfg: StrategyConfig,
+) -> dict[str, LateResolutionConfig]:
+    """Build per-question.klass LateResolutionConfig overrides from the
+    strategy's allowlist. Each entry whose `match.class` is set produces one
+    config; entries without a class match fall through to defaults at
+    evaluation time. Multiple entries with the same class: last one wins.
+
+    Plumbed into LateResolutionStrategy so allowlist match-specific gate
+    fields (e.g. priceBucket `tte_max_seconds: 86400`) actually take effect
+    at the strategy gate, not only at the risk-gate caps.
+    """
+    by_class: dict[str, LateResolutionConfig] = {}
+    for entry in cfg.allowlist:
+        klass = entry.match.get("class")
+        if not klass:
+            continue
+        by_class[klass] = _late_resolution_config_from_entry(
+            entry, global_=cfg.global_,
+        )
+    return by_class
 
 
 def build_theta_harvester_config(cfg: StrategyConfig) -> ThetaHarvesterConfig:
@@ -119,7 +154,10 @@ def _build_strategy_for_slot(cfg: StrategyConfig) -> Strategy:
     """Dispatch on strategy_type. Add new strategies here as they're surfaced
     for live trading."""
     if cfg.strategy_type == "late_resolution":
-        return LateResolutionStrategy(build_late_resolution_config(cfg))
+        return LateResolutionStrategy(
+            build_late_resolution_config(cfg),
+            cfg_by_class=build_late_resolution_configs_by_class(cfg),
+        )
     if cfg.strategy_type == "theta_harvester":
         return ThetaHarvesterStrategy(build_theta_harvester_config(cfg))
     raise ValueError(f"unknown strategy_type: {cfg.strategy_type!r}")

@@ -165,3 +165,118 @@ def test_legacy_utc_midnight_helper_still_works():
     legacy = _Scanner._utc_midnight_ns(now_ns)
     new = _Scanner._daily_window_start_ns(now_ns, hour=0)
     assert legacy == new
+
+
+# --- Gate-decision log: chosen-leg book snapshot for bucket markets ---
+
+
+def test_gate_log_snapshot_uses_chosen_leg_book_when_diagnosed(tmp_path):
+    """For bucket markets, the strategy can route to any one of N YES legs.
+    The gate-decision log must snapshot THAT leg's book (not an arbitrary
+    first leg), so operators can correlate the price columns with edge_yes
+    without doing inverse arithmetic.
+    """
+    import json
+    from hlanalysis.strategy.types import (
+        Action, BookState, Decision, Diagnostic, QuestionView,
+    )
+
+    now = 1_700_000_000_000_000_000
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    cfg = _strategy_cfg()
+    rcfg = LateResolutionConfig(
+        tte_min_seconds=60, tte_max_seconds=1800,
+        price_extreme_threshold=0.95, distance_from_strike_usd_min=200.0,
+        vol_max=0.5, max_position_usd=100.0, stop_loss_pct=10.0,
+        max_strike_distance_pct=10.0, min_recent_volume_usd=0.0,
+        stale_data_halt_seconds=5,
+    )
+    log_path = tmp_path / "gate_decisions.jsonl"
+    scanner = Scanner(
+        strategy=LateResolutionStrategy(rcfg),
+        cfg=cfg, market_state=MarketState(), dal=dal,
+        kill_switch_path=tmp_path / "halt",
+        last_reconcile_ns=now,
+        gate_log_path=log_path,
+    )
+
+    bucket_q = QuestionView(
+        question_idx=14, yes_symbol="", no_symbol="", strike=0.0,
+        expiry_ns=now + 3600 * 1_000_000_000,
+        underlying="BTC", klass="priceBucket", period="1d",
+        leg_symbols=("#700", "#701", "#780", "#781"),
+    )
+    # First leg is a long-shot (price 0.01); chosen leg #780 is the favorite (0.95).
+    books = {
+        "#700": BookState(symbol="#700", bid_px=0.00301, bid_sz=10.0,
+                          ask_px=0.01, ask_sz=10.0,
+                          last_trade_ts_ns=now, last_l2_ts_ns=now),
+        "#780": BookState(symbol="#780", bid_px=0.94, bid_sz=10.0,
+                          ask_px=0.95, ask_sz=10.0,
+                          last_trade_ts_ns=now, last_l2_ts_ns=now),
+    }
+    decision = Decision(action=Action.HOLD, diagnostics=(
+        Diagnostic("info", "edge", (
+            ("p_model", "0.7847"), ("edge_yes", "-0.1706"),
+            ("chosen_leg", "#780"),
+        )),
+    ))
+
+    scanner._maybe_log_gate_transition(
+        question=bucket_q, decision=decision, books=books, now_ns=now,
+    )
+    row = json.loads(log_path.read_text().strip())
+    # The chosen leg's book is what should appear in the snapshot columns.
+    assert row["ask_px"] == 0.95, f"ask_px should be chosen leg's ask, got {row['ask_px']}"
+    assert row["bid_px"] == 0.94
+    assert row["reason"] == "edge"
+
+
+def test_gate_log_snapshot_falls_back_to_first_leg_when_no_chosen_leg(tmp_path):
+    """When the diagnostic doesn't carry chosen_leg (binary path, or other
+    reasons like tte_out_of_window), preserve the legacy first-leg snapshot."""
+    import json
+    from hlanalysis.strategy.types import (
+        Action, BookState, Decision, Diagnostic, QuestionView,
+    )
+
+    now = 1_700_000_000_000_000_000
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    cfg = _strategy_cfg()
+    rcfg = LateResolutionConfig(
+        tte_min_seconds=60, tte_max_seconds=1800,
+        price_extreme_threshold=0.95, distance_from_strike_usd_min=200.0,
+        vol_max=0.5, max_position_usd=100.0, stop_loss_pct=10.0,
+        max_strike_distance_pct=10.0, min_recent_volume_usd=0.0,
+        stale_data_halt_seconds=5,
+    )
+    log_path = tmp_path / "gate_decisions.jsonl"
+    scanner = Scanner(
+        strategy=LateResolutionStrategy(rcfg),
+        cfg=cfg, market_state=MarketState(), dal=dal,
+        kill_switch_path=tmp_path / "halt",
+        last_reconcile_ns=now,
+        gate_log_path=log_path,
+    )
+
+    q = QuestionView(
+        question_idx=42, yes_symbol="@30", no_symbol="@31", strike=80_000.0,
+        expiry_ns=now + 600 * 1_000_000_000,
+        underlying="BTC", klass="priceBinary", period="1h",
+    )
+    books = {
+        "@30": BookState(symbol="@30", bid_px=0.95, bid_sz=10.0,
+                        ask_px=0.96, ask_sz=10.0,
+                        last_trade_ts_ns=now, last_l2_ts_ns=now),
+    }
+    decision = Decision(action=Action.HOLD, diagnostics=(
+        Diagnostic("info", "tte_out_of_window", (("tte_s", "8000"),)),
+    ))
+    scanner._maybe_log_gate_transition(
+        question=q, decision=decision, books=books, now_ns=now,
+    )
+    row = json.loads(log_path.read_text().strip())
+    assert row["ask_px"] == 0.96
+    assert row["reason"] == "tte_out_of_window"

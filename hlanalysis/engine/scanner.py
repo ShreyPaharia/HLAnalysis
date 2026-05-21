@@ -196,10 +196,22 @@ class Scanner:
         if prev == key:
             return
         self._last_logged_state[question.question_idx] = key
-        # Snapshot book state for the first leg with quotes (used by the
-        # strategy's gate). Lets the operator see bid/ask/mid at the moment
-        # of the decision without having to cross-join recorder data.
-        sample_book: BookState | None = next(iter(books.values()), None)
+        # Snapshot book state for the leg the strategy actually chose. For
+        # binary questions there's only one favorite path so this is moot,
+        # but for buckets the strategy picks among N YES legs and emits
+        # `chosen_leg=<sym>` in the diagnostic. Falling back to first-leg
+        # for older diagnostics or missing books keeps legacy rows readable.
+        chosen_sym: str | None = None
+        for d in decision.diagnostics:
+            for k, v in d.fields:
+                if k == "chosen_leg":
+                    chosen_sym = v
+                    break
+            if chosen_sym is not None:
+                break
+        sample_book: BookState | None = (
+            books.get(chosen_sym) if chosen_sym else None
+        ) or next(iter(books.values()), None)
         bid = sample_book.bid_px if sample_book else None
         ask = sample_book.ask_px if sample_book else None
         mid = (bid + ask) / 2.0 if (bid is not None and ask is not None) else None

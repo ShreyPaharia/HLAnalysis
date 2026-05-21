@@ -1174,3 +1174,69 @@ def test_topup_size_floors_to_two_decimals():
     assert d.action is Action.ENTER
     assert _m.isclose(d.intents[0].size, 53.09, abs_tol=0.01)
 
+
+# --- Per-class allowlist config overrides ---
+
+
+def _q_bucket(expiry_ns: int) -> QuestionView:
+    # Minimal priceBucket question; we only need TTE to be inside the bucket
+    # window to prove the per-class TTE override fires. legs=() forces the
+    # "no_legs" diagnostic on the *next* gate, which is what we assert on.
+    return QuestionView(
+        question_idx=99,
+        yes_symbol="",
+        no_symbol="",
+        strike=0.0,
+        expiry_ns=expiry_ns,
+        underlying="BTC",
+        klass="priceBucket",
+        period="1d",
+    )
+
+
+def test_evaluate_uses_per_class_cfg_when_provided():
+    """priceBucket questions must read tte_max from cfg_by_class['priceBucket'],
+    not from the default cfg. Regression: build_late_resolution_config used to
+    read only cfg.defaults, silently dropping per-class allowlist overrides."""
+    default = _cfg(tte_max_seconds=1800)        # 30min — same as existing tests
+    bucket = _cfg(tte_max_seconds=86400)        # 24h — what the YAML allowlist sets
+    s = LateResolutionStrategy(default, cfg_by_class={"priceBucket": bucket})
+
+    now = 10_000_000_000_000
+    expiry_8h = now + 8 * 3600 * 1_000_000_000  # 8h TTE — outside default, inside bucket
+
+    # priceBucket: TTE override applies → should NOT be tte_out_of_window.
+    d_bucket = s.evaluate(
+        question=_q_bucket(expiry_ns=expiry_8h), books={}, reference_price=80_000.0,
+        recent_returns=(), recent_volume_usd=0.0, position=None, now_ns=now,
+    )
+    assert d_bucket.action is Action.HOLD
+    assert not any(diag.message == "tte_out_of_window" for diag in d_bucket.diagnostics), (
+        f"priceBucket should clear TTE gate with per-class override; got {d_bucket.diagnostics!r}"
+    )
+
+    # priceBinary at the same 8h TTE: no override → falls back to default tte_max=1800
+    # → must still be tte_out_of_window.
+    d_binary = s.evaluate(
+        question=_q(strike=80_000.0, expiry_ns=expiry_8h), books={}, reference_price=80_000.0,
+        recent_returns=(), recent_volume_usd=0.0, position=None, now_ns=now,
+    )
+    assert d_binary.action is Action.HOLD
+    assert any(diag.message == "tte_out_of_window" for diag in d_binary.diagnostics)
+
+
+def test_evaluate_restores_default_cfg_after_per_class_call():
+    """Outside an evaluate() call, strategy.cfg must read as the originally-
+    constructed default — never the last per-class swap."""
+    default = _cfg(tte_max_seconds=1800)
+    bucket = _cfg(tte_max_seconds=86400)
+    s = LateResolutionStrategy(default, cfg_by_class={"priceBucket": bucket})
+
+    now = 10_000_000_000_000
+    expiry_8h = now + 8 * 3600 * 1_000_000_000
+    s.evaluate(
+        question=_q_bucket(expiry_ns=expiry_8h), books={}, reference_price=80_000.0,
+        recent_returns=(), recent_volume_usd=0.0, position=None, now_ns=now,
+    )
+    assert s.cfg is default
+
