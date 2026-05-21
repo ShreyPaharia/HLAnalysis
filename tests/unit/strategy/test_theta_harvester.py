@@ -110,6 +110,48 @@ def test_edge_exit_fires_when_edge_collapses_below_threshold() -> None:
     assert decision.intents[0].reduce_only is True
 
 
+def test_exit_take_profit_mode_holds_when_bid_below_held_p_plus_fee() -> None:
+    """With exit_take_profit_mode=True, hold while bid < held_p + exit_fee.
+    Mirrors the take-profit reading: don't sell unless the bid offers above-
+    fair premium net of exit-side fee."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        exit_take_profit_mode=True, exit_fee=0.0007,
+        exit_edge_threshold=0.0, edge_buffer=0.0, half_spread_assumption=0.0,
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    # held_p ≈ 1 at strike well above (ref=120k); bid 0.96 < held_p + fee
+    books = {"YES": _book("YES", bid=0.96, ask=0.99), "NO": _book("NO", bid=0.01, ask=0.04)}
+    pos = _pos(symbol="YES", qty=200.0, entry_px=0.50)
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books, reference_price=120_000.0,
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert decision.action == Action.HOLD
+
+
+def test_exit_take_profit_mode_exits_when_bid_above_held_p_plus_fee() -> None:
+    """With exit_take_profit_mode=True, exit when bid > held_p + exit_fee."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        exit_take_profit_mode=True, exit_fee=0.0001,
+        exit_edge_threshold=0.0, edge_buffer=0.0, half_spread_assumption=0.0,
+    ))
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    # ref exactly at strike → p_model ≈ 0.5; bid 0.95 → edge_yes_sell = 0.95 − 0.5 − fee ≈ +0.45 → EXIT.
+    books = {"YES": _book("YES", bid=0.95, ask=0.99), "NO": _book("NO", bid=0.01, ask=0.05)}
+    pos = _pos(symbol="YES", qty=200.0, entry_px=0.40)
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books, reference_price=100_000.0,  # at strike → p_model ~0.5
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert decision.action == Action.EXIT
+    assert decision.intents[0].side == "sell"
+    assert decision.intents[0].reduce_only is True
+
+
 def test_holds_when_edge_held_still_positive() -> None:
     strat = build_strategy("v3_theta_harvester", _params(exit_edge_threshold=-0.01))
     qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)

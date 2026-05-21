@@ -292,6 +292,21 @@ class ThetaHarvesterConfig:
     # in the literature. None disables. This is a TRULY τ-free entry trigger:
     # the gate compares a single recent return to recent BV, no τ involved.
     lm_threshold: Optional[float] = None
+    # 2026-05-22: take-profit-style exit edge. When True, the held-position
+    # exit gate flips from "is the alpha gone?" (held_p - bid - fee < 0) to
+    # "is the bid offering above-fair premium net of fees?" (bid - held_p
+    # - exit_fee > 0). The new framing avoids the transient-bid-spike
+    # churn caused by the legacy ASK-symmetric formulation crossing zero
+    # on noise. Default False preserves v3.1 byte-for-byte for backtest
+    # reproducibility; toggle via config and validate on PM+HL before
+    # promoting. See `exit_fee` for the per-fill exit cost.
+    exit_take_profit_mode: bool = False
+    # Exit-side fee in fraction (e.g. 0.0007 = 7 bps). Only consumed when
+    # ``exit_take_profit_mode`` is True. Models the cost incurred when
+    # closing a position at bid; lets us decouple the exit-cost assumption
+    # from entry-side ``fee_taker`` (which can stay 0 if the venue subsidises
+    # opens).
+    exit_fee: float = 0.0007
 
 
 class ThetaHarvesterStrategy(Strategy):
@@ -716,12 +731,27 @@ class ThetaHarvesterStrategy(Strategy):
         # never had a stop-loss-style cut here (stop_loss_pct=null by design);
         # legacy callers wanting one should re-introduce it as a separate
         # rule, not piggy-back on edge_held with the wrong price.
-        edge_held = held_p - held.bid_px - self.cfg.fee_taker
+        # Two formulations available; see ThetaHarvesterConfig.exit_take_profit_mode
+        # for the rationale and how to A/B-test them.
+        #   - legacy (mode=False): edge_held = held_p − bid − fee_taker;
+        #     exit when this drops below exit_edge_threshold. Frames the
+        #     question as "is the alpha gone if I hypothetically rebought at
+        #     the bid?" — fires on bid noise close to fair value.
+        #   - take-profit (mode=True): edge_held = bid − held_p − exit_fee;
+        #     exit when this rises above exit_edge_threshold. Frames the
+        #     question as "is the bid offering me an above-fair sell price
+        #     net of the exit-side fee?" — only fires on genuine premium.
+        if self.cfg.exit_take_profit_mode:
+            edge_held = held.bid_px - held_p - self.cfg.exit_fee
+            exit_now = edge_held > self.cfg.exit_edge_threshold
+        else:
+            edge_held = held_p - held.bid_px - self.cfg.fee_taker
+            exit_now = edge_held < self.cfg.exit_edge_threshold
         # Gamma penalty is INTENTIONALLY NOT applied to the exit gate.
         # Empirical: symmetric gamma penalty triggers premature exits during
         # transient drift through near-strike regions that would otherwise
         # recover (HL 9-question test 2026-05-19, net -$3 to -$10/question).
-        if edge_held < self.cfg.exit_edge_threshold:
+        if exit_now:
             return self._exit_intent(question, position, held, reason="exit_edge")
 
         return Decision(action=Action.HOLD, diagnostics=(
@@ -909,6 +939,8 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
             float(params["lm_threshold"])
             if params.get("lm_threshold") is not None else None
         ),
+        exit_take_profit_mode=bool(params.get("exit_take_profit_mode", False)),
+        exit_fee=float(params.get("exit_fee", 0.0007)),
     )
     return ThetaHarvesterStrategy(cfg)
 

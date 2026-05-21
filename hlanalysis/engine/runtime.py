@@ -147,6 +147,8 @@ def build_theta_harvester_config(cfg: StrategyConfig) -> ThetaHarvesterConfig:
         topup_enabled=getattr(t, "topup_enabled", True),
         topup_threshold_pct=getattr(t, "topup_threshold_pct", 0.2),
         topup_min_notional_usd=getattr(t, "topup_min_notional_usd", 11.0),
+        exit_take_profit_mode=getattr(t, "exit_take_profit_mode", False),
+        exit_fee=getattr(t, "exit_fee", 0.0007),
     )
 
 

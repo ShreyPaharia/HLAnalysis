@@ -141,6 +141,9 @@ class ThetaParams(BaseModel):
     topup_enabled: bool = True
     topup_threshold_pct: float = 0.2
     topup_min_notional_usd: float = 11.0
+    # See ThetaHarvesterConfig.exit_take_profit_mode / exit_fee.
+    exit_take_profit_mode: bool = False
+    exit_fee: float = 0.0007
 
 
 class StrategyConfig(BaseModel):
