@@ -5,6 +5,17 @@
 **Sweep configs:** `data/sim/configs/v3.1-mid-hold-tte-stack/`
 **Sweep runs:** `data/sim/runs/v3.1-mid-hold-tte-stack-2026-05-21/` and `data/sim/tuning/v3-1-mid-hold-walkforward-2026-05-21/`
 
+---
+
+> **POST-σ-FIX UPDATE (commit `cc44bf6`):** the HL conclusions below were
+> rendered partly stale by a σ-sampling bug discovered during this session.
+> See the "Post-σ-fix re-tune" section at the bottom for the corrected
+> HL picture. The PM walk-forward, the d=1.5 cascade analysis, and the
+> v3.2/v3.4 stacking verdicts (P3/P4) remain valid — PM's data feed
+> was always correctly resampled to 1m.
+
+---
+
 ## TL;DR (one line per layer)
 
 1. **TTE cap on HL**: KEEP `tte_max_seconds=14400`. Mid-hold + 4h cap (+$11.54, Sharpe 0.43, $82 DD) is strictly better than mid-hold + 24h cap (+$10.91, Sharpe 0.31, $120 DD).
@@ -196,3 +207,105 @@ v3.2/v3.4 tests; no regressions from the merge).
 3. **v3.2-volclock:** do not ship alongside mid-hold. Re-evaluate only if mid-hold is rolled back.
 4. **v3.4-LMgate:** ship as the DD-disciplined variant (best Sharpe, ¼ the DD). Both v3.1 and v3.4 benefit from mid-hold.
 5. **d=1.5 cascade:** d=1.0 is the production ceiling. If a future test grid wants d>1.0, add a post-safety_d cooldown first.
+
+---
+
+# Post-σ-fix re-tune (HL only — supersedes the HL conclusions above)
+
+## The bug
+
+The strategy's σ formula (`theta_harvester._sigma`, `late_resolution._sigma`)
+takes the last `vol_lookback_seconds / vol_sampling_dt_seconds` returns and
+treats each as a 60-second sample. The HL data path was violating this
+contract:
+
+- **Backtest** (`hl_hip4._reference_iter`): emitted every BBO tick (~6/s
+  on HL perp BBO). Last 60 returns spanned **5.5 seconds** of wall time.
+  Annualization treated them as 60 minutes → **650× time-scale mismatch**.
+  σ collapsed to the `vol_clip_min=0.05` floor on 100% of HL ticks.
+- **Live engine** (`engine/market_state.apply`): appended every MarkEvent
+  (~1.2/s on HL `activeAssetCtx`). Last 32 marks spanned 27 seconds → **72×
+  mismatch**. Less catastrophic than backtest but still wrong by an
+  order of magnitude.
+- **PM** was always correct (PM's feed is pre-resampled 1m Binance bars).
+
+## The fix (commit `cc44bf6`)
+
+Resample the HL reference stream to 1-minute OHLC bars at the data
+source, and mirror the same bucketing logic in the live engine's
+`MarketState.apply` for MarkEvent. The strategy's σ assumption now holds.
+
+## Post-fix HL 14-day re-tune (kind=both, 26 questions)
+
+| variant | trades | PnL pre-fix | **PnL post-fix** | Sharpe post | max DD post |
+|---|---:|---:|---:|---:|---:|
+| d=0.0 tte=4h  | 38 | -$13.26 | **+$102.83** | 11.29 | $9.93 |
+| d=1.0 tte=4h  | 38 | +$11.54 | +$95.89 | 9.72 | $16.87 |
+| d=0.0 tte=24h | 94 | -$29.94 | **+$152.99** | 12.54 | $16.45 |
+| **d=1.0 tte=12h** | 80 | +$3.11 | **+$177.01** | **16.22** | **$15.07** |
+| d=1.0 tte=24h | 94 | +$10.91 | +$169.97 | 14.38 | $20.00 |
+
+σ at entry post-fix: median 0.19–0.22 (was 100% floor-clipped at 0.05).
+
+## Binary/bucket split (post-fix)
+
+| variant | binary PnL | binary DD | bucket PnL | bucket DD |
+|---|---:|---:|---:|---:|
+| d=0.0 tte=4h  | +$58.64 | $10 | +$44.19 | $0 |
+| d=1.0 tte=4h  | +$51.69 | $17 | +$44.19 | $0 |
+| d=0.0 tte=24h | +$51.40 | $16 | +$101.59 | $4 |
+| **d=1.0 tte=12h** | **+$75.73** | $17 | **+$101.28** | $6 |
+| d=1.0 tte=24h | +$74.40 | $17 | +$95.57 | $10 |
+
+Binaries are **profitable on every variant post-fix.** Buckets prefer the
+12h cap by +$6 PnL, 43% lower DD, and 23% fewer trades vs the 24h cap.
+
+## v1 (`late_resolution`) post-fix smoke
+
+v1 was also operating on broken σ. Single-run on the same corpus with the
+current production config (price_extreme_threshold=0.85, min_safety_d=1.0,
+exit_safety_d=1.0, vol_lookback=3600, etc.) post-fix:
+
+- 26 questions, 42 trades, **+$40.01 PnL**, Sharpe 4.81, hit 57.7%, max DD $25
+- Binary leg: +$37.79 (10 questions), Bucket leg: +$2.22 (7 questions)
+
+No catastrophe — v1's `min_safety_d=1.0` entry gate now fires meaningfully
+(was trivially passing under broken σ). Strategy is more selective, entries
+are still positive-EV. Safe to ship the σ fix to live v1 alongside v3.1.
+
+## PM walk-forward at 12h cap (run id `v3-1-mid-hold-walkforward-tte12h-2026-05-21`)
+
+| d | 24h PnL | 12h PnL | Δ |
+|---|---:|---:|---:|
+| 0.0 | $453 | $402 | -$51 (-11%) |
+| 0.5 | $761 | $692 | -$69 (-9%) |
+| 0.75 | $758 | $650 | -$108 (-14%) |
+| 1.0 | $755 | $658 | -$97 (-13%) |
+| 1.25 | $681 | $589 | -$92 (-14%) |
+
+PM clearly prefers the 24h cap — tightening to 12h costs 9-14% PnL at
+every d value. Per-venue cap divergence is justified.
+
+## Production ship (commit `ca66b87`)
+
+| venue | tte_max | exit_safety_d | rationale |
+|---|---|---|---|
+| **PM** | **86400 (24h)** | **1.0** | walk-forward optimum, +67% over baseline OOS |
+| **HL** | **43200 (12h)** | **1.0** | post-fix optimum; +$81 PnL over the prior 4h cap, +$24 over 24h, identical DD |
+
+Both venues use the same strategy code; the cap divergence is via the
+per-class `tte_max_seconds` field in `config/strategy.yaml`'s
+`theta_harvester` block.
+
+## What the σ fix invalidates
+
+Some prior memos referenced σ-driven HL findings — all are now suspect:
+- `hl_tte_cap_load_bearing_2026_05_21` — the "load-bearing" conclusion was an
+  artifact of broken σ. With correct σ the optimum cap shifts from 4h to
+  12h, and the previously "catastrophic" 24h variant is now profitable.
+- The pre-fix P0 table in this document (top section) is stale on HL.
+- Any v1 tuning that touched `min_safety_d`, `vol_max`, `vol_ewma_lambda`,
+  or `exit_safety_d` on HL was calibrated against broken σ.
+
+PM tunings, the d=1.5 cascade analysis, the v3.2 stacking result, and the
+v3.4 stacking result are all PM-only and remain valid.
