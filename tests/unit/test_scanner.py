@@ -167,6 +167,84 @@ def test_legacy_utc_midnight_helper_still_works():
     assert legacy == new
 
 
+# --- Returns-window length derived from cfg, not hard-coded ---
+
+
+def test_scanner_recent_returns_n_uses_max_vol_lookback_seconds():
+    """Scanner must request enough 1m returns to cover vol_lookback_seconds
+    across defaults + every allowlist entry. The legacy n=32 silently
+    capped the strategy's σ window at 32 min regardless of YAML config."""
+    from hlanalysis.engine.scanner import Scanner
+
+    cfg = _strategy_cfg()
+    # Override defaults + allowlist to a 1h lookback (60 samples expected).
+    cfg = cfg.model_copy(update={
+        "defaults": cfg.defaults.model_copy(update={"vol_lookback_seconds": 3600}),
+        "allowlist": [
+            cfg.allowlist[0].model_copy(update={"vol_lookback_seconds": 3600}),
+        ],
+    })
+    n = Scanner._required_returns_n(cfg)
+    assert n >= 60, f"expected >=60 bars for 3600s lookback, got {n}"
+
+
+def test_scanner_recent_returns_n_picks_max_across_allowlist_entries():
+    """If priceBinary asks for 1800s but priceBucket asks for 7200s,
+    scanner must size for the larger window so the bucket strategy gets
+    the samples it needs."""
+    from hlanalysis.engine.scanner import Scanner
+    from hlanalysis.engine.config import AllowlistEntry
+
+    cfg = _strategy_cfg()
+    long_entry = AllowlistEntry(
+        match={"class": "priceBucket", "underlying": "BTC", "period": "1d"},
+        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=0,
+        tte_max_seconds=86400, price_extreme_threshold=0.85,
+        distance_from_strike_usd_min=0, vol_max=100,
+        vol_lookback_seconds=7200,
+    )
+    short_entry = cfg.allowlist[0].model_copy(update={"vol_lookback_seconds": 1800})
+    cfg = cfg.model_copy(update={
+        "defaults": cfg.defaults.model_copy(update={"vol_lookback_seconds": 1800}),
+        "allowlist": [short_entry, long_entry],
+    })
+    n = Scanner._required_returns_n(cfg)
+    assert n >= 120, f"expected >=120 bars for 7200s lookback, got {n}"
+
+
+def test_scanner_recent_returns_n_includes_theta_drift_lookback():
+    """For theta_harvester, drift_lookback_seconds can exceed vol_lookback_seconds;
+    scanner must size for whichever is larger."""
+    from hlanalysis.engine.scanner import Scanner
+    from hlanalysis.engine.config import ThetaParams
+
+    cfg = _strategy_cfg().model_copy(update={
+        "strategy_type": "theta_harvester",
+        "theta": ThetaParams(
+            vol_lookback_seconds=1800,
+            drift_lookback_seconds=7200,
+            vol_sampling_dt_seconds=60,
+        ),
+    })
+    n = Scanner._required_returns_n(cfg)
+    assert n >= 120, f"expected >=120 bars for 7200s drift lookback, got {n}"
+
+
+def test_scanner_recent_returns_n_floors_at_32():
+    """Legacy behavior: never return fewer than 32 bars so existing strategies
+    that read recent_returns directly (e.g. v3.4 LM gate) keep working."""
+    from hlanalysis.engine.scanner import Scanner
+
+    cfg = _strategy_cfg().model_copy(update={
+        "defaults": _strategy_cfg().defaults.model_copy(update={"vol_lookback_seconds": 600}),
+        "allowlist": [
+            _strategy_cfg().allowlist[0].model_copy(update={"vol_lookback_seconds": 600}),
+        ],
+    })
+    n = Scanner._required_returns_n(cfg)
+    assert n == 32  # 600/60 = 10 → floored to 32
+
+
 # --- Gate-decision log: chosen-leg book snapshot for bucket markets ---
 
 

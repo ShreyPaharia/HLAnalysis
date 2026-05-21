@@ -64,6 +64,37 @@ class Scanner:
         # the bid-gate / cooldown / near-strike filters.
         self.gate_log_path = gate_log_path
         self._last_logged_state: dict[int, tuple[str, str]] = {}
+        # Number of 1m log-returns to pull from MarketState each scan tick.
+        # Derived from cfg so the YAML's vol_lookback_seconds actually
+        # reflects the σ window the strategy sees. Previously hard-coded to
+        # 32, which silently capped late_resolution and theta_harvester at
+        # 32 min regardless of vol_lookback_seconds=3600 — short windows
+        # made σ jumpy enough to bounce p_model across edge_buffer once
+        # per minute, churning enter/exit cycles on thin bucket books.
+        self._recent_returns_n = self._required_returns_n(cfg)
+
+    @staticmethod
+    def _required_returns_n(cfg: StrategyConfig) -> int:
+        """How many 1m log-returns to request per scan tick for this strategy.
+
+        Honors vol_lookback_seconds across cfg.defaults and every allowlist
+        entry, plus theta.{vol,drift}_lookback_seconds when the strategy is
+        theta_harvester. Floored at 32 (the legacy value) so any downstream
+        consumer that assumed ≥32 (e.g. v3.4 LM gate's K-of-N) keeps working.
+        """
+        secs = cfg.defaults.vol_lookback_seconds
+        for entry in cfg.allowlist:
+            secs = max(secs, entry.vol_lookback_seconds)
+        if cfg.theta is not None:
+            secs = max(
+                secs,
+                cfg.theta.vol_lookback_seconds,
+                cfg.theta.drift_lookback_seconds,
+            )
+        # MarketState resamples the ref feed to 1m bars, so each sample = 60s.
+        # Round up to a whole bar; floor at 32 for the legacy behavior.
+        bars = (secs + 59) // 60
+        return max(32, bars)
 
     def scan(self, *, now_ns: int) -> list[ScannedDecision]:
         out: list[ScannedDecision] = []
@@ -124,7 +155,9 @@ class Scanner:
                 question=q,
                 books=books,
                 reference_price=ref,
-                recent_returns=self.ms.recent_returns(self.ref_symbol, n=32),
+                recent_returns=self.ms.recent_returns(
+                    self.ref_symbol, n=self._recent_returns_n,
+                ),
                 recent_volume_usd=volume_total,
                 position=strat_pos,
                 now_ns=now_ns,

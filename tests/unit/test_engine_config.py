@@ -58,7 +58,9 @@ def test_load_strategy_yaml_from_repo():
     # 2026-05-21 post-σ-fix retune: bucket leg disables mid-hold (sweep showed
     # mid-hold churns buckets — d=0.0/tte=24h = $148 PnL vs d=1.0/tte=2h = $2).
     assert btc_bucket.exit_safety_d == 0.0
-    assert btc_bucket.tte_max_seconds == 86400
+    # 2026-05-22: capped at 6h for live forward-test (was 86400/24h). See the
+    # comment block in config/strategy.yaml for rationale.
+    assert btc_bucket.tte_max_seconds == 21600
     assert btc_bucket.vol_ewma_lambda == 0.85
     # Bucket entry's size-cap left disabled — PM bucket data (used to tune the
     # binary cap) uses an "above-X stack" layout incompatible with the
