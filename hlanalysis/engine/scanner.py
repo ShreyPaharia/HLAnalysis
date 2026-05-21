@@ -164,6 +164,7 @@ class Scanner:
             )
             self._maybe_log_gate_transition(
                 question=q, decision=decision, books=books, now_ns=now_ns,
+                position=db_pos,
             )
             if decision.action is Action.HOLD:
                 continue
@@ -207,6 +208,7 @@ class Scanner:
     def _maybe_log_gate_transition(
         self, *, question: QuestionView, decision: Decision,
         books: dict[str, BookState], now_ns: int,
+        position: "Position | None" = None,
     ) -> None:
         """Append a JSONL line when the (action, primary_diag) tuple changes
         for this question_idx vs the last scan tick.
@@ -229,11 +231,20 @@ class Scanner:
         if prev == key:
             return
         self._last_logged_state[question.question_idx] = key
-        # Snapshot book state for the leg the strategy actually chose. For
-        # binary questions there's only one favorite path so this is moot,
-        # but for buckets the strategy picks among N YES legs and emits
-        # `chosen_leg=<sym>` in the diagnostic. Falling back to first-leg
-        # for older diagnostics or missing books keeps legacy rows readable.
+        # Snapshot the book of the leg the strategy actually cares about,
+        # in priority order:
+        #   1) `chosen_leg=<sym>` in the diagnostic — entry-eval path picks
+        #      one of N YES legs for buckets and tags the diag.
+        #   2) position.symbol — held-position paths (topup hold, edge-hold,
+        #      vol_insufficient_data while a position is open, etc.) don't
+        #      emit chosen_leg, but the relevant leg is implicitly the
+        #      held one.
+        #   3) first leg in `books` — pre-existing fallback for diagnostics
+        #      with neither chosen_leg nor an open position (e.g.
+        #      tte_out_of_window on a fresh question).
+        # Without 2) the bucket snapshot would read an arbitrary long-shot
+        # leg of the same question and operators would back-solve wildly
+        # wrong spreads. See test_gate_log_snapshot_uses_held_position_book_*.
         chosen_sym: str | None = None
         for d in decision.diagnostics:
             for k, v in d.fields:
@@ -242,6 +253,8 @@ class Scanner:
                     break
             if chosen_sym is not None:
                 break
+        if chosen_sym is None and position is not None:
+            chosen_sym = position.symbol
         sample_book: BookState | None = (
             books.get(chosen_sym) if chosen_sym else None
         ) or next(iter(books.values()), None)

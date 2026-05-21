@@ -311,6 +311,72 @@ def test_gate_log_snapshot_uses_chosen_leg_book_when_diagnosed(tmp_path):
     assert row["reason"] == "edge"
 
 
+def test_gate_log_snapshot_uses_held_position_book_when_no_chosen_leg(tmp_path):
+    """For held-position paths (topup_hold, exit_eval, vol_insufficient_data
+    while position is open) the strategy doesn't emit `chosen_leg` in the
+    diag — the relevant leg is implicit from the held position. Snapshot
+    must read THAT leg's book, not an arbitrary first leg of the question."""
+    import json
+    from hlanalysis.engine.state import Position as DalPosition
+    from hlanalysis.strategy.types import (
+        Action, BookState, Decision, Diagnostic, QuestionView,
+    )
+
+    now = 1_700_000_000_000_000_000
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    cfg = _strategy_cfg()
+    rcfg = LateResolutionConfig(
+        tte_min_seconds=60, tte_max_seconds=1800,
+        price_extreme_threshold=0.95, distance_from_strike_usd_min=200.0,
+        vol_max=0.5, max_position_usd=100.0, stop_loss_pct=10.0,
+        max_strike_distance_pct=10.0, min_recent_volume_usd=0.0,
+        stale_data_halt_seconds=5,
+    )
+    log_path = tmp_path / "gate_decisions.jsonl"
+    scanner = Scanner(
+        strategy=LateResolutionStrategy(rcfg),
+        cfg=cfg, market_state=MarketState(), dal=dal,
+        kill_switch_path=tmp_path / "halt",
+        last_reconcile_ns=now,
+        gate_log_path=log_path,
+    )
+
+    bucket_q = QuestionView(
+        question_idx=14, yes_symbol="", no_symbol="", strike=0.0,
+        expiry_ns=now + 3600 * 1_000_000_000,
+        underlying="BTC", klass="priceBucket", period="1d",
+        leg_symbols=("#700", "#701", "#780", "#781"),
+    )
+    books = {
+        "#700": BookState(symbol="#700", bid_px=0.018, bid_sz=10.0,
+                          ask_px=0.04, ask_sz=10.0,
+                          last_trade_ts_ns=now, last_l2_ts_ns=now),
+        "#780": BookState(symbol="#780", bid_px=0.94, bid_sz=10.0,
+                          ask_px=0.95, ask_sz=10.0,
+                          last_trade_ts_ns=now, last_l2_ts_ns=now),
+    }
+    # Topup-hold style decision: held position exists, no chosen_leg in diag.
+    held_position = DalPosition(
+        question_idx=14, symbol="#780", qty=100.0, avg_entry=0.93,
+        realized_pnl=0.0, last_update_ts_ns=now, stop_loss_price=0.0,
+    )
+    decision = Decision(action=Action.HOLD, diagnostics=(
+        Diagnostic("info", "hold", (
+            ("edge_held", "0.0500"), ("held_p", "0.99"),
+            ("reason", "not_needed"),
+        )),
+    ))
+
+    scanner._maybe_log_gate_transition(
+        question=bucket_q, decision=decision, books=books, now_ns=now,
+        position=held_position,
+    )
+    row = json.loads(log_path.read_text().strip())
+    assert row["ask_px"] == 0.95, f"held-position snapshot should read #780's ask, got {row['ask_px']}"
+    assert row["bid_px"] == 0.94
+
+
 def test_gate_log_snapshot_falls_back_to_first_leg_when_no_chosen_leg(tmp_path):
     """When the diagnostic doesn't carry chosen_leg (binary path, or other
     reasons like tte_out_of_window), preserve the legacy first-leg snapshot."""
