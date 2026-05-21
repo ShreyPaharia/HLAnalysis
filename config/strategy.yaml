@@ -82,12 +82,21 @@ strategies:
         max_position_usd: 100             # tightened from 200 for 48h forward-test after 2026-05-19 churn
         stop_loss_pct: null              # disabled — 1y PM tuning showed any stop hurts net PnL
         tte_min_seconds: 0
-        tte_max_seconds: 7200
+        # 2026-05-21 post-σ-fix retune: bucket leg prefers long cap + no
+        # mid-hold. 16-cell HL sweep d∈{0,0.5,1,1.5} × tte∈{2,4,12,24}h:
+        #   tte=24h d=0.0: bucket PnL +$147.80 / DD $0    ← ship
+        #   tte=12h d=0.0:           +$122.84 / DD $0
+        #   tte=4h  d=0.0:            +$49.49 / DD $0
+        #   tte=2h  d=1.0 (prior):     +$2.22 / DD $9   (mid-hold churns buckets)
+        # v1's min_safety_d=1.0 entry gate already filters bucket entry
+        # quality; mid-hold double-counts and only churns. d=1.5 cascades
+        # catastrophically on buckets (−$50 at 2h, −$580 at 24h).
+        tte_max_seconds: 86400
         price_extreme_threshold: 0.85
         price_extreme_max: 0.999          # HL HIP-4 favorites trade 0.98-0.9999; 0.97 cap blocked every trade live
         min_safety_d: 1.0
         vol_lookback_seconds: 3600
-        exit_safety_d: 1.0
+        exit_safety_d: 0.0                # mid-hold disabled on buckets per retune
         vol_ewma_lambda: 0.85
         distance_from_strike_usd_min: 0
         vol_max: 100
