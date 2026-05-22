@@ -168,6 +168,28 @@ class MarketState:
             kv=kv_pairs,
         )
 
+    def mark_question_settled(self, question_idx: int) -> bool:
+        """Mark a question settled by its question_idx.
+
+        Used by the reconciler when it detects a local position has vanished
+        from the venue — on HL HIP-4 that's overwhelmingly a settlement
+        auto-close, and the polled SettlementEvent typically lags by tens of
+        seconds. Marking the question settled here suppresses STALE DATA HALT
+        on the now-silent legs and prevents the strategy from re-entering
+        before the polled event arrives.
+
+        Idempotent: returns True on the first state transition, False if the
+        question was already marked settled (or the question_idx is unknown).
+        Side is left as None — we have no way to know which side won from a
+        position-vanished signal alone, and the alert payload doesn't need it
+        (settled_side is informational for non-binary questions).
+        """
+        q = self._questions.get(question_idx)
+        if q is None or q.settled:
+            return False
+        self._questions[question_idx] = dataclasses.replace(q, settled=True)
+        return True
+
     def _mark_settled(self, ev: SettlementEvent) -> None:
         # SettlementEvent.symbol is one leg; find the question whose leg_symbols
         # contains it and mark it settled. Multi-outcome (priceBucket) has up to

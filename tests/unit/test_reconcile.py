@@ -145,15 +145,29 @@ def test_position_both_qty_and_avg_diff_emits_single_qty_drift(dal):
 
 
 def test_position_disappearance_drops_local_position(dal):
+    # A local position with no matching venue position is overwhelmingly a
+    # HIP-4 settlement auto-close on HL. The reconciler surfaces it on
+    # ``vanished_positions`` so the runtime can publish a settlement Exit
+    # alert and mark the question settled in MarketState (suppressing the
+    # stale-data halt the leg would otherwise trip on its now-silent book).
+    # We deliberately do NOT emit a position_mismatch DRIFT here — the Exit
+    # is the canonical alert; firing both would double-notify on every roll.
     dal.upsert_position(Position(
         question_idx=42, symbol="@30", qty=10.0, avg_entry=0.95,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=0.855,
+        realized_pnl=1.25, last_update_ts_ns=1, stop_loss_price=0.855,
     ))
     res = Reconciler(dal, fills_lookup=lambda _: [], symbol_to_question={"@30": 42}).run(
         venue_open=[], venue_state=ClearinghouseState(positions=(), account_value_usd=0), now_ns=2,
     )
     assert dal.get_position(42) is None
-    assert any(d.case == "position_mismatch" for d in res.drift_events)
+    assert not any(d.case == "position_mismatch" for d in res.drift_events)
+    assert len(res.vanished_positions) == 1
+    qidx, sym, lp = res.vanished_positions[0]
+    assert (qidx, sym) == (42, "@30")
+    # Snapshot is taken BEFORE delete_position so qty/PnL survive for the
+    # caller's Exit payload.
+    assert lp.qty == 10.0
+    assert lp.realized_pnl == 1.25
 
 
 def test_venue_orphan_position_is_adopted_into_local_db(dal):

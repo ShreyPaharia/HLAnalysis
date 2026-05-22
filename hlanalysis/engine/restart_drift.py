@@ -69,10 +69,13 @@ class RestartDriftGate:
                 # reconcile tick once the WS catches up. Treating this as loud
                 # blocks the scanner indefinitely on every multi-account restart
                 # where one of the slots holds an open venue position — defeats
-                # the whole point of crash-recovery via the gate. The genuine
-                # drift signal (local position GONE from venue) is still loud
-                # because that emits "deleted_local_position_not_on_venue", and
-                # a real qty/avg_entry mismatch emits a hl_qty/db_qty detail.
+                # the whole point of crash-recovery via the gate. The
+                # "local position GONE from venue" signal is now handled out-of-
+                # band via ReconcileResult.vanished_positions (the runtime
+                # publishes a settlement Exit alert for it), so it never
+                # reaches drift_events here. A real qty/avg_entry mismatch
+                # still flows through as a position_mismatch DRIFT with a
+                # hl_qty/db_qty detail and remains loud.
                 if (d.detail or {}).get("resolution") == "venue_orphan_unattributed":
                     return False
             return d.case in self.LOUD_CASES

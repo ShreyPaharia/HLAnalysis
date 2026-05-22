@@ -23,7 +23,8 @@ from .reconcile import Reconciler
 from .restart_drift import RestartDriftGate
 from .risk import RiskGate
 from .risk_events import (
-    DailyLossHalt, KillSwitchActivated, NewQuestion, StaleDataHalt, StopLossTriggered,
+    DailyLossHalt, Exit, KillSwitchActivated, NewQuestion, StaleDataHalt,
+    StopLossTriggered,
 )
 from .router import Router
 from .scanner import Scanner
@@ -505,6 +506,29 @@ class EngineRuntime:
                     venue_state=slot.hl.clearinghouse_state(),
                     now_ns=now,
                 )
+                # Translate "local position vanished from venue" into a
+                # settlement event before publishing any other drift. On HL
+                # HIP-4 the venue auto-closes positions at settlement and the
+                # leg's L2 book goes silent before the polled SettlementEvent
+                # catches up. Without this, operators see a generic DRIFT
+                # alert (no 🏁 emoji, no PnL line) followed by a spurious
+                # STALE DATA HALT a few seconds later. Marking the question
+                # settled here suppresses the stale-halt and also stops the
+                # strategy from re-entering on the now-closed market.
+                from ..strategy.render import (
+                    outcome_description, question_description,
+                )
+                for qidx, sym, lp in res.vanished_positions:
+                    self.market_state.mark_question_settled(qidx)
+                    qv = self.market_state.question(qidx)
+                    await self.bus.publish(Exit(
+                        ts_ns=now, account_alias=slot.alias,
+                        question_idx=qidx, symbol=sym,
+                        qty=lp.qty, realized_pnl=lp.realized_pnl,
+                        reason="settlement",
+                        question_description=question_description(qv) if qv else "",
+                        outcome_description=outcome_description(qv, sym) if qv else "",
+                    ))
                 for ev in res.drift_events:
                     await self.bus.publish(ev)
                 for cloid, symbol in res.orphans_to_cancel:

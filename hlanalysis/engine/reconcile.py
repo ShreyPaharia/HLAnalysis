@@ -23,6 +23,14 @@ class ReconcileResult:
     # non-empty — HL's cancelByCloid rejects empty coin and the SDK silently
     # reports outer status='ok' even when the per-cancel statuses[] failed.
     orphans_to_cancel: list[tuple[str, str]]
+    # Local positions that no longer exist on the venue — almost always means
+    # the HIP-4 market settled and HL auto-closed the position. The caller is
+    # expected to (a) mark the question settled in MarketState so subsequent
+    # stale-data checks skip the now-silent leg, and (b) publish a settlement
+    # Exit event so operators see a 🏁 alert instead of a generic DRIFT.
+    # The list carries the pre-delete Position snapshot so the caller can
+    # populate the Exit's qty/realized_pnl without re-reading the DB.
+    vanished_positions: list[tuple[int, str, Position]]
 
 
 class Reconciler:
@@ -66,6 +74,7 @@ class Reconciler:
     ) -> ReconcileResult:
         drift: list[ReconcileDrift] = []
         orphans: list[tuple[str, str]] = []
+        vanished: list[tuple[int, str, Position]] = []
 
         # --- orders ---
         # Match local↔venue by the 32-hex tail of the cloid. HL normalizes
@@ -154,12 +163,18 @@ class Reconciler:
         for qidx, lp in local_by_qidx.items():
             vp = venue_by_symbol.get(lp.symbol)
             if vp is None:
-                # Position vanished from venue. Likely settled/closed during outage.
+                # Position vanished from venue. On HL HIP-4 this is overwhelmingly
+                # "market settled and auto-closed the position" — the polled
+                # outcomeMeta SettlementEvent typically arrives later than this
+                # reconcile cycle, so we treat the vanish itself as the settlement
+                # signal. Surface as a structured vanished_positions entry; the
+                # caller publishes a settlement Exit and marks the question settled
+                # in MarketState (which suppresses STALE DATA HALT on the now-silent
+                # leg and prevents the strategy from re-entering before the polled
+                # SettlementEvent catches up). We snapshot the Position before
+                # deletion so callers don't race the DB.
+                vanished.append((qidx, lp.symbol, lp))
                 self.dal.delete_position(qidx)
-                drift.append(ReconcileDrift(
-                    ts_ns=now_ns, account_alias=self.account_alias, case="position_mismatch", question_idx=qidx,
-                    detail={"resolution": "deleted_local_position_not_on_venue"},
-                ))
                 continue
             qty_diff = abs(vp.qty - lp.qty) > 1e-9
             avg_diff = abs(vp.avg_entry - lp.avg_entry) > 1e-9
@@ -216,4 +231,8 @@ class Reconciler:
                         "qty": f"{vp.qty}", "avg_entry": f"{vp.avg_entry}"},
             ))
 
-        return ReconcileResult(drift_events=drift, orphans_to_cancel=orphans)
+        return ReconcileResult(
+            drift_events=drift,
+            orphans_to_cancel=orphans,
+            vanished_positions=vanished,
+        )

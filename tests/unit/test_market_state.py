@@ -49,6 +49,31 @@ def test_question_registry_built_from_question_meta():
     assert q.no_symbol == "#31"
 
 
+def test_mark_question_settled_by_idx():
+    # Used by the reconciler when it detects a local position vanished from
+    # the venue — we need to mark the question settled BEFORE the polled
+    # outcomeMeta SettlementEvent arrives so the continuous-checks loop
+    # skips the now-silent leg's stale-data check. Idempotent: returns True
+    # only on the first transition.
+    ms = MarketState()
+    qm = QuestionMetaEvent(
+        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB, symbol="qmeta",
+        exchange_ts=1, local_recv_ts=1,
+        question_idx=42, named_outcome_idxs=[3],
+        keys=["class", "underlying", "period", "expiry", "strike"],
+        values=["priceBinary", "BTC", "1h", "20260508-1200", "80000"],
+    )
+    ms.apply(qm)
+    assert ms.question(42).settled is False
+    assert ms.mark_question_settled(42) is True
+    assert ms.question(42).settled is True
+    # Idempotent — second call is a no-op.
+    assert ms.mark_question_settled(42) is False
+    # Unknown question_idx — no-op (no exception).
+    assert ms.mark_question_settled(9999) is False
+
+
 def test_settlement_marks_question_settled():
     ms = MarketState()
     qm = QuestionMetaEvent(
