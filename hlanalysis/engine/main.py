@@ -68,7 +68,10 @@ def main() -> None:
                 s.account_alias, s.strategy_type,
             )
         else:
-            logger.error(
+            # warning, not error: this is a startup banner, not a failure
+            # condition. Logging at ERROR pollutes journalctl ERROR filters
+            # and any alerting hooked off the loguru level.
+            logger.warning(
                 "LIVE MODE alias={} ({}) — real money at stake; "
                 "ensure caps in strategy.yaml are correct",
                 s.account_alias, s.strategy_type,

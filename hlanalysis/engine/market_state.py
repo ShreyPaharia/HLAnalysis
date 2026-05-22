@@ -64,6 +64,11 @@ class MarketState:
         self._last_mark_bucket: dict[str, int] = {}
         self._volume_window_ns = volume_window_ns
         self._mark_history = mark_history
+        # Cached symbol→question_idx map. Rebuilt lazily on first access after
+        # _update_question fires, and reused thereafter. Reconciler runs every
+        # ~15s and previously rebuilt this from O(N legs × M questions) on
+        # every cycle; the cache makes that O(1) on the steady-state path.
+        self._sym_to_q_cache: dict[str, int] | None = None
 
     # ---- ingest ----
 
@@ -152,6 +157,11 @@ class MarketState:
             if k != "question_description"
         )
         question_name = kv.get("question_name", "")
+        # leg_symbols can change between QuestionMetaEvent emissions (e.g. on
+        # outcomeCreated rolls), so invalidate the cache on every meta update.
+        # Settlement-only updates go through mark_question_settled and don't
+        # need to invalidate (leg layout is unchanged).
+        self._sym_to_q_cache = None
         self._questions[ev.question_idx] = QuestionView(
             question_idx=ev.question_idx,
             yes_symbol=yes_symbol,
@@ -239,6 +249,23 @@ class MarketState:
 
     def all_questions(self) -> list[QuestionView]:
         return list(self._questions.values())
+
+    def symbol_to_question_map(self) -> dict[str, int]:
+        """sym → question_idx for every known leg. Cached, invalidated on
+        QuestionMetaEvent ingestion. The reconciler uses this every cycle to
+        attribute venue positions back to a qidx."""
+        if self._sym_to_q_cache is not None:
+            return self._sym_to_q_cache
+        m: dict[str, int] = {}
+        for q in self._questions.values():
+            legs = q.leg_symbols or (
+                (q.yes_symbol, q.no_symbol) if q.yes_symbol else ()
+            )
+            for sym in legs:
+                if sym:
+                    m[sym] = q.question_idx
+        self._sym_to_q_cache = m
+        return m
 
     def last_mark(self, symbol: str) -> float | None:
         return self._last_mark.get(symbol)

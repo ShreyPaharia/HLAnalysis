@@ -28,6 +28,18 @@ class EventBus:
         return q
 
     async def publish(self, ev: BusEvent) -> None:
+        # Surface every bus event in journalctl so post-mortems aren't limited
+        # to Telegram (ephemeral, no search) and gate_decisions.jsonl
+        # (gate-side only). Pydantic's model_dump_json gives a compact
+        # one-line representation that survives the discriminator. INFO level
+        # so routine operation is searchable without flipping the engine to
+        # debug — the noisy stuff (heartbeat, topup_skip) is logged
+        # separately at the appropriate level.
+        try:
+            logger.info("bus {} {}", ev.kind, ev.model_dump_json())
+        except Exception:
+            # Defensive: a logging failure must never block a bus publish.
+            logger.exception("event_bus: failed to log {}", ev.kind)
         for q in self._subs:
             if self._drop_when_full and q.full():
                 logger.warning(

@@ -486,18 +486,10 @@ class EngineRuntime:
                 return
             try:
                 now = self._now_ns()
-                sym_to_q: dict[str, int] = {}
-                for q in self.market_state.all_questions():
-                    legs = q.leg_symbols or (
-                        (q.yes_symbol, q.no_symbol) if q.yes_symbol else ()
-                    )
-                    for sym in legs:
-                        if sym:
-                            sym_to_q[sym] = q.question_idx
                 rec = Reconciler(
                     slot.dal,
                     fills_lookup=lambda c, _hl=slot.hl: _hl.user_fills(),
-                    symbol_to_question=sym_to_q,
+                    symbol_to_question=self.market_state.symbol_to_question_map(),
                     cloid_prefix=slot.cloid_prefix,
                     account_alias=slot.alias,
                 )

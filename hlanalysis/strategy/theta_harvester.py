@@ -786,7 +786,13 @@ class ThetaHarvesterStrategy(Strategy):
         target_ntl = self.cfg.max_position_usd
         shortfall_ntl = target_ntl - current_ntl
         if shortfall_ntl < target_ntl * self.cfg.topup_threshold_pct:
-            logger.info(
+            # Demoted from info → debug 2026-05-22: fires every scan tick (~1/s)
+            # while a position is held and the topup gate stays "not_needed",
+            # drowning genuinely interesting events out of journalctl. The
+            # current/target notionals are still attached to the Diagnostic
+            # below, which feeds the scanner's gate-transition log
+            # (gate_decisions.jsonl) and renders in the bus-event journal log.
+            logger.debug(
                 "topup_skip q={} sym={} reason=not_needed current_ntl=${:.2f} target_ntl=${:.2f}",
                 question.question_idx, position.symbol, current_ntl, target_ntl,
             )
@@ -811,7 +817,7 @@ class ThetaHarvesterStrategy(Strategy):
                 entry_dec.diagnostics[0].message
                 if entry_dec.diagnostics else "unknown"
             )
-            logger.info(
+            logger.debug(
                 "topup_skip q={} sym={} reason=gate_failed:{} current_ntl=${:.2f} target_ntl=${:.2f}",
                 question.question_idx, position.symbol, failed_gate,
                 current_ntl, target_ntl,
@@ -823,7 +829,7 @@ class ThetaHarvesterStrategy(Strategy):
             ))
         candidate = entry_dec.intents[0]
         if candidate.symbol != position.symbol:
-            logger.info(
+            logger.debug(
                 "topup_skip q={} sym={} reason=leg_changed chosen={} current_ntl=${:.2f} target_ntl=${:.2f}",
                 question.question_idx, position.symbol, candidate.symbol,
                 current_ntl, target_ntl,
@@ -838,7 +844,7 @@ class ThetaHarvesterStrategy(Strategy):
         topup_size = math.floor((shortfall_ntl / ask) * 100) / 100
         topup_ntl = topup_size * ask
         if topup_ntl < self.cfg.topup_min_notional_usd:
-            logger.info(
+            logger.debug(
                 "topup_skip q={} sym={} reason=below_min_notional topup_ntl=${:.2f} min=${:.2f}",
                 question.question_idx, position.symbol, topup_ntl,
                 self.cfg.topup_min_notional_usd,

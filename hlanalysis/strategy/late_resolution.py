@@ -884,7 +884,7 @@ class LateResolutionStrategy(Strategy):
                 entry_dec.diagnostics[0].message
                 if entry_dec.diagnostics else "unknown"
             )
-            logger.info(
+            logger.debug(
                 "topup_skip q={} sym={} reason=gate_failed:{} current_ntl=${:.2f} target_ntl=${:.2f}",
                 question.question_idx, position.symbol, failed_gate,
                 current_ntl, target_ntl,
@@ -896,7 +896,7 @@ class LateResolutionStrategy(Strategy):
             ))
         candidate = entry_dec.intents[0]
         if candidate.symbol != position.symbol:
-            logger.info(
+            logger.debug(
                 "topup_skip q={} sym={} reason=leg_changed chosen={} current_ntl=${:.2f} target_ntl=${:.2f}",
                 question.question_idx, position.symbol, candidate.symbol,
                 current_ntl, target_ntl,
@@ -911,7 +911,7 @@ class LateResolutionStrategy(Strategy):
         topup_size = math.floor((shortfall_ntl / ask) * 100) / 100
         topup_ntl = topup_size * ask
         if topup_ntl < self.cfg.topup_min_notional_usd:
-            logger.info(
+            logger.debug(
                 "topup_skip q={} sym={} reason=below_min_notional topup_ntl=${:.2f} min=${:.2f}",
                 question.question_idx, position.symbol, topup_ntl,
                 self.cfg.topup_min_notional_usd,
