@@ -1,0 +1,51 @@
+# PM walk-forward mirroring CURRENT v3.1 prod config (strategy.yaml,
+# theta_harvester block) under the realistic Polymarket fee curve.
+#
+# Why: prior PM backtests assumed flat fee_taker=0.00035 (3.5 bps of notional),
+# but PM's published fee curve is fee = C · feeRate · p · (1-p) with feeRate=0.07
+# for crypto (docs.polymarket.com/trading/fees). At the prices v3.1 actually
+# trades (p ∈ [0.85, 0.99]) the real fee is 0.14% – 1.05% of notional — 4×–30×
+# the flat assumption. This run quantifies the PnL hit and whether v3.1's edge
+# survives realistic fees.
+#
+# Mirrors prod (config/strategy.yaml, theta_harvester):
+#   - tte_max_seconds=43200 (12h)
+#   - exit_take_profit_mode=true, exit_fee=0.0007
+#   - fee_taker=0.0 (strategy math; live fill cost comes from venue mechanics)
+#   - edge_max=0.20, favorite_threshold=0.85
+#   - exit_safety_d sweep around prod's 1.0 ceiling
+#
+# Sim-side: --fee-model pm_binary --fee-rate 0.07 on the hl-bt tune CLI.
+
+grids:
+  v3_theta_harvester:
+    vol_lookback_seconds: [3600]
+    vol_sampling_dt_seconds: [60]
+    vol_clip_min: [0.05]
+    vol_clip_max: [5.0]
+    edge_buffer: [0.02]
+    fee_taker: [0.0]                       # strategy-math knob; exit fee carries cost
+    half_spread_assumption: [0.005]
+    drift_lookback_seconds: [3600]
+    drift_blend: [0.0]
+    favorite_threshold: [0.85]
+    tte_min_seconds: [0]
+    tte_max_seconds: [43200]
+    edge_max: [0.20]
+    min_distance_pct: [0.002]              # PM keeps the 0.002 floor (per prod comment)
+    min_bid_notional_usd: [10.0]
+    max_position_usd: [200.0]              # tracks prod (restored 100→200 after 2026-05-19 churn-fix forward test)
+    stop_loss_pct: [null]
+    exit_edge_threshold: [0.0]
+    take_profit_price: [null]
+    time_stop_seconds: [0]
+    gamma_lambda: [0.0]
+    exit_take_profit_mode: [true]
+    exit_fee: [0.0007]
+    exit_safety_d: [0.0, 0.5, 0.75, 1.0]   # sweep around prod's 1.0
+
+run:
+  train_markets: 60
+  test_markets: 60
+  step_markets: 60
+  max_workers: 4

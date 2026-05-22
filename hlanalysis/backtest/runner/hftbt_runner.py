@@ -83,6 +83,15 @@ class RunConfig:
     book_depth_assumption: float = 10_000.0
     vol_lookback_seconds: int = 86_400
     last_trades_capacity: int = 256
+    # Binary-leg fee model. "flat" → fee = px * qty * fee_taker (legacy; HL,
+    # synthetic, anywhere a constant per-notional rate is wanted). "pm_binary"
+    # → fee = qty * fee_rate * px * (1-px) — Polymarket's published curve
+    # (docs.polymarket.com/trading/fees: fee = C · feeRate · p · (1-p)). The
+    # PM curve peaks at $1.75/100 shares at p=0.5 (feeRate=0.07, crypto) and
+    # collapses in the tails where the near-resolution strategies actually
+    # trade. fee_taker is ignored when model != "flat".
+    fee_model: str = "flat"
+    fee_rate: float = 0.07
     # Hedge leg config (used by v5_delta_hedged; ignored by all other strategies)
     hedge_enabled: bool = False
     hedge_symbol: str = ""
@@ -90,6 +99,18 @@ class RunConfig:
     hedge_lot_size: float = 0.001
     hedge_slippage_bps: float = 10.0
     hedge_fee_bps: float = 1.0
+
+
+def _binary_fee(px: float, qty: float, cfg: RunConfig) -> float:
+    """Per-fill fee for binary tokens. Branches on cfg.fee_model.
+
+    - "flat":      px * qty * fee_taker          (legacy; HL & synthetic)
+    - "pm_binary": qty * fee_rate * p * (1-p)    (Polymarket docs formula)
+    """
+    if cfg.fee_model == "pm_binary":
+        p = max(0.0, min(1.0, px))
+        return qty * cfg.fee_rate * p * (1.0 - p)
+    return px * qty * cfg.fee_taker
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +466,7 @@ def run_one_question(
         # Cap fill size by the strategy's intended size and the configured
         # book-depth assumption (mirrors sim/fills.py semantics).
         exec_qty = min(exec_qty, intent_size, cfg.book_depth_assumption)
-        fee = exec_px * exec_qty * cfg.fee_taker
+        fee = _binary_fee(exec_px, exec_qty, cfg)
         return Fill(
             cloid=cloid,
             symbol=symbol,
@@ -650,7 +671,7 @@ def run_one_question(
                         side="sell",
                         price=px,
                         size=abs(pos.qty),
-                        fee=px * abs(pos.qty) * cfg.fee_taker,
+                        fee=_binary_fee(px, abs(pos.qty), cfg),
                         partial=False,
                     )
                 result.fills.append(fill)

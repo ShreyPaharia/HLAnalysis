@@ -108,3 +108,44 @@ def test_run_persists_parquet_artifacts(synthetic_source, tmp_path):
     assert "settle" in f["cloid"]
     settle_idx = f["cloid"].index("settle")
     assert f["resolved_outcome"][settle_idx] == "yes"
+
+
+def test_binary_fee_flat_matches_legacy():
+    from hlanalysis.backtest.runner.hftbt_runner import _binary_fee
+
+    cfg = RunConfig(fee_model="flat", fee_taker=0.0035)
+    # flat: px * qty * fee_taker
+    assert _binary_fee(0.50, 100.0, cfg) == pytest.approx(0.50 * 100.0 * 0.0035)
+    assert _binary_fee(0.95, 100.0, cfg) == pytest.approx(0.95 * 100.0 * 0.0035)
+    # fee_rate unused in flat mode
+    cfg2 = RunConfig(fee_model="flat", fee_taker=0.0035, fee_rate=0.07)
+    assert _binary_fee(0.50, 100.0, cfg2) == pytest.approx(_binary_fee(0.50, 100.0, cfg))
+
+
+def test_binary_fee_pm_binary_matches_polymarket_docs():
+    """fee = C * feeRate * p * (1-p); peaks $1.75 / 100 shares at p=0.5, crypto."""
+    from hlanalysis.backtest.runner.hftbt_runner import _binary_fee
+
+    cfg = RunConfig(fee_model="pm_binary", fee_rate=0.07, fee_taker=999.0)
+    # Doc example: 100 shares at p=0.5 in crypto → max $1.75
+    assert _binary_fee(0.50, 100.0, cfg) == pytest.approx(1.75)
+    # Near-resolution: p=0.95 → 0.07 * 0.95 * 0.05 * 100 = 0.3325
+    assert _binary_fee(0.95, 100.0, cfg) == pytest.approx(0.3325)
+    # Symmetric: p=0.05 same fee as p=0.95
+    assert _binary_fee(0.05, 100.0, cfg) == pytest.approx(_binary_fee(0.95, 100.0, cfg))
+    # p=0.85: 0.07 * 0.85 * 0.15 * 100 = 0.8925
+    assert _binary_fee(0.85, 100.0, cfg) == pytest.approx(0.8925)
+    # fee_taker is ignored in pm_binary mode (would otherwise blow up)
+    assert _binary_fee(0.50, 100.0, cfg) < 2.0
+    # Sports category (feeRate=0.03): max = 0.03 * 0.25 * 100 = 0.75
+    cfg_sports = RunConfig(fee_model="pm_binary", fee_rate=0.03)
+    assert _binary_fee(0.50, 100.0, cfg_sports) == pytest.approx(0.75)
+
+
+def test_binary_fee_pm_binary_clamps_out_of_range_price():
+    """Prices outside [0,1] (numerical noise) must not produce negative fees."""
+    from hlanalysis.backtest.runner.hftbt_runner import _binary_fee
+
+    cfg = RunConfig(fee_model="pm_binary", fee_rate=0.07)
+    assert _binary_fee(-0.01, 100.0, cfg) == pytest.approx(0.0)
+    assert _binary_fee(1.01, 100.0, cfg) == pytest.approx(0.0)

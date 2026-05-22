@@ -222,6 +222,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         lot_size=args.lot_size,
         slippage_bps=args.slippage_bps,
         fee_taker=args.fee_taker,
+        fee_model=args.fee_model,
+        fee_rate=args.fee_rate,
         book_depth_assumption=args.depth,
     )
     if hedge_cfg is not None:
@@ -388,6 +390,8 @@ def cmd_tune(args: argparse.Namespace) -> int:
         lot_size=args.lot_size,
         slippage_bps=args.slippage_bps,
         fee_taker=args.fee_taker,
+        fee_model=args.fee_model,
+        fee_rate=args.fee_rate,
         book_depth_assumption=args.depth,
     )
     if hedge_cfg_dict is not None:
@@ -488,6 +492,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     pr.add_argument("--scanner-interval-seconds", type=int, default=60)
     pr.add_argument("--slippage-bps", type=float, default=5.0)
     pr.add_argument("--fee-taker", type=float, default=0.0)
+    pr.add_argument(
+        "--fee-model",
+        choices=["flat", "pm_binary"],
+        default="flat",
+        help="Binary-leg fee model. 'flat' uses --fee-taker as constant %% of "
+        "notional (HL/synthetic). 'pm_binary' uses Polymarket's curve "
+        "fee = qty * --fee-rate * p * (1-p).",
+    )
+    pr.add_argument(
+        "--fee-rate",
+        type=float,
+        default=0.07,
+        help="feeRate for --fee-model pm_binary. PM crypto = 0.07; sports = 0.03; "
+        "politics/tech/finance/mentions = 0.04; econ/culture/weather = 0.05.",
+    )
     pr.add_argument("--tick-size", type=float, default=0.001)
     pr.add_argument("--lot-size", type=float, default=1.0)
     pr.add_argument("--depth", type=float, default=10_000.0)
@@ -548,6 +567,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     pt.add_argument("--scanner-interval-seconds", type=int, default=60)
     pt.add_argument("--slippage-bps", type=float, default=5.0)
     pt.add_argument("--fee-taker", type=float, default=0.0)
+    pt.add_argument(
+        "--fee-model",
+        choices=["flat", "pm_binary"],
+        default="flat",
+        help="Binary-leg fee model. See `run` help for details.",
+    )
+    pt.add_argument("--fee-rate", type=float, default=0.07)
     pt.add_argument("--tick-size", type=float, default=0.001)
     pt.add_argument("--lot-size", type=float, default=1.0)
     pt.add_argument("--depth", type=float, default=10_000.0)
