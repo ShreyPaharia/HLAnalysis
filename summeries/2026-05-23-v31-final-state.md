@@ -24,7 +24,7 @@ Prod baseline (PM, 24h tte, fav=0.85, d=1.0, all gates on):
 |---|---|---|---|
 | `edge_max=0.20` | on | **KILL** | identical with `edge_max=None` ($855/3.07/$508) — never binds on PM. |
 | `min_distance_pct=0.002` | on (PM) | **KILL** | +$27 PnL, +0.03 Sharpe, identical DD when removed. Originally tuned on flat fees (memory `feedback_…`); under PM-curve the near-strike band no longer dominates losses. |
-| `min_bid_notional_usd=10` | on (PM) | **KILL** | identical when removed. PM books are deep enough that this never fires. (HL keeps it via different layer for thin-book defense — separate knob, not this one.) |
+| `min_bid_notional_usd=10` | on (PM) | **KEEP** (safety gate) | bit-identical in backtest, but kept as live thin-book / spoof defense. Backtests don't replay adversarial microstructure; cost of keeping a non-firing safety gate is zero. |
 | `vol_clip_min=0.05` | on | **KILL** | identical when removed. Post-σ-fix (commit `cc44bf6`) the 1-min ref bars never produce σ below the floor. Dead since May 2026. |
 | `topup_enabled=True` | on | **KILL on PM** | identical when removed in PM sim (no partial fills). **KEEP on HL** — designed for HL HIP-4 partial-fill recovery (`fixes commit 2026-05-20`). |
 | `half_spread_assumption=0.005` | 0.005 | **KEEP (cosmetic)** | mathematically equivalent to shifting `edge_buffer` by +0.005; kept for diagnostic interpretability. Killing it with absorbed edge_buffer is fine. |
@@ -49,7 +49,6 @@ Prod baseline (PM, 24h tte, fav=0.85, d=1.0, all gates on):
 | `edge_buffer` | 0.02 | **0.03** |
 | `edge_max` | 0.20 | **None** |
 | `min_distance_pct` (PM only) | 0.002 | **None** |
-| `min_bid_notional_usd` (PM only) | 10 | **0** |
 | `vol_clip_min` | 0.05 | **0.0** |
 | `topup_enabled` | True | **PM: False; HL: True** |
 | everything else | unchanged |
@@ -128,7 +127,8 @@ The dead-weight knobs are definitively dead on the HL backtest corpus.
 ## Knob count
 
 - **Prod:** 16 tunable knobs in `theta_harvester` block of `strategy.yaml`
-- **Final:** 11 active knobs (5 hardcoded off or absorbed)
+- **Final:** 12 active knobs (4 killed; `min_bid_notional_usd` kept as
+  live safety gate even though backtest shows bit-identical)
 
 ## Recommendation
 

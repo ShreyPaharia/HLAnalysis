@@ -21,9 +21,12 @@ grids:
     # Killed (dead weight on PM under realistic fees):
     edge_max: [null]
     min_distance_pct: [null]
-    min_bid_notional_usd: [0.0]
     vol_clip_min: [0.0]
     topup_enabled: [false]               # never fires in PM sim (no partial fills)
+    # KEPT (safety gate, not micro-tuning): backtest shows bit-identical but
+    # live thin-book / spoof defense earns its keep regardless of historical
+    # firing frequency.
+    min_bid_notional_usd: [10.0]
     # Tuned (changed from prod):
     favorite_threshold: [0.90]           # was 0.85 — under PM-curve fees, selectivity wins
     edge_buffer: [0.03]                  # was 0.02 — tighter entry bar
