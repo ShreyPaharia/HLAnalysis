@@ -28,7 +28,7 @@ strategies:
       - match:
           class: priceBinary
           underlying: BTC
-        max_position_usd: 200             # restored from 100 after 48h forward-test post-2026-05-19 churn fixes
+        max_position_usd: 300             # bumped 200→300 2026-05-24
         stop_loss_pct: null              # disabled — 1y PM tuning showed any stop hurts net PnL
         tte_min_seconds: 0
         tte_max_seconds: 7200
@@ -79,7 +79,7 @@ strategies:
       - match:
           class: priceBucket
           underlying: BTC
-        max_position_usd: 200             # restored from 100 after 48h forward-test post-2026-05-19 churn fixes
+        max_position_usd: 300             # bumped 200→300 2026-05-24
         stop_loss_pct: null              # disabled — 1y PM tuning showed any stop hurts net PnL
         tte_min_seconds: 0
         # 2026-05-22: capped at 6h for live forward-test. Backtest swept
@@ -108,7 +108,7 @@ strategies:
 
     defaults:
       match: {}
-      max_position_usd: 200               # mirrors allowlist; build_late_resolution_config reads from here
+      max_position_usd: 300               # mirrors allowlist; build_late_resolution_config reads from here
       stop_loss_pct: null
       tte_min_seconds: 0
       tte_max_seconds: 7200
@@ -136,7 +136,7 @@ strategies:
       topup_min_notional_usd: 11.0        # HL per-order min is $10; buffer to 11
 
     global:
-      max_total_inventory_usd: 500
+      max_total_inventory_usd: 1000
       max_concurrent_positions: 5
       daily_loss_cap_usd: 100             # tightened from 200 in lockstep with per-position cap
       max_strike_distance_pct: 50       # 50% — BTC moves 5-10% per day, allow room
@@ -164,7 +164,7 @@ strategies:
       - match:
           class: priceBinary
           underlying: BTC
-        max_position_usd: 200             # restored from 100 after 48h forward-test post-2026-05-19 churn fixes
+        max_position_usd: 300             # bumped 200→300 2026-05-24
         stop_loss_pct: null              # theta_harvester drives exits off edge, not stop-loss
         tte_min_seconds: 0
         # 2026-05-21: 14400 → 43200 (4h → 12h). The original 4h cap was
@@ -188,7 +188,7 @@ strategies:
       - match:
           class: priceBucket
           underlying: BTC
-        max_position_usd: 200             # restored from 100 after 48h forward-test post-2026-05-19 churn fixes
+        max_position_usd: 300             # bumped 200→300 2026-05-24
         stop_loss_pct: null
         tte_min_seconds: 0
         # 2026-05-21: 86400 → 43200. Post-σ-fix HL sweep: bucket leg at 12h
@@ -206,7 +206,7 @@ strategies:
 
     defaults:
       match: {}
-      max_position_usd: 200
+      max_position_usd: 300
       stop_loss_pct: null
       tte_min_seconds: 0
       tte_max_seconds: 43200              # mirror priceBinary/Bucket allowlist — engine reads ThetaHarvesterConfig.tte_max from defaults
@@ -217,7 +217,7 @@ strategies:
       entry_cooldown_seconds: 60          # router reads from defaults
 
     global:
-      max_total_inventory_usd: 500
+      max_total_inventory_usd: 1000
       max_concurrent_positions: 5
       daily_loss_cap_usd: 100             # tightened in lockstep with per-position cap
       max_strike_distance_pct: 50
