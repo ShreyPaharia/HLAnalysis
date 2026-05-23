@@ -1,0 +1,35 @@
+# v3.1 PROD-EXACT baseline for ablation comparisons (PM, realistic fees).
+# Single-cell grid → walk-forward returns 5 OOS splits at the prod config.
+
+grids:
+  v3_theta_harvester:
+    vol_lookback_seconds: [3600]
+    vol_sampling_dt_seconds: [60]
+    vol_clip_min: [0.05]
+    vol_clip_max: [5.0]
+    edge_buffer: [0.02]
+    fee_taker: [0.0]
+    half_spread_assumption: [0.005]
+    drift_lookback_seconds: [3600]
+    drift_blend: [0.0]
+    favorite_threshold: [0.85]
+    tte_min_seconds: [0]
+    tte_max_seconds: [86400]            # PM ships 24h cap (HL is 12h)
+    edge_max: [0.20]
+    min_distance_pct: [0.002]
+    min_bid_notional_usd: [10.0]
+    max_position_usd: [200.0]
+    stop_loss_pct: [null]
+    exit_edge_threshold: [0.0]
+    take_profit_price: [null]
+    time_stop_seconds: [0]
+    gamma_lambda: [0.0]
+    exit_take_profit_mode: [true]
+    exit_fee: [0.0007]
+    exit_safety_d: [1.0]                # PM prod ships 1.0 (HL also 1.0)
+
+run:
+  train_markets: 60
+  test_markets: 60
+  step_markets: 60
+  max_workers: 4

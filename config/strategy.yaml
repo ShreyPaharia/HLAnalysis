@@ -230,7 +230,11 @@ strategies:
     theta:
       vol_lookback_seconds: 3600
       vol_sampling_dt_seconds: 60
-      vol_clip_min: 0.05
+      # 2026-05-24: 0.05 → 0.0 (kill). Post-σ-fix (commit cc44bf6) the 1m
+      # bar resampling makes σ_RV never approach the 0.05 floor. HL
+      # binary+bucket kill-only ablation produced bit-identical
+      # PnL/Sharpe/maxDD/trades vs prod. See summeries/2026-05-23-v31-final-state.md.
+      vol_clip_min: 0.0
       vol_clip_max: 5.0
       edge_buffer: 0.02
       # 2026-05-22: entry fee zeroed alongside take-profit-mode flip. Per the
@@ -242,7 +246,11 @@ strategies:
       drift_lookback_seconds: 3600
       drift_blend: 0.0
       favorite_threshold: 0.85
-      edge_max: 0.20                     # v3.1 upper-edge filter (commit 0578a11): +37% PnL, -84% max DD on PM
+      # 2026-05-24: 0.20 → null (kill). Upper-edge filter never binds on PM
+      # (entries are gated well below 20% edge by edge_buffer + favorite_threshold)
+      # and never binds on HL. Both PM walk-forward and HL kill-only ablation
+      # produced bit-identical results to prod. See summeries/2026-05-23-v31-final-state.md.
+      edge_max: null
       exit_edge_threshold: 0.0
       time_stop_seconds: 0
       # 2026-05-22: take-profit-style exit edge.

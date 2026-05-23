@@ -1,0 +1,48 @@
+# v3.1 FINAL PM config (post-ablation 2026-05-23).
+# See summeries/2026-05-23-v31-final-state.md for the per-knob derivation.
+#
+# Walk-forward result vs PM prod baseline (pm_binary fee, 5 OOS splits):
+#   prod:   $855 PnL / Sharpe 3.07 / maxDD $508 / 584 trades
+#   final: $1295 PnL / Sharpe 5.94 / maxDD $207 / 396 trades
+#   Δ:     +51% PnL, +2.87 Sharpe, -59% maxDD
+#
+# All 5 OOS splits positive under final config (min +$21 vs prod's -$228).
+
+grids:
+  v3_theta_harvester:
+    # Math (unchanged from prod)
+    vol_lookback_seconds: [3600]
+    vol_sampling_dt_seconds: [60]
+    vol_clip_max: [5.0]
+    fee_taker: [0.0]
+    half_spread_assumption: [0.005]      # mathematically absorbed into edge_buffer; kept for diagnostic clarity
+    drift_lookback_seconds: [3600]
+    drift_blend: [0.0]
+    # Killed (dead weight on PM under realistic fees):
+    edge_max: [null]
+    min_distance_pct: [null]
+    min_bid_notional_usd: [0.0]
+    vol_clip_min: [0.0]
+    topup_enabled: [false]               # never fires in PM sim (no partial fills)
+    # Tuned (changed from prod):
+    favorite_threshold: [0.90]           # was 0.85 — under PM-curve fees, selectivity wins
+    edge_buffer: [0.03]                  # was 0.02 — tighter entry bar
+    exit_safety_d: [1.0]                 # unchanged; d=0.9/1.0/1.1 cluster, 1.0 most robust per-split
+    exit_take_profit_mode: [true]        # ~$20 PnL gain at the new optimum
+    exit_fee: [0.0007]
+    # Window
+    tte_min_seconds: [0]
+    tte_max_seconds: [86400]             # PM 24h (no markets longer)
+    # Sizing & risk (unchanged)
+    max_position_usd: [200.0]
+    stop_loss_pct: [null]
+    exit_edge_threshold: [0.0]
+    take_profit_price: [null]
+    time_stop_seconds: [0]
+    gamma_lambda: [0.0]
+
+run:
+  train_markets: 60
+  test_markets: 60
+  step_markets: 60
+  max_workers: 4
