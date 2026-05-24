@@ -151,7 +151,7 @@ async def test_two_strategies_isolated_state(deploy_cfg, tmp_path):
         deploy_cfg=deploy_cfg,
         adapter_factory=_FakeAdapter,
         subscriptions=[],
-        hl_client_factory=_hl_factory,
+        exec_client_factory=_hl_factory,
         telegram_factory=lambda _http: fake_tg,
     )
     runtime_task = asyncio.create_task(runtime.run())
@@ -222,7 +222,7 @@ async def test_one_slot_halt_does_not_stop_other(deploy_cfg, tmp_path):
         deploy_cfg=deploy_cfg,
         adapter_factory=_FakeAdapter,
         subscriptions=[],
-        hl_client_factory=_hl_factory,
+        exec_client_factory=_hl_factory,
         telegram_factory=lambda _http: fake_tg,
     )
     runtime_task = asyncio.create_task(runtime.run())
