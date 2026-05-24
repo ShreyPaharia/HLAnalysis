@@ -156,6 +156,67 @@ async def test_reduce_only_without_exit_reason_falls_back_to_stop_loss(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_addon_fill_publishes_entry_for_telegram(tmp_path):
+    """Topups and other same-direction add-ons must emit Entry so Telegram
+    alerts fire — not only the initial open."""
+    from hlanalysis.engine.risk_events import Entry
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    sub = bus.subscribe()
+    client = HLClient(account_address="0x", api_secret_key="0x",
+                      base_url="x", paper_mode=True)
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+
+    await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
+    assert isinstance(await asyncio.wait_for(sub.get(), timeout=0.5), Entry)
+
+    topup = Decision(
+        action=Action.ENTER,
+        intents=(OrderIntent(
+            question_idx=42, symbol="@30", side="buy", size=5.0,
+            limit_price=0.95, cloid="hla-router-topup", time_in_force="ioc",
+        ),),
+    )
+    await router.handle(topup, inputs=_approval_inputs(), now_ns=3)
+    ev = await asyncio.wait_for(sub.get(), timeout=0.5)
+    assert isinstance(ev, Entry)
+    assert ev.cloid == "hla-router-topup"
+    assert ev.size == 5.0
+    p = dal.get_position(42)
+    assert p is not None and p.qty == pytest.approx(15.0)
+
+
+@pytest.mark.asyncio
+async def test_partial_reduce_does_not_publish_entry(tmp_path):
+    """Selling part of a long must not look like a new ENTRY in Telegram."""
+    from hlanalysis.engine.risk_events import Entry, Exit
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    sub = bus.subscribe()
+    client = HLClient(account_address="0x", api_secret_key="0x",
+                      base_url="x", paper_mode=True)
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+
+    await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
+    assert isinstance(await asyncio.wait_for(sub.get(), timeout=0.5), Entry)
+
+    partial = OrderIntent(
+        question_idx=42, symbol="@30", side="sell", size=4.0,
+        limit_price=0.95, cloid="hla-router-partial", time_in_force="ioc",
+        reduce_only=True, exit_reason="exit_edge",
+    )
+    await router.handle(Decision(action=Action.EXIT, intents=(partial,)),
+                        inputs=_approval_inputs(), now_ns=3)
+    assert sub.qsize() == 0
+    p = dal.get_position(42)
+    assert p is not None and p.qty == pytest.approx(6.0)
+
+
+@pytest.mark.asyncio
 async def test_book_fill_persists_fill_row_with_closed_pnl(tmp_path):
     """Daily-loss accounting and post-hoc audit both rely on the local fill
     table being populated. Router._book_fill must write a Fill row on every

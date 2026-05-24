@@ -326,6 +326,10 @@ class Router:
             else:
                 # Reduce-only partial or add-on. Carry realized PnL forward on
                 # the position so later closes don't lose this partial's PnL.
+                is_addon = (
+                    (existing.qty > 0 and intent.side == "buy")
+                    or (existing.qty < 0 and intent.side == "sell")
+                )
                 avg = (existing.qty * existing.avg_entry + signed * price) / new_qty if new_qty else 0.0
                 self.dal.upsert_position(Position(
                     question_idx=intent.question_idx, symbol=intent.symbol,
@@ -333,6 +337,16 @@ class Router:
                     realized_pnl=existing.realized_pnl + realized_this_fill,
                     last_update_ts_ns=now_ns, stop_loss_price=existing.stop_loss_price,
                 ))
+                # Topups / add-on buys reuse the ENTRY Telegram alert so operators
+                # see every size-increasing fill, not just the initial open.
+                if is_addon:
+                    await self.bus.publish(Entry(
+                        ts_ns=now_ns, account_alias=self.account_alias,
+                        cloid=intent.cloid,
+                        question_idx=intent.question_idx, symbol=intent.symbol,
+                        side=intent.side, size=size, price=price,
+                        question_description=q_desc, outcome_description=o_desc,
+                    ))
         # Persist a Fill row regardless of branch so the local DB has a
         # coherent trade history for diagnostics. fill_id is derived from the
         # cloid + timestamp to be unique per actual venue fill even when one
