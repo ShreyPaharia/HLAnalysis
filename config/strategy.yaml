@@ -343,6 +343,11 @@ strategies:
       stale_data_halt_seconds: 30
       reconcile_interval_seconds: 15
       daily_window_start_hour_utc: 6
+      # Depth-walk slippage cap — ~0.5¢ at a 0.95-favorite leg. PM books are
+      # thin at the top; the gate vetoes intents whose blended fill across
+      # ask_levels would slip more than this. HL slots leave this at 0
+      # (default) because the BboEvent feed doesn't populate ask_levels.
+      max_slippage_pct: 0.005
 
     theta:
       vol_lookback_seconds: 3600
