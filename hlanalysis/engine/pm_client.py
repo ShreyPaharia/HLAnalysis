@@ -66,11 +66,9 @@ class PMClient:
         return self._live_cancel(cloid=cloid, symbol=symbol)
 
     def open_orders(self) -> list[OpenOrderRow]:
-        # Live read-only paths land in Task 8.4; place/cancel ship first
-        # so the engine boot path is clean.
         if self.paper_mode:
             return list(self._paper_open.values())
-        return []
+        return self._live_open_orders()
 
     def clearinghouse_state(self) -> ClearinghouseState:
         if self.paper_mode:
@@ -78,12 +76,12 @@ class PMClient:
                 positions=tuple(self._paper_positions.values()),
                 account_value_usd=0.0,
             )
-        return ClearinghouseState(positions=(), account_value_usd=0.0)
+        return self._live_clearinghouse_state()
 
     def user_fills(self, *, since_ts_ns: int = 0) -> list[UserFillRow]:
         if self.paper_mode:
             return [f for f in self._paper_fills if f.ts_ns >= since_ts_ns]
-        return []
+        return self._live_user_fills(since_ts_ns=since_ts_ns)
 
     def realized_pnl_since(self, since_ts_ns: int) -> float:
         fills = self.user_fills(since_ts_ns=since_ts_ns)
@@ -228,3 +226,102 @@ class PMClient:
             return False
         return bool(resp)
 
+    def _live_open_orders(self) -> list[OpenOrderRow]:
+        try:
+            sdk = self._ensure_sdk()
+            rows = sdk.get_open_orders()
+        except Exception:
+            return []
+        oid_to_cloid = {v: k for k, v in self._cloid_to_oid.items()}
+        out: list[OpenOrderRow] = []
+        for r in rows or []:
+            oid = str(r.get("id") or r.get("orderID") or "")
+            symbol = str(r.get("asset_id") or r.get("token_id") or "")
+            side_raw = str(r.get("side") or "BUY").upper()
+            side = "buy" if side_raw == "BUY" else "sell"
+            try:
+                price = float(r.get("price") or 0.0)
+            except (TypeError, ValueError):
+                price = 0.0
+            try:
+                original = float(r.get("original_size") or r.get("size") or 0.0)
+                matched = float(r.get("size_matched") or 0.0)
+            except (TypeError, ValueError):
+                original, matched = 0.0, 0.0
+            remaining = max(original - matched, 0.0)
+            created = r.get("created_at") or 0
+            try:
+                placed_ts_ns = int(float(created) * 1_000_000_000)
+            except (TypeError, ValueError):
+                placed_ts_ns = 0
+            cloid = oid_to_cloid.get(oid, oid)
+            out.append(OpenOrderRow(
+                cloid=cloid, venue_oid=oid, symbol=symbol,
+                side=side, price=price, size=remaining,
+                placed_ts_ns=placed_ts_ns,
+            ))
+        return out
+
+    def _live_clearinghouse_state(self) -> ClearinghouseState:
+        from py_clob_client_v2 import AssetType, BalanceAllowanceParams
+        try:
+            sdk = self._ensure_sdk()
+            resp = sdk.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL),
+            )
+        except Exception:
+            return ClearinghouseState(positions=(), account_value_usd=0.0)
+        try:
+            # USDC is 6-decimal; balance comes back as a stringified integer.
+            bal_raw = float(resp.get("balance") or 0.0)
+        except (TypeError, ValueError):
+            bal_raw = 0.0
+        account_value_usd = bal_raw / 1_000_000.0
+        # PM doesn't expose positions through balance-allowance; positions
+        # are tracked on-chain via conditional-token balances. The engine
+        # reconstructs them from its DAL + open_orders, so leaving the
+        # tuple empty here keeps the reconciler well-behaved.
+        return ClearinghouseState(positions=(), account_value_usd=account_value_usd)
+
+    def _live_user_fills(self, *, since_ts_ns: int = 0) -> list[UserFillRow]:
+        from py_clob_client_v2 import TradeParams
+        after_s = since_ts_ns // 1_000_000_000 if since_ts_ns else 0
+        try:
+            sdk = self._ensure_sdk()
+            params = TradeParams(after=after_s) if after_s else None
+            trades = sdk.get_trades(params=params)
+        except Exception:
+            return []
+        oid_to_cloid = {v: k for k, v in self._cloid_to_oid.items()}
+        out: list[UserFillRow] = []
+        for t in trades or []:
+            fill_id = str(t.get("id") or "")
+            taker_oid = str(t.get("taker_order_id") or "")
+            symbol = str(t.get("asset_id") or "")
+            side_raw = str(t.get("side") or t.get("trader_side") or "BUY").upper()
+            side = "buy" if side_raw == "BUY" else "sell"
+            try:
+                price = float(t.get("price") or 0.0)
+            except (TypeError, ValueError):
+                price = 0.0
+            try:
+                size = float(t.get("size") or 0.0)
+            except (TypeError, ValueError):
+                size = 0.0
+            try:
+                fee_bps = float(t.get("fee_rate_bps") or 0.0)
+            except (TypeError, ValueError):
+                fee_bps = 0.0
+            fee = fee_bps / 10_000.0 * price * size
+            ts = t.get("match_time") or t.get("last_update") or 0
+            try:
+                ts_ns = int(float(ts) * 1_000_000_000)
+            except (TypeError, ValueError):
+                ts_ns = 0
+            cloid = oid_to_cloid.get(taker_oid, taker_oid or fill_id)
+            out.append(UserFillRow(
+                fill_id=fill_id, cloid=cloid, symbol=symbol,
+                side=side, price=price, size=size, fee=fee, ts_ns=ts_ns,
+                closed_pnl=0.0,
+            ))
+        return [f for f in out if f.ts_ns >= since_ts_ns]

@@ -16,11 +16,17 @@ class _FakeClob:
         *,
         place_resp: dict | None = None,
         cancel_resp: dict | None = None,
+        open_orders: list[dict] | None = None,
+        balance_allowance: dict | None = None,
+        trades: list[dict] | None = None,
     ) -> None:
         self.placed: list[dict] = []
         self.canceled: list[str] = []
         self._place_resp = place_resp
         self._cancel_resp = cancel_resp or {"canceled": []}
+        self._open_orders = open_orders or []
+        self._balance_allowance = balance_allowance or {"balance": "0"}
+        self._trades = trades or []
 
     def create_and_post_order(self, *, order_args, options, order_type):
         self.placed.append({
@@ -44,6 +50,15 @@ class _FakeClob:
         oid = getattr(payload, "orderID", None) or payload.get("orderID")  # type: ignore[attr-defined]
         self.canceled.append(oid)
         return self._cancel_resp
+
+    def get_open_orders(self):
+        return self._open_orders
+
+    def get_balance_allowance(self, params=None):
+        return self._balance_allowance
+
+    def get_trades(self, params=None):
+        return self._trades
 
 
 def _client() -> PMClient:
@@ -126,3 +141,99 @@ def test_live_cancel_unknown_cloid_returns_false():
     c._sdk = fake
     assert c.cancel(cloid="never-placed", symbol="tok") is False
     assert fake.canceled == []
+
+
+def test_live_open_orders_maps_response_to_OpenOrderRow():
+    fake = _FakeClob(open_orders=[
+        {
+            "id": "0xabc", "asset_id": "tok-1", "side": "BUY",
+            "price": "0.55", "original_size": "100", "size_matched": "30",
+            "created_at": 1_700_000_000,
+        },
+        {
+            "id": "0xdef", "asset_id": "tok-2", "side": "SELL",
+            "price": "0.30", "original_size": "50", "size_matched": "0",
+            "created_at": 1_700_000_100,
+        },
+    ])
+    c = _client()
+    c._sdk = fake
+    # Seed a known mapping for one of the orders to validate reverse-lookup.
+    c._cloid_to_oid["hla-1"] = "0xabc"
+    rows = c.open_orders()
+    assert len(rows) == 2
+    by_oid = {r.venue_oid: r for r in rows}
+    a = by_oid["0xabc"]
+    assert a.cloid == "hla-1"
+    assert a.symbol == "tok-1"
+    assert a.side == "buy"
+    assert a.price == 0.55
+    assert a.size == 70.0  # remaining = 100 - 30
+    assert a.placed_ts_ns == 1_700_000_000 * 1_000_000_000
+    b = by_oid["0xdef"]
+    assert b.side == "sell"
+    assert b.size == 50.0
+    # No cloid mapping → falls back to the venue oid.
+    assert b.cloid == "0xdef"
+
+
+def test_live_clearinghouse_state_reflects_usdc_balance():
+    fake = _FakeClob(balance_allowance={"balance": "1500000000"})  # 1500 USDC
+    c = _client()
+    c._sdk = fake
+    state = c.clearinghouse_state()
+    assert state.positions == ()
+    assert state.account_value_usd == 1500.0
+
+
+def test_live_user_fills_maps_trades_to_UserFillRow():
+    fake = _FakeClob(trades=[
+        {
+            "id": "t-1", "taker_order_id": "0xabc", "asset_id": "tok-1",
+            "side": "BUY", "price": "0.55", "size": "100",
+            "fee_rate_bps": "10", "match_time": 1_700_000_050,
+        },
+        {
+            "id": "t-2", "taker_order_id": "0xdef", "asset_id": "tok-2",
+            "side": "SELL", "price": "0.30", "size": "50",
+            "fee_rate_bps": "0", "match_time": 1_700_000_200,
+        },
+    ])
+    c = _client()
+    c._sdk = fake
+    c._cloid_to_oid["hla-1"] = "0xabc"
+    fills = c.user_fills(since_ts_ns=0)
+    assert len(fills) == 2
+    by_id = {f.fill_id: f for f in fills}
+    a = by_id["t-1"]
+    assert a.cloid == "hla-1"
+    assert a.symbol == "tok-1"
+    assert a.side == "buy"
+    assert a.price == 0.55
+    assert a.size == 100.0
+    # 10 bps on $55 notional = $0.055
+    assert abs(a.fee - (10 / 10_000) * 0.55 * 100) < 1e-9
+    assert a.ts_ns == 1_700_000_050 * 1_000_000_000
+    b = by_id["t-2"]
+    assert b.side == "sell"
+    assert b.cloid == "0xdef"  # no mapping → falls back to taker_order_id
+
+
+def test_live_user_fills_filters_by_since_ts_ns():
+    fake = _FakeClob(trades=[
+        {
+            "id": "old", "taker_order_id": "x", "asset_id": "tok",
+            "side": "BUY", "price": "0.5", "size": "10",
+            "fee_rate_bps": "0", "match_time": 1_000,
+        },
+        {
+            "id": "new", "taker_order_id": "y", "asset_id": "tok",
+            "side": "BUY", "price": "0.5", "size": "10",
+            "fee_rate_bps": "0", "match_time": 2_000,
+        },
+    ])
+    c = _client()
+    c._sdk = fake
+    # since_ts_ns=1500s in ns → only "new" survives.
+    fills = c.user_fills(since_ts_ns=1500 * 1_000_000_000)
+    assert [f.fill_id for f in fills] == ["new"]
