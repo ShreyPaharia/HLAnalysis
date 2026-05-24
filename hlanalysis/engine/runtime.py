@@ -31,8 +31,8 @@ from .reconcile import Reconciler
 from .restart_drift import RestartDriftGate
 from .risk import RiskGate
 from .risk_events import (
-    DailyLossHalt, Exit, KillSwitchActivated, NewQuestion, StaleDataHalt,
-    StopLossTriggered,
+    DailyLossHalt, Exit, KillSwitchActivated, NewQuestion, OrderUnconfirmed,
+    StaleDataHalt, StopLossTriggered,
 )
 from .router import Router
 from .scanner import Scanner
@@ -46,6 +46,48 @@ from ..strategy.late_resolution import (
 from ..strategy.theta_harvester import (
     ThetaHarvesterConfig, ThetaHarvesterStrategy,
 )
+
+
+# PM unconfirmed-order watchdog: OrderUnconfirmed fires once a live PM order
+# has sat in flight (status=open/pending/partially_filled) past this threshold
+# without a status change. 30s gives PM CLOB plenty of room under heavy chain
+# load while still surfacing stuck orders before the next scan tick would
+# top up on top of stale state.
+PM_UNCONFIRMED_THRESHOLD_S: float = 30.0
+
+
+def _pm_check_unconfirmed_orders(
+    slot: "AccountSlot", now_ns: int, *,
+    threshold_s: float = PM_UNCONFIRMED_THRESHOLD_S,
+) -> list[OrderUnconfirmed]:
+    """Pure detector: scan slot.dal.live_orders() and return one
+    OrderUnconfirmed for each open order older than threshold_s that hasn't
+    already alerted. Mutates `slot.pm_alerted_unconfirmed_cloids` to record
+    new alerts and to evict cloids no longer live.
+    """
+    live = slot.dal.live_orders()
+    live_cloids: set[str] = {o.cloid for o in live}
+    # Garbage-collect alerted set so a re-placed order with the same cloid
+    # would re-fire after its next stall. Without this, the set grows
+    # unbounded over the process lifetime.
+    slot.pm_alerted_unconfirmed_cloids &= live_cloids
+    out: list[OrderUnconfirmed] = []
+    for o in live:
+        if o.status != "open":
+            continue
+        age_s = (now_ns - o.last_update_ts_ns) / 1e9
+        if age_s < threshold_s:
+            continue
+        if o.cloid in slot.pm_alerted_unconfirmed_cloids:
+            continue
+        out.append(OrderUnconfirmed(
+            ts_ns=now_ns, account_alias=slot.alias,
+            cloid=o.cloid, symbol=o.symbol, side=o.side,  # type: ignore[arg-type]
+            size=o.size, limit_price=o.price, age_seconds=age_s,
+            venue_oid=o.venue_oid or "",
+        ))
+        slot.pm_alerted_unconfirmed_cloids.add(o.cloid)
+    return out
 
 
 def _late_resolution_config_from_entry(
@@ -200,6 +242,13 @@ class AccountSlot:
     scans_completed: int = 0
     decisions_emitted: int = 0
     halted: bool = False         # daily-loss / kill-switch latched
+    # PM-only alert tracking. Populated by `_continuous_checks_loop` for slots
+    # whose `account_cfg` is a PolymarketAccount; HL slots leave these empty.
+    # `pm_alerted_unconfirmed_cloids` lists cloids that have already triggered
+    # an OrderUnconfirmed alert. Cleared when the cloid drops out of
+    # live_orders (status flipped to filled/cancelled/rejected) so a future
+    # stall on a re-placed order with the same cloid would re-fire.
+    pm_alerted_unconfirmed_cloids: set[str] = field(default_factory=set)
 
     @property
     def alias(self) -> str:
@@ -555,6 +604,9 @@ class EngineRuntime:
 
     async def _continuous_checks_loop(self, slot: AccountSlot) -> None:
         kill_path = slot.kill_switch_path
+        # PM-only flag gating the OrderUnconfirmed watchdog so HL slots don't
+        # emit PM-specific alerts for their own HL open orders.
+        is_pm = isinstance(slot.account_cfg, PolymarketAccount)
         while not self.stop_event.is_set():
             try:
                 if slot.halted:
@@ -654,6 +706,13 @@ class EngineRuntime:
                     slot.halted = True
                     self._maybe_stop_all_halted(slot)
                     continue
+
+                # PM-only: unconfirmed-order watchdog. Surfaces PM CLOB
+                # orders that have sat as `open` past the threshold without
+                # status flipping (chain congestion, dropped acks).
+                if is_pm:
+                    for unconf in _pm_check_unconfirmed_orders(slot, now):
+                        await self.bus.publish(unconf)
 
                 # Stale-data halt is per-trade; we also surface it as an alert here.
                 if positions_db:

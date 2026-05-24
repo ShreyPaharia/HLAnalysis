@@ -23,8 +23,8 @@ from loguru import logger
 from ..engine.event_bus import EventBus
 from ..engine.risk_events import (
     BusEvent, DailyLossHalt, Entry, Exit, KillSwitchActivated, NewQuestion,
-    OrderRejected, ReconcileDrift, RiskHalt, RiskVeto, StaleDataHalt,
-    StopLossTriggered,
+    OrderRejected, OrderUnconfirmed, ReconcileDrift, RiskHalt, RiskVeto,
+    StaleDataHalt, StopLossTriggered,
 )
 
 
@@ -175,6 +175,15 @@ class AlertRules:
                 # on the same leg (e.g. min-notional retries) collapse, but a
                 # new error or new symbol fires a fresh alert.
                 return f"rej:{ev.symbol}:{ev.error}", "\n".join(lines)
+            case OrderUnconfirmed():
+                # Dedupe per cloid — same stalled order fires once per dedupe
+                # window. The detection loop also tracks alerted cloids in-
+                # memory so re-emission doesn't happen until status flips.
+                return f"unconf:{ev.cloid}", (
+                    f"⚠️ <b>ORDER UNCONFIRMED</b> cloid=<code>{_e(ev.cloid)}</code> "
+                    f"{ev.side} {ev.size:g}@{ev.limit_price:.4f} "
+                    f"age={ev.age_seconds:.0f}s"
+                )
             case NewQuestion():
                 lines = ["📣 <b>NEW MARKET</b>"]
                 if ev.description:

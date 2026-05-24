@@ -9,7 +9,7 @@ from hlanalysis.alerts.rules import AlertRules
 from hlanalysis.engine.event_bus import EventBus
 from hlanalysis.engine.risk_events import (
     DailyLossHalt, Entry, Exit, KillSwitchActivated, OrderRejected,
-    ReconcileDrift, RiskVeto,
+    OrderUnconfirmed, ReconcileDrift, RiskVeto,
 )
 
 
@@ -139,6 +139,43 @@ async def test_reconcile_drift_distinct_events_alert():
         pass
     drift_msgs = [m for m in tg.messages if "DRIFT" in m]
     assert len(drift_msgs) == 2
+
+
+@pytest.mark.asyncio
+async def test_order_unconfirmed_formats_with_age_and_cloid():
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    await bus.publish(OrderUnconfirmed(
+        ts_ns=1, account_alias="v31_pm", cloid="hla-v31-abc",
+        symbol="0xdeadbeef", side="buy", size=10.0, limit_price=0.55,
+        age_seconds=45.0, venue_oid="ven-1",
+    ))
+    # Same cloid → deduped within window
+    await bus.publish(OrderUnconfirmed(
+        ts_ns=2, account_alias="v31_pm", cloid="hla-v31-abc",
+        symbol="0xdeadbeef", side="buy", size=10.0, limit_price=0.55,
+        age_seconds=46.0, venue_oid="ven-1",
+    ))
+    # Different cloid → fires
+    await bus.publish(OrderUnconfirmed(
+        ts_ns=3, account_alias="v31_pm", cloid="hla-v31-xyz",
+        symbol="0xdeadbeef", side="sell", size=5.0, limit_price=0.42,
+        age_seconds=33.0,
+    ))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    unconf_msgs = [m for m in tg.messages if "ORDER UNCONFIRMED" in m]
+    assert len(unconf_msgs) == 2
+    assert any("hla-v31-abc" in m and "45s" in m for m in unconf_msgs)
+    assert any("hla-v31-xyz" in m and "33s" in m for m in unconf_msgs)
+    assert all("[v31_pm]" in m for m in unconf_msgs)
 
 
 @pytest.mark.asyncio
