@@ -170,6 +170,37 @@ def test_position_disappearance_drops_local_position(dal):
     assert lp.realized_pnl == 1.25
 
 
+def test_zero_qty_venue_position_treated_as_vanished_on_pm(dal):
+    # Unlike HL HIP-4 (which removes the position row entirely on settlement),
+    # Polymarket leaves the venue position at qty=0 until redemption. The
+    # reconciler must treat that as a vanished position so the caller's
+    # _close_settled flow publishes the settlement Exit and deletes the local
+    # row — otherwise the strategy keeps seeing a stale local position long
+    # after the market resolved.
+    dal.upsert_position(Position(
+        question_idx=77, symbol="pm-0xabc", qty=10.0, avg_entry=0.55,
+        realized_pnl=4.50, last_update_ts_ns=1, stop_loss_price=-1.0,
+    ))
+    venue_state = ClearinghouseState(
+        positions=(VenuePosition(symbol="pm-0xabc", qty=0.0, avg_entry=0.55,
+                                  unrealized_pnl=0.0),),
+        account_value_usd=0,
+    )
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"pm-0xabc": 77},
+    ).run(venue_open=[], venue_state=venue_state, now_ns=2)
+
+    assert dal.get_position(77) is None
+    assert len(res.vanished_positions) == 1
+    qidx, sym, lp = res.vanished_positions[0]
+    assert (qidx, sym) == (77, "pm-0xabc")
+    assert lp.qty == 10.0
+    assert lp.realized_pnl == 4.50
+    # No false-positive position_mismatch drift — the Exit is the canonical
+    # alert (mirrors the HL vanish path).
+    assert not any(d.case == "position_mismatch" for d in res.drift_events)
+
+
 def test_venue_orphan_position_is_adopted_into_local_db(dal):
     # HL has #551 with 500 shares but the local DB is empty (e.g. fills booked
     # before a restart that wiped the DB, or filled while the engine was
