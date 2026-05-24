@@ -54,6 +54,11 @@ class BookState:
     ask_sz: float | None
     last_trade_ts_ns: int  # 0 if no trade yet
     last_l2_ts_ns: int     # 0 if no l2 yet
+    # Top-N L2 levels (price, size) for entry-leg slippage estimation.
+    # Empty tuple disables the depth-walk gate (legacy HL BboEvent path);
+    # MarketState fills these from BookSnapshotEvent on PM/HL.
+    ask_levels: tuple[tuple[float, float], ...] = ()
+    bid_levels: tuple[tuple[float, float], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
