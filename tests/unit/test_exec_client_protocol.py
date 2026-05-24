@@ -26,12 +26,11 @@ def test_pm_client_paper_satisfies_execution_client_protocol():
 
 
 def test_pm_client_live_constructs_without_sdk_import():
-    """Paper_mode=False MUST construct successfully — the live SDK
-    (py-clob-client-v2) lands in Phase 8 and must not be imported here,
-    so an unconfigured env still boots the engine. Order I/O raises
-    NotImplementedError only when actually invoked."""
-    import pytest
-
+    """Paper_mode=False MUST construct successfully — the SDK
+    (py-clob-client-v2) is lazily constructed on first live call so an
+    unconfigured env still boots the engine. With stub credentials,
+    lazy SDK construction fails inside our try/except wrappers, so
+    read-only calls return empty and order I/O returns a rejected ack."""
     live = PMClient(
         paper_mode=False,
         clob_host="https://clob.polymarket.com",
@@ -42,18 +41,20 @@ def test_pm_client_live_constructs_without_sdk_import():
         clob_api_passphrase="stub",
     )
     assert isinstance(live, ExecutionClient)
-    # Read-only calls return empty/zero so the engine's restart-drift and
-    # PnL paths don't crash before Phase 8.
+    # SDK is not eagerly imported/constructed.
+    assert live._sdk is None
+    # Read-only calls swallow the construction error and return empty/zero
+    # so the engine's restart-drift and PnL paths don't crash.
     assert live.open_orders() == []
     assert live.user_fills() == []
     assert live.realized_pnl_since(0) == 0.0
-    # place / cancel raise — surfaces a misconfigured slot at first order.
+    # place / cancel return failure ack / False — surfaces a misconfigured
+    # slot loudly via OrderRejected alerts rather than crashing the engine.
     from hlanalysis.engine.exec_types import PlaceRequest
     req = PlaceRequest(
         cloid="x", symbol="tok", side="buy", size=1.0, price=0.9,
         reduce_only=False, time_in_force="ioc",
     )
-    with pytest.raises(NotImplementedError):
-        live.place(req)
-    with pytest.raises(NotImplementedError):
-        live.cancel(cloid="x", symbol="tok")
+    ack = live.place(req)
+    assert ack.status == "rejected"
+    assert live.cancel(cloid="x", symbol="tok") is False

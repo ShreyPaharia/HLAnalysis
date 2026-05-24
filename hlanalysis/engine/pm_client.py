@@ -1,11 +1,10 @@
 """Polymarket execution client. Implements ExecutionClient.
 
-Paper mode here is the same shape as HLClient.paper — synthesized
-OrderAcks, in-memory positions and fills. The strategy doesn't know it's
-paper; the engine wiring decides.
-
-Live mode (paper_mode=False) bootstrap and order I/O land in Phase 8 via
-py-clob-client-v2.
+Paper mode synthesizes OrderAcks, positions, and fills in-memory — same
+shape as HLClient.paper. Live mode wraps `py-clob-client-v2`: order
+placement uses `OrderType.FAK` for `time_in_force="ioc"` and
+`OrderType.GTC` for `"gtc"`. The SDK is imported and constructed lazily
+on first live call so paper-only tests don't need the dep installed.
 """
 from __future__ import annotations
 
@@ -50,10 +49,11 @@ class PMClient:
         self._paper_open: dict[str, OpenOrderRow] = {}
         self._paper_positions: dict[str, VenuePosition] = {}
         self._paper_fills: list[UserFillRow] = []
-        # Live SDK wiring lands in Phase 8. We do NOT import py-clob-client-v2
-        # here — even in live mode — so a misconfigured environment fails
-        # loudly at first order rather than at process startup.
-        self._live = None
+        # Live wiring. SDK is lazily constructed on first live call so paper
+        # tests and stub-credential constructions don't touch py-clob-client-v2.
+        # Tests inject a fake by setting `self._sdk` directly before any call.
+        self._sdk = None
+        self._cloid_to_oid: dict[str, str] = {}
 
     def place(self, req: PlaceRequest) -> OrderAck:
         if self.paper_mode:
@@ -66,12 +66,9 @@ class PMClient:
         return self._live_cancel(cloid=cloid, symbol=symbol)
 
     def open_orders(self) -> list[OpenOrderRow]:
-        # Live read-only paths return empty until Phase 8 wires in the CLOB
-        # client. This keeps engine boot (restart-drift, reconciler) clean
-        # for a misconfigured live slot — order I/O still raises on first use.
         if self.paper_mode:
             return list(self._paper_open.values())
-        return []
+        return self._live_open_orders()
 
     def clearinghouse_state(self) -> ClearinghouseState:
         if self.paper_mode:
@@ -79,12 +76,12 @@ class PMClient:
                 positions=tuple(self._paper_positions.values()),
                 account_value_usd=0.0,
             )
-        return ClearinghouseState(positions=(), account_value_usd=0.0)
+        return self._live_clearinghouse_state()
 
     def user_fills(self, *, since_ts_ns: int = 0) -> list[UserFillRow]:
         if self.paper_mode:
             return [f for f in self._paper_fills if f.ts_ns >= since_ts_ns]
-        return []
+        return self._live_user_fills(since_ts_ns=since_ts_ns)
 
     def realized_pnl_since(self, since_ts_ns: int) -> float:
         fills = self.user_fills(since_ts_ns=since_ts_ns)
@@ -134,10 +131,197 @@ class PMClient:
         ))
         return ack
 
-    # ---- live stubs (filled in Phase 8) ----
+    # ---- live internals ----
+
+    def _ensure_sdk(self):
+        if self._sdk is not None:
+            return self._sdk
+        from py_clob_client_v2 import ApiCreds, ClobClient
+        self._sdk = ClobClient(
+            host=self._cfg["clob_host"],
+            chain_id=self._cfg["chain_id"],
+            key=self._cfg["private_key"],
+            creds=ApiCreds(
+                api_key=self._cfg["clob_api_key"],
+                api_secret=self._cfg["clob_api_secret"],
+                api_passphrase=self._cfg["clob_api_passphrase"],
+            ),
+        )
+        return self._sdk
 
     def _live_place(self, req: PlaceRequest) -> OrderAck:
-        raise NotImplementedError("Phase 8")
+        from py_clob_client_v2 import (
+            OrderArgs,
+            OrderType,
+            PartialCreateOrderOptions,
+            Side,
+        )
+        side = Side.BUY if req.side == "buy" else Side.SELL
+        order_type = OrderType.FAK if req.time_in_force == "ioc" else OrderType.GTC
+        try:
+            sdk = self._ensure_sdk()
+            resp = sdk.create_and_post_order(
+                order_args=OrderArgs(
+                    token_id=req.symbol,
+                    price=req.price,
+                    side=side,
+                    size=req.size,
+                ),
+                options=PartialCreateOrderOptions(tick_size="0.01"),
+                order_type=order_type,
+            )
+        except Exception as e:
+            return OrderAck(
+                cloid=req.cloid, venue_oid="", status="rejected",
+                error=str(e)[:200],
+            )
+        if not resp.get("success"):
+            return OrderAck(
+                cloid=req.cloid,
+                venue_oid=str(resp.get("orderID") or ""),
+                status="rejected",
+                error=str(resp.get("errorMsg", "unknown"))[:200],
+            )
+        oid = str(resp.get("orderID") or "")
+        if oid:
+            self._cloid_to_oid[req.cloid] = oid
+        making = float(resp.get("makingAmount") or 0)
+        taking = float(resp.get("takingAmount") or 0)
+        # For a BUY: maker spends USDC (taking), receives tokens (making).
+        #   size = makingAmount (tokens); price = takingAmount/makingAmount.
+        # For a SELL: maker spends tokens (making), receives USDC (taking).
+        #   size = makingAmount (tokens); price = takingAmount/makingAmount.
+        fill_size = making
+        if req.side == "buy":
+            fill_price = (taking / making) if making > 0 else req.price
+        else:
+            fill_price = (taking / making) if making > 0 else req.price
+        status = "filled" if fill_size > 0 else "open"
+        return OrderAck(
+            cloid=req.cloid, venue_oid=oid,
+            status=status, fill_price=fill_price, fill_size=fill_size,
+        )
 
     def _live_cancel(self, *, cloid: str, symbol: str) -> bool:
-        raise NotImplementedError("Phase 8")
+        # PM cancels by orderID, not cloid. We track cloid→orderID locally in
+        # _live_place. Orphans (no mapping) fail-soft to False.
+        oid = self._cloid_to_oid.get(cloid)
+        if not oid:
+            return False
+        from py_clob_client_v2 import OrderPayload
+        try:
+            sdk = self._ensure_sdk()
+            resp = sdk.cancel_order(OrderPayload(orderID=oid))
+        except Exception:
+            return False
+        if isinstance(resp, dict):
+            # CLOB returns {"canceled": [...], "not_canceled": {...}}.
+            canceled = resp.get("canceled") or []
+            if oid in canceled:
+                self._cloid_to_oid.pop(cloid, None)
+                return True
+            if resp.get("success"):
+                self._cloid_to_oid.pop(cloid, None)
+                return True
+            return False
+        return bool(resp)
+
+    def _live_open_orders(self) -> list[OpenOrderRow]:
+        try:
+            sdk = self._ensure_sdk()
+            rows = sdk.get_open_orders()
+        except Exception:
+            return []
+        oid_to_cloid = {v: k for k, v in self._cloid_to_oid.items()}
+        out: list[OpenOrderRow] = []
+        for r in rows or []:
+            oid = str(r.get("id") or r.get("orderID") or "")
+            symbol = str(r.get("asset_id") or r.get("token_id") or "")
+            side_raw = str(r.get("side") or "BUY").upper()
+            side = "buy" if side_raw == "BUY" else "sell"
+            try:
+                price = float(r.get("price") or 0.0)
+            except (TypeError, ValueError):
+                price = 0.0
+            try:
+                original = float(r.get("original_size") or r.get("size") or 0.0)
+                matched = float(r.get("size_matched") or 0.0)
+            except (TypeError, ValueError):
+                original, matched = 0.0, 0.0
+            remaining = max(original - matched, 0.0)
+            created = r.get("created_at") or 0
+            try:
+                placed_ts_ns = int(float(created) * 1_000_000_000)
+            except (TypeError, ValueError):
+                placed_ts_ns = 0
+            cloid = oid_to_cloid.get(oid, oid)
+            out.append(OpenOrderRow(
+                cloid=cloid, venue_oid=oid, symbol=symbol,
+                side=side, price=price, size=remaining,
+                placed_ts_ns=placed_ts_ns,
+            ))
+        return out
+
+    def _live_clearinghouse_state(self) -> ClearinghouseState:
+        from py_clob_client_v2 import AssetType, BalanceAllowanceParams
+        try:
+            sdk = self._ensure_sdk()
+            resp = sdk.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL),
+            )
+        except Exception:
+            return ClearinghouseState(positions=(), account_value_usd=0.0)
+        try:
+            # USDC is 6-decimal; balance comes back as a stringified integer.
+            bal_raw = float(resp.get("balance") or 0.0)
+        except (TypeError, ValueError):
+            bal_raw = 0.0
+        account_value_usd = bal_raw / 1_000_000.0
+        # PM doesn't expose positions through balance-allowance; positions
+        # are tracked on-chain via conditional-token balances. The engine
+        # reconstructs them from its DAL + open_orders, so leaving the
+        # tuple empty here keeps the reconciler well-behaved.
+        return ClearinghouseState(positions=(), account_value_usd=account_value_usd)
+
+    def _live_user_fills(self, *, since_ts_ns: int = 0) -> list[UserFillRow]:
+        from py_clob_client_v2 import TradeParams
+        after_s = since_ts_ns // 1_000_000_000 if since_ts_ns else 0
+        try:
+            sdk = self._ensure_sdk()
+            params = TradeParams(after=after_s) if after_s else None
+            trades = sdk.get_trades(params=params)
+        except Exception:
+            return []
+        oid_to_cloid = {v: k for k, v in self._cloid_to_oid.items()}
+        out: list[UserFillRow] = []
+        for t in trades or []:
+            fill_id = str(t.get("id") or "")
+            taker_oid = str(t.get("taker_order_id") or "")
+            symbol = str(t.get("asset_id") or "")
+            side_raw = str(t.get("side") or t.get("trader_side") or "BUY").upper()
+            side = "buy" if side_raw == "BUY" else "sell"
+            try:
+                price = float(t.get("price") or 0.0)
+            except (TypeError, ValueError):
+                price = 0.0
+            try:
+                size = float(t.get("size") or 0.0)
+            except (TypeError, ValueError):
+                size = 0.0
+            try:
+                fee_bps = float(t.get("fee_rate_bps") or 0.0)
+            except (TypeError, ValueError):
+                fee_bps = 0.0
+            fee = fee_bps / 10_000.0 * price * size
+            ts = t.get("match_time") or t.get("last_update") or 0
+            try:
+                ts_ns = int(float(ts) * 1_000_000_000)
+            except (TypeError, ValueError):
+                ts_ns = 0
+            cloid = oid_to_cloid.get(taker_oid, taker_oid or fill_id)
+            out.append(UserFillRow(
+                fill_id=fill_id, cloid=cloid, symbol=symbol,
+                side=side, price=price, size=size, fee=fee, ts_ns=ts_ns,
+                closed_pnl=0.0,
+            ))
+        return [f for f in out if f.ts_ns >= since_ts_ns]

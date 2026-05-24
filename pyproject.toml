@@ -21,6 +21,8 @@ dependencies = [
   "hftbacktest>=2.0",
   "numba>=0.65",
   "plotly>=5.20",
+  "py-clob-client-v2>=1.0.1",
+  "httpx[http2]>=0.27",
 ]
 
 [project.optional-dependencies]

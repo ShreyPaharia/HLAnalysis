@@ -95,18 +95,25 @@ def test_paper_cancel_returns_false_when_no_open(paper):
     assert paper.cancel(cloid="never-placed", symbol="tok") is False
 
 
-def test_live_mode_construct_does_not_crash():
-    """paper_mode=False must construct without hitting the network — the
-    actual live wiring lands in Phase 8 and raises NotImplementedError on
-    first order I/O."""
+def test_live_mode_construct_does_not_touch_network():
+    """paper_mode=False must construct without hitting the network. Live
+    SDK wiring is constructed lazily on first live call — so a bad/stub
+    private key surfaces as a `rejected` ack from `.place()`, not as a
+    construct-time crash."""
     c = PMClient(
         paper_mode=False,
         clob_host="https://clob.polymarket.com",
         private_key="0xdead",
         clob_api_key="k", clob_api_secret="s", clob_api_passphrase="p",
     )
-    with pytest.raises(NotImplementedError):
-        c.place(PlaceRequest(
-            cloid="x", symbol="t", side="buy", size=1, price=0.5,
-            reduce_only=False, time_in_force="ioc",
-        ))
+    # SDK is not constructed at __init__ — paper-only tests don't need
+    # py-clob-client-v2 installed in some hypothetical future env.
+    assert c._sdk is None
+    # First live call lazily attempts construction; with a stub key the
+    # SDK raises in ClobClient.__init__, which our wrapper turns into a
+    # rejected ack rather than letting it crash the engine.
+    ack = c.place(PlaceRequest(
+        cloid="x", symbol="t", side="buy", size=1, price=0.5,
+        reduce_only=False, time_in_force="ioc",
+    ))
+    assert ack.status == "rejected"
