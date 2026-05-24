@@ -167,7 +167,7 @@ async def test_addon_fill_publishes_entry_for_telegram(tmp_path):
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
     assert isinstance(await asyncio.wait_for(sub.get(), timeout=0.5), Entry)
@@ -199,7 +199,7 @@ async def test_partial_reduce_does_not_publish_entry(tmp_path):
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
     assert isinstance(await asyncio.wait_for(sub.get(), timeout=0.5), Entry)
