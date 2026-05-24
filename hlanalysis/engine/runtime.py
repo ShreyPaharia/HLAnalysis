@@ -15,7 +15,14 @@ from loguru import logger
 from ..adapters.base import VenueAdapter
 from ..config import Subscription
 from ..events import NormalizedEvent
-from .config import DeployConfig, HLConfig, StrategyConfig
+from .config import (
+    AccountConfig,
+    DeployConfig,
+    HLConfig,
+    HyperliquidAccount,
+    PolymarketAccount,
+    StrategyConfig,
+)
 from .event_bus import EventBus
 from .exec_client import ExecutionClient
 from .hl_client import HLClient
@@ -174,7 +181,7 @@ class AccountSlot:
     sibling slots is the engine's MarketState + WS feed.
     """
     cfg: StrategyConfig
-    hl_cfg: HLConfig
+    account_cfg: "HyperliquidAccount | PolymarketAccount"
     state_db_path: Path
     kill_switch_path: Path
     cloid_prefix: str           # e.g. "hla-v1-" or "hla-v31-"
@@ -206,8 +213,9 @@ class EngineRuntime:
     adapter_factory: Callable[[], VenueAdapter]
     subscriptions: list[Subscription]
     # Optional dependency injections so tests can swap real components for fakes.
-    # The factory is called once per slot with (alias, hl_cfg, paper_mode).
-    exec_client_factory: Callable[[str, HLConfig, bool], ExecutionClient] | None = None
+    # The factory is called once per slot with (alias, account_cfg, paper_mode).
+    # account_cfg is the venue-typed AccountConfig (HyperliquidAccount | PolymarketAccount).
+    exec_client_factory: Callable[[str, AccountConfig, bool], ExecutionClient] | None = None
     telegram_factory: Callable[[aiohttp.ClientSession], TelegramClient] | None = None
     market_state: MarketState = field(default_factory=MarketState)
     bus: EventBus = field(default_factory=EventBus)
@@ -237,9 +245,9 @@ class EngineRuntime:
         Wraps the per-slot ExecutionClient factory so callers that only care
         about paper_mode can keep passing a unary lambda.
         """
-        wrapped_factory: Callable[[str, HLConfig, bool], ExecutionClient] | None = None
+        wrapped_factory: Callable[[str, AccountConfig, bool], ExecutionClient] | None = None
         if exec_client_factory is not None:
-            def wrapped_factory(_alias: str, _hl: HLConfig, paper: bool) -> ExecutionClient:
+            def wrapped_factory(_alias: str, _acct: AccountConfig, paper: bool) -> ExecutionClient:
                 return exec_client_factory(paper)
         return cls(
             strategies=[strategy_cfg],
@@ -326,12 +334,12 @@ class EngineRuntime:
 
     def _build_slot(self, s_cfg: StrategyConfig) -> AccountSlot:
         alias = s_cfg.account_alias
-        if alias not in self.deploy_cfg.hl_accounts:
+        if alias not in self.deploy_cfg.accounts:
             raise ValueError(
                 f"strategy '{s_cfg.name}' references account_alias={alias!r} but "
-                f"deploy.hl_accounts has only {list(self.deploy_cfg.hl_accounts)}",
+                f"deploy.accounts has only {list(self.deploy_cfg.accounts)}",
             )
-        hl_cfg = self.deploy_cfg.hl_accounts[alias]
+        acct = self.deploy_cfg.accounts[alias]
         state_db_path = Path(self.deploy_cfg.state_db_path_for(alias))
         kill_switch_path = Path(self.deploy_cfg.kill_switch_path_for(alias))
         cloid_prefix = f"hla-{alias}-"
@@ -340,14 +348,27 @@ class EngineRuntime:
         dal.run_migrations()
 
         if self.exec_client_factory is not None:
-            exec_client = self.exec_client_factory(alias, hl_cfg, s_cfg.paper_mode)
-        else:
+            exec_client = self.exec_client_factory(alias, acct, s_cfg.paper_mode)
+        elif isinstance(acct, HyperliquidAccount):
             exec_client = HLClient(
-                account_address=hl_cfg.account_address,
-                api_secret_key=hl_cfg.api_secret_key,
-                base_url=hl_cfg.base_url,
+                account_address=acct.account_address,
+                api_secret_key=acct.api_secret_key,
+                base_url=acct.base_url,
                 paper_mode=s_cfg.paper_mode,
             )
+        elif isinstance(acct, PolymarketAccount):
+            from .pm_client import PMClient
+            exec_client = PMClient(
+                paper_mode=s_cfg.paper_mode,
+                clob_host=acct.clob_host,
+                chain_id=acct.chain_id,
+                private_key=acct.private_key,
+                clob_api_key=acct.clob_api_key,
+                clob_api_secret=acct.clob_api_secret,
+                clob_api_passphrase=acct.clob_api_passphrase,
+            )
+        else:
+            raise ValueError(f"unsupported account type: {type(acct).__name__}")
 
         risk = RiskGate(s_cfg)
         router = Router(
@@ -374,7 +395,7 @@ class EngineRuntime:
             gate_log_path=gate_log_path,
         )
         return AccountSlot(
-            cfg=s_cfg, hl_cfg=hl_cfg,
+            cfg=s_cfg, account_cfg=acct,
             state_db_path=state_db_path, kill_switch_path=kill_switch_path,
             cloid_prefix=cloid_prefix,
             dal=dal, exec_client=exec_client, risk=risk, router=router,
