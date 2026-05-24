@@ -10,7 +10,8 @@ from loguru import logger
 
 from .config import StrategyConfig, match_question
 from .event_bus import EventBus
-from .hl_client import HLClient, PlaceRequest
+from .exec_client import ExecutionClient
+from .exec_types import PlaceRequest
 from .risk import RiskGate, RiskInputs
 from .risk_events import Entry, Exit, OrderRejected, RiskVeto
 from .state import Fill, OpenOrder, Position, StateDAL
@@ -37,7 +38,7 @@ class Router:
         dal: StateDAL,
         gate: RiskGate,
         bus: EventBus,
-        hl: HLClient,
+        exec_client: ExecutionClient,
         strategy_cfg: StrategyConfig,
         strategy_id: str = "late_resolution",
         cloid_prefix: str = "hla-",
@@ -45,7 +46,7 @@ class Router:
         self.dal = dal
         self.gate = gate
         self.bus = bus
-        self.hl = hl
+        self.exec_client = exec_client
         self.strategy_cfg = strategy_cfg
         self.strategy_id = strategy_id
         # Per-account prefix used for both DB storage and venue-side identification
@@ -180,7 +181,7 @@ class Router:
             last_update_ts_ns=now_ns, strategy_id=self.strategy_id,
         ))
         # 2. Send.
-        ack = self.hl.place(PlaceRequest(
+        ack = self.exec_client.place(PlaceRequest(
             cloid=intent.cloid, symbol=intent.symbol, side=intent.side,
             size=intent.size, price=intent.limit_price,
             reduce_only=intent.reduce_only, time_in_force=intent.time_in_force,

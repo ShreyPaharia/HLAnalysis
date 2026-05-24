@@ -17,6 +17,7 @@ from ..config import Subscription
 from ..events import NormalizedEvent
 from .config import DeployConfig, HLConfig, StrategyConfig
 from .event_bus import EventBus
+from .exec_client import ExecutionClient
 from .hl_client import HLClient
 from .market_state import MarketState
 from .reconcile import Reconciler
@@ -178,7 +179,7 @@ class AccountSlot:
     kill_switch_path: Path
     cloid_prefix: str           # e.g. "hla-v1-" or "hla-v31-"
     dal: StateDAL
-    hl: HLClient
+    exec_client: ExecutionClient
     risk: RiskGate
     router: Router
     strategy: Strategy
@@ -206,7 +207,7 @@ class EngineRuntime:
     subscriptions: list[Subscription]
     # Optional dependency injections so tests can swap real components for fakes.
     # The factory is called once per slot with (alias, hl_cfg, paper_mode).
-    hl_client_factory: Callable[[str, HLConfig, bool], HLClient] | None = None
+    exec_client_factory: Callable[[str, HLConfig, bool], ExecutionClient] | None = None
     telegram_factory: Callable[[aiohttp.ClientSession], TelegramClient] | None = None
     market_state: MarketState = field(default_factory=MarketState)
     bus: EventBus = field(default_factory=EventBus)
@@ -228,24 +229,24 @@ class EngineRuntime:
         deploy_cfg: DeployConfig,
         adapter_factory: Callable[[], VenueAdapter],
         subscriptions: list[Subscription],
-        hl_client_factory: Callable[[bool], HLClient] | None = None,
+        exec_client_factory: Callable[[bool], ExecutionClient] | None = None,
         telegram_factory: Callable[[aiohttp.ClientSession], TelegramClient] | None = None,
     ) -> EngineRuntime:
         """Convenience constructor for tests / single-strategy use.
 
-        Wraps the per-slot HLClient factory so callers that only care about
-        paper_mode can keep passing a unary lambda.
+        Wraps the per-slot ExecutionClient factory so callers that only care
+        about paper_mode can keep passing a unary lambda.
         """
-        wrapped_factory: Callable[[str, HLConfig, bool], HLClient] | None = None
-        if hl_client_factory is not None:
-            def wrapped_factory(_alias: str, _hl: HLConfig, paper: bool) -> HLClient:
-                return hl_client_factory(paper)
+        wrapped_factory: Callable[[str, HLConfig, bool], ExecutionClient] | None = None
+        if exec_client_factory is not None:
+            def wrapped_factory(_alias: str, _hl: HLConfig, paper: bool) -> ExecutionClient:
+                return exec_client_factory(paper)
         return cls(
             strategies=[strategy_cfg],
             deploy_cfg=deploy_cfg,
             adapter_factory=adapter_factory,
             subscriptions=subscriptions,
-            hl_client_factory=wrapped_factory,
+            exec_client_factory=wrapped_factory,
             telegram_factory=telegram_factory,
         )
 
@@ -278,9 +279,9 @@ class EngineRuntime:
                     account_alias=slot.alias,
                 )
                 drift_res = gate.run(
-                    venue_open=slot.hl.open_orders(),
-                    venue_state=slot.hl.clearinghouse_state(),
-                    fills_lookup=lambda c, _hl=slot.hl: _hl.user_fills(),
+                    venue_open=slot.exec_client.open_orders(),
+                    venue_state=slot.exec_client.clearinghouse_state(),
+                    fills_lookup=lambda c, _ec=slot.exec_client: _ec.user_fills(),
                     now_ns=now_ns0,
                 )
                 for ev in drift_res.drift_events:
@@ -338,10 +339,10 @@ class EngineRuntime:
         dal = StateDAL(state_db_path)
         dal.run_migrations()
 
-        if self.hl_client_factory is not None:
-            hl = self.hl_client_factory(alias, hl_cfg, s_cfg.paper_mode)
+        if self.exec_client_factory is not None:
+            exec_client = self.exec_client_factory(alias, hl_cfg, s_cfg.paper_mode)
         else:
-            hl = HLClient(
+            exec_client = HLClient(
                 account_address=hl_cfg.account_address,
                 api_secret_key=hl_cfg.api_secret_key,
                 base_url=hl_cfg.base_url,
@@ -350,7 +351,7 @@ class EngineRuntime:
 
         risk = RiskGate(s_cfg)
         router = Router(
-            dal=dal, gate=risk, bus=self.bus, hl=hl,
+            dal=dal, gate=risk, bus=self.bus, exec_client=exec_client,
             strategy_cfg=s_cfg, strategy_id=s_cfg.name,
             cloid_prefix=cloid_prefix,
         )
@@ -369,14 +370,14 @@ class EngineRuntime:
             # DB. The DB's realized_pnl is structurally near-zero — fills aren't
             # persisted on the happy path and closed positions are deleted —
             # so without this the cap would never fire.
-            pnl_provider=hl.realized_pnl_since,
+            pnl_provider=exec_client.realized_pnl_since,
             gate_log_path=gate_log_path,
         )
         return AccountSlot(
             cfg=s_cfg, hl_cfg=hl_cfg,
             state_db_path=state_db_path, kill_switch_path=kill_switch_path,
             cloid_prefix=cloid_prefix,
-            dal=dal, hl=hl, risk=risk, router=router,
+            dal=dal, exec_client=exec_client, risk=risk, router=router,
             strategy=strategy, scanner=scanner,
         )
 
@@ -488,14 +489,14 @@ class EngineRuntime:
                 now = self._now_ns()
                 rec = Reconciler(
                     slot.dal,
-                    fills_lookup=lambda c, _hl=slot.hl: _hl.user_fills(),
+                    fills_lookup=lambda c, _ec=slot.exec_client: _ec.user_fills(),
                     symbol_to_question=self.market_state.symbol_to_question_map(),
                     cloid_prefix=slot.cloid_prefix,
                     account_alias=slot.alias,
                 )
                 res = rec.run(
-                    venue_open=slot.hl.open_orders(),
-                    venue_state=slot.hl.clearinghouse_state(),
+                    venue_open=slot.exec_client.open_orders(),
+                    venue_state=slot.exec_client.clearinghouse_state(),
                     now_ns=now,
                 )
                 # Translate "local position vanished from venue" into a
@@ -524,7 +525,7 @@ class EngineRuntime:
                 for ev in res.drift_events:
                     await self.bus.publish(ev)
                 for cloid, symbol in res.orphans_to_cancel:
-                    slot.hl.cancel(cloid=cloid, symbol=symbol)
+                    slot.exec_client.cancel(cloid=cloid, symbol=symbol)
                 slot.last_reconcile_ns = now
             except Exception:
                 logger.exception("reconcile crashed alias={}", slot.alias)
@@ -617,7 +618,7 @@ class EngineRuntime:
                     now, hour=slot.cfg.global_.daily_window_start_hour_utc,
                 )
                 try:
-                    pnl = slot.hl.realized_pnl_since(window_start_ns)
+                    pnl = slot.exec_client.realized_pnl_since(window_start_ns)
                 except Exception:
                     logger.warning("hl.realized_pnl_since failed alias={}; falling back to DAL", slot.alias)
                     pnl = slot.dal.realized_pnl_since(window_start_ns)
