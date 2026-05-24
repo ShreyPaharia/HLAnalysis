@@ -1,5 +1,7 @@
 from hlanalysis.adapters.polymarket_normalize import (
     parse_book_message,
+    parse_gamma_market_to_question_meta,
+    parse_gamma_market_to_settlement,
     parse_price_change_message,
     parse_trade_message,
 )
@@ -93,3 +95,73 @@ def test_parse_price_change_message_returns_none_on_empty_changes():
         "changes": [],
     }
     assert parse_price_change_message(payload, local_recv_ts=0) is None
+
+
+_SAMPLE_GAMMA_MARKET = {
+    "conditionId": "0xcond123",
+    "clobTokenIds": '["71321...992563", "71321...111111"]',
+    "startDate": "2026-05-24T00:00:00Z",
+    "endDate": "2026-05-25T00:00:00Z",
+    "description": (
+        "Will BTC go up or down? Resolves based on the Binance 1 "
+        "minute candle for BTC/USDT May 24 '26 20:00 in the ET timezone..."
+    ),
+    "outcomePrices": '["0.92","0.08"]',
+    "groupItemTitle": "",
+}
+
+
+def test_parse_gamma_market_to_question_meta_binary():
+    ev = parse_gamma_market_to_question_meta(
+        _SAMPLE_GAMMA_MARKET,
+        series_slug="btc-up-or-down-daily",
+        local_recv_ts=1716545000000_000_000,
+    )
+    assert ev.event_type == "question_meta"
+    assert ev.venue == "polymarket"
+    assert ev.symbol == "71321...992563"
+    assert ev.named_outcome_idxs == [0, 1]
+    keys = dict(zip(ev.keys, ev.values))
+    assert keys["class"] == "priceBinary"
+    assert keys["underlying"] == "BTC"
+    assert keys["yes_token_id"] == "71321...992563"
+    assert keys["no_token_id"] == "71321...111111"
+    assert keys["series_slug"] == "btc-up-or-down-daily"
+    assert keys["condition_id"] == "0xcond123"
+    assert "strike_ref_ts_ns" in keys
+    assert int(keys["expiry_ns"]) > 0
+
+
+def test_parse_gamma_market_to_settlement_when_resolved_yes():
+    resolved = dict(_SAMPLE_GAMMA_MARKET, outcomePrices='["1.0","0.0"]')
+    ev = parse_gamma_market_to_settlement(
+        resolved,
+        series_slug="btc-up-or-down-daily",
+        local_recv_ts=1716631400000_000_000,
+    )
+    assert ev is not None
+    assert ev.event_type == "settlement"
+    assert ev.settled_side_idx == 0  # YES won
+    assert ev.symbol == "71321...992563"
+    assert ev.settle_price == 1.0
+
+
+def test_parse_gamma_market_to_settlement_when_resolved_no():
+    resolved = dict(_SAMPLE_GAMMA_MARKET, outcomePrices='["0.0","1.0"]')
+    ev = parse_gamma_market_to_settlement(
+        resolved,
+        series_slug="btc-up-or-down-daily",
+        local_recv_ts=1716631400000_000_000,
+    )
+    assert ev is not None
+    assert ev.settled_side_idx == 1
+    assert ev.symbol == "71321...111111"
+
+
+def test_parse_gamma_market_to_settlement_returns_none_when_open():
+    ev = parse_gamma_market_to_settlement(
+        _SAMPLE_GAMMA_MARKET,
+        series_slug="btc-up-or-down-daily",
+        local_recv_ts=0,
+    )
+    assert ev is None
