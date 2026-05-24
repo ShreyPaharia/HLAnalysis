@@ -162,17 +162,18 @@ class Reconciler:
 
         for qidx, lp in local_by_qidx.items():
             vp = venue_by_symbol.get(lp.symbol)
-            if vp is None:
-                # Position vanished from venue. On HL HIP-4 this is overwhelmingly
-                # "market settled and auto-closed the position" — the polled
-                # outcomeMeta SettlementEvent typically arrives later than this
-                # reconcile cycle, so we treat the vanish itself as the settlement
-                # signal. Surface as a structured vanished_positions entry; the
-                # caller publishes a settlement Exit and marks the question settled
-                # in MarketState (which suppresses STALE DATA HALT on the now-silent
-                # leg and prevents the strategy from re-entering before the polled
-                # SettlementEvent catches up). We snapshot the Position before
-                # deletion so callers don't race the DB.
+            if vp is None or abs(vp.qty) < 1e-9:
+                # Position vanished from venue, OR present at exactly qty=0.
+                # On HL HIP-4 the row disappears entirely at settlement; on
+                # Polymarket the venue position stays at qty=0 until redemption
+                # so the row is still present. Both flavours mean "the market
+                # resolved and the position is closed" — surface as a
+                # vanished_positions entry so the caller publishes a settlement
+                # Exit via _close_settled and marks the question settled in
+                # MarketState. We snapshot the Position before deletion so
+                # callers don't race the DB. The polled SettlementEvent
+                # typically arrives later than this reconcile cycle, so we
+                # treat the vanish itself as the settlement signal.
                 vanished.append((qidx, lp.symbol, lp))
                 self.dal.delete_position(qidx)
                 continue
