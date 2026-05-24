@@ -1,8 +1,23 @@
 # v3.1 on Polymarket — Live-Trading Investigation
 
 **Status:** investigation only — no code changes.
-**Branch:** `docs/v31-polymarket-live-investigation`
-**Author / date:** Shrey, 2026-05-22
+**Branch:** `docs/v31-polymarket-live-investigation` (rebased on `main` @ 385dd9d)
+**Author / date:** Shrey, 2026-05-22 (updated 2026-05-24 with operator answers + post-ablation PM params)
+
+**Decisions locked in (from operator):**
+- **Trading host: Tokyo** — PM is reachable; no geo-block workaround needed.
+- **Wallet model: single Polygon EOA**, operator-funded.
+- **Daily loss cap: $100** (prod parity with HL slots — no $25/$50 ramp on the cap).
+- **Scope: v3.1 only.** v1 (`late_resolution`) is **not** going to PM. No paper-only
+  step is requested; shadow infra still needed for risk-gate verification, but
+  the rollout target is real money on a dedicated third HL/PM account.
+- **Account topology: third (strategy, account) slot** alongside the existing
+  `v1` (HL) and `v31` (HL) slots — `account_alias: v31_pm` (new), runs the
+  same strategy class as `v31` but against PM.
+- **PM params: locked from post-ablation final-state (2026-05-23, commit `562e8f1`).**
+  Source: `config/tuning.v3-1-final-pm.yaml` + memory
+  [[v31-final-state-2026-05-23]]. See §3.5 / Appendix C for the exact knob
+  delta vs HL `v31`.
 
 This report scopes the work needed to take the **v3.1 strategy** (currently the
 `theta_harvester` strategy_type with the v3.1-tuned config — see
@@ -291,14 +306,16 @@ a single (strategy, venue) pair without affecting the HL slot.
 - **UMA-disputed resolutions**: rare but real. Don't book PnL until the
   dispute window closes. Detected by Gamma `resolved=true && resolved_at -
   now > 48h`.
-- **`exit_safety_d` value for PM**: the production `strategy.yaml:282` sets
-  `exit_safety_d: 1.0` (HL-tuned). The PM-fee-curve memory
-  ([[pm-fee-curve-2026-05-22]]) shows under realistic PM fees **d=0.5 wins
-  total PnL** ($438 net vs $396 at d=1.0). **Decide before live: use
-  d=0.5 PM config or d=1.0 HL config?** Recommend: per-venue config
-  override mirroring the existing per-`question.klass` override pattern
-  (`runtime.py:_cfg_by_class`), so PM gets `exit_safety_d=0.5` without
-  disturbing HL's `1.0`.
+- **`exit_safety_d` value for PM — SETTLED post-ablation (2026-05-23):** the
+  earlier d=0.5-vs-1.0 question is resolved. The final-state ablation memory
+  [[v31-final-state-2026-05-23]] and `config/tuning.v3-1-final-pm.yaml:33`
+  ship **`exit_safety_d: 1.0`** for PM ("d=0.9/1.0/1.1 cluster, 1.0 most
+  robust per-split"). The d=0.5 finding from [[pm-fee-curve-2026-05-22]] was
+  superseded by the round-2-through-5 ablations once `favorite_threshold` and
+  `edge_buffer` were jointly retuned. So **PM and HL share `exit_safety_d=1.0`**
+  — no per-venue override needed on this knob. The per-venue split *is* still
+  required for `favorite_threshold` / `edge_buffer` / `topup_enabled` /
+  `min_distance_pct` — see Appendix C.
 
 ---
 
@@ -360,46 +377,56 @@ orders, **never submit a signed CLOB transaction**. Validate:
 
 ## 5. Real-money rollout plan
 
-### 5.1 Capital sizing — start conservative
+### 5.1 Capital sizing — operator-locked
 
-- **Initial wallet balance**: $500 USDC on Polygon (covers 5 concurrent
-  $100 positions or 2.5 concurrent $200 positions; `max_total_inventory_usd:
-  500` already enforced).
-- **Initial `max_position_usd`**: **$50** (down from prod $200). Reason: PM
-  depth at favorites is thin; one $200 fill at 0.95 needs $190 of ask depth at
-  $0.95 — uncommon. Start at the depth that >80% of live ticks support.
-- **Daily loss cap**: $25 for first 2 weeks (down from $100). Twice the
-  expected per-trade loss; trips after ~3 catastrophic losers.
-- **Per-position stop-loss**: leave disabled (matches PM walk-forward best;
-  see memory `dynamic_sizing_negative_2026_05_19`).
-- **Gas float**: 20 MATIC (~$20). Monitor and top up when < 5.
+- **Wallet balance (operator-funded)**: ≥ $1,000 USDC on Polygon. Sized to
+  support `max_total_inventory_usd=1000` (= main HL prod, per
+  `strategy.yaml:139`) without bumping the cap into the live wallet.
+- **`max_position_usd: 200`** for PM — matches the post-ablation final-PM
+  config (`tuning.v3-1-final-pm.yaml:40`). The main `strategy.yaml`
+  HL slots ship `300` post-rebase (`:31, :82, :167, :191, :209`); PM stays
+  at the ablation-validated `200`. Walk-forward at `200` produced $1,295 PnL
+  / Sharpe 5.94 / maxDD $207 across 5 OOS splits.
+- **Daily loss cap: $100** (operator decision; matches HL prod
+  `strategy.yaml:222`). Trips after ~5 catastrophic full-position losers.
+- **Per-position stop-loss**: disabled (PM walk-forward best per memory
+  [[dynamic_sizing_negative_2026_05_19]]).
+- **Gas float**: 20 MATIC (~$20). Monitor; top up when < 5.
 
 ### 5.2 Market filtering
 
-For the first 30 days, restrict allowlist to **the most liquid PM market
-slug only**: `btc-up-or-down-daily` (binary, single market per day).
+For the first 30 days, restrict allowlist to **`btc-up-or-down-daily`** only.
 
-Additional pre-trade filters:
-- `total_volume_usd >= 50_000` over market lifetime (filters away thin
-  weekend / off-cycle markets).
-- Best-bid depth at entry leg ≥ $250 USDC.
-- Spread ≤ 1.5¢ at entry.
+Pre-trade filters (built into the existing `RiskGate` + the new PM-only
+depth gate from §3.1):
+- Allowlist match-class `priceBinary` only.
+- `min_recent_volume_usd: 100` (main config default, sufficient on this
+  liquid daily market).
+- Best-ask depth at entry leg ≥ `intent.size × 1.5` (depth-walk gate; see §3.1).
+- Spread ≤ 1.5¢ at entry (PM ticks are 0.001 → ≤ 15 ticks wide).
+- Operator-side gate: `favorite_threshold=0.90` (PM-tuned, vs HL's 0.85),
+  `edge_buffer=0.03` (vs HL's 0.02).
 
-Reconcile against `pm_fee_curve_2026_05_22` recommendation: ship v3.1 PM with
-**`exit_safety_d=0.5`** (PM-optimal) rather than 1.0 (HL prod value).
+### 5.3 Ramp schedule (revised — no paper-only phase)
 
-### 5.3 Ramp schedule
+Operator answer "real only v3.1" + "third account": skip the paper-only
+calendar weeks. **Position-size ramp still applies** to validate live
+microstructure (depth, slippage, on-chain finalization) before sitting at the
+ablation-recommended cap. The dedicated `v31_pm` account isolates blast
+radius — the existing HL `v1` and `v31` slots are unaffected.
 
-| Phase | Duration | `max_position_usd` | Daily cap | Notes |
-|-------|----------|-------------------:|----------:|-------|
-| Paper | 14 d     | 100 (simulated)    | n/a       | Shadow only |
-| Real T0 | 7 d    | 50                 | $25       | One leg at a time max (concurrent=1) |
-| Real T1 | 14 d   | 100                | $50       | Concurrent ≤ 2 |
-| Real T2 | open   | 200 (prod)         | $100      | Match HL prod caps |
+| Phase | Duration | `max_position_usd` | Daily cap | `max_concurrent_positions` | Notes |
+|-------|----------|-------------------:|----------:|----------------------:|-------|
+| Burn-in | 3 d  | 50                 | $25       | 1                     | Single market at a time; verify fill prices match backtest assumption ≤ 50 bps slip |
+| Ramp 1 | 7 d   | 100                | $50       | 2                     | Spread across consecutive daily markets |
+| Prod   | open  | 200 (ablation)     | $100      | 5 (HL parity)         | Final state — matches `tuning.v3-1-final-pm.yaml` |
 
-Promotion gate between phases: no `RiskVeto` storms, no manual interventions,
-realized hit-rate within 2σ of backtest expectation, fill-price slippage
-under 50 bps.
+Promotion gates between phases (all must hold):
+- No `OrderRejected` storms (≤ 1 per day, manually triaged).
+- No `RiskVeto.daily_loss_cap` firing.
+- Realized fill price within ±50 bps of intent `limit_price` on ≥ 80% of fills.
+- ≥ 1 settlement-driven exit cycle observed without spurious DRIFT alerts.
+- No manual intervention.
 
 ### 5.4 Monitoring dashboard requirements
 
@@ -455,42 +482,59 @@ and pipe into the same destination.
 
 ---
 
-## 7. Open questions / decisions for the user
+## 7. Resolved decisions + remaining open questions
 
-1. **Operator location**: Are you in a jurisdiction that can transact on PM?
-   PM blocks US IPs. The DoH workaround in `scripts/fetch_pm_with_doh.py`
-   handles **DNS** blocks but not **IP geo-blocks**. If geo-blocked,
-   shadow mode is fine but real-money requires a VPS in an allowed region.
+### Resolved (operator answers, 2026-05-24)
 
-2. **`exit_safety_d` value for PM**: ship 0.5 (PM-fee-curve memory's
-   PnL-best) or 1.0 (current prod, HL value)? Recommend **0.5** with a
-   per-venue override mechanism so HL keeps 1.0.
+| # | Question | Answer |
+|---|----------|--------|
+| 1 | Operator location | **Tokyo** — PM reachable, no geo-block workaround |
+| 2 | `exit_safety_d` PM value | **1.0** — settled by 2026-05-23 ablation, same as HL |
+| 3 | PM ablation params | Take from `config/tuning.v3-1-final-pm.yaml` (see Appendix C) |
+| 4 | Wallet model | **Single Polygon EOA**, operator-managed |
+| 5 | Funding source | **Operator-funded** — USDC.e procurement is operator's |
+| 6 | Daily loss cap | **$100** (HL prod parity; no ramp on the cap) |
+| 7 | Scope | **v3.1 only**, real money — no v1 PM slot |
+| 8 | Account topology | **Third (strategy, account) slot** — `account_alias: v31_pm` |
 
-3. **`tte_max_seconds` for PM**: the user mentioned PM was tuned with
-   `tte_max=14400` (4h); current prod config is 43200 (12h, HL-tuned).
-   Confirm which value to ship for PM — affects how early in a daily market
-   we accept entries.
+### Still open (need answers before P0 ships)
 
-4. **Wallet model**: a single Polygon EOA for trading, or hot/cold split
-   (cold custody, hot wallet topped up from cold weekly)? Cold split is
-   safer but adds operational overhead; given the $500 starting capital,
-   single hot EOA is fine.
+1. **`tte_max_seconds` for PM**: the ablation file pins `tte_max=86400`
+   (24h, `tuning.v3-1-final-pm.yaml:38`). HL ships 43200 (12h). PM daily
+   markets *expire* at 24h regardless; the question is whether we want to
+   accept entries with > 12h to expiry. Recommend keeping the
+   ablation value (`86400`) since that's what the OOS PnL was measured under.
+   Confirm.
 
-5. **Account funding source**: do you already have USDC.e on Polygon, or
-   does the rollout need to budget bridge time/fees from another chain?
+2. **Concurrent-position cap on PM**: ablation tested per-market not
+   cross-market. With `max_concurrent_positions=5` (HL prod parity) and PM
+   running one binary per day, the cap only binds across rollover windows
+   (a few minutes per day). OK to ship at 5, or tighten to e.g. 2?
 
-6. **Risk-cap appetite during ramp**: §5.3 proposes $25 → $50 → $100 daily
-   caps. Is that aggressive enough, or too aggressive? Backtest expectation
-   is ~ -$5 max worst trade at $50 size; a $25 cap permits ~5 consecutive
-   losers before halt.
+3. **EIP-712 key custody**: where does the Polygon private key live? Options:
+   - (a) Encrypted env var on the EC2 instance (matches HL key handling
+     today, `engine/config.py:HLConfig.api_secret_key`).
+   - (b) Hardware signer (Frame / Fireblocks) — slower but stronger.
+   Recommend (a) for parity with existing HL key handling, given single-EOA
+   model and ≤ $1,000 exposure cap.
 
-7. **Shadow → real promotion authority**: who signs off on each ramp
-   transition? Likely just you, but worth being explicit so the criteria in
-   §4.3 / §5.3 aren't quietly waived.
+4. **Tokyo host: re-use existing EC2 or new instance?** PM WS + Polygon RPC
+   add ~1–3 MB/s extra ingress. The existing t4g.micro should hold (the
+   memory note `deployment_topology` confirms recorder + engine already
+   share it with 1G swap headroom), but if Polygon RPC adds latency to the
+   1Hz scan loop, consider a separate `t4g.small` for the PM slot.
 
-8. **Multi-strategy-on-PM scope**: does v1 (`late_resolution`) also get a PM
-   shadow slot, or is this v3.1-only? Recommend v3.1-only for now;
-   `late_resolution` was HL-tuned and would need a separate PM walk-forward.
+5. **Polygon RPC provider**: Alchemy / QuickNode / Infura / self-hosted?
+   For ≤ 5 orders/day plus polling, free-tier Alchemy is plenty. Confirm
+   choice so the `PMConfig.polygon_rpc_url` value can be locked.
+
+6. **Settlement-PnL bookkeeping vs redemption lag**: PM resolves the
+   on-chain `condition.resolve` but USDC redemption can take minutes to
+   hours. Should the engine mark settled positions to 1.0/0.0 immediately
+   (and book PnL), or wait for the actual redemption tx? Recommend
+   immediate marking (matches existing `_close_settled` flow,
+   `router.py:353`), with a separate `RedemptionTimeout` alert if the tx
+   doesn't land within 6 hours.
 
 ---
 
@@ -517,15 +561,129 @@ and pipe into the same destination.
 | Engine deploy config | `hlanalysis/engine/config.py:149-234` |
 | Alerts pipeline | `hlanalysis/alerts/rules.py`, `telegram.py` |
 
+## Appendix C — PM-specific config delta (post-2026-05-23 ablation)
+
+Source: `config/tuning.v3-1-final-pm.yaml` + memory [[v31-final-state-2026-05-23]].
+Walk-forward PM result vs prior PM prod baseline (5 OOS splits, `pm_binary`/0.07):
+
+| Metric | PM prod baseline | Final-PM (ship) |
+|--------|-----------------:|----------------:|
+| PnL | $855 | **$1,295** (+51%) |
+| Sharpe | 3.07 | **5.94** |
+| Max DD | $508 | **$207** (-59%) |
+| Trades | 584 | 396 |
+| Per-split min | -$228 | **+$21** (all positive) |
+
+### Knob delta — what changes between HL `v31` and the new `v31_pm` slot
+
+| Knob | HL prod (current `v31`) | PM prod (new `v31_pm`) | Why |
+|------|------------------------|-----------------------|-----|
+| `favorite_threshold` | 0.85 | **0.90** | PM-curve fees reward selectivity; +$340 PnL / +2.81 Sharpe |
+| `edge_buffer` | 0.02 | **0.03** | Tighter entry bar; +$62 PnL on PM |
+| `topup_enabled` | true | **false** | PM has no partial fills; HL live MUST keep `true` |
+| `min_distance_pct` | null | null | Already disabled both sides |
+| `tte_max_seconds` | 43200 (12h) | **86400 (24h)** | PM markets are 24h; ablation tested at 24h |
+| `max_position_usd` | 300 (post-rebase) | **200** | Ablation OOS validated at 200; bump deferred for PM |
+| `min_bid_notional_usd` | 0 (theta defaults) / 10 (PM ablation) | **10** | Live safety gate per [[feedback-keep-safety-gates]] — kept even though bit-identical in backtest |
+| `exit_safety_d` | 1.0 | 1.0 | Same — d=0.9/1.0/1.1 cluster |
+| `exit_take_profit_mode` | true | true | Same |
+| `exit_fee` | 0.0007 | 0.0007 | Same |
+| `edge_max` | null (killed) | null | Same — killed 2026-05-24 |
+| `vol_clip_min` | 0.0 | 0.0 | Same — killed 2026-05-24 |
+
+### Concrete YAML stub (to drop into `config/strategy.yaml`)
+
+```yaml
+  # --- v3.1 Polymarket ---
+  - name: theta_harvester
+    account_alias: v31_pm                   # → deploy.hl_accounts.v31_pm (new)
+    strategy_type: theta_harvester
+    paper_mode: false
+
+    allowlist:
+      - match:
+          class: priceBinary
+          underlying: BTC
+        max_position_usd: 200
+        stop_loss_pct: null
+        tte_min_seconds: 0
+        tte_max_seconds: 86400              # PM 24h (vs HL 43200)
+        price_extreme_threshold: 0.0
+        price_extreme_max: 1.0
+        distance_from_strike_usd_min: 0
+        vol_max: 100
+        entry_cooldown_seconds: 60
+
+    blocklist_question_idxs: []
+
+    defaults:
+      match: {}
+      max_position_usd: 200
+      stop_loss_pct: null
+      tte_min_seconds: 0
+      tte_max_seconds: 86400
+      price_extreme_threshold: 0.0
+      price_extreme_max: 1.0
+      distance_from_strike_usd_min: 0
+      vol_max: 100
+      entry_cooldown_seconds: 60
+
+    global:
+      max_total_inventory_usd: 1000
+      max_concurrent_positions: 5
+      daily_loss_cap_usd: 100               # operator-locked
+      max_strike_distance_pct: 50
+      min_recent_volume_usd: 100
+      stale_data_halt_seconds: 30
+      reconcile_interval_seconds: 15
+      daily_window_start_hour_utc: 6
+
+    theta:
+      vol_lookback_seconds: 3600
+      vol_sampling_dt_seconds: 60
+      vol_clip_min: 0.0
+      vol_clip_max: 5.0
+      edge_buffer: 0.03                     # PM-tuned (vs HL 0.02)
+      fee_taker: 0.0
+      half_spread_assumption: 0.005
+      drift_lookback_seconds: 3600
+      drift_blend: 0.0
+      favorite_threshold: 0.90              # PM-tuned (vs HL 0.85)
+      edge_max: null
+      exit_edge_threshold: 0.0
+      time_stop_seconds: 0
+      exit_take_profit_mode: true
+      exit_fee: 0.0007
+      min_distance_pct: null
+      min_bid_notional_usd: 10.0            # safety gate, kept (see feedback memo)
+      topup_enabled: false                  # PM has no partial fills
+      topup_threshold_pct: 0.2
+      topup_min_notional_usd: 11.0
+      exit_safety_d: 1.0
+```
+
+The corresponding `deploy.yaml` needs an `hl_accounts.v31_pm` entry — but the
+field shape must change from `HLConfig` to a venue-typed config (`PMConfig`)
+per §2.3. The exact field set: `polygon_rpc_url`, `private_key`,
+`clob_api_key`, `clob_secret`, `clob_passphrase`, `clob_funder_address`.
+
 ## Appendix B — Cross-references to project memory
 
-- [[pm-fee-curve-2026-05-22]] — PM fee formula and v3.1-prod walkforward
-  impact (drives the d=0.5 vs d=1.0 decision in §3.5 / §7).
-- [[strategy_phase1]] — original near-resolution arb scope; v3.1 inherits
-  from this.
+- [[v31-final-state-2026-05-23]] — **load-bearing**: end-to-end v3.1 ablation
+  under PM-curve fees. Source of the PM `favorite_threshold=0.90`,
+  `edge_buffer=0.03`, `topup_enabled=false`, killed `edge_max` /
+  `vol_clip_min`. Confirms PM-tune does NOT transfer to HL (40% PnL hit).
+- [[feedback-keep-safety-gates]] — `min_bid_notional_usd=10` is bit-identical
+  in backtest but kept as live safety gate; same logic applies to other
+  defensive gates.
+- [[pm-fee-curve-2026-05-22]] — PM fee formula derivation. The original
+  d=0.5-vs-1.0 finding was superseded by the round-2-through-5 ablations once
+  `favorite_threshold` / `edge_buffer` were jointly retuned.
+- [[strategy_phase1]] — original near-resolution arb scope; v3.1 inherits.
 - [[dynamic_sizing_negative_2026_05_19]] — fixed-$100 beats safety-d-scaled
-  sizing on PM (informs §5.1 conservative cap choice).
+  sizing on PM; informs §5.1 sizing.
 - [[v3_2_volclock_smoke_2026_05_20]] / [[tau_removal_pm_2026_05_20]] —
   alternative vol estimators tested; v3.1 stays on sample_std.
-- [[deployment_topology]] — EC2 t4g.micro shared between recorder + engine;
-  PM slot fits inside existing footprint.
+- [[deployment_topology]] — EC2 shared between recorder + engine; PM slot
+  fits inside existing footprint (caveat in §7-Q4 if Polygon RPC latency
+  pressures the 1Hz scan loop).
