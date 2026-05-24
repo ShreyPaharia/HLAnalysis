@@ -1,11 +1,10 @@
 """Polymarket execution client. Implements ExecutionClient.
 
-Paper mode here is the same shape as HLClient.paper — synthesized
-OrderAcks, in-memory positions and fills. The strategy doesn't know it's
-paper; the engine wiring decides.
-
-Live mode (paper_mode=False) bootstrap and order I/O land in Phase 8 via
-py-clob-client-v2.
+Paper mode synthesizes OrderAcks, positions, and fills in-memory — same
+shape as HLClient.paper. Live mode wraps `py-clob-client-v2`: order
+placement uses `OrderType.FAK` for `time_in_force="ioc"` and
+`OrderType.GTC` for `"gtc"`. The SDK is imported and constructed lazily
+on first live call so paper-only tests don't need the dep installed.
 """
 from __future__ import annotations
 
@@ -50,10 +49,11 @@ class PMClient:
         self._paper_open: dict[str, OpenOrderRow] = {}
         self._paper_positions: dict[str, VenuePosition] = {}
         self._paper_fills: list[UserFillRow] = []
-        # Live SDK wiring lands in Phase 8. We do NOT import py-clob-client-v2
-        # here — even in live mode — so a misconfigured environment fails
-        # loudly at first order rather than at process startup.
-        self._live = None
+        # Live wiring. SDK is lazily constructed on first live call so paper
+        # tests and stub-credential constructions don't touch py-clob-client-v2.
+        # Tests inject a fake by setting `self._sdk` directly before any call.
+        self._sdk = None
+        self._cloid_to_oid: dict[str, str] = {}
 
     def place(self, req: PlaceRequest) -> OrderAck:
         if self.paper_mode:
@@ -66,9 +66,8 @@ class PMClient:
         return self._live_cancel(cloid=cloid, symbol=symbol)
 
     def open_orders(self) -> list[OpenOrderRow]:
-        # Live read-only paths return empty until Phase 8 wires in the CLOB
-        # client. This keeps engine boot (restart-drift, reconciler) clean
-        # for a misconfigured live slot — order I/O still raises on first use.
+        # Live read-only paths land in Task 8.4; place/cancel ship first
+        # so the engine boot path is clean.
         if self.paper_mode:
             return list(self._paper_open.values())
         return []
@@ -134,10 +133,98 @@ class PMClient:
         ))
         return ack
 
-    # ---- live stubs (filled in Phase 8) ----
+    # ---- live internals ----
+
+    def _ensure_sdk(self):
+        if self._sdk is not None:
+            return self._sdk
+        from py_clob_client_v2 import ApiCreds, ClobClient
+        self._sdk = ClobClient(
+            host=self._cfg["clob_host"],
+            chain_id=self._cfg["chain_id"],
+            key=self._cfg["private_key"],
+            creds=ApiCreds(
+                api_key=self._cfg["clob_api_key"],
+                api_secret=self._cfg["clob_api_secret"],
+                api_passphrase=self._cfg["clob_api_passphrase"],
+            ),
+        )
+        return self._sdk
 
     def _live_place(self, req: PlaceRequest) -> OrderAck:
-        raise NotImplementedError("Phase 8")
+        from py_clob_client_v2 import (
+            OrderArgs,
+            OrderType,
+            PartialCreateOrderOptions,
+            Side,
+        )
+        side = Side.BUY if req.side == "buy" else Side.SELL
+        order_type = OrderType.FAK if req.time_in_force == "ioc" else OrderType.GTC
+        try:
+            sdk = self._ensure_sdk()
+            resp = sdk.create_and_post_order(
+                order_args=OrderArgs(
+                    token_id=req.symbol,
+                    price=req.price,
+                    side=side,
+                    size=req.size,
+                ),
+                options=PartialCreateOrderOptions(tick_size="0.01"),
+                order_type=order_type,
+            )
+        except Exception as e:
+            return OrderAck(
+                cloid=req.cloid, venue_oid="", status="rejected",
+                error=str(e)[:200],
+            )
+        if not resp.get("success"):
+            return OrderAck(
+                cloid=req.cloid,
+                venue_oid=str(resp.get("orderID") or ""),
+                status="rejected",
+                error=str(resp.get("errorMsg", "unknown"))[:200],
+            )
+        oid = str(resp.get("orderID") or "")
+        if oid:
+            self._cloid_to_oid[req.cloid] = oid
+        making = float(resp.get("makingAmount") or 0)
+        taking = float(resp.get("takingAmount") or 0)
+        # For a BUY: maker spends USDC (taking), receives tokens (making).
+        #   size = makingAmount (tokens); price = takingAmount/makingAmount.
+        # For a SELL: maker spends tokens (making), receives USDC (taking).
+        #   size = makingAmount (tokens); price = takingAmount/makingAmount.
+        fill_size = making
+        if req.side == "buy":
+            fill_price = (taking / making) if making > 0 else req.price
+        else:
+            fill_price = (taking / making) if making > 0 else req.price
+        status = "filled" if fill_size > 0 else "open"
+        return OrderAck(
+            cloid=req.cloid, venue_oid=oid,
+            status=status, fill_price=fill_price, fill_size=fill_size,
+        )
 
     def _live_cancel(self, *, cloid: str, symbol: str) -> bool:
-        raise NotImplementedError("Phase 8")
+        # PM cancels by orderID, not cloid. We track cloid→orderID locally in
+        # _live_place. Orphans (no mapping) fail-soft to False.
+        oid = self._cloid_to_oid.get(cloid)
+        if not oid:
+            return False
+        from py_clob_client_v2 import OrderPayload
+        try:
+            sdk = self._ensure_sdk()
+            resp = sdk.cancel_order(OrderPayload(orderID=oid))
+        except Exception:
+            return False
+        if isinstance(resp, dict):
+            # CLOB returns {"canceled": [...], "not_canceled": {...}}.
+            canceled = resp.get("canceled") or []
+            if oid in canceled:
+                self._cloid_to_oid.pop(cloid, None)
+                return True
+            if resp.get("success"):
+                self._cloid_to_oid.pop(cloid, None)
+                return True
+            return False
+        return bool(resp)
+
