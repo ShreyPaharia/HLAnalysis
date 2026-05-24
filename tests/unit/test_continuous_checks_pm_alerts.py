@@ -1,13 +1,16 @@
-"""PM-only watchdog tests for `_pm_check_unconfirmed_orders`. The detector
-is pure against slot state, so we drive it with a SimpleNamespace stub and
-a real StateDAL instead of spinning up the full EngineRuntime.
+"""PM-only watchdog tests for `_pm_check_unconfirmed_orders` and
+`_pm_check_redemption_timeouts`. Both detectors are pure against slot state,
+so we drive them with a SimpleNamespace stub and a real StateDAL instead of
+spinning up the full EngineRuntime.
 """
 from __future__ import annotations
 
 from types import SimpleNamespace
 
 from hlanalysis.engine.runtime import (
+    PM_REDEMPTION_TIMEOUT_S,
     PM_UNCONFIRMED_THRESHOLD_S,
+    _pm_check_redemption_timeouts,
     _pm_check_unconfirmed_orders,
 )
 from hlanalysis.engine.state import OpenOrder, StateDAL
@@ -20,6 +23,8 @@ def _make_slot(tmp_path, *, alias: str = "v31_pm"):
         alias=alias,
         dal=dal,
         pm_alerted_unconfirmed_cloids=set(),
+        pm_settlements={},
+        pm_alerted_redemption_qidxs=set(),
     )
 
 
@@ -93,3 +98,46 @@ def test_unconfirmed_deduplicates_until_cloid_clears(tmp_path):
     )
     _pm_check_unconfirmed_orders(slot, now + 10_000_000_000)
     assert "hla-v31-c" not in slot.pm_alerted_unconfirmed_cloids
+
+
+def test_redemption_fires_past_threshold(tmp_path):
+    slot = _make_slot(tmp_path)
+    settled_ts = 1_000_000_000_000_000_000
+    # 7h old — past the 6h threshold
+    now = settled_ts + int((PM_REDEMPTION_TIMEOUT_S + 3600.0) * 1e9)
+    # Winner: realized_pnl > 0 → expected payout = qty
+    slot.pm_settlements[42] = (settled_ts, "0xdeadbeefcafebabe", 100.0, 30.0)
+    # Loser: realized_pnl < 0 → expected payout = 0
+    slot.pm_settlements[43] = (settled_ts, "0xabcd", 50.0, -25.0)
+
+    out = _pm_check_redemption_timeouts(slot, now)
+    assert len(out) == 2
+    by_q = {ev.question_idx: ev for ev in out}
+    assert by_q[42].expected_payout_usd == 100.0
+    assert by_q[43].expected_payout_usd == 0.0
+    assert by_q[42].age_seconds >= PM_REDEMPTION_TIMEOUT_S
+    assert slot.pm_alerted_redemption_qidxs == {42, 43}
+
+
+def test_redemption_silent_below_threshold(tmp_path):
+    slot = _make_slot(tmp_path)
+    settled_ts = 1_000_000_000_000_000_000
+    # 5h after settlement — under the 6h threshold
+    now = settled_ts + int((PM_REDEMPTION_TIMEOUT_S - 3600.0) * 1e9)
+    slot.pm_settlements[42] = (settled_ts, "0xdead", 100.0, 30.0)
+    out = _pm_check_redemption_timeouts(slot, now)
+    assert out == []
+    assert slot.pm_alerted_redemption_qidxs == set()
+
+
+def test_redemption_dedupes_after_first_emit(tmp_path):
+    slot = _make_slot(tmp_path)
+    settled_ts = 1_000_000_000_000_000_000
+    now = settled_ts + int((PM_REDEMPTION_TIMEOUT_S + 3600.0) * 1e9)
+    slot.pm_settlements[42] = (settled_ts, "0xdead", 100.0, 30.0)
+
+    first = _pm_check_redemption_timeouts(slot, now)
+    assert len(first) == 1
+    # Re-run an hour later — already alerted, must not re-emit
+    second = _pm_check_redemption_timeouts(slot, now + 3600 * 10**9)
+    assert second == []

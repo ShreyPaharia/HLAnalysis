@@ -127,11 +127,27 @@ class OrderUnconfirmed(_Base):
     venue_oid: str = ""
 
 
+class RedemptionTimeout(_Base):
+    """PM-specific: a settled position hasn't been redeemed on-chain within
+    the timeout window (default 6h after the settlement Exit fired). Without
+    a Polygon RPC integration we can't actually verify USDC inflow, so this
+    is a TIME-BASED watchdog only — operator verifies on PM UI and manually
+    redeems if needed. expected_payout_usd is qty when realized_pnl > 0
+    (winner) or 0 otherwise (loser)."""
+    kind: Literal["redemption_timeout"] = "redemption_timeout"
+    question_idx: int
+    symbol: str
+    qty: float
+    settled_ts_ns: int
+    age_seconds: float
+    expected_payout_usd: float
+
+
 BusEvent = Annotated[
     Union[
         RiskVeto, RiskHalt, StopLossTriggered, DailyLossHalt, StaleDataHalt,
         KillSwitchActivated, ReconcileDrift, Entry, Exit, NewQuestion,
-        OrderRejected, OrderUnconfirmed,
+        OrderRejected, OrderUnconfirmed, RedemptionTimeout,
     ],
     Field(discriminator="kind"),
 ]

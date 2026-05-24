@@ -23,8 +23,8 @@ from loguru import logger
 from ..engine.event_bus import EventBus
 from ..engine.risk_events import (
     BusEvent, DailyLossHalt, Entry, Exit, KillSwitchActivated, NewQuestion,
-    OrderRejected, OrderUnconfirmed, ReconcileDrift, RiskHalt, RiskVeto,
-    StaleDataHalt, StopLossTriggered,
+    OrderRejected, OrderUnconfirmed, ReconcileDrift, RedemptionTimeout,
+    RiskHalt, RiskVeto, StaleDataHalt, StopLossTriggered,
 )
 
 
@@ -183,6 +183,15 @@ class AlertRules:
                     f"⚠️ <b>ORDER UNCONFIRMED</b> cloid=<code>{_e(ev.cloid)}</code> "
                     f"{ev.side} {ev.size:g}@{ev.limit_price:.4f} "
                     f"age={ev.age_seconds:.0f}s"
+                )
+            case RedemptionTimeout():
+                age_hours = ev.age_seconds / 3600.0
+                sym_short = ev.symbol[:8]
+                return f"redempt:{ev.question_idx}", (
+                    f"⏰ <b>REDEMPTION TIMEOUT</b> q={ev.question_idx} "
+                    f"sym=<code>{_e(sym_short)}...</code> qty={ev.qty:g} "
+                    f"expected=${ev.expected_payout_usd:.2f} "
+                    f"settled={age_hours:.1f}h ago"
                 )
             case NewQuestion():
                 lines = ["📣 <b>NEW MARKET</b>"]

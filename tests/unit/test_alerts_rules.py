@@ -9,7 +9,7 @@ from hlanalysis.alerts.rules import AlertRules
 from hlanalysis.engine.event_bus import EventBus
 from hlanalysis.engine.risk_events import (
     DailyLossHalt, Entry, Exit, KillSwitchActivated, OrderRejected,
-    OrderUnconfirmed, ReconcileDrift, RiskVeto,
+    OrderUnconfirmed, ReconcileDrift, RedemptionTimeout, RiskVeto,
 )
 
 
@@ -176,6 +176,45 @@ async def test_order_unconfirmed_formats_with_age_and_cloid():
     assert any("hla-v31-abc" in m and "45s" in m for m in unconf_msgs)
     assert any("hla-v31-xyz" in m and "33s" in m for m in unconf_msgs)
     assert all("[v31_pm]" in m for m in unconf_msgs)
+
+
+@pytest.mark.asyncio
+async def test_redemption_timeout_formats_with_age_hours():
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    settled_ts = 1_700_000_000_000_000_000
+    # Winner with expected $100 payout
+    await bus.publish(RedemptionTimeout(
+        ts_ns=settled_ts + 6 * 3600 * 10**9, account_alias="v31_pm",
+        question_idx=42, symbol="0xabcdef0123456789", qty=100.0,
+        settled_ts_ns=settled_ts, age_seconds=6.5 * 3600.0,
+        expected_payout_usd=100.0,
+    ))
+    # Loser: $0 expected
+    await bus.publish(RedemptionTimeout(
+        ts_ns=settled_ts + 7 * 3600 * 10**9, account_alias="v31_pm",
+        question_idx=43, symbol="0x1234567890abcdef", qty=50.0,
+        settled_ts_ns=settled_ts, age_seconds=7.0 * 3600.0,
+        expected_payout_usd=0.0,
+    ))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    redempt_msgs = [m for m in tg.messages if "REDEMPTION TIMEOUT" in m]
+    assert len(redempt_msgs) == 2
+    # Winner: $100.00 expected, 6.5h age, symbol truncated
+    assert any(
+        "q=42" in m and "100.00" in m and "6.5h" in m and "0xabcdef" in m
+        for m in redempt_msgs
+    )
+    # Loser: $0.00 expected
+    assert any("q=43" in m and "0.00" in m and "7.0h" in m for m in redempt_msgs)
 
 
 @pytest.mark.asyncio
