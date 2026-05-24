@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -174,11 +174,37 @@ class StrategiesConfig(BaseModel):
     strategies: list[StrategyConfig]
 
 
-class HLConfig(BaseModel):
+class _AccountBase(BaseModel):
     model_config = ConfigDict(frozen=True)
+    venue: str  # discriminator
+
+
+class HyperliquidAccount(_AccountBase):
+    venue: Literal["hyperliquid"] = "hyperliquid"
     account_address: str
     api_secret_key: str
     base_url: str
+
+
+class PolymarketAccount(_AccountBase):
+    venue: Literal["polymarket"] = "polymarket"
+    clob_host: str = "https://clob.polymarket.com"
+    chain_id: int = 137
+    private_key: str
+    clob_api_key: str
+    clob_api_secret: str
+    clob_api_passphrase: str
+
+
+AccountConfig = Annotated[
+    HyperliquidAccount | PolymarketAccount,
+    Field(discriminator="venue"),
+]
+
+
+# Back-compat alias — many tests still import HLConfig by name. Drop in a
+# follow-up release once call sites switch.
+HLConfig = HyperliquidAccount
 
 
 class TelegramConfig(BaseModel):
@@ -195,33 +221,17 @@ class AlertsConfig(BaseModel):
 class DeployConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
     env: str
-    # Multi-account: alias -> HLConfig. Legacy 'hl:' single-block YAMLs are
-    # auto-wrapped into {"default": HLConfig(...)} by load_deploy_config.
-    hl_accounts: dict[str, HLConfig]
+    accounts: dict[str, AccountConfig]
     alerts: AlertsConfig
     state_db_path: str
     kill_switch_path: str
-
-    # Convenience back-compat: callers that still reach for `.hl` get the
-    # single account when there's only one, or the "default" entry. New code
-    # should use hl_accounts[alias] directly.
-    @property
-    def hl(self) -> HLConfig:
-        if "default" in self.hl_accounts:
-            return self.hl_accounts["default"]
-        if len(self.hl_accounts) == 1:
-            return next(iter(self.hl_accounts.values()))
-        raise KeyError(
-            "DeployConfig.hl is ambiguous with multiple hl_accounts; "
-            "use deploy_cfg.hl_accounts[alias] instead."
-        )
 
     def state_db_path_for(self, alias: str) -> str:
         """Per-account state DB path. Multiple accounts → namespaced subdir;
         single 'default' account → legacy flat path so existing deployments
         don't see their state.db move."""
         base = Path(self.state_db_path)
-        if len(self.hl_accounts) <= 1 and alias == "default":
+        if len(self.accounts) <= 1 and alias == "default":
             return str(base)
         return str(base.parent / alias / base.name)
 
@@ -229,9 +239,16 @@ class DeployConfig(BaseModel):
         """Per-account kill switch (so an operator can halt one strategy
         without killing both). Same namespacing rule as state_db_path_for."""
         base = Path(self.kill_switch_path)
-        if len(self.hl_accounts) <= 1 and alias == "default":
+        if len(self.accounts) <= 1 and alias == "default":
             return str(base)
         return str(base.parent / alias / base.name)
+
+
+# Back-compat property: monitoring code reads `.hl_accounts` directly.
+# Kept as a read-only view; remove after the call sites are migrated.
+def _hl_accounts(self: "DeployConfig") -> dict[str, HyperliquidAccount]:
+    return {a: c for a, c in self.accounts.items() if isinstance(c, HyperliquidAccount)}
+DeployConfig.hl_accounts = property(_hl_accounts)  # type: ignore[assignment]
 
 
 def load_strategy_config(path: Path) -> StrategyConfig:
@@ -285,12 +302,12 @@ def load_deploy_config(path: Path) -> DeployConfig:
         raw = yaml.safe_load(f)
     raw = _substitute_env(raw)
     deploy = raw["deploy"]
-    # Accept both new `hl_accounts: {alias: {...}}` and legacy single `hl: {...}`.
-    if "hl_accounts" not in deploy:
-        if "hl" not in deploy:
-            raise ValueError(f"{path}: deploy must define 'hl_accounts' or 'hl'")
-        deploy = dict(deploy)
-        deploy["hl_accounts"] = {"default": deploy.pop("hl")}
+    if "accounts" not in deploy:
+        raise ValueError(
+            f"{path}: deploy must define `accounts:` (venue-typed). "
+            "Legacy `hl_accounts:` / `hl:` are no longer supported; see "
+            "DEPLOYMENT.md for migration."
+        )
     return DeployConfig(**deploy)
 
 

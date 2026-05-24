@@ -161,3 +161,37 @@ def test_deploy_config_missing_env_raises(monkeypatch, tmp_path):
     p.write_text(Path("config/deploy.yaml").read_text())
     with pytest.raises(ValueError):
         load_deploy_config(p)
+
+
+def test_account_config_discriminates_on_venue(tmp_path):
+    from hlanalysis.engine.config import HyperliquidAccount, PolymarketAccount
+
+    deploy_yaml = tmp_path / "deploy.yaml"
+    deploy_yaml.write_text("""
+deploy:
+  env: test
+  accounts:
+    v1:
+      venue: hyperliquid
+      account_address: "0xabc"
+      api_secret_key: "0xdef"
+      base_url: https://api.hyperliquid.xyz
+    v31_pm:
+      venue: polymarket
+      clob_host: https://clob.polymarket.com
+      chain_id: 137
+      private_key: "0xfeed"
+      clob_api_key: "ak"
+      clob_api_secret: "as"
+      clob_api_passphrase: "ap"
+  alerts:
+    telegram:
+      bot_token: T
+      chat_id: C
+  state_db_path: data/engine/state.db
+  kill_switch_path: data/engine/halt
+""")
+    cfg = load_deploy_config(deploy_yaml)
+    assert isinstance(cfg.accounts["v1"], HyperliquidAccount)
+    assert isinstance(cfg.accounts["v31_pm"], PolymarketAccount)
+    assert cfg.accounts["v31_pm"].chain_id == 137

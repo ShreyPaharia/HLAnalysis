@@ -116,7 +116,7 @@ def _v1b_strategy() -> StrategyConfig:
 def deploy_cfg(tmp_path):
     return DeployConfig(
         env="dev",
-        hl_accounts={
+        accounts={
             "v1": HLConfig(
                 account_address="0xv1", api_secret_key="0xv1",
                 base_url="https://api.hyperliquid.xyz",

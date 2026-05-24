@@ -108,7 +108,7 @@ def cfgs(tmp_path):
     )
     deploy = DeployConfig(
         env="dev",
-        hl_accounts={"default": HLConfig(
+        accounts={"default": HLConfig(
             account_address="0x", api_secret_key="0x",
             base_url="https://api.hyperliquid.xyz",
         )},
