@@ -144,6 +144,14 @@ class ThetaParams(BaseModel):
     # See ThetaHarvesterConfig.exit_take_profit_mode / exit_fee.
     exit_take_profit_mode: bool = False
     exit_fee: float = 0.0007
+    # Fee model selector. Plumbed into ThetaHarvesterConfig in Phase 7; the
+    # strategy ignores these fields today, but they MUST round-trip cleanly
+    # through YAML now so the v31_pm slot config is stable across phases.
+    #   "flat"      → existing behaviour: fee = fee_taker (per-leg fixed bps)
+    #   "pm_binary" → Polymarket curve: fee = C · fee_rate · p · (1−p)
+    # Default "flat" / 0.0 preserves HL v31 bit-identically.
+    fee_model: Literal["flat", "pm_binary"] = "flat"
+    fee_rate: float = 0.0
 
 
 class StrategyConfig(BaseModel):

@@ -16,6 +16,17 @@ deploy:
       account_address: ${HL_ACCOUNT_ADDRESS_V31}
       api_secret_key: ${HL_API_SECRET_KEY_V31}
       base_url: https://api.hyperliquid.xyz
+    # Polymarket CLOB slot for v3.1 strategy. Paper-only until Phase 8 of the
+    # v3.1-PM plan wires py-clob-client-v2; live mode requires all four
+    # `clob_api_*` creds plus the Polygon `private_key` for L1 signing.
+    v31_pm:
+      venue: polymarket
+      clob_host: https://clob.polymarket.com
+      chain_id: 137
+      private_key: ${PM_PRIVATE_KEY}
+      clob_api_key: ${PM_CLOB_API_KEY}
+      clob_api_secret: ${PM_CLOB_API_SECRET}
+      clob_api_passphrase: ${PM_CLOB_API_PASSPHRASE}
   alerts:
     telegram:
       bot_token: ${TG_BOT_TOKEN}

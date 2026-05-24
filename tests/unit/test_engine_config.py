@@ -147,12 +147,20 @@ def test_deploy_config_substitutes_env(monkeypatch, tmp_path):
     monkeypatch.setenv("HL_API_SECRET_KEY_V31", "secret-v31")
     monkeypatch.setenv("TG_BOT_TOKEN", "tg-token")
     monkeypatch.setenv("TG_CHAT_ID", "12345")
+    # PM v31_pm slot was added in Phase 5; deploy.yaml references these four
+    # Polymarket env vars. They MUST be set for the production config to load.
+    monkeypatch.setenv("PM_PRIVATE_KEY", "0xstub")
+    monkeypatch.setenv("PM_CLOB_API_KEY", "stub-key")
+    monkeypatch.setenv("PM_CLOB_API_SECRET", "stub-secret")
+    monkeypatch.setenv("PM_CLOB_API_PASSPHRASE", "stub-pass")
     p = tmp_path / "deploy.yaml"
     p.write_text(Path("config/deploy.yaml").read_text())
     cfg = load_deploy_config(p)
     assert cfg.hl_accounts["v1"].account_address == "0xdeadbeef"
     assert cfg.hl_accounts["v31"].account_address == "0xv31"
     assert cfg.alerts.telegram.bot_token == "tg-token"
+    assert "v31_pm" in cfg.accounts
+    assert cfg.accounts["v31_pm"].chain_id == 137
 
 
 def test_deploy_config_missing_env_raises(monkeypatch, tmp_path):
