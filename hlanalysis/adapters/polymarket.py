@@ -33,6 +33,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import websockets
+import websockets.exceptions
 
 from ..config import Subscription
 from ..events import HealthEvent, Mechanism, NormalizedEvent, ProductType
@@ -127,15 +128,34 @@ class PolymarketAdapter(VenueAdapter):
                                  "Gamma returned 0 active markets")
                 )
                 return
-            ws_ctx = self._ws_factory(_WS_URL)
-            async with ws_ctx as ws:
-                await ws.send(json.dumps({
-                    "type": "market",
-                    "assets_ids": sorted(active_tokens),
-                }))
-                while True:
-                    raw = await ws.recv()
-                    self._dispatch_frame(raw, queue)
+            backoff = 1.0
+            while True:
+                try:
+                    ws_ctx = self._ws_factory(_WS_URL)
+                    async with ws_ctx as ws:
+                        await ws.send(json.dumps({
+                            "type": "market",
+                            "assets_ids": sorted(active_tokens),
+                        }))
+                        await queue.put(self._health(
+                            "subscribed", f"{len(active_tokens)} tokens",
+                        ))
+                        backoff = 1.0  # reset on successful (re)connect
+                        while True:
+                            raw = await ws.recv()
+                            self._dispatch_frame(raw, queue)
+                except asyncio.CancelledError:
+                    raise
+                except (
+                    websockets.exceptions.ConnectionClosed,
+                    OSError,
+                    asyncio.IncompleteReadError,
+                ) as e:
+                    await queue.put(
+                        self._health("reconnect", str(e)[:200])
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 30.0)
 
         tasks = [
             asyncio.create_task(_ws_loop()),
