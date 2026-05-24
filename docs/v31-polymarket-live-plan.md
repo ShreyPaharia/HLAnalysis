@@ -161,16 +161,31 @@ PM order entry runs over an EIP-712 signed payload to the CLOB REST API on
 Polygon, plus on-chain settlement for fills. Concretely:
 
 - **Auth model**: Polygon EOA + L2 API key registered with the PM CLOB. Two
-  signatures per order (CLOB API auth signature; order-payload EIP-712).
-  Library: `py-clob-client` (PyPI, official) — **not currently in
-  `pyproject.toml`**.
+  layers (per `py-clob-client-v2` README): **L1** EIP-712 wallet signature to
+  create / derive API key; **L2** HMAC with the derived `(api_key, api_secret,
+  api_passphrase)` for order placement / cancel / account-read.
+  - Library: **`py-clob-client-v2` 1.0.1** (PyPI, official). The original
+    `py-clob-client` was **archived on GitHub 2026-05-11** alongside the TS
+    `clob-client` — both superseded by `-v2` variants. Deps:
+    `eth-account>=0.13`, `eth-abi>=5.0`, `poly_eip712_structs>=0.0.1`,
+    `py-order-utils>=0.3.2`, `httpx[http2]>=0.27`.
+  - **No Python WS SDK from Polymarket** — `real-time-data-client` is
+    TypeScript-only. The Python live adapter must wrap PM's WS directly on
+    `websockets` (already a project dep via `hyperliquid.py`).
 - **Funding model**: USDC.e on Polygon for collateral; small MATIC bag for
   gas on approvals/withdrawals. No margin: it is fully collateralized — each
   contract you hold costs $1, fills clamp into [0,1]. Maps cleanly onto the
   existing `max_position_usd` cap.
-- **Order types**:
-  - GTC limit, GTD limit, FOK, FAK (PM's term for IOC-like).
-  - The strategy emits `time_in_force="ioc"` — must map to PM `FAK`.
+- **Order types** (per `py-clob-client-v2` `examples/orders/`):
+  - `OrderType.GTC` / `OrderType.GTD` (resting limits).
+  - `OrderType.FOK` (all-or-cancel immediate).
+  - `OrderType.FAK` ("fills as much as possible, remainder cancelled") —
+    **direct map for our `time_in_force="ioc"`**. The `marketable_limit_buy.py`
+    / `marketable_limit_sell.py` examples show the exact pattern (a marketable
+    limit with FAK semantics = our IOC).
+  - Market orders also supported (`create_and_post_market_order` with
+    `MarketOrderArgs.amount` in USDC). The strategy still emits a price; stick
+    with FAK on a marketable limit so slippage stays bounded.
   - `reduce_only` doesn't exist on PM (long-only collateralized YES/NO
     contracts). Same workaround the HL client uses for HIP-4
     (`hl_client.py:271`): strip the flag, rely on Router's position
@@ -200,9 +215,15 @@ Polygon, plus on-chain settlement for fills. Concretely:
 ### 2.3 Account-side wiring
 
 - `HLConfig` (`engine/config.py:177-181`) is HL-specific. Needs a sibling
-  `PMConfig` with: `polygon_rpc_url`, `private_key` (or signer reference),
-  `clob_api_key`, `clob_secret`, `clob_passphrase`, `usdc_address`,
-  `clob_exchange_address`.
+  `PMConfig` matching the `py-clob-client-v2.ClobClient` constructor surface:
+  `clob_host` (e.g. `https://clob.polymarket.com`), `chain_id` (137 mainnet
+  / 80002 Amoy), `private_key` (EOA L1 key), and the persisted L2 triple
+  `clob_api_key` / `clob_api_secret` / `clob_api_passphrase` (derived once
+  via `client.create_or_derive_api_key()` and saved to `deploy.yaml` so the
+  engine doesn't re-derive every restart). Polygon RPC URL is **not** needed
+  for CLOB I/O (the SDK talks HTTPS to PM's REST/WS — Polygon RPC is only
+  needed for direct token approvals / redemptions, which can be a manual
+  one-time setup step).
 - `DeployConfig.hl_accounts` (`engine/config.py:200`) becomes
   `accounts: dict[str, HLConfig | PMConfig]` — or split into separate
   dicts keyed by venue. The runtime's per-slot factory
@@ -465,9 +486,11 @@ and pipe into the same destination.
    config has been re-tuned under `--fee-model pm_binary --fee-rate 0.07`
    (per memory note, this is already supported in the backtester).
 6. Depth-walk slippage gate in `RiskGate` (PM-only; HL is unaffected).
-7. `PMClient(paper_mode=False)` — `py-clob-client` integration, EIP-712
-   signing, FAK order mapping, status polling, on-chain finalization
-   handling.
+7. `PMClient(paper_mode=False)` — `py-clob-client-v2` integration:
+   `create_or_derive_api_key()` bootstrap (one-time, persisted to
+   `deploy.yaml`), `create_and_post_order(OrderArgs, OrderType.FAK)` for
+   IOC, `cancel_order(order_id)`, `get_orders` / `get_balance_allowance` /
+   `get_trades` for the read path.
 8. PM settlement detection path (Gamma `/events` resolution poll →
    `SettlementEvent` → existing `_close_settled` flow).
 9. `GasLow` / `OnchainPending` alert rules.
@@ -524,9 +547,14 @@ and pipe into the same destination.
    share it with 1G swap headroom), but if Polygon RPC adds latency to the
    1Hz scan loop, consider a separate `t4g.small` for the PM slot.
 
-5. **Polygon RPC provider**: Alchemy / QuickNode / Infura / self-hosted?
-   For ≤ 5 orders/day plus polling, free-tier Alchemy is plenty. Confirm
-   choice so the `PMConfig.polygon_rpc_url` value can be locked.
+5. **Polygon RPC provider** *(may be unnecessary)*: `py-clob-client-v2` does
+   all order I/O over HTTPS against `clob.polymarket.com` — no direct
+   Polygon RPC calls. RPC is only needed for one-off operations: USDC
+   approval to the CTF exchange (one tx, can be done via MetaMask manually)
+   and redemption sweeps after settlement (also one-off per market). For
+   ≤ 5 orders/day this is *not* a hot-path dependency. Recommend: skip
+   RPC integration for v1; do the approvals manually via the PM UI.
+   Revisit only if we need programmatic redemption.
 
 6. **Settlement-PnL bookkeeping vs redemption lag**: PM resolves the
    on-chain `condition.resolve` but USDC redemption can take minutes to
@@ -664,8 +692,9 @@ Walk-forward PM result vs prior PM prod baseline (5 OOS splits, `pm_binary`/0.07
 
 The corresponding `deploy.yaml` needs an `hl_accounts.v31_pm` entry — but the
 field shape must change from `HLConfig` to a venue-typed config (`PMConfig`)
-per §2.3. The exact field set: `polygon_rpc_url`, `private_key`,
-`clob_api_key`, `clob_secret`, `clob_passphrase`, `clob_funder_address`.
+per §2.3. Exact fields (mirroring `py-clob-client-v2.ClobClient`):
+`clob_host`, `chain_id`, `private_key`, `clob_api_key`, `clob_api_secret`,
+`clob_api_passphrase`.
 
 ## Appendix B — Cross-references to project memory
 
