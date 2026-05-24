@@ -34,7 +34,7 @@ grids:
     edge_max: [0.20]
     min_distance_pct: [0.002]              # PM keeps the 0.002 floor (per prod comment)
     min_bid_notional_usd: [10.0]
-    max_position_usd: [300.0]              # tracks prod (bumped 200→300 2026-05-24)
+    max_position_usd: [500.0]              # tracks prod (bumped 300→500 2026-05-24)
     stop_loss_pct: [null]
     exit_edge_threshold: [0.0]
     take_profit_price: [null]

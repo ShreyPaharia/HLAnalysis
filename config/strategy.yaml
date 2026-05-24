@@ -164,7 +164,7 @@ strategies:
       - match:
           class: priceBinary
           underlying: BTC
-        max_position_usd: 300             # bumped 200→300 2026-05-24
+        max_position_usd: 500             # bumped 300→500 2026-05-24
         stop_loss_pct: null              # theta_harvester drives exits off edge, not stop-loss
         tte_min_seconds: 0
         # 2026-05-21: 14400 → 43200 (4h → 12h). The original 4h cap was
@@ -188,7 +188,7 @@ strategies:
       - match:
           class: priceBucket
           underlying: BTC
-        max_position_usd: 300             # bumped 200→300 2026-05-24
+        max_position_usd: 500             # bumped 300→500 2026-05-24
         stop_loss_pct: null
         tte_min_seconds: 0
         # 2026-05-21: 86400 → 43200. Post-σ-fix HL sweep: bucket leg at 12h
@@ -206,7 +206,7 @@ strategies:
 
     defaults:
       match: {}
-      max_position_usd: 300
+      max_position_usd: 500
       stop_loss_pct: null
       tte_min_seconds: 0
       tte_max_seconds: 43200              # mirror priceBinary/Bucket allowlist — engine reads ThetaHarvesterConfig.tte_max from defaults
