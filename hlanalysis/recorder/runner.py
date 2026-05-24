@@ -9,6 +9,7 @@ from pathlib import Path
 from ..adapters.base import VenueAdapter
 from ..adapters.binance import BinanceAdapter
 from ..adapters.hyperliquid import HyperliquidAdapter
+from ..adapters.polymarket import PolymarketAdapter
 from ..config import Subscription, load_config
 from .writer import ParquetWriter
 
@@ -17,6 +18,7 @@ log = logging.getLogger(__name__)
 ADAPTERS: dict[str, type[VenueAdapter]] = {
     "hyperliquid": HyperliquidAdapter,
     "binance": BinanceAdapter,
+    "polymarket": PolymarketAdapter,
 }
 
 

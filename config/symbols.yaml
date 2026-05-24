@@ -48,3 +48,16 @@ subscriptions:
     mechanism: clob
     symbol: BTCUSDT
     channels: [trades, book, bbo]
+
+  # Polymarket BTC Up/Down daily binary — read-side feed for the new
+  # v31_pm engine slot. Wildcard `*` symbol so the adapter discovers
+  # currently-active markets via Gamma and subscribes their token IDs.
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: BTC
+      class: priceBinary
+      series_slug: btc-up-or-down-daily
