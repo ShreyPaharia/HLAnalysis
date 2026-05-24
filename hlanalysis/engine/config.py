@@ -100,6 +100,12 @@ class GlobalRiskConfig(BaseModel):
     min_recent_volume_usd: float
     stale_data_halt_seconds: int
     reconcile_interval_seconds: int
+    # Maximum tolerated realized-fill slippage as a fraction of intent
+    # limit_price (depth-walk gate). 0 disables; PM ships ~0.005
+    # (~0.5¢ at a 0.95-favorite leg). HL slots keep this at 0 because the
+    # BboEvent path doesn't populate BookState.ask_levels and the gate is a
+    # no-op without ladder data.
+    max_slippage_pct: float = 0.0
     # Hour-of-day in UTC when the "daily" PnL accounting window resets.
     # Default 0 = UTC midnight (legacy). Set to 6 to align with HL HIP-4
     # binary settlement (markets resolve at 06:00 UTC = 11:30 IST). Aligning

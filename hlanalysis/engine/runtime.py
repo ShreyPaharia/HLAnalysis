@@ -158,6 +158,8 @@ def build_theta_harvester_config(cfg: StrategyConfig) -> ThetaHarvesterConfig:
         topup_min_notional_usd=getattr(t, "topup_min_notional_usd", 11.0),
         exit_take_profit_mode=getattr(t, "exit_take_profit_mode", False),
         exit_fee=getattr(t, "exit_fee", 0.0007),
+        fee_model=getattr(t, "fee_model", "flat"),
+        fee_rate=getattr(t, "fee_rate", 0.0),
     )
 
 
