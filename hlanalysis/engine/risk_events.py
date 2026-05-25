@@ -111,11 +111,43 @@ class OrderRejected(_Base):
     error: str = ""
 
 
+class OrderUnconfirmed(_Base):
+    """PM-specific: a place() returned status=open but the order has sat in
+    flight past the unconfirmed threshold (default 30s) without a status
+    change. Polymarket CLOB orders can stall under chain load; this gives
+    operators an early warning so they can investigate before the position
+    sizing assumption breaks down."""
+    kind: Literal["order_unconfirmed"] = "order_unconfirmed"
+    cloid: str
+    symbol: str
+    side: Literal["buy", "sell"]
+    size: float
+    limit_price: float
+    age_seconds: float
+    venue_oid: str = ""
+
+
+class RedemptionTimeout(_Base):
+    """PM-specific: a settled position hasn't been redeemed on-chain within
+    the timeout window (default 6h after the settlement Exit fired). Without
+    a Polygon RPC integration we can't actually verify USDC inflow, so this
+    is a TIME-BASED watchdog only — operator verifies on PM UI and manually
+    redeems if needed. expected_payout_usd is qty when realized_pnl > 0
+    (winner) or 0 otherwise (loser)."""
+    kind: Literal["redemption_timeout"] = "redemption_timeout"
+    question_idx: int
+    symbol: str
+    qty: float
+    settled_ts_ns: int
+    age_seconds: float
+    expected_payout_usd: float
+
+
 BusEvent = Annotated[
     Union[
         RiskVeto, RiskHalt, StopLossTriggered, DailyLossHalt, StaleDataHalt,
         KillSwitchActivated, ReconcileDrift, Entry, Exit, NewQuestion,
-        OrderRejected,
+        OrderRejected, OrderUnconfirmed, RedemptionTimeout,
     ],
     Field(discriminator="kind"),
 ]

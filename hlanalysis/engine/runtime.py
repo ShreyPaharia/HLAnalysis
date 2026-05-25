@@ -31,8 +31,8 @@ from .reconcile import Reconciler
 from .restart_drift import RestartDriftGate
 from .risk import RiskGate
 from .risk_events import (
-    DailyLossHalt, Exit, KillSwitchActivated, NewQuestion, StaleDataHalt,
-    StopLossTriggered,
+    DailyLossHalt, Exit, KillSwitchActivated, NewQuestion, OrderUnconfirmed,
+    RedemptionTimeout, StaleDataHalt, StopLossTriggered,
 )
 from .router import Router
 from .scanner import Scanner
@@ -46,6 +46,84 @@ from ..strategy.late_resolution import (
 from ..strategy.theta_harvester import (
     ThetaHarvesterConfig, ThetaHarvesterStrategy,
 )
+
+
+# PM unconfirmed-order watchdog: OrderUnconfirmed fires once a live PM order
+# has sat in flight (status=open/pending/partially_filled) past this threshold
+# without a status change. 30s gives PM CLOB plenty of room under heavy chain
+# load while still surfacing stuck orders before the next scan tick would
+# top up on top of stale state.
+PM_UNCONFIRMED_THRESHOLD_S: float = 30.0
+
+# PM redemption watchdog: RedemptionTimeout fires this long after the
+# settlement Exit if the operator hasn't redeemed yet (we don't watch USDC
+# on-chain). 6h is a generous window that catches genuinely-forgotten
+# settlements without nagging through the normal redemption flow.
+PM_REDEMPTION_TIMEOUT_S: float = 6 * 3600.0
+
+
+def _pm_check_unconfirmed_orders(
+    slot: "AccountSlot", now_ns: int, *,
+    threshold_s: float = PM_UNCONFIRMED_THRESHOLD_S,
+) -> list[OrderUnconfirmed]:
+    """Pure detector: scan slot.dal.live_orders() and return one
+    OrderUnconfirmed for each open order older than threshold_s that hasn't
+    already alerted. Mutates `slot.pm_alerted_unconfirmed_cloids` to record
+    new alerts and to evict cloids no longer live.
+    """
+    live = slot.dal.live_orders()
+    live_cloids: set[str] = {o.cloid for o in live}
+    # Garbage-collect alerted set so a re-placed order with the same cloid
+    # would re-fire after its next stall. Without this, the set grows
+    # unbounded over the process lifetime.
+    slot.pm_alerted_unconfirmed_cloids &= live_cloids
+    out: list[OrderUnconfirmed] = []
+    for o in live:
+        if o.status != "open":
+            continue
+        age_s = (now_ns - o.last_update_ts_ns) / 1e9
+        if age_s < threshold_s:
+            continue
+        if o.cloid in slot.pm_alerted_unconfirmed_cloids:
+            continue
+        out.append(OrderUnconfirmed(
+            ts_ns=now_ns, account_alias=slot.alias,
+            cloid=o.cloid, symbol=o.symbol, side=o.side,  # type: ignore[arg-type]
+            size=o.size, limit_price=o.price, age_seconds=age_s,
+            venue_oid=o.venue_oid or "",
+        ))
+        slot.pm_alerted_unconfirmed_cloids.add(o.cloid)
+    return out
+
+
+def _pm_check_redemption_timeouts(
+    slot: "AccountSlot", now_ns: int, *,
+    threshold_s: float = PM_REDEMPTION_TIMEOUT_S,
+) -> list[RedemptionTimeout]:
+    """Pure detector: walk slot.pm_settlements and return one
+    RedemptionTimeout per PM settlement older than threshold_s that hasn't
+    alerted. Mutates `slot.pm_alerted_redemption_qidxs`.
+    """
+    out: list[RedemptionTimeout] = []
+    for qidx, (settled_ts_ns, symbol, qty, realized_pnl) in slot.pm_settlements.items():
+        if qidx in slot.pm_alerted_redemption_qidxs:
+            continue
+        age_s = (now_ns - settled_ts_ns) / 1e9
+        if age_s < threshold_s:
+            continue
+        # No on-chain check (see RedemptionTimeout docstring): for a winning
+        # leg the operator should see qty USDC arrive; for a loser, zero.
+        # Winner heuristic: realized_pnl > 0 (PM binary payouts make this
+        # equivalent under positive entry prices, which is always the case).
+        expected_payout = qty if realized_pnl > 0 else 0.0
+        out.append(RedemptionTimeout(
+            ts_ns=now_ns, account_alias=slot.alias,
+            question_idx=qidx, symbol=symbol, qty=qty,
+            settled_ts_ns=settled_ts_ns, age_seconds=age_s,
+            expected_payout_usd=expected_payout,
+        ))
+        slot.pm_alerted_redemption_qidxs.add(qidx)
+    return out
 
 
 def _late_resolution_config_from_entry(
@@ -200,6 +278,20 @@ class AccountSlot:
     scans_completed: int = 0
     decisions_emitted: int = 0
     halted: bool = False         # daily-loss / kill-switch latched
+    # PM-only alert tracking. Populated by `_continuous_checks_loop` for slots
+    # whose `account_cfg` is a PolymarketAccount; HL slots leave these empty.
+    # `pm_alerted_unconfirmed_cloids` lists cloids that have already triggered
+    # an OrderUnconfirmed alert. Cleared when the cloid drops out of
+    # live_orders (status flipped to filled/cancelled/rejected) so a future
+    # stall on a re-placed order with the same cloid would re-fire.
+    pm_alerted_unconfirmed_cloids: set[str] = field(default_factory=set)
+    # `pm_settlements` records (qidx -> (settled_ts_ns, symbol, qty,
+    # realized_pnl)) for PM settlement Exits, captured via the bus subscription
+    # in `_continuous_checks_loop`. Drives RedemptionTimeout.
+    # `pm_alerted_redemption_qidxs` tracks qidxs that have already fired
+    # RedemptionTimeout — prevents per-tick spam after the 6h threshold trips.
+    pm_settlements: dict[int, tuple[int, str, float, float]] = field(default_factory=dict)
+    pm_alerted_redemption_qidxs: set[int] = field(default_factory=set)
 
     @property
     def alias(self) -> str:
@@ -555,6 +647,13 @@ class EngineRuntime:
 
     async def _continuous_checks_loop(self, slot: AccountSlot) -> None:
         kill_path = slot.kill_switch_path
+        # PM-only flag gating the OrderUnconfirmed + RedemptionTimeout
+        # watchdogs so HL slots don't emit PM-specific alerts.
+        is_pm = isinstance(slot.account_cfg, PolymarketAccount)
+        # PM-only bus subscription. We capture settlement Exit events into
+        # `slot.pm_settlements` so the RedemptionTimeout watchdog has a
+        # ts→qty record to scan 6h later. HL slots don't subscribe.
+        pm_bus_sub: asyncio.Queue | None = self.bus.subscribe() if is_pm else None
         while not self.stop_event.is_set():
             try:
                 if slot.halted:
@@ -654,6 +753,38 @@ class EngineRuntime:
                     slot.halted = True
                     self._maybe_stop_all_halted(slot)
                     continue
+
+                # PM-only: drain bus subscription into pm_settlements so the
+                # RedemptionTimeout watchdog can fire 6h after a settlement
+                # Exit. We filter to settlement Exits matching this slot's
+                # alias — other slots' settlements / non-settlement events are
+                # ignored. `setdefault` means a re-published Exit (e.g.
+                # reconciler racing the close path) doesn't reset the clock.
+                if pm_bus_sub is not None:
+                    while True:
+                        try:
+                            ev = pm_bus_sub.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        if (
+                            isinstance(ev, Exit)
+                            and ev.reason == "settlement"
+                            and ev.account_alias == slot.alias
+                        ):
+                            slot.pm_settlements.setdefault(
+                                ev.question_idx,
+                                (ev.ts_ns, ev.symbol, ev.qty, ev.realized_pnl),
+                            )
+
+                # PM-only: unconfirmed-order + redemption watchdogs. Surfaces
+                # PM CLOB orders that have sat as `open` past the threshold
+                # (chain congestion, dropped acks), and settled positions
+                # that haven't been redeemed within 6h.
+                if is_pm:
+                    for unconf in _pm_check_unconfirmed_orders(slot, now):
+                        await self.bus.publish(unconf)
+                    for redempt in _pm_check_redemption_timeouts(slot, now):
+                        await self.bus.publish(redempt)
 
                 # Stale-data halt is per-trade; we also surface it as an alert here.
                 if positions_db:
