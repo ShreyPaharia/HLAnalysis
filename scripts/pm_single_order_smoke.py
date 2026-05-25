@@ -53,19 +53,22 @@ def _best_ask_from_orderbook(client: PMClient, token_id: str) -> float | None:
     """Fetch live best ask via py-clob-client-v2.get_orderbook.
 
     Returns None if the book is empty (no asks) or the SDK errors out.
+    `_sdk` is lazy-initialized in PMClient; force it now.
     """
     try:
-        ob = client._sdk.get_orderbook(token_id)  # type: ignore[attr-defined]
+        sdk = client._ensure_sdk()  # type: ignore[attr-defined]
+        ob = sdk.get_order_book(token_id)
     except Exception as e:
         print(f"  ! get_orderbook failed: {e}")
         return None
     asks = getattr(ob, "asks", None) or (ob.get("asks") if isinstance(ob, dict) else None)
     if not asks:
         return None
-    # PM returns asks sorted ascending by price; first entry = best ask.
-    first = asks[0]
-    px = float(getattr(first, "price", None) or first["price"])
-    return px
+    # PM returns asks sorted DESCENDING by price — the "best" ask (lowest
+    # price, most attractive to a buyer) is the MIN, not asks[0].
+    def _px(a):
+        return float(getattr(a, "price", None) or a["price"])
+    return min(_px(a) for a in asks)
 
 
 def main() -> None:
@@ -83,19 +86,29 @@ def main() -> None:
     if missing:
         sys.exit(f"missing env vars: {missing}")
 
-    # 1. Discover active BTC Up/Down daily market
+    # 1. Discover active BTC Up/Down daily market with future endDate.
+    # Gamma's `closed=false` keeps returning markets that have expired but
+    # haven't been recorded as resolved on-chain yet, so we filter ourselves.
     print("[1/4] fetching active BTC Up/Down daily markets via Gamma...")
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
     gc = GammaClient()
     events = gc.fetch_events(series_slug="btc-up-or-down-daily", closed=False)
-    markets = sorted(
-        gc.iter_binary_markets(events),
-        key=lambda m: m.get("endDate", ""),
-    )
+
+    def _ends_in_future(mkt: dict) -> bool:
+        try:
+            end = datetime.fromisoformat(mkt.get("endDate", "").replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return end > now
+
+    active = [m for m in gc.iter_binary_markets(events) if _ends_in_future(m)]
+    markets = sorted(active, key=lambda m: m["endDate"])
     if not markets:
-        sys.exit("no active BTC Up/Down daily markets")
+        sys.exit("no future-ending BTC Up/Down daily markets")
     mk = markets[0]
     print(f"      market: {mk['conditionId']}")
-    print(f"      ends:   {mk.get('endDate')}")
+    print(f"      ends:   {mk.get('endDate')} ({(datetime.fromisoformat(mk['endDate'].replace('Z','+00:00')) - now).total_seconds()/3600:.1f}h from now)")
 
     # 2. Pick favored leg
     token_id, side_label, indicative = _pick_favored_leg(mk)
@@ -122,8 +135,20 @@ def main() -> None:
     else:
         print(f"      best ask: {best_ask:.4f}")
 
-    # Compute limit + size. PM tick = 0.01; round limit to 2 decimals.
-    limit_price = round(min(0.99, best_ask + args.limit_buffer), 2)
+    # Compute limit. The live `best_ask` from get_order_book is the source
+    # of truth — Gamma's `outcomePrices` is stale (last trade, not mid).
+    # Sanity guard: refuse to lift an ask > 0.95 against a much lower
+    # indicative — that's the stale-lonely-seller pattern, not a real
+    # quote. The strategy gate (price_extreme_max) catches this in prod;
+    # this script enforces the same defensively.
+    if best_ask > 0.95 and best_ask - indicative > 0.20:
+        sys.exit(
+            f"best_ask {best_ask:.4f} is much wider than indicative "
+            f"{indicative:.4f} — likely stale lonely seller; refusing to "
+            f"trade. Re-run later when book tightens."
+        )
+    # PM tick = 0.01; round limit to 2 decimals.
+    limit_price = round(best_ask + args.limit_buffer, 2)
     # PM share-size is an integer (1-share granularity); floor so we don't
     # exceed notional.
     size = math.floor(args.usd / limit_price)
