@@ -304,7 +304,7 @@ strategies:
   - name: theta_harvester
     account_alias: v31_pm                   # → deploy.accounts.v31_pm
     strategy_type: theta_harvester
-    paper_mode: true                        # Phase 5: paper-only. Phase 8 flips to false.
+    paper_mode: false                       # LIVE: real PM orders on v31_pm funder
 
     allowlist:
       - match:
