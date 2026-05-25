@@ -895,3 +895,165 @@ def test_v3_2_volclock_sigma_immune_to_recent_wick() -> None:
     s_bv = v32._sigma(rets)
     assert s_rv is not None and s_bv is not None
     assert s_bv < s_rv
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.3 — pm_binary fee model
+# ---------------------------------------------------------------------------
+
+
+def test_pm_binary_fee_curve_reduces_effective_edge_near_50_50() -> None:
+    """Near p=0.5 the PM fee_per_share peaks at fee_rate * 0.25 = 0.0175 (7%
+    headline rate), so a strategy run with fee_model='pm_binary' must compute
+    a strictly smaller edge than the legacy 'flat' branch on the same book.
+
+    Setup: reference_price == strike → p_yes ≈ 0.5. YES ask = 0.40 so the
+    raw GBM edge ≈ 0.10. With edge_buffer between 0.0825 and 0.10, the
+    'flat' run ENTERs and the 'pm_binary' run HOLDs (edge_buffer dominates).
+    """
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    books = {"YES": _book("YES", bid=0.39, ask=0.40),
+             "NO": _book("NO", bid=0.59, ask=0.60)}
+    rets = tuple([0.0001] * 120)  # tame σ → no jumpy d
+
+    common = _params(edge_buffer=0.09)
+    flat = build_strategy("v3_theta_harvester", common)
+    pmf = build_strategy(
+        "v3_theta_harvester", dict(common, fee_model="pm_binary", fee_rate=0.07),
+    )
+
+    d_flat = flat.evaluate(
+        question=qv, books=books, reference_price=100_000.0,
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    d_pmf = pmf.evaluate(
+        question=qv, books=books, reference_price=100_000.0,
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+
+    assert d_flat.action == Action.ENTER, (
+        f"flat run must enter (edge ≈ 0.10 > buffer 0.09); got {d_flat}"
+    )
+    assert d_pmf.action == Action.HOLD, (
+        "pm_binary run must hold: pm fee = 0.07·0.5·0.5 = 0.0175 brings "
+        f"edge to ≈ 0.0825 < buffer 0.09; got {d_pmf}"
+    )
+
+
+def test_pm_binary_fee_curve_negligible_for_deep_favorite() -> None:
+    """For p_yes ≈ 1 (deep favorite) the PM fee curve evaluates to ≈ 0, so
+    pm_binary and flat (fee_taker=0) should produce identical decisions
+    bit-for-bit on a deep-favorite book."""
+    # ref massively above strike → p_yes ≈ 1 → fee = 0.07·1·0 = 0
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    books = {"YES": _book("YES", bid=0.89, ask=0.90),
+             "NO": _book("NO", bid=0.09, ask=0.10)}
+    rets = tuple([0.0001] * 120)
+
+    flat = build_strategy("v3_theta_harvester", _params())
+    pmf = build_strategy(
+        "v3_theta_harvester", _params(fee_model="pm_binary", fee_rate=0.07),
+    )
+    d_flat = flat.evaluate(
+        question=qv, books=books, reference_price=120_000.0,
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    d_pmf = pmf.evaluate(
+        question=qv, books=books, reference_price=120_000.0,
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    assert d_flat.action == Action.ENTER and d_pmf.action == Action.ENTER
+    assert d_flat.intents[0].symbol == d_pmf.intents[0].symbol == "YES"
+
+
+def test_pm_binary_fee_default_off_preserves_hl_behavior() -> None:
+    """fee_model defaults to 'flat'; without setting it the strategy must
+    behave identically to the legacy fee_taker path (HL v31 bit-identical)."""
+    strat = build_strategy("v3_theta_harvester", _params(fee_taker=0.001))
+    assert strat.cfg.fee_model == "flat"
+    assert strat.cfg.fee_rate == 0.0
+
+
+def test_pm_binary_exit_fee_uses_curve_not_flat_exit_fee() -> None:
+    """Under fee_model='pm_binary' the take-profit exit gate must use the
+    curve fee (= fee_rate · held_p · (1-held_p)), not the flat exit_fee.
+
+    Setup: held YES at ref ≈ strike → held_p ≈ 0.5 → curve fee ≈ 0.07 ·
+    0.25 = 0.0175. Bid at 0.51. Edge under FLAT (exit_fee=0.0007) =
+    0.51 - 0.5 - 0.0007 ≈ +0.0093 → exits. Edge under PM curve =
+    0.51 - 0.5 - 0.0175 ≈ -0.0075 → holds.
+
+    The two strategies see the same book + position; the only difference is
+    fee_model. Curve must produce a strictly more conservative exit decision
+    near p=0.5 where the curve fee is largest.
+    """
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    books = {"YES": _book("YES", bid=0.51, ask=0.52),
+             "NO": _book("NO", bid=0.47, ask=0.48)}
+    pos = _pos(symbol="YES", qty=200.0, entry_px=0.40)
+    rets = tuple([0.0001] * 120)
+
+    common = _params(
+        exit_take_profit_mode=True, exit_fee=0.0007,
+        exit_edge_threshold=0.0, edge_buffer=0.0, half_spread_assumption=0.0,
+    )
+    flat = build_strategy("v3_theta_harvester", common)
+    pmf = build_strategy(
+        "v3_theta_harvester",
+        dict(common, fee_model="pm_binary", fee_rate=0.07),
+    )
+
+    d_flat = flat.evaluate(
+        question=qv, books=books, reference_price=100_000.0,
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    d_pmf = pmf.evaluate(
+        question=qv, books=books, reference_price=100_000.0,
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+
+    assert d_flat.action == Action.EXIT, (
+        f"flat run must exit (edge ≈ +0.0093 > threshold 0.0); got {d_flat}"
+    )
+    assert d_pmf.action == Action.HOLD, (
+        "pm_binary run must hold (curve fee 0.0175 makes edge ≈ -0.0075); "
+        f"got {d_pmf}"
+    )
+
+
+def test_pm_binary_exit_fee_negligible_for_deep_favorite() -> None:
+    """At held_p ≈ 1 the curve fee → 0, so pm_binary and flat (exit_fee=0)
+    produce identical exit decisions on a deep-favorite book. Symmetric
+    with the entry-side `_negligible_for_deep_favorite` test."""
+    qv = _qv(expiry_ns=3600 * 10**9, strike=100_000.0)
+    books = {"YES": _book("YES", bid=0.99, ask=0.999),
+             "NO": _book("NO", bid=0.001, ask=0.01)}
+    pos = _pos(symbol="YES", qty=200.0, entry_px=0.50)
+    rets = tuple([0.0001] * 120)
+
+    common = _params(
+        exit_take_profit_mode=True, exit_fee=0.0,
+        exit_edge_threshold=0.0, edge_buffer=0.0, half_spread_assumption=0.0,
+    )
+    flat = build_strategy("v3_theta_harvester", common)
+    pmf = build_strategy(
+        "v3_theta_harvester",
+        dict(common, fee_model="pm_binary", fee_rate=0.07),
+    )
+    d_flat = flat.evaluate(
+        question=qv, books=books, reference_price=120_000.0,
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    d_pmf = pmf.evaluate(
+        question=qv, books=books, reference_price=120_000.0,
+        recent_returns=rets, recent_volume_usd=1000.0,
+        position=pos, now_ns=0,
+    )
+    assert d_flat.action == d_pmf.action

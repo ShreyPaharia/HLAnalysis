@@ -307,6 +307,14 @@ class ThetaHarvesterConfig:
     # from entry-side ``fee_taker`` (which can stay 0 if the venue subsidises
     # opens).
     exit_fee: float = 0.0007
+    # Entry-side fee model:
+    #   "flat"      — subtract ``fee_taker`` per share (legacy, HL).
+    #   "pm_binary" — Polymarket curve: fee_per_share = fee_rate * p * (1-p).
+    # PM's headline 7% taker rate is applied to the *expected loss* leg of the
+    # binary, so the realized per-share cost peaks at p=0.5 (0.0175 at 7%)
+    # and tapers to ~0 for deep favorites. Default "flat" keeps HL bit-identical.
+    fee_model: str = "flat"
+    fee_rate: float = 0.0
 
 
 class ThetaHarvesterStrategy(Strategy):
@@ -482,7 +490,12 @@ class ThetaHarvesterStrategy(Strategy):
             if pp is None:
                 continue  # NO leg of a middle bucket — no contiguous winning region
             p_win, phi_d = pp
-            edge = p_win - book.ask_px - self.cfg.fee_taker - self.cfg.half_spread_assumption
+            fee_per_share = (
+                self.cfg.fee_rate * p_win * (1.0 - p_win)
+                if self.cfg.fee_model == "pm_binary"
+                else self.cfg.fee_taker
+            )
+            edge = p_win - book.ask_px - fee_per_share - self.cfg.half_spread_assumption
             per_leg.append((sym, p_win, edge, book, phi_d))
 
         if not per_leg:
@@ -536,13 +549,23 @@ class ThetaHarvesterStrategy(Strategy):
                 reference_price=reference_price, lo=question.strike, hi=None,
                 sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
             ) or 0.0
+            fee_yes = (
+                self.cfg.fee_rate * p_yes_view * (1.0 - p_yes_view)
+                if self.cfg.fee_model == "pm_binary"
+                else self.cfg.fee_taker
+            )
+            fee_no = (
+                self.cfg.fee_rate * (1.0 - p_yes_view) * p_yes_view
+                if self.cfg.fee_model == "pm_binary"
+                else self.cfg.fee_taker
+            )
             edge_yes = (
                 p_yes_view - (yes.ask_px if yes and yes.ask_px is not None else 1.0)
-                - self.cfg.fee_taker - self.cfg.half_spread_assumption
+                - fee_yes - self.cfg.half_spread_assumption
             )
             edge_no = (
                 (1.0 - p_yes_view) - (no_.ask_px if no_ and no_.ask_px is not None else 1.0)
-                - self.cfg.fee_taker - self.cfg.half_spread_assumption
+                - fee_no - self.cfg.half_spread_assumption
             )
             # Apply favorite-gate disabling sentinels so the diagnostic mirrors
             # the legacy behavior exactly (existing tests check exact values).
@@ -741,11 +764,25 @@ class ThetaHarvesterStrategy(Strategy):
         #     exit when this rises above exit_edge_threshold. Frames the
         #     question as "is the bid offering me an above-fair sell price
         #     net of the exit-side fee?" — only fires on genuine premium.
+        # Exit-side fee per share. PM charges the curve fee on BOTH taker
+        # sides (entry and exit) — under fee_model="pm_binary" we estimate
+        # it at the model probability `held_p`, consistent with the entry
+        # edge formulation. Under fee_model="flat" (HL slots, legacy):
+        # take-profit mode uses the fixed `exit_fee`; legacy mode uses
+        # `fee_taker` (the legacy formula models the gate as "if I
+        # hypothetically rebought at the bid, what'd I pay?", so an entry
+        # fee is the right comparable).
+        if self.cfg.fee_model == "pm_binary":
+            exit_fee_per_share = self.cfg.fee_rate * held_p * (1.0 - held_p)
+        elif self.cfg.exit_take_profit_mode:
+            exit_fee_per_share = self.cfg.exit_fee
+        else:
+            exit_fee_per_share = self.cfg.fee_taker
         if self.cfg.exit_take_profit_mode:
-            edge_held = held.bid_px - held_p - self.cfg.exit_fee
+            edge_held = held.bid_px - held_p - exit_fee_per_share
             exit_now = edge_held > self.cfg.exit_edge_threshold
         else:
-            edge_held = held_p - held.bid_px - self.cfg.fee_taker
+            edge_held = held_p - held.bid_px - exit_fee_per_share
             exit_now = edge_held < self.cfg.exit_edge_threshold
         # Gamma penalty is INTENTIONALLY NOT applied to the exit gate.
         # Empirical: symmetric gamma penalty triggers premature exits during
@@ -947,6 +984,8 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         ),
         exit_take_profit_mode=bool(params.get("exit_take_profit_mode", False)),
         exit_fee=float(params.get("exit_fee", 0.0007)),
+        fee_model=str(params.get("fee_model", "flat")),
+        fee_rate=float(params.get("fee_rate", 0.0)),
     )
     return ThetaHarvesterStrategy(cfg)
 

@@ -26,6 +26,8 @@ class _MutableBook:
     ask_sz: float | None = None
     last_trade_ts_ns: int = 0
     last_l2_ts_ns: int = 0
+    ask_levels: tuple[tuple[float, float], ...] = ()
+    bid_levels: tuple[tuple[float, float], ...] = ()
 
 
 class MarketState:
@@ -83,8 +85,10 @@ class MarketState:
                 b = self._books.setdefault(ev.symbol, _MutableBook())
                 if ev.bid_px:
                     b.bid_px, b.bid_sz = ev.bid_px[0], ev.bid_sz[0]
+                    b.bid_levels = tuple(zip(ev.bid_px, ev.bid_sz, strict=False))
                 if ev.ask_px:
                     b.ask_px, b.ask_sz = ev.ask_px[0], ev.ask_sz[0]
+                    b.ask_levels = tuple(zip(ev.ask_px, ev.ask_sz, strict=False))
                 b.last_l2_ts_ns = max(b.last_l2_ts_ns, ev.exchange_ts or ev.local_recv_ts)
             case BookDeltaEvent():
                 # Phase 1 strategy uses top-of-book only; deltas that hit the top
@@ -242,6 +246,8 @@ class MarketState:
             ask_sz=b.ask_sz,
             last_trade_ts_ns=b.last_trade_ts_ns,
             last_l2_ts_ns=b.last_l2_ts_ns,
+            ask_levels=b.ask_levels,
+            bid_levels=b.bid_levels,
         )
 
     def question(self, idx: int) -> QuestionView | None:

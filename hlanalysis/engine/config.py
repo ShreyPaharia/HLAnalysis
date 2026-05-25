@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -100,6 +100,12 @@ class GlobalRiskConfig(BaseModel):
     min_recent_volume_usd: float
     stale_data_halt_seconds: int
     reconcile_interval_seconds: int
+    # Maximum tolerated realized-fill slippage as a fraction of intent
+    # limit_price (depth-walk gate). 0 disables; PM ships ~0.005
+    # (~0.5¢ at a 0.95-favorite leg). HL slots keep this at 0 because the
+    # BboEvent path doesn't populate BookState.ask_levels and the gate is a
+    # no-op without ladder data.
+    max_slippage_pct: float = 0.0
     # Hour-of-day in UTC when the "daily" PnL accounting window resets.
     # Default 0 = UTC midnight (legacy). Set to 6 to align with HL HIP-4
     # binary settlement (markets resolve at 06:00 UTC = 11:30 IST). Aligning
@@ -144,6 +150,14 @@ class ThetaParams(BaseModel):
     # See ThetaHarvesterConfig.exit_take_profit_mode / exit_fee.
     exit_take_profit_mode: bool = False
     exit_fee: float = 0.0007
+    # Fee model selector. Plumbed into ThetaHarvesterConfig in Phase 7; the
+    # strategy ignores these fields today, but they MUST round-trip cleanly
+    # through YAML now so the v31_pm slot config is stable across phases.
+    #   "flat"      → existing behaviour: fee = fee_taker (per-leg fixed bps)
+    #   "pm_binary" → Polymarket curve: fee = C · fee_rate · p · (1−p)
+    # Default "flat" / 0.0 preserves HL v31 bit-identically.
+    fee_model: Literal["flat", "pm_binary"] = "flat"
+    fee_rate: float = 0.0
 
 
 class StrategyConfig(BaseModel):
@@ -174,11 +188,42 @@ class StrategiesConfig(BaseModel):
     strategies: list[StrategyConfig]
 
 
-class HLConfig(BaseModel):
+class _AccountBase(BaseModel):
     model_config = ConfigDict(frozen=True)
+    venue: str  # discriminator
+
+
+class HyperliquidAccount(_AccountBase):
+    venue: Literal["hyperliquid"] = "hyperliquid"
     account_address: str
     api_secret_key: str
     base_url: str
+
+
+class PolymarketAccount(_AccountBase):
+    venue: Literal["polymarket"] = "polymarket"
+    clob_host: str = "https://clob.polymarket.com"
+    chain_id: int = 137
+    private_key: str
+    clob_api_key: str
+    clob_api_secret: str
+    clob_api_passphrase: str
+    # Set for polymarket.com-UI accounts (proxy/safe wallet pattern). The EOA
+    # signs; this address is the on-chain maker. Leave None for direct-EOA
+    # deployments. signature_type defaults to POLY_1271 when funder is set.
+    funder_address: str | None = None
+    signature_type: str | None = None
+
+
+AccountConfig = Annotated[
+    HyperliquidAccount | PolymarketAccount,
+    Field(discriminator="venue"),
+]
+
+
+# Back-compat alias — many tests still import HLConfig by name. Drop in a
+# follow-up release once call sites switch.
+HLConfig = HyperliquidAccount
 
 
 class TelegramConfig(BaseModel):
@@ -195,33 +240,17 @@ class AlertsConfig(BaseModel):
 class DeployConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
     env: str
-    # Multi-account: alias -> HLConfig. Legacy 'hl:' single-block YAMLs are
-    # auto-wrapped into {"default": HLConfig(...)} by load_deploy_config.
-    hl_accounts: dict[str, HLConfig]
+    accounts: dict[str, AccountConfig]
     alerts: AlertsConfig
     state_db_path: str
     kill_switch_path: str
-
-    # Convenience back-compat: callers that still reach for `.hl` get the
-    # single account when there's only one, or the "default" entry. New code
-    # should use hl_accounts[alias] directly.
-    @property
-    def hl(self) -> HLConfig:
-        if "default" in self.hl_accounts:
-            return self.hl_accounts["default"]
-        if len(self.hl_accounts) == 1:
-            return next(iter(self.hl_accounts.values()))
-        raise KeyError(
-            "DeployConfig.hl is ambiguous with multiple hl_accounts; "
-            "use deploy_cfg.hl_accounts[alias] instead."
-        )
 
     def state_db_path_for(self, alias: str) -> str:
         """Per-account state DB path. Multiple accounts → namespaced subdir;
         single 'default' account → legacy flat path so existing deployments
         don't see their state.db move."""
         base = Path(self.state_db_path)
-        if len(self.hl_accounts) <= 1 and alias == "default":
+        if len(self.accounts) <= 1 and alias == "default":
             return str(base)
         return str(base.parent / alias / base.name)
 
@@ -229,9 +258,16 @@ class DeployConfig(BaseModel):
         """Per-account kill switch (so an operator can halt one strategy
         without killing both). Same namespacing rule as state_db_path_for."""
         base = Path(self.kill_switch_path)
-        if len(self.hl_accounts) <= 1 and alias == "default":
+        if len(self.accounts) <= 1 and alias == "default":
             return str(base)
         return str(base.parent / alias / base.name)
+
+
+# Back-compat property: monitoring code reads `.hl_accounts` directly.
+# Kept as a read-only view; remove after the call sites are migrated.
+def _hl_accounts(self: "DeployConfig") -> dict[str, HyperliquidAccount]:
+    return {a: c for a, c in self.accounts.items() if isinstance(c, HyperliquidAccount)}
+DeployConfig.hl_accounts = property(_hl_accounts)  # type: ignore[assignment]
 
 
 def load_strategy_config(path: Path) -> StrategyConfig:
@@ -285,12 +321,12 @@ def load_deploy_config(path: Path) -> DeployConfig:
         raw = yaml.safe_load(f)
     raw = _substitute_env(raw)
     deploy = raw["deploy"]
-    # Accept both new `hl_accounts: {alias: {...}}` and legacy single `hl: {...}`.
-    if "hl_accounts" not in deploy:
-        if "hl" not in deploy:
-            raise ValueError(f"{path}: deploy must define 'hl_accounts' or 'hl'")
-        deploy = dict(deploy)
-        deploy["hl_accounts"] = {"default": deploy.pop("hl")}
+    if "accounts" not in deploy:
+        raise ValueError(
+            f"{path}: deploy must define `accounts:` (venue-typed). "
+            "Legacy `hl_accounts:` / `hl:` are no longer supported; see "
+            "DEPLOYMENT.md for migration."
+        )
     return DeployConfig(**deploy)
 
 

@@ -85,7 +85,7 @@ async def test_approved_decision_writes_db_row_and_calls_place(tmp_path):
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
     o = dal.get_order("hla-router-1")
     assert o is not None and o.status == "filled"
@@ -106,7 +106,7 @@ async def test_exit_reason_is_threaded_to_exit_event(tmp_path):
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
     # 1) Open a position.
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
@@ -139,7 +139,7 @@ async def test_reduce_only_without_exit_reason_falls_back_to_stop_loss(tmp_path)
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
     await asyncio.wait_for(sub.get(), timeout=0.5)  # drain entry
 
@@ -167,7 +167,7 @@ async def test_addon_fill_publishes_entry_for_telegram(tmp_path):
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
     assert isinstance(await asyncio.wait_for(sub.get(), timeout=0.5), Entry)
@@ -199,7 +199,7 @@ async def test_partial_reduce_does_not_publish_entry(tmp_path):
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
     assert isinstance(await asyncio.wait_for(sub.get(), timeout=0.5), Entry)
@@ -228,7 +228,7 @@ async def test_book_fill_persists_fill_row_with_closed_pnl(tmp_path):
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
     # Open at 0.95 size 10, then close at 0.90 reduce_only.
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
@@ -260,7 +260,7 @@ async def test_vetoed_decision_publishes_veto_and_does_not_call_place(tmp_path):
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
     inputs = replace(_approval_inputs(), kill_switch_active=True)
     await router.handle(_decision_enter(), inputs=inputs, now_ns=2)
     assert dal.get_order("hla-router-1") is None
@@ -290,7 +290,7 @@ async def test_post_exit_cooldown_blocks_immediate_reentry(tmp_path):
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
     cfg = _cfg_with_cooldown(60)
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
     # 1) Open position.
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=1_000_000_000)
@@ -336,7 +336,7 @@ async def test_post_exit_cooldown_expires_and_allows_reentry(tmp_path):
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
     cfg = _cfg_with_cooldown(60)
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=1_000_000_000)
     await asyncio.wait_for(sub.get(), timeout=0.5)
     exit_intent = OrderIntent(
@@ -377,7 +377,7 @@ async def test_post_exit_cooldown_disabled_when_seconds_is_zero(tmp_path):
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
     cfg = _strategy_cfg()  # default cooldown=0
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=1_000_000_000)
     await asyncio.wait_for(sub.get(), timeout=0.5)
     exit_intent = OrderIntent(
@@ -410,7 +410,7 @@ def _make_router(tmp_path, cfg=None) -> Router:
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
     cfg = cfg or _strategy_cfg()
-    return Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    return Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
 
 def test_cooldown_init_with_no_file_is_empty(tmp_path):
@@ -491,7 +491,7 @@ async def test_cooldown_veto_uses_persisted_state_after_restart(tmp_path):
     sub = bus.subscribe()
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, hl=client, strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
     reentry = Decision(
         action=Action.ENTER,

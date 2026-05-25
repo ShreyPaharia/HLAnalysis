@@ -19,7 +19,7 @@ def test_load_strategy_yaml_from_repo():
     cfg = load_strategy_config(Path("config/strategy.yaml"))
     assert cfg.name == "late_resolution"
     assert cfg.paper_mode is False
-    assert cfg.global_.max_total_inventory_usd == 500
+    assert cfg.global_.max_total_inventory_usd == 1000  # bumped 500→1000 in 42e0f0c
     # 2026-05-19: dropped from 200 → 100 in lockstep with per-position cap
     # while the bid-gate / cooldown / near-strike fixes are forward-tested.
     assert cfg.global_.daily_loss_cap_usd == 100
@@ -147,12 +147,23 @@ def test_deploy_config_substitutes_env(monkeypatch, tmp_path):
     monkeypatch.setenv("HL_API_SECRET_KEY_V31", "secret-v31")
     monkeypatch.setenv("TG_BOT_TOKEN", "tg-token")
     monkeypatch.setenv("TG_CHAT_ID", "12345")
+    # PM v31_pm slot was added in Phase 5; deploy.yaml references these four
+    # Polymarket env vars. They MUST be set for the production config to load.
+    monkeypatch.setenv("PM_PRIVATE_KEY", "0xstub")
+    monkeypatch.setenv("PM_CLOB_API_KEY", "stub-key")
+    monkeypatch.setenv("PM_CLOB_API_SECRET", "stub-secret")
+    monkeypatch.setenv("PM_CLOB_API_PASSPHRASE", "stub-pass")
+    # PM-UI-onboarded accounts use a Safe-proxy funder; deploy.yaml now
+    # references PM_FUNDER_ADDRESS.
+    monkeypatch.setenv("PM_FUNDER_ADDRESS", "0xstubfunder")
     p = tmp_path / "deploy.yaml"
     p.write_text(Path("config/deploy.yaml").read_text())
     cfg = load_deploy_config(p)
     assert cfg.hl_accounts["v1"].account_address == "0xdeadbeef"
     assert cfg.hl_accounts["v31"].account_address == "0xv31"
     assert cfg.alerts.telegram.bot_token == "tg-token"
+    assert "v31_pm" in cfg.accounts
+    assert cfg.accounts["v31_pm"].chain_id == 137
 
 
 def test_deploy_config_missing_env_raises(monkeypatch, tmp_path):
@@ -161,3 +172,37 @@ def test_deploy_config_missing_env_raises(monkeypatch, tmp_path):
     p.write_text(Path("config/deploy.yaml").read_text())
     with pytest.raises(ValueError):
         load_deploy_config(p)
+
+
+def test_account_config_discriminates_on_venue(tmp_path):
+    from hlanalysis.engine.config import HyperliquidAccount, PolymarketAccount
+
+    deploy_yaml = tmp_path / "deploy.yaml"
+    deploy_yaml.write_text("""
+deploy:
+  env: test
+  accounts:
+    v1:
+      venue: hyperliquid
+      account_address: "0xabc"
+      api_secret_key: "0xdef"
+      base_url: https://api.hyperliquid.xyz
+    v31_pm:
+      venue: polymarket
+      clob_host: https://clob.polymarket.com
+      chain_id: 137
+      private_key: "0xfeed"
+      clob_api_key: "ak"
+      clob_api_secret: "as"
+      clob_api_passphrase: "ap"
+  alerts:
+    telegram:
+      bot_token: T
+      chat_id: C
+  state_db_path: data/engine/state.db
+  kill_switch_path: data/engine/halt
+""")
+    cfg = load_deploy_config(deploy_yaml)
+    assert isinstance(cfg.accounts["v1"], HyperliquidAccount)
+    assert isinstance(cfg.accounts["v31_pm"], PolymarketAccount)
+    assert cfg.accounts["v31_pm"].chain_id == 137

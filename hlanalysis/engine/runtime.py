@@ -15,16 +15,24 @@ from loguru import logger
 from ..adapters.base import VenueAdapter
 from ..config import Subscription
 from ..events import NormalizedEvent
-from .config import DeployConfig, HLConfig, StrategyConfig
+from .config import (
+    AccountConfig,
+    DeployConfig,
+    HLConfig,
+    HyperliquidAccount,
+    PolymarketAccount,
+    StrategyConfig,
+)
 from .event_bus import EventBus
+from .exec_client import ExecutionClient
 from .hl_client import HLClient
 from .market_state import MarketState
 from .reconcile import Reconciler
 from .restart_drift import RestartDriftGate
 from .risk import RiskGate
 from .risk_events import (
-    DailyLossHalt, Exit, KillSwitchActivated, NewQuestion, StaleDataHalt,
-    StopLossTriggered,
+    DailyLossHalt, Exit, KillSwitchActivated, NewQuestion, OrderUnconfirmed,
+    RedemptionTimeout, StaleDataHalt, StopLossTriggered,
 )
 from .router import Router
 from .scanner import Scanner
@@ -38,6 +46,84 @@ from ..strategy.late_resolution import (
 from ..strategy.theta_harvester import (
     ThetaHarvesterConfig, ThetaHarvesterStrategy,
 )
+
+
+# PM unconfirmed-order watchdog: OrderUnconfirmed fires once a live PM order
+# has sat in flight (status=open/pending/partially_filled) past this threshold
+# without a status change. 30s gives PM CLOB plenty of room under heavy chain
+# load while still surfacing stuck orders before the next scan tick would
+# top up on top of stale state.
+PM_UNCONFIRMED_THRESHOLD_S: float = 30.0
+
+# PM redemption watchdog: RedemptionTimeout fires this long after the
+# settlement Exit if the operator hasn't redeemed yet (we don't watch USDC
+# on-chain). 6h is a generous window that catches genuinely-forgotten
+# settlements without nagging through the normal redemption flow.
+PM_REDEMPTION_TIMEOUT_S: float = 6 * 3600.0
+
+
+def _pm_check_unconfirmed_orders(
+    slot: "AccountSlot", now_ns: int, *,
+    threshold_s: float = PM_UNCONFIRMED_THRESHOLD_S,
+) -> list[OrderUnconfirmed]:
+    """Pure detector: scan slot.dal.live_orders() and return one
+    OrderUnconfirmed for each open order older than threshold_s that hasn't
+    already alerted. Mutates `slot.pm_alerted_unconfirmed_cloids` to record
+    new alerts and to evict cloids no longer live.
+    """
+    live = slot.dal.live_orders()
+    live_cloids: set[str] = {o.cloid for o in live}
+    # Garbage-collect alerted set so a re-placed order with the same cloid
+    # would re-fire after its next stall. Without this, the set grows
+    # unbounded over the process lifetime.
+    slot.pm_alerted_unconfirmed_cloids &= live_cloids
+    out: list[OrderUnconfirmed] = []
+    for o in live:
+        if o.status != "open":
+            continue
+        age_s = (now_ns - o.last_update_ts_ns) / 1e9
+        if age_s < threshold_s:
+            continue
+        if o.cloid in slot.pm_alerted_unconfirmed_cloids:
+            continue
+        out.append(OrderUnconfirmed(
+            ts_ns=now_ns, account_alias=slot.alias,
+            cloid=o.cloid, symbol=o.symbol, side=o.side,  # type: ignore[arg-type]
+            size=o.size, limit_price=o.price, age_seconds=age_s,
+            venue_oid=o.venue_oid or "",
+        ))
+        slot.pm_alerted_unconfirmed_cloids.add(o.cloid)
+    return out
+
+
+def _pm_check_redemption_timeouts(
+    slot: "AccountSlot", now_ns: int, *,
+    threshold_s: float = PM_REDEMPTION_TIMEOUT_S,
+) -> list[RedemptionTimeout]:
+    """Pure detector: walk slot.pm_settlements and return one
+    RedemptionTimeout per PM settlement older than threshold_s that hasn't
+    alerted. Mutates `slot.pm_alerted_redemption_qidxs`.
+    """
+    out: list[RedemptionTimeout] = []
+    for qidx, (settled_ts_ns, symbol, qty, realized_pnl) in slot.pm_settlements.items():
+        if qidx in slot.pm_alerted_redemption_qidxs:
+            continue
+        age_s = (now_ns - settled_ts_ns) / 1e9
+        if age_s < threshold_s:
+            continue
+        # No on-chain check (see RedemptionTimeout docstring): for a winning
+        # leg the operator should see qty USDC arrive; for a loser, zero.
+        # Winner heuristic: realized_pnl > 0 (PM binary payouts make this
+        # equivalent under positive entry prices, which is always the case).
+        expected_payout = qty if realized_pnl > 0 else 0.0
+        out.append(RedemptionTimeout(
+            ts_ns=now_ns, account_alias=slot.alias,
+            question_idx=qidx, symbol=symbol, qty=qty,
+            settled_ts_ns=settled_ts_ns, age_seconds=age_s,
+            expected_payout_usd=expected_payout,
+        ))
+        slot.pm_alerted_redemption_qidxs.add(qidx)
+    return out
 
 
 def _late_resolution_config_from_entry(
@@ -150,6 +236,8 @@ def build_theta_harvester_config(cfg: StrategyConfig) -> ThetaHarvesterConfig:
         topup_min_notional_usd=getattr(t, "topup_min_notional_usd", 11.0),
         exit_take_profit_mode=getattr(t, "exit_take_profit_mode", False),
         exit_fee=getattr(t, "exit_fee", 0.0007),
+        fee_model=getattr(t, "fee_model", "flat"),
+        fee_rate=getattr(t, "fee_rate", 0.0),
     )
 
 
@@ -173,12 +261,12 @@ class AccountSlot:
     sibling slots is the engine's MarketState + WS feed.
     """
     cfg: StrategyConfig
-    hl_cfg: HLConfig
+    account_cfg: "HyperliquidAccount | PolymarketAccount"
     state_db_path: Path
     kill_switch_path: Path
     cloid_prefix: str           # e.g. "hla-v1-" or "hla-v31-"
     dal: StateDAL
-    hl: HLClient
+    exec_client: ExecutionClient
     risk: RiskGate
     router: Router
     strategy: Strategy
@@ -190,6 +278,20 @@ class AccountSlot:
     scans_completed: int = 0
     decisions_emitted: int = 0
     halted: bool = False         # daily-loss / kill-switch latched
+    # PM-only alert tracking. Populated by `_continuous_checks_loop` for slots
+    # whose `account_cfg` is a PolymarketAccount; HL slots leave these empty.
+    # `pm_alerted_unconfirmed_cloids` lists cloids that have already triggered
+    # an OrderUnconfirmed alert. Cleared when the cloid drops out of
+    # live_orders (status flipped to filled/cancelled/rejected) so a future
+    # stall on a re-placed order with the same cloid would re-fire.
+    pm_alerted_unconfirmed_cloids: set[str] = field(default_factory=set)
+    # `pm_settlements` records (qidx -> (settled_ts_ns, symbol, qty,
+    # realized_pnl)) for PM settlement Exits, captured via the bus subscription
+    # in `_continuous_checks_loop`. Drives RedemptionTimeout.
+    # `pm_alerted_redemption_qidxs` tracks qidxs that have already fired
+    # RedemptionTimeout — prevents per-tick spam after the 6h threshold trips.
+    pm_settlements: dict[int, tuple[int, str, float, float]] = field(default_factory=dict)
+    pm_alerted_redemption_qidxs: set[int] = field(default_factory=set)
 
     @property
     def alias(self) -> str:
@@ -205,8 +307,9 @@ class EngineRuntime:
     adapter_factory: Callable[[], VenueAdapter]
     subscriptions: list[Subscription]
     # Optional dependency injections so tests can swap real components for fakes.
-    # The factory is called once per slot with (alias, hl_cfg, paper_mode).
-    hl_client_factory: Callable[[str, HLConfig, bool], HLClient] | None = None
+    # The factory is called once per slot with (alias, account_cfg, paper_mode).
+    # account_cfg is the venue-typed AccountConfig (HyperliquidAccount | PolymarketAccount).
+    exec_client_factory: Callable[[str, AccountConfig, bool], ExecutionClient] | None = None
     telegram_factory: Callable[[aiohttp.ClientSession], TelegramClient] | None = None
     market_state: MarketState = field(default_factory=MarketState)
     bus: EventBus = field(default_factory=EventBus)
@@ -228,24 +331,24 @@ class EngineRuntime:
         deploy_cfg: DeployConfig,
         adapter_factory: Callable[[], VenueAdapter],
         subscriptions: list[Subscription],
-        hl_client_factory: Callable[[bool], HLClient] | None = None,
+        exec_client_factory: Callable[[bool], ExecutionClient] | None = None,
         telegram_factory: Callable[[aiohttp.ClientSession], TelegramClient] | None = None,
     ) -> EngineRuntime:
         """Convenience constructor for tests / single-strategy use.
 
-        Wraps the per-slot HLClient factory so callers that only care about
-        paper_mode can keep passing a unary lambda.
+        Wraps the per-slot ExecutionClient factory so callers that only care
+        about paper_mode can keep passing a unary lambda.
         """
-        wrapped_factory: Callable[[str, HLConfig, bool], HLClient] | None = None
-        if hl_client_factory is not None:
-            def wrapped_factory(_alias: str, _hl: HLConfig, paper: bool) -> HLClient:
-                return hl_client_factory(paper)
+        wrapped_factory: Callable[[str, AccountConfig, bool], ExecutionClient] | None = None
+        if exec_client_factory is not None:
+            def wrapped_factory(_alias: str, _acct: AccountConfig, paper: bool) -> ExecutionClient:
+                return exec_client_factory(paper)
         return cls(
             strategies=[strategy_cfg],
             deploy_cfg=deploy_cfg,
             adapter_factory=adapter_factory,
             subscriptions=subscriptions,
-            hl_client_factory=wrapped_factory,
+            exec_client_factory=wrapped_factory,
             telegram_factory=telegram_factory,
         )
 
@@ -278,9 +381,9 @@ class EngineRuntime:
                     account_alias=slot.alias,
                 )
                 drift_res = gate.run(
-                    venue_open=slot.hl.open_orders(),
-                    venue_state=slot.hl.clearinghouse_state(),
-                    fills_lookup=lambda c, _hl=slot.hl: _hl.user_fills(),
+                    venue_open=slot.exec_client.open_orders(),
+                    venue_state=slot.exec_client.clearinghouse_state(),
+                    fills_lookup=lambda c, _ec=slot.exec_client: _ec.user_fills(),
                     now_ns=now_ns0,
                 )
                 for ev in drift_res.drift_events:
@@ -325,12 +428,12 @@ class EngineRuntime:
 
     def _build_slot(self, s_cfg: StrategyConfig) -> AccountSlot:
         alias = s_cfg.account_alias
-        if alias not in self.deploy_cfg.hl_accounts:
+        if alias not in self.deploy_cfg.accounts:
             raise ValueError(
                 f"strategy '{s_cfg.name}' references account_alias={alias!r} but "
-                f"deploy.hl_accounts has only {list(self.deploy_cfg.hl_accounts)}",
+                f"deploy.accounts has only {list(self.deploy_cfg.accounts)}",
             )
-        hl_cfg = self.deploy_cfg.hl_accounts[alias]
+        acct = self.deploy_cfg.accounts[alias]
         state_db_path = Path(self.deploy_cfg.state_db_path_for(alias))
         kill_switch_path = Path(self.deploy_cfg.kill_switch_path_for(alias))
         cloid_prefix = f"hla-{alias}-"
@@ -338,19 +441,34 @@ class EngineRuntime:
         dal = StateDAL(state_db_path)
         dal.run_migrations()
 
-        if self.hl_client_factory is not None:
-            hl = self.hl_client_factory(alias, hl_cfg, s_cfg.paper_mode)
-        else:
-            hl = HLClient(
-                account_address=hl_cfg.account_address,
-                api_secret_key=hl_cfg.api_secret_key,
-                base_url=hl_cfg.base_url,
+        if self.exec_client_factory is not None:
+            exec_client = self.exec_client_factory(alias, acct, s_cfg.paper_mode)
+        elif isinstance(acct, HyperliquidAccount):
+            exec_client = HLClient(
+                account_address=acct.account_address,
+                api_secret_key=acct.api_secret_key,
+                base_url=acct.base_url,
                 paper_mode=s_cfg.paper_mode,
             )
+        elif isinstance(acct, PolymarketAccount):
+            from .pm_client import PMClient
+            exec_client = PMClient(
+                paper_mode=s_cfg.paper_mode,
+                clob_host=acct.clob_host,
+                chain_id=acct.chain_id,
+                private_key=acct.private_key,
+                clob_api_key=acct.clob_api_key,
+                clob_api_secret=acct.clob_api_secret,
+                clob_api_passphrase=acct.clob_api_passphrase,
+                funder_address=acct.funder_address,
+                signature_type=acct.signature_type,
+            )
+        else:
+            raise ValueError(f"unsupported account type: {type(acct).__name__}")
 
         risk = RiskGate(s_cfg)
         router = Router(
-            dal=dal, gate=risk, bus=self.bus, hl=hl,
+            dal=dal, gate=risk, bus=self.bus, exec_client=exec_client,
             strategy_cfg=s_cfg, strategy_id=s_cfg.name,
             cloid_prefix=cloid_prefix,
         )
@@ -369,14 +487,14 @@ class EngineRuntime:
             # DB. The DB's realized_pnl is structurally near-zero — fills aren't
             # persisted on the happy path and closed positions are deleted —
             # so without this the cap would never fire.
-            pnl_provider=hl.realized_pnl_since,
+            pnl_provider=exec_client.realized_pnl_since,
             gate_log_path=gate_log_path,
         )
         return AccountSlot(
-            cfg=s_cfg, hl_cfg=hl_cfg,
+            cfg=s_cfg, account_cfg=acct,
             state_db_path=state_db_path, kill_switch_path=kill_switch_path,
             cloid_prefix=cloid_prefix,
-            dal=dal, hl=hl, risk=risk, router=router,
+            dal=dal, exec_client=exec_client, risk=risk, router=router,
             strategy=strategy, scanner=scanner,
         )
 
@@ -488,14 +606,14 @@ class EngineRuntime:
                 now = self._now_ns()
                 rec = Reconciler(
                     slot.dal,
-                    fills_lookup=lambda c, _hl=slot.hl: _hl.user_fills(),
+                    fills_lookup=lambda c, _ec=slot.exec_client: _ec.user_fills(),
                     symbol_to_question=self.market_state.symbol_to_question_map(),
                     cloid_prefix=slot.cloid_prefix,
                     account_alias=slot.alias,
                 )
                 res = rec.run(
-                    venue_open=slot.hl.open_orders(),
-                    venue_state=slot.hl.clearinghouse_state(),
+                    venue_open=slot.exec_client.open_orders(),
+                    venue_state=slot.exec_client.clearinghouse_state(),
                     now_ns=now,
                 )
                 # Translate "local position vanished from venue" into a
@@ -524,13 +642,20 @@ class EngineRuntime:
                 for ev in res.drift_events:
                     await self.bus.publish(ev)
                 for cloid, symbol in res.orphans_to_cancel:
-                    slot.hl.cancel(cloid=cloid, symbol=symbol)
+                    slot.exec_client.cancel(cloid=cloid, symbol=symbol)
                 slot.last_reconcile_ns = now
             except Exception:
                 logger.exception("reconcile crashed alias={}", slot.alias)
 
     async def _continuous_checks_loop(self, slot: AccountSlot) -> None:
         kill_path = slot.kill_switch_path
+        # PM-only flag gating the OrderUnconfirmed + RedemptionTimeout
+        # watchdogs so HL slots don't emit PM-specific alerts.
+        is_pm = isinstance(slot.account_cfg, PolymarketAccount)
+        # PM-only bus subscription. We capture settlement Exit events into
+        # `slot.pm_settlements` so the RedemptionTimeout watchdog has a
+        # ts→qty record to scan 6h later. HL slots don't subscribe.
+        pm_bus_sub: asyncio.Queue | None = self.bus.subscribe() if is_pm else None
         while not self.stop_event.is_set():
             try:
                 if slot.halted:
@@ -617,7 +742,7 @@ class EngineRuntime:
                     now, hour=slot.cfg.global_.daily_window_start_hour_utc,
                 )
                 try:
-                    pnl = slot.hl.realized_pnl_since(window_start_ns)
+                    pnl = slot.exec_client.realized_pnl_since(window_start_ns)
                 except Exception:
                     logger.warning("hl.realized_pnl_since failed alias={}; falling back to DAL", slot.alias)
                     pnl = slot.dal.realized_pnl_since(window_start_ns)
@@ -630,6 +755,38 @@ class EngineRuntime:
                     slot.halted = True
                     self._maybe_stop_all_halted(slot)
                     continue
+
+                # PM-only: drain bus subscription into pm_settlements so the
+                # RedemptionTimeout watchdog can fire 6h after a settlement
+                # Exit. We filter to settlement Exits matching this slot's
+                # alias — other slots' settlements / non-settlement events are
+                # ignored. `setdefault` means a re-published Exit (e.g.
+                # reconciler racing the close path) doesn't reset the clock.
+                if pm_bus_sub is not None:
+                    while True:
+                        try:
+                            ev = pm_bus_sub.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        if (
+                            isinstance(ev, Exit)
+                            and ev.reason == "settlement"
+                            and ev.account_alias == slot.alias
+                        ):
+                            slot.pm_settlements.setdefault(
+                                ev.question_idx,
+                                (ev.ts_ns, ev.symbol, ev.qty, ev.realized_pnl),
+                            )
+
+                # PM-only: unconfirmed-order + redemption watchdogs. Surfaces
+                # PM CLOB orders that have sat as `open` past the threshold
+                # (chain congestion, dropped acks), and settled positions
+                # that haven't been redeemed within 6h.
+                if is_pm:
+                    for unconf in _pm_check_unconfirmed_orders(slot, now):
+                        await self.bus.publish(unconf)
+                    for redempt in _pm_check_redemption_timeouts(slot, now):
+                        await self.bus.publish(redempt)
 
                 # Stale-data halt is per-trade; we also surface it as an alert here.
                 if positions_db:

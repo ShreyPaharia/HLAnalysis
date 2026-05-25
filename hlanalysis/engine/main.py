@@ -8,7 +8,9 @@ from pathlib import Path
 
 from loguru import logger
 
+from ..adapters.composite import CompositeAdapter
 from ..adapters.hyperliquid import HyperliquidAdapter
+from ..adapters.polymarket import PolymarketAdapter
 from ..config import load_config
 from .config import load_deploy_config, load_strategies_config
 from .runtime import EngineRuntime
@@ -52,14 +54,22 @@ def main() -> None:
     deploy_cfg = load_deploy_config(args.deploy_config)
     sym_cfg = load_config(args.symbols_config)
 
-    # Engine consumes only Hyperliquid subs. Binance is recorder-only in Phase 1.
-    hl_subs = [s for s in sym_cfg.subscriptions if s.venue == "hyperliquid"]
+    # Engine consumes HL + PM subscriptions; Binance stays recorder-only.
+    engine_subs = [
+        s for s in sym_cfg.subscriptions
+        if s.venue in ("hyperliquid", "polymarket")
+    ]
+
+    def _composite_factory() -> CompositeAdapter:
+        # One merged stream over HL + PM. Each child adapter only receives
+        # its own venue's subs (CompositeAdapter filters by `venue`).
+        return CompositeAdapter([HyperliquidAdapter(), PolymarketAdapter()])
 
     runtime = EngineRuntime(
         strategies=strategies_cfg.strategies,
         deploy_cfg=deploy_cfg,
-        adapter_factory=HyperliquidAdapter,
-        subscriptions=hl_subs,
+        adapter_factory=_composite_factory,
+        subscriptions=engine_subs,
     )
     for s in strategies_cfg.strategies:
         if s.paper_mode:

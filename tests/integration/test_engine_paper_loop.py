@@ -108,7 +108,7 @@ def cfgs(tmp_path):
     )
     deploy = DeployConfig(
         env="dev",
-        hl_accounts={"default": HLConfig(
+        accounts={"default": HLConfig(
             account_address="0x", api_secret_key="0x",
             base_url="https://api.hyperliquid.xyz",
         )},
@@ -129,7 +129,7 @@ async def test_paper_loop_enters_and_exits_on_settlement(cfgs, tmp_path):
         deploy_cfg=deploy_cfg,
         adapter_factory=_FakeAdapter,
         subscriptions=[],
-        hl_client_factory=lambda paper: HLClient(
+        exec_client_factory=lambda paper: HLClient(
             account_address="0x", api_secret_key="0x",
             base_url="https://api.hyperliquid.xyz", paper_mode=True,
         ),

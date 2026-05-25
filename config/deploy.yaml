@@ -1,23 +1,42 @@
 deploy:
   env: dev                              # dev | staging | prod
-  # Multi-account HL credentials. Each `account_alias` referenced by an entry in
-  # strategy.yaml must have a matching key here. Funding lives outside this
-  # config (ops decision). To add an account: introduce a new env var (e.g.
-  # HL_API_SECRET_KEY_V31) and add its block below.
-  hl_accounts:
+  # Multi-account, venue-typed. Each `account_alias` referenced by an entry in
+  # strategy.yaml must have a matching key here. The `venue:` discriminator
+  # selects HyperliquidAccount | PolymarketAccount. Funding lives outside this
+  # config (ops decision). To add an account: introduce env vars and add the
+  # block below.
+  accounts:
     v1:
+      venue: hyperliquid
       account_address: ${HL_ACCOUNT_ADDRESS}
       api_secret_key: ${HL_API_SECRET_KEY}
       base_url: https://api.hyperliquid.xyz
     v31:
+      venue: hyperliquid
       account_address: ${HL_ACCOUNT_ADDRESS_V31}
       api_secret_key: ${HL_API_SECRET_KEY_V31}
       base_url: https://api.hyperliquid.xyz
+    # Polymarket CLOB slot for v3.1 strategy. Paper-only until Phase 8 of the
+    # v3.1-PM plan wires py-clob-client-v2; live mode requires all four
+    # `clob_api_*` creds plus the Polygon `private_key` for L1 signing.
+    v31_pm:
+      venue: polymarket
+      clob_host: https://clob.polymarket.com
+      chain_id: 137
+      private_key: ${PM_PRIVATE_KEY}
+      clob_api_key: ${PM_CLOB_API_KEY}
+      clob_api_secret: ${PM_CLOB_API_SECRET}
+      clob_api_passphrase: ${PM_CLOB_API_PASSPHRASE}
+      # Required for polymarket.com-UI accounts (Safe-proxy maker). Set to
+      # the address shown at polymarket.com/wallet ("Receive / Deposit").
+      # Leave commented out for direct-EOA deployments.
+      funder_address: ${PM_FUNDER_ADDRESS}
+      signature_type: POLY_1271
   alerts:
     telegram:
       bot_token: ${TG_BOT_TOKEN}
       chat_id: ${TG_CHAT_ID}
-  # When >1 hl_accounts is configured, the engine namespaces state.db and the
+  # When >1 accounts is configured, the engine namespaces state.db and the
   # kill switch under the alias: data/engine/<alias>/state.db ,
   # data/engine/<alias>/halt. For a single 'default' (or single-named) account
   # the legacy flat paths below are used to preserve existing deployments.

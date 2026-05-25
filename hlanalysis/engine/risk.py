@@ -124,6 +124,38 @@ class RiskGate:
             if p.question_idx == intent.question_idx and p.symbol != intent.symbol:
                 return RiskVerdict(False, "opposite_leg_held")
 
+        # 13. Depth-walk slippage. Estimate the realized fill price by walking
+        # the ask ladder for buys (bid ladder for sells); reject when the
+        # blended fill exceeds the configured cap. Disabled when cap = 0 (HL
+        # default) or when the venue feed doesn't populate book levels.
+        slip_cap = self.cfg.global_.max_slippage_pct
+        if slip_cap > 0 and intent.size > 0 and intent.limit_price > 0:
+            levels = (
+                inp.book.ask_levels if intent.side == "buy"
+                else inp.book.bid_levels
+            )
+            if levels:
+                remaining = intent.size
+                cost = 0.0
+                for px, sz in levels:
+                    take = min(remaining, sz)
+                    cost += take * px
+                    remaining -= take
+                    if remaining <= 1e-9:
+                        break
+                if remaining > 1e-9:
+                    return RiskVerdict(False, "depth_walk_no_fill",
+                                       {"shortfall": f"{remaining:.4f}"})
+                avg_px = cost / intent.size
+                slip = (avg_px - intent.limit_price) / intent.limit_price
+                if intent.side == "sell":
+                    slip = -slip
+                if slip > slip_cap:
+                    return RiskVerdict(False, "depth_walk_slip",
+                                       {"avg_px": f"{avg_px:.5f}",
+                                        "limit": f"{intent.limit_price:.5f}",
+                                        "slip_pct": f"{slip*100:.3f}"})
+
         return RiskVerdict(True, "approved")
 
     # ---- continuous checks ----

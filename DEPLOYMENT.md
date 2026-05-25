@@ -539,3 +539,82 @@ switch or daily-loss halt.
   Monitor if order volume increases substantially.
 - The engine's `_reconcile_loop` runs once per slot per `reconcile_interval_seconds`
   (default 60s). With 2 accounts that's 2 read calls/min to HL — negligible.
+
+## Polymarket data
+
+The recorder subscribes to Polymarket's CLOB WebSocket alongside HL and Binance
+once a `polymarket` subscription block is added to `config/symbols.yaml`. The
+PM adapter (`hlanalysis/adapters/polymarket.py`) drives two background tasks:
+
+1. **Gamma poller** — every 60s, `GET https://gamma-api.polymarket.com/events?series_slug=<slug>&closed=false`,
+   diff against the in-memory market set, emit a `QuestionMetaEvent` for each
+   newly-listed market and a `SettlementEvent` for each newly-resolved one.
+2. **CLOB WebSocket** — `wss://ws-subscriptions-clob.polymarket.com/ws/market`,
+   subscribed via `{"type":"market","assets_ids":[...]}`. Frames are dispatched
+   by `event_type` (`book` / `price_change` / `last_trade_price`) into the
+   normalizers in `polymarket_normalize.py`. The receive loop is wrapped in an
+   exponential-backoff retry (1s → cap 30s, reset on successful (re)connect).
+
+### Smoke-test runbook
+
+```bash
+# 1. Trim a PM-only config (uses the existing match: filters)
+cat > /tmp/symbols_pm_only.yaml <<'YAML'
+subscriptions:
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: BTC
+      class: priceBinary
+      series_slug: btc-up-or-down-daily
+YAML
+
+# 2. Launch the recorder for ≥ 5 minutes
+uv run python -m hlanalysis.recorder.main \
+    --config /tmp/symbols_pm_only.yaml \
+    --data-root data/recorder \
+    --log-level INFO &
+RECORDER_PID=$!
+sleep 360
+kill -INT $RECORDER_PID
+
+# 3. Sanity-check the captured rows
+uv run python -c "
+import glob, pyarrow.parquet as pq
+files = sorted(glob.glob('data/recorder/venue=polymarket/**/*.parquet', recursive=True))
+print(f'parquet files: {len(files)}')
+for p in files[-3:]:
+    tbl = pq.ParquetFile(p).read()
+    print(p, '→', tbl.num_rows, 'rows, schema:', tbl.schema.names[:6])
+"
+```
+
+Expected on a healthy run:
+- One or more parquet files under
+  `data/recorder/venue=polymarket/product_type=prediction_binary/mechanism=clob/event={book_snapshot,trade}/symbol=<76-digit-id>/date=YYYY-MM-DD/hour=HH/`.
+- `book_snapshot` rows contain `bid_px`/`bid_sz`/`ask_px`/`ask_sz` as float
+  lists; `trade` rows contain `price`/`size`/`side`/`trade_id`.
+- The `symbol` column is the raw PM ERC-1155 token ID (76-digit string),
+  never coerced to int.
+
+### When the BTC Up/Down series is dead-quiet
+
+Polymarket only lists the **next** day's `btc-up-or-down-daily` market about
+2.5h after the prior day settles. Between settlement and listing, Gamma will
+return zero active markets and the adapter emits a single `HealthEvent
+kind="no_active_markets"` then idles. This is expected. The Gamma poll loop
+keeps running on a 60s cadence and the WS subscription kicks in automatically
+once a new market appears.
+
+### Failure modes seen during build-out
+
+- **`websockets` 16.x lazy submodule loading** — `import websockets` alone
+  does NOT make `websockets.exceptions` accessible. The adapter explicitly
+  does `import websockets.exceptions`.
+- **PyArrow dataset partition merge error** when reading partitioned files
+  via `pq.read_table(path)` — pyarrow merges the in-file `venue` column
+  against the `venue=...` hive partition value and errors on type mismatch.
+  Read individual files via `pq.ParquetFile(path).read()` instead.
