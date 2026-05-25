@@ -51,10 +51,14 @@ async def _flusher(writer: ParquetWriter, stop: asyncio.Event) -> None:
 
 async def run(config_path: Path, data_root: Path) -> None:
     config = load_config(config_path)
-    # 5 min time-trigger; per-key row cap stays at the writer default. Live small files
-    # are merged hourly by `scripts/compact-data.sh` (called from the S3 sync timer).
-    # Hard-crash data-loss bound: ~5 min.
-    writer = ParquetWriter(data_root, flush_interval_s=300.0)
+    # 60s time-trigger; per-key row cap stays at the writer default (5000).
+    # HL/Binance saturate the row cap within seconds and never hit the timer
+    # trigger; the 60s setting only matters for low-volume venues like
+    # Polymarket where book/trade keys would otherwise sit in memory until
+    # the row cap (essentially never). Live small files are merged hourly by
+    # `scripts/compact-data.sh` (called from the S3 sync timer). Hard-crash
+    # data-loss bound: ~60s.
+    writer = ParquetWriter(data_root, flush_interval_s=60.0)
 
     by_venue: dict[str, list[Subscription]] = defaultdict(list)
     for sub in config.subscriptions:
