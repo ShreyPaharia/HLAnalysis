@@ -460,6 +460,8 @@ class EngineRuntime:
                 clob_api_key=acct.clob_api_key,
                 clob_api_secret=acct.clob_api_secret,
                 clob_api_passphrase=acct.clob_api_passphrase,
+                funder_address=acct.funder_address,
+                signature_type=acct.signature_type,
             )
         else:
             raise ValueError(f"unsupported account type: {type(acct).__name__}")

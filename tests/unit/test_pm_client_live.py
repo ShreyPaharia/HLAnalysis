@@ -38,12 +38,18 @@ class _FakeClob:
         })
         if self._place_resp is not None:
             return self._place_resp
+        # PM CLOB taker-perspective convention: BUY → making=USDC paid,
+        # taking=shares received. Confirmed empirically against a live
+        # $19.50 fill 2026-05-26.
+        is_buy = str(order_args.side).endswith("BUY") or str(order_args.side) == "0"
+        usdc = order_args.size * order_args.price
+        shares = order_args.size
         return {
             "success": True,
             "orderID": "0xfakeid",
             "status": "matched",
-            "makingAmount": str(order_args.size),
-            "takingAmount": f"{order_args.size * order_args.price}",
+            "makingAmount": str(usdc if is_buy else shares),
+            "takingAmount": str(shares if is_buy else usdc),
         }
 
     def cancel_order(self, payload):

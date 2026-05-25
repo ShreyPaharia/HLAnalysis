@@ -27,6 +27,11 @@ deploy:
       clob_api_key: ${PM_CLOB_API_KEY}
       clob_api_secret: ${PM_CLOB_API_SECRET}
       clob_api_passphrase: ${PM_CLOB_API_PASSPHRASE}
+      # Required for polymarket.com-UI accounts (Safe-proxy maker). Set to
+      # the address shown at polymarket.com/wallet ("Receive / Deposit").
+      # Leave commented out for direct-EOA deployments.
+      funder_address: ${PM_FUNDER_ADDRESS}
+      signature_type: POLY_1271
   alerts:
     telegram:
       bot_token: ${TG_BOT_TOKEN}

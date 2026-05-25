@@ -208,6 +208,11 @@ class PolymarketAccount(_AccountBase):
     clob_api_key: str
     clob_api_secret: str
     clob_api_passphrase: str
+    # Set for polymarket.com-UI accounts (proxy/safe wallet pattern). The EOA
+    # signs; this address is the on-chain maker. Leave None for direct-EOA
+    # deployments. signature_type defaults to POLY_1271 when funder is set.
+    funder_address: str | None = None
+    signature_type: str | None = None
 
 
 AccountConfig = Annotated[

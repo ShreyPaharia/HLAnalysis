@@ -153,6 +153,9 @@ def test_deploy_config_substitutes_env(monkeypatch, tmp_path):
     monkeypatch.setenv("PM_CLOB_API_KEY", "stub-key")
     monkeypatch.setenv("PM_CLOB_API_SECRET", "stub-secret")
     monkeypatch.setenv("PM_CLOB_API_PASSPHRASE", "stub-pass")
+    # PM-UI-onboarded accounts use a Safe-proxy funder; deploy.yaml now
+    # references PM_FUNDER_ADDRESS.
+    monkeypatch.setenv("PM_FUNDER_ADDRESS", "0xstubfunder")
     p = tmp_path / "deploy.yaml"
     p.write_text(Path("config/deploy.yaml").read_text())
     cfg = load_deploy_config(p)

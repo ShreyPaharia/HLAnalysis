@@ -34,7 +34,17 @@ class PMClient:
         clob_api_key: str | None = None,
         clob_api_secret: str | None = None,
         clob_api_passphrase: str | None = None,
+        funder_address: str | None = None,
+        signature_type: str | None = None,
     ) -> None:
+        # PM-UI-onboarded accounts: the EOA only SIGNS; a Safe-style proxy
+        # is the on-chain MAKER. PM rejects orders signed by the EOA acting
+        # as its own maker with "maker address not allowed". Set
+        # funder_address to the proxy ("Receive / Deposit" address on
+        # polymarket.com/wallet) and signature_type="POLY_1271" to use the
+        # ERC-1271 contract-signature flow.
+        # signature_type values: "EOA" | "POLY_PROXY" | "POLY_1271".
+        # None defaults to EOA which only works for direct-deployment EOAs.
         self.paper_mode = paper_mode
         self._cfg = dict(
             clob_host=clob_host,
@@ -43,6 +53,8 @@ class PMClient:
             clob_api_key=clob_api_key,
             clob_api_secret=clob_api_secret,
             clob_api_passphrase=clob_api_passphrase,
+            funder_address=funder_address,
+            signature_type=signature_type,
         )
         # Paper bookkeeping
         self._paper_acks: dict[str, OrderAck] = {}
@@ -136,8 +148,8 @@ class PMClient:
     def _ensure_sdk(self):
         if self._sdk is not None:
             return self._sdk
-        from py_clob_client_v2 import ApiCreds, ClobClient
-        self._sdk = ClobClient(
+        from py_clob_client_v2 import ApiCreds, ClobClient, SignatureTypeV2
+        kwargs: dict = dict(
             host=self._cfg["clob_host"],
             chain_id=self._cfg["chain_id"],
             key=self._cfg["private_key"],
@@ -147,6 +159,16 @@ class PMClient:
                 api_passphrase=self._cfg["clob_api_passphrase"],
             ),
         )
+        funder = self._cfg.get("funder_address")
+        sig_type = self._cfg.get("signature_type")
+        if funder:
+            kwargs["funder"] = funder
+            # Default to POLY_1271 (Safe / smart-contract proxy) — that's
+            # what polymarket.com-UI accounts use. Override via config if
+            # using POLY_PROXY (older proxy factory variant).
+            type_name = (sig_type or "POLY_1271").upper()
+            kwargs["signature_type"] = getattr(SignatureTypeV2, type_name)
+        self._sdk = ClobClient(**kwargs)
         return self._sdk
 
     def _live_place(self, req: PlaceRequest) -> OrderAck:
@@ -187,14 +209,17 @@ class PMClient:
             self._cloid_to_oid[req.cloid] = oid
         making = float(resp.get("makingAmount") or 0)
         taking = float(resp.get("takingAmount") or 0)
-        # For a BUY: maker spends USDC (taking), receives tokens (making).
-        #   size = makingAmount (tokens); price = takingAmount/makingAmount.
-        # For a SELL: maker spends tokens (making), receives USDC (taking).
-        #   size = makingAmount (tokens); price = takingAmount/makingAmount.
-        fill_size = making
+        # Polymarket CLOB returns makingAmount/takingAmount from the
+        # TAKER'S perspective:
+        #   BUY taker:  making = USDC paid, taking = outcome tokens received.
+        #   SELL taker: making = tokens sold, taking = USDC received.
+        # Empirically confirmed against a $19.50 fill 2026-05-26: ack
+        # reported making=19.5, taking=30.47 → 30.47 shares at $0.64/share.
         if req.side == "buy":
-            fill_price = (taking / making) if making > 0 else req.price
+            fill_size = taking
+            fill_price = (making / taking) if taking > 0 else req.price
         else:
+            fill_size = making
             fill_price = (taking / making) if making > 0 else req.price
         status = "filled" if fill_size > 0 else "open"
         return OrderAck(

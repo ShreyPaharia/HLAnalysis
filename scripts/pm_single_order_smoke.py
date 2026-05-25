@@ -85,6 +85,11 @@ def main() -> None:
     missing = [v for v in required if not os.environ.get(v)]
     if missing:
         sys.exit(f"missing env vars: {missing}")
+    # Polymarket-web-UI accounts use a proxy/safe contract as the on-chain
+    # maker; the EOA only signs. Set PM_FUNDER_ADDRESS to the address shown
+    # at polymarket.com/wallet (the "Receive / Deposit" address). When set,
+    # we use the deposit-wallet flow (signature_type=POLY_1271 + funder=...).
+    funder = os.environ.get("PM_FUNDER_ADDRESS")
 
     # 1. Discover active BTC Up/Down daily market with future endDate.
     # Gamma's `closed=false` keeps returning markets that have expired but
@@ -126,6 +131,25 @@ def main() -> None:
         clob_api_secret=os.environ["PM_CLOB_API_SECRET"],
         clob_api_passphrase=os.environ["PM_CLOB_API_PASSPHRASE"],
     )
+    # If we have a deposit-wallet funder, override PMClient's lazy SDK
+    # construction with one that uses the POLY_1271 deposit-wallet flow.
+    # Permanent PMConfig+PMClient support for this lands in a follow-up
+    # commit; this is the smoke-test bridge.
+    if funder:
+        print(f"      using deposit-wallet flow; funder={funder}")
+        from py_clob_client_v2 import ApiCreds, ClobClient, SignatureTypeV2
+        client._sdk = ClobClient(  # type: ignore[attr-defined]
+            host=os.environ.get("PM_CLOB_HOST", "https://clob.polymarket.com"),
+            chain_id=int(os.environ.get("PM_CHAIN_ID", "137")),
+            key=os.environ["PM_PRIVATE_KEY"],
+            creds=ApiCreds(
+                api_key=os.environ["PM_CLOB_API_KEY"],
+                api_secret=os.environ["PM_CLOB_API_SECRET"],
+                api_passphrase=os.environ["PM_CLOB_API_PASSPHRASE"],
+            ),
+            signature_type=SignatureTypeV2.POLY_1271,
+            funder=funder,
+        )
     best_ask = _best_ask_from_orderbook(client, token_id)
     if best_ask is None:
         # Fall back to indicative + 1¢ — better than aborting on transient
