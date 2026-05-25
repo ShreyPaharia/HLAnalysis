@@ -52,6 +52,17 @@ TG_CHAT_ID=$(get_param /hl-engine/tg-chat-id no)
 HL_ACCOUNT_ADDRESS_V31=$(get_param /hl-engine/account-address-v31 no 2>/dev/null || true)
 HL_API_SECRET_KEY_V31=$(get_param /hl-engine/api-secret-key-v31 yes 2>/dev/null || true)
 
+# v31_pm (theta_harvester on Polymarket) — optional, same pattern as v31. The
+# engine constructs the v31_pm slot only when deploy.yaml's accounts.v31_pm
+# block resolves these env vars; missing here means the engine still boots
+# v1 + v31 but the v31_pm slot fails at load_deploy_config with a clear
+# substitution error in journalctl.
+PM_PRIVATE_KEY=$(get_param /hl-engine/pm-private-key yes 2>/dev/null || true)
+PM_CLOB_API_KEY=$(get_param /hl-engine/pm-clob-api-key yes 2>/dev/null || true)
+PM_CLOB_API_SECRET=$(get_param /hl-engine/pm-clob-api-secret yes 2>/dev/null || true)
+PM_CLOB_API_PASSPHRASE=$(get_param /hl-engine/pm-clob-api-passphrase yes 2>/dev/null || true)
+PM_FUNDER_ADDRESS=$(get_param /hl-engine/pm-funder-address no 2>/dev/null || true)
+
 # Write atomically so a partial write can never be sourced by EnvironmentFile.
 TMP=$(mktemp /etc/hl-engine/env.XXXXXX)
 chmod 600 "$TMP"
@@ -60,6 +71,11 @@ HL_ACCOUNT_ADDRESS=${HL_ACCOUNT_ADDRESS}
 HL_API_SECRET_KEY=${HL_API_SECRET_KEY}
 HL_ACCOUNT_ADDRESS_V31=${HL_ACCOUNT_ADDRESS_V31}
 HL_API_SECRET_KEY_V31=${HL_API_SECRET_KEY_V31}
+PM_PRIVATE_KEY=${PM_PRIVATE_KEY}
+PM_CLOB_API_KEY=${PM_CLOB_API_KEY}
+PM_CLOB_API_SECRET=${PM_CLOB_API_SECRET}
+PM_CLOB_API_PASSPHRASE=${PM_CLOB_API_PASSPHRASE}
+PM_FUNDER_ADDRESS=${PM_FUNDER_ADDRESS}
 TG_BOT_TOKEN=${TG_BOT_TOKEN}
 TG_CHAT_ID=${TG_CHAT_ID}
 PYTHONUNBUFFERED=1

@@ -64,6 +64,13 @@ MAPPING=(
   "HL_API_SECRET_KEY_V31|/hl-engine/api-secret-key-v31|SecureString|no"
   "TG_BOT_TOKEN|/hl-engine/tg-bot-token|SecureString|yes"
   "TG_CHAT_ID|/hl-engine/tg-chat-id|String|yes"
+  # Polymarket v31_pm slot. All required when the slot is configured in
+  # strategy.yaml — fetch-engine-secrets.sh hard-fails if they're missing.
+  "PM_PRIVATE_KEY|/hl-engine/pm-private-key|SecureString|no"
+  "PM_CLOB_API_KEY|/hl-engine/pm-clob-api-key|SecureString|no"
+  "PM_CLOB_API_SECRET|/hl-engine/pm-clob-api-secret|SecureString|no"
+  "PM_CLOB_API_PASSPHRASE|/hl-engine/pm-clob-api-passphrase|SecureString|no"
+  "PM_FUNDER_ADDRESS|/hl-engine/pm-funder-address|String|no"
 )
 
 # Dummy-value guard: the .env.local.example ships placeholder addresses like
