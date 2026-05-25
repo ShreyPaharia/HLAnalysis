@@ -764,11 +764,25 @@ class ThetaHarvesterStrategy(Strategy):
         #     exit when this rises above exit_edge_threshold. Frames the
         #     question as "is the bid offering me an above-fair sell price
         #     net of the exit-side fee?" — only fires on genuine premium.
+        # Exit-side fee per share. PM charges the curve fee on BOTH taker
+        # sides (entry and exit) — under fee_model="pm_binary" we estimate
+        # it at the model probability `held_p`, consistent with the entry
+        # edge formulation. Under fee_model="flat" (HL slots, legacy):
+        # take-profit mode uses the fixed `exit_fee`; legacy mode uses
+        # `fee_taker` (the legacy formula models the gate as "if I
+        # hypothetically rebought at the bid, what'd I pay?", so an entry
+        # fee is the right comparable).
+        if self.cfg.fee_model == "pm_binary":
+            exit_fee_per_share = self.cfg.fee_rate * held_p * (1.0 - held_p)
+        elif self.cfg.exit_take_profit_mode:
+            exit_fee_per_share = self.cfg.exit_fee
+        else:
+            exit_fee_per_share = self.cfg.fee_taker
         if self.cfg.exit_take_profit_mode:
-            edge_held = held.bid_px - held_p - self.cfg.exit_fee
+            edge_held = held.bid_px - held_p - exit_fee_per_share
             exit_now = edge_held > self.cfg.exit_edge_threshold
         else:
-            edge_held = held_p - held.bid_px - self.cfg.fee_taker
+            edge_held = held_p - held.bid_px - exit_fee_per_share
             exit_now = edge_held < self.cfg.exit_edge_threshold
         # Gamma penalty is INTENTIONALLY NOT applied to the exit gate.
         # Empirical: symmetric gamma penalty triggers premature exits during
