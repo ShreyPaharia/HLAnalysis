@@ -1225,6 +1225,37 @@ def test_evaluate_uses_per_class_cfg_when_provided():
     assert any(diag.message == "tte_out_of_window" for diag in d_binary.diagnostics)
 
 
+def test_fee_model_defaults_preserve_legacy_hl_behavior():
+    """fee_model defaults to 'flat' and fee_rate to 0.0 so existing HL slot
+    configs (which don't set either) load bit-identical."""
+    cfg = _cfg()
+    assert cfg.fee_model == "flat"
+    assert cfg.fee_rate == 0.0
+
+
+def test_build_v1_late_resolution_threads_pm_binary_fee_fields():
+    """v1 on Polymarket: the registered builder must propagate fee_model and
+    fee_rate from params into LateResolutionConfig so a v1_pm slot can declare
+    the PM fee curve in the same shape as v31_pm."""
+    from hlanalysis.strategy.late_resolution import build_v1_late_resolution
+
+    params = dict(
+        tte_min_seconds=0,
+        tte_max_seconds=7200,
+        price_extreme_threshold=0.85,
+        price_extreme_max=0.99,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
+        stop_loss_pct=None,
+        max_position_usd=50.0,
+        fee_model="pm_binary",
+        fee_rate=0.07,
+    )
+    strat = build_v1_late_resolution(params)
+    assert strat.cfg.fee_model == "pm_binary"
+    assert strat.cfg.fee_rate == 0.07
+
+
 def test_evaluate_restores_default_cfg_after_per_class_call():
     """Outside an evaluate() call, strategy.cfg must read as the originally-
     constructed default — never the last per-class swap."""

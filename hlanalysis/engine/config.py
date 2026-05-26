@@ -89,6 +89,14 @@ class AllowlistEntry(BaseModel):
     topup_enabled: bool = True
     topup_threshold_pct: float = 0.2          # trigger when shortfall ≥ 20% of target
     topup_min_notional_usd: float = 11.0      # HL per-order min is $10; buffer 11
+    # Fee model declaration (mirrors ThetaParams). Plumbed through to
+    # LateResolutionConfig so a `v1_pm` slot can declare fee_model: pm_binary
+    # alongside the v31_pm slot. The strategy gates don't read these — v1 has
+    # no edge formula — but the backtest runner picks the curve via
+    # --fee-model/--fee-rate, and surfacing them here keeps the live YAML
+    # honest about what fee curve the slot expects.
+    fee_model: Literal["flat", "pm_binary"] = "flat"
+    fee_rate: float = 0.0
 
 
 class GlobalRiskConfig(BaseModel):

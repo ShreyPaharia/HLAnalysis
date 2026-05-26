@@ -1,0 +1,43 @@
+# v1 late-resolution: focused PM walk-forward to compare flat vs pm_binary fees.
+#
+# The fee-sensitive knobs are price_extreme_threshold (low p = high fee per
+# share) and exit_safety_d (mid-hold exits pay an extra fee). Everything else
+# is pinned to the prod-equivalent settings from config/strategy.yaml +
+# config/v1-final.json so the comparison stays apples-to-apples.
+#
+# Wall-time budget: 4 × 2 = 8 cells × 6 OOS test splits × 60 markets ≈ 2,880
+# market backtests; ~5min at --workers 12 on PM cache.
+#
+# Comparison: run twice via the harness script, once with
+#   --fee-model flat --fee-taker 0.0      (legacy baseline; matches
+#                                          tuning.v1-1year regime)
+# and once with
+#   --fee-model pm_binary --fee-rate 0.07 (PM crypto-binary curve).
+# Diff the best-PnL cell between the two outputs to see how the optimum and
+# magnitude shift once realistic fees apply.
+
+grids:
+  v1_late_resolution:
+    tte_min_seconds: [0]
+    tte_max_seconds: [7200]
+    price_extreme_threshold: [0.85, 0.90, 0.93, 0.95]
+    price_extreme_max: [0.99]
+    distance_from_strike_usd_min: [0]
+    vol_max: [100]
+    stop_loss_pct: [null]
+    min_safety_d: [1.0]
+    vol_lookback_seconds: [3600]
+    exit_safety_d: [0, 1.0]
+    exit_bid_floor: [0]
+    drift_aware_d: [false]
+    vol_ewma_lambda: [0.85]
+    max_position_usd: [100]
+    size_cap_near_strike_pct: [1.0]
+    size_cap_max_dist_pct: [1.5]
+    size_cap_min_ask: [0.88]
+
+run:
+  train_markets: 60
+  test_markets: 60
+  step_markets: 60
+  max_workers: 12

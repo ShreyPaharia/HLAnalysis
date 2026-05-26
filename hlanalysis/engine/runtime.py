@@ -160,6 +160,8 @@ def _late_resolution_config_from_entry(
         topup_enabled=getattr(entry, "topup_enabled", True),
         topup_threshold_pct=getattr(entry, "topup_threshold_pct", 0.2),
         topup_min_notional_usd=getattr(entry, "topup_min_notional_usd", 11.0),
+        fee_model=getattr(entry, "fee_model", "flat"),
+        fee_rate=getattr(entry, "fee_rate", 0.0),
     )
 
 

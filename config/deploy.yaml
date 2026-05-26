@@ -32,6 +32,22 @@ deploy:
       # Leave commented out for direct-EOA deployments.
       funder_address: ${PM_FUNDER_ADDRESS}
       signature_type: POLY_1271
+    # Polymarket CLOB slot for v1 late_resolution. Separate funder/keys from
+    # v31_pm so the two slots have independent PnL accounting and can be
+    # halted independently. Walk-forward (2026-05-27) confirmed v1 stays
+    # profitable under pm_binary fees at the existing config
+    # (price_extreme_threshold=0.85, exit_safety_d=1.0): $556.65 / 5 OOS
+    # splits, max DD $101, 464 trades — ~20% fee haircut vs flat fees.
+    v1_pm:
+      venue: polymarket
+      clob_host: https://clob.polymarket.com
+      chain_id: 137
+      private_key: ${PM_PRIVATE_KEY_V1}
+      clob_api_key: ${PM_CLOB_API_KEY_V1}
+      clob_api_secret: ${PM_CLOB_API_SECRET_V1}
+      clob_api_passphrase: ${PM_CLOB_API_PASSPHRASE_V1}
+      funder_address: ${PM_FUNDER_ADDRESS_V1}
+      signature_type: POLY_1271
   alerts:
     telegram:
       bot_token: ${TG_BOT_TOKEN}

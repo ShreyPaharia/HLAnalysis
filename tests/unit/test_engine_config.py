@@ -156,6 +156,12 @@ def test_deploy_config_substitutes_env(monkeypatch, tmp_path):
     # PM-UI-onboarded accounts use a Safe-proxy funder; deploy.yaml now
     # references PM_FUNDER_ADDRESS.
     monkeypatch.setenv("PM_FUNDER_ADDRESS", "0xstubfunder")
+    # PM v1_pm slot: separate funder/keys mirroring v31_pm.
+    monkeypatch.setenv("PM_PRIVATE_KEY_V1", "0xstub-v1")
+    monkeypatch.setenv("PM_CLOB_API_KEY_V1", "stub-key-v1")
+    monkeypatch.setenv("PM_CLOB_API_SECRET_V1", "stub-secret-v1")
+    monkeypatch.setenv("PM_CLOB_API_PASSPHRASE_V1", "stub-pass-v1")
+    monkeypatch.setenv("PM_FUNDER_ADDRESS_V1", "0xstubfunder-v1")
     p = tmp_path / "deploy.yaml"
     p.write_text(Path("config/deploy.yaml").read_text())
     cfg = load_deploy_config(p)
@@ -164,6 +170,8 @@ def test_deploy_config_substitutes_env(monkeypatch, tmp_path):
     assert cfg.alerts.telegram.bot_token == "tg-token"
     assert "v31_pm" in cfg.accounts
     assert cfg.accounts["v31_pm"].chain_id == 137
+    assert "v1_pm" in cfg.accounts
+    assert cfg.accounts["v1_pm"].funder_address == "0xstubfunder-v1"
 
 
 def test_deploy_config_missing_env_raises(monkeypatch, tmp_path):

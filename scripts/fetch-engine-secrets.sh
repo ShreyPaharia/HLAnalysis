@@ -63,6 +63,15 @@ PM_CLOB_API_SECRET=$(get_param /hl-engine/pm-clob-api-secret yes 2>/dev/null || 
 PM_CLOB_API_PASSPHRASE=$(get_param /hl-engine/pm-clob-api-passphrase yes 2>/dev/null || true)
 PM_FUNDER_ADDRESS=$(get_param /hl-engine/pm-funder-address no 2>/dev/null || true)
 
+# v1_pm (late_resolution on Polymarket) — optional, same pattern as v31_pm.
+# Separate funder/keys so the two PM slots have independent PnL accounting and
+# can be halted independently.
+PM_PRIVATE_KEY_V1=$(get_param /hl-engine/pm-private-key-v1 yes 2>/dev/null || true)
+PM_CLOB_API_KEY_V1=$(get_param /hl-engine/pm-clob-api-key-v1 yes 2>/dev/null || true)
+PM_CLOB_API_SECRET_V1=$(get_param /hl-engine/pm-clob-api-secret-v1 yes 2>/dev/null || true)
+PM_CLOB_API_PASSPHRASE_V1=$(get_param /hl-engine/pm-clob-api-passphrase-v1 yes 2>/dev/null || true)
+PM_FUNDER_ADDRESS_V1=$(get_param /hl-engine/pm-funder-address-v1 no 2>/dev/null || true)
+
 # Write atomically so a partial write can never be sourced by EnvironmentFile.
 TMP=$(mktemp /etc/hl-engine/env.XXXXXX)
 chmod 600 "$TMP"
@@ -76,6 +85,11 @@ PM_CLOB_API_KEY=${PM_CLOB_API_KEY}
 PM_CLOB_API_SECRET=${PM_CLOB_API_SECRET}
 PM_CLOB_API_PASSPHRASE=${PM_CLOB_API_PASSPHRASE}
 PM_FUNDER_ADDRESS=${PM_FUNDER_ADDRESS}
+PM_PRIVATE_KEY_V1=${PM_PRIVATE_KEY_V1}
+PM_CLOB_API_KEY_V1=${PM_CLOB_API_KEY_V1}
+PM_CLOB_API_SECRET_V1=${PM_CLOB_API_SECRET_V1}
+PM_CLOB_API_PASSPHRASE_V1=${PM_CLOB_API_PASSPHRASE_V1}
+PM_FUNDER_ADDRESS_V1=${PM_FUNDER_ADDRESS_V1}
 TG_BOT_TOKEN=${TG_BOT_TOKEN}
 TG_CHAT_ID=${TG_CHAT_ID}
 PYTHONUNBUFFERED=1

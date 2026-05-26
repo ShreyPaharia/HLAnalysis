@@ -13,6 +13,16 @@
 #   HL_API_SECRET_KEY_V31   -> /hl-engine/api-secret-key-v31    SecureString
 #   TG_BOT_TOKEN            -> /hl-engine/tg-bot-token          SecureString
 #   TG_CHAT_ID              -> /hl-engine/tg-chat-id            String
+#   PM_PRIVATE_KEY          -> /hl-engine/pm-private-key            SecureString  (v31_pm)
+#   PM_CLOB_API_KEY         -> /hl-engine/pm-clob-api-key           SecureString  (v31_pm)
+#   PM_CLOB_API_SECRET      -> /hl-engine/pm-clob-api-secret        SecureString  (v31_pm)
+#   PM_CLOB_API_PASSPHRASE  -> /hl-engine/pm-clob-api-passphrase    SecureString  (v31_pm)
+#   PM_FUNDER_ADDRESS       -> /hl-engine/pm-funder-address         String        (v31_pm)
+#   PM_PRIVATE_KEY_V1       -> /hl-engine/pm-private-key-v1         SecureString  (v1_pm)
+#   PM_CLOB_API_KEY_V1      -> /hl-engine/pm-clob-api-key-v1        SecureString  (v1_pm)
+#   PM_CLOB_API_SECRET_V1   -> /hl-engine/pm-clob-api-secret-v1     SecureString  (v1_pm)
+#   PM_CLOB_API_PASSPHRASE_V1 -> /hl-engine/pm-clob-api-passphrase-v1 SecureString (v1_pm)
+#   PM_FUNDER_ADDRESS_V1    -> /hl-engine/pm-funder-address-v1      String        (v1_pm)
 #
 # The engine's ExecStartPre (scripts/fetch-engine-secrets.sh) reads these
 # back from SSM on every `systemctl restart hl-engine.service` — so after
@@ -71,6 +81,13 @@ MAPPING=(
   "PM_CLOB_API_SECRET|/hl-engine/pm-clob-api-secret|SecureString|no"
   "PM_CLOB_API_PASSPHRASE|/hl-engine/pm-clob-api-passphrase|SecureString|no"
   "PM_FUNDER_ADDRESS|/hl-engine/pm-funder-address|String|no"
+  # Polymarket v1_pm slot. Separate funder/keys from v31_pm so the slots have
+  # independent PnL accounting and can be halted independently.
+  "PM_PRIVATE_KEY_V1|/hl-engine/pm-private-key-v1|SecureString|no"
+  "PM_CLOB_API_KEY_V1|/hl-engine/pm-clob-api-key-v1|SecureString|no"
+  "PM_CLOB_API_SECRET_V1|/hl-engine/pm-clob-api-secret-v1|SecureString|no"
+  "PM_CLOB_API_PASSPHRASE_V1|/hl-engine/pm-clob-api-passphrase-v1|SecureString|no"
+  "PM_FUNDER_ADDRESS_V1|/hl-engine/pm-funder-address-v1|String|no"
 )
 
 # Dummy-value guard: the .env.local.example ships placeholder addresses like

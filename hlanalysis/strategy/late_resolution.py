@@ -255,6 +255,15 @@ class LateResolutionConfig:
     topup_enabled: bool = True
     topup_threshold_pct: float = 0.2
     topup_min_notional_usd: float = 11.0
+    # Fee model declaration. Mirrors theta_harvester's fields so v1 can run on
+    # Polymarket with the same `fee_model: pm_binary` / `fee_rate: 0.07` config
+    # shape as v31_pm. The strategy's gates don't read these directly — v1 has
+    # no edge calculation — but they round-trip through YAML so the live config
+    # carries an explicit fee declaration and the backtest runner can pick the
+    # same curve via --fee-model/--fee-rate. Defaults keep HL backtests
+    # bit-identical (flat, fee_taker=0).
+    fee_model: str = "flat"
+    fee_rate: float = 0.0
 
 
 class LateResolutionStrategy(Strategy):
@@ -987,5 +996,7 @@ def build_v1_late_resolution(params: dict) -> LateResolutionStrategy:
         topup_enabled=bool(params.get("topup_enabled", True)),
         topup_threshold_pct=float(params.get("topup_threshold_pct", 0.2)),
         topup_min_notional_usd=float(params.get("topup_min_notional_usd", 11.0)),
+        fee_model=str(params.get("fee_model", "flat")),
+        fee_rate=float(params.get("fee_rate", 0.0)),
     )
     return LateResolutionStrategy(cfg)
