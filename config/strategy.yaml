@@ -291,11 +291,15 @@ strategies:
 
   # --- v3.1 Polymarket ---
   # PM ablation knobs: post-2026-05-23 walk-forward (see Appendix C of
-  # docs/v31-polymarket-live-plan.md and [[v31-final-state-2026-05-23]]):
-  #   favorite_threshold=0.90, edge_buffer=0.03, topup_enabled=false,
-  #   tte_max_seconds=86400 (PM markets are 24h).
-  # PM-tuned params DO NOT transfer to HL (40% PnL hit on HL when applied),
-  # which is why this is a separate slot rather than a parameter sweep.
+  # docs/v31-polymarket-live-plan.md and [[v31-final-state-2026-05-23]]) picked
+  # favorite_threshold=0.90, edge_buffer=0.03. Operator override 2026-05-26:
+  # 16h live shadow on the v31_pm funder produced 0 entries — gate log showed
+  # edge_no peaking at +0.021 (below the 0.03 buffer) on a market where p_model
+  # tracked p_market within ~2pp. Aligned the two knobs to HL v31's
+  # favorite_threshold=0.85 / edge_buffer=0.02 to unblock entries during burn-in.
+  # tte_max_seconds=86400 (PM markets are 24h) stays PM-specific.
+  # PM-tuned → HL transfer was previously shown to hurt HL PnL by 40%; the
+  # reverse direction (HL knobs on PM) is being validated live during burn-in.
   # paper_mode=true until Phase 8 lands py-clob-client-v2; Phases 6+7+8
   # flip this on once paper-mode order I/O and live wiring are in.
   # fee_model/fee_rate are NEW config fields (Phase 7 plumbs them through to
@@ -357,12 +361,12 @@ strategies:
       vol_sampling_dt_seconds: 60
       vol_clip_min: 0.0
       vol_clip_max: 5.0
-      edge_buffer: 0.03                     # PM-tuned (vs HL 0.02)
+      edge_buffer: 0.02                     # aligned with HL v31 (was 0.03 PM-tuned) — 16h live shadow took 0 trades; relaxing to HL band per operator call 2026-05-26
       fee_taker: 0.0
       half_spread_assumption: 0.005
       drift_lookback_seconds: 3600
       drift_blend: 0.0
-      favorite_threshold: 0.90              # PM-tuned (vs HL 0.85)
+      favorite_threshold: 0.85              # aligned with HL v31 (was 0.90 PM-tuned) — see edge_buffer note
       edge_max: null
       exit_edge_threshold: 0.0
       time_stop_seconds: 0
