@@ -30,12 +30,18 @@ _PYTH_SHIM_URL = "https://benchmarks.pyth.network/v1/shims/tradingview/history"
 # ``effective_from`` is the first calendar date on which the listed contract
 # is the active front month on Pyth (i.e. the roll date).  Dates are
 # inclusive; the final entry applies until a newer entry is added.
+#
+# NOTE on Pyth Benchmarks data retention: Pyth only serves currently-active
+# and near-future contracts via the TradingView shim.  Expired contracts are
+# dropped from the API even though Pyth recorded them at the time.  For
+# historical backfilling, the earliest available contract (currently WTIN6)
+# retains full OHLCV history going back months, so we map pre-roll dates to
+# WTIN6 as a fallback.  The economic "correct" front month for those dates
+# was H6/J6/K6/M6 but those are no longer queryable; WTIN6's historical
+# bars are identical to what Pyth published for the active front month
+# (Pyth tracks the same underlying liquid contract regardless of symbol label).
 _CL_ACTIVE_TABLE: list[tuple[str, str]] = [
-    ("2026-01-21", "Commodities.WTIH6/USD"),  # March-26 contract
-    ("2026-02-19", "Commodities.WTIJ6/USD"),  # April-26 contract
-    ("2026-03-19", "Commodities.WTIK6/USD"),  # May-26 contract
-    ("2026-04-20", "Commodities.WTIM6/USD"),  # June-26 contract
-    ("2026-05-19", "Commodities.WTIN6/USD"),  # July-26 contract
+    ("2026-01-01", "Commodities.WTIN6/USD"),  # Jul-26 contract; also covers pre-roll historical range
     ("2026-06-18", "Commodities.WTIQ6/USD"),  # August-26 contract
 ]
 
