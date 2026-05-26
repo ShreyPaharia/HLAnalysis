@@ -34,15 +34,15 @@ _PYTH_SHIM_URL = "https://benchmarks.pyth.network/v1/shims/tradingview/history"
 # NOTE on Pyth Benchmarks data retention: Pyth only serves currently-active
 # and near-future contracts via the TradingView shim.  Expired contracts are
 # dropped from the API even though Pyth recorded them at the time.  For
-# historical backfilling, the earliest available contract (currently WTIN6)
-# retains full OHLCV history going back months, so we map pre-roll dates to
-# WTIN6 as a fallback.  The economic "correct" front month for those dates
-# was H6/J6/K6/M6 but those are no longer queryable; WTIN6's historical
-# bars are identical to what Pyth published for the active front month
-# (Pyth tracks the same underlying liquid contract regardless of symbol label).
+# historical backfilling, the latest active contract (currently WTIN6, the
+# Jul-26 contract) retains full 1m OHLCV history going back months, so we
+# map pre-roll dates to it as a fallback.  Calendar-spread vs the actual
+# active-front-month contract at the time is typically pennies; for σ and
+# near-resolution edge in backtest this is immaterial, but PM's actual
+# resolution prices come from PM's `outcomePrices` field (already-resolved
+# corpus), so reference-feed drift does not affect win/loss tallies.
 _CL_ACTIVE_TABLE: list[tuple[str, str]] = [
-    ("2026-01-01", "Commodities.WTIN6/USD"),  # Jul-26 contract; also covers pre-roll historical range
-    ("2026-06-18", "Commodities.WTIQ6/USD"),  # August-26 contract
+    ("2026-01-01", "Commodities.WTIN6/USD"),  # Jul-26 contract; backfills pre-roll history
 ]
 
 # Pre-compute sorted keys for bisect
@@ -92,7 +92,7 @@ def fetch_klines_1m(pyth_symbol: str, start_ts_ns: int, end_ts_ns: int) -> list[
         "from": start_ts_ns // 1_000_000_000,
         "to": end_ts_ns // 1_000_000_000,
     }
-    resp = requests.get(_PYTH_SHIM_URL, params=params)
+    resp = requests.get(_PYTH_SHIM_URL, params=params, timeout=30)
     resp.raise_for_status()
     data = resp.json()
 

@@ -1,12 +1,13 @@
-"""Polymarket data source — binary (BTC Up/Down daily) and bucket
-(Bitcoin Multi Strikes Hourly) markets.
+"""Polymarket data source — binary (e.g. BTC / WTI Up-or-Down daily) and
+bucket (Bitcoin Multi Strikes Hourly) markets.
 
 Implements the §3.2 `DataSource` protocol against a local cache populated by
 `fetch_and_cache(...)`. The cache layout is a single `manifest.json` keyed by
 question_id (PM `condition_id` for binaries, PM event slug for buckets) plus
-per-leg trade parquet files under `pm_trades/` and 1m BTC klines under
-`btc_klines/*.json`. See `docs/specs/2026-05-11-task-c-plan.md` §3 for the
-on-disk shape.
+per-leg trade parquet files under `pm_trades/` and 1m reference klines under
+`<klines_subdir>/*.json` (default `btc_klines/`; `wti_klines/` when
+constructed with `reference_symbol="WTI"`). See
+`docs/specs/2026-05-11-task-c-plan.md` §3 for the on-disk shape.
 
 The synthetic L2 model (one snapshot per PM trade, single level at ±half_spread)
 is preserved from the previous `sim/hftbt_adapter.build_event_stream`. Within
