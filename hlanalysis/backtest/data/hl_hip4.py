@@ -46,6 +46,9 @@ log = logging.getLogger(__name__)
 _LEG_RE = re.compile(r"^#(\d+)$")
 _HL_PREDICTION_PATH = "venue=hyperliquid/product_type=prediction_binary/mechanism=clob"
 _HL_PERP_PATH = "venue=hyperliquid/product_type=perp/mechanism=clob"
+_BINANCE_PERP_PATH = "venue=binance/product_type=perp/mechanism=clob"
+# Map HL underlying → Binance perp symbol for the reference-price swap.
+_BINANCE_REF_SYMBOL = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
 
 # Reference-feed resampling period. Must match the strategy's
 # vol_sampling_dt_seconds contract (currently 60s). Aggregating raw
@@ -169,9 +172,17 @@ class HLHip4DataSource:
         data_root: Path | str = "data",
         *,
         ref_event: Literal["bbo", "mark"] = "bbo",
+        ref_source: Literal["hl_perp", "binance_perp"] = "hl_perp",
     ) -> None:
         self.data_root = Path(data_root)
         self.ref_event = ref_event
+        # Reference-price venue. `hl_perp` (default) reads HL BBO/mark from
+        # data/venue=hyperliquid/product_type=perp/...; `binance_perp` reads
+        # Binance perp BBO from data/venue=binance/product_type=perp/...
+        # The Binance feed leads HL by tens-of-ms to seconds on macro moves;
+        # this lets us A/B whether feeding p_model (and σ) from Binance
+        # changes the strategy's edges on HL HIP-4 markets.
+        self.ref_source = ref_source
         # Cached per-instance: question_id -> parsed metadata bundle.
         self._meta_cache: dict[str, _QuestionMeta] = {}
 
@@ -768,6 +779,14 @@ class HLHip4DataSource:
         )
 
     def _perp_partition_glob(self, event: str, *, symbol: str) -> str:
+        if self.ref_source == "binance_perp":
+            return str(
+                self.data_root
+                / _BINANCE_PERP_PATH
+                / f"event={event}"
+                / f"symbol={_BINANCE_REF_SYMBOL.get(symbol, symbol)}"
+                / "**" / "*.parquet"
+            )
         return str(
             self.data_root
             / _HL_PERP_PATH

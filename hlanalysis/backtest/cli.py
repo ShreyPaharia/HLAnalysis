@@ -45,7 +45,12 @@ _ENV_HL_DATA = "HLBT_HL_DATA_ROOT"
 # Data source resolution
 # ---------------------------------------------------------------------------
 
-def _resolve_data_source(name: str, *, cache_root: str | None = None) -> DataSource:
+def _resolve_data_source(
+    name: str,
+    *,
+    cache_root: str | None = None,
+    ref_source: str | None = None,
+) -> DataSource:
     """Map a CLI data-source name to a concrete DataSource instance.
 
     Sources live behind lazy imports so a missing dependency in one source
@@ -71,7 +76,8 @@ def _resolve_data_source(name: str, *, cache_root: str | None = None) -> DataSou
         from .data.hl_hip4 import HLHip4DataSource
 
         root = cache_root or os.environ.get(_ENV_HL_DATA, "data")
-        return HLHip4DataSource(data_root=Path(root))
+        rs = ref_source or "hl_perp"
+        return HLHip4DataSource(data_root=Path(root), ref_source=rs)  # type: ignore[arg-type]
     raise SystemExit(f"Unknown --data-source: {name}")
 
 
@@ -188,7 +194,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     hedge_source = _build_hedge_source(args.hedge_data_path, hedge_cfg)
 
-    data_source = _resolve_data_source(args.data_source, cache_root=args.cache_root)
+    data_source = _resolve_data_source(
+        args.data_source,
+        cache_root=args.cache_root,
+        ref_source=getattr(args, "ref_source", None),
+    )
     start = args.start or ""
     end = args.end or ""
     discover_kwargs: dict = {}
@@ -349,7 +359,11 @@ def cmd_tune(args: argparse.Namespace) -> int:
         elif args.data_source == "hl_hip4":
             os.environ[_ENV_HL_DATA] = str(args.cache_root)
 
-    data_source = _resolve_data_source(args.data_source, cache_root=args.cache_root)
+    data_source = _resolve_data_source(
+        args.data_source,
+        cache_root=args.cache_root,
+        ref_source=getattr(args, "ref_source", None),
+    )
     discover_kwargs: dict = {}
     if args.data_source == "polymarket" and args.kind != "both":
         discover_kwargs["kind"] = args.kind
@@ -530,6 +544,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Filter discovery to this question class. "
         "For hl_hip4: binary→priceBinary, bucket→priceBucket. "
         "For polymarket: pass-through.",
+    )
+    pr.add_argument(
+        "--ref-source",
+        choices=["hl_perp", "binance_perp"],
+        default="hl_perp",
+        help="(hl_hip4 only) Reference-price feed for σ + p_model. "
+        "`hl_perp` reads HL BBO/mark; `binance_perp` reads Binance perp BBO/mark.",
     )
     pr.set_defaults(func=cmd_run)
 
