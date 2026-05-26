@@ -309,6 +309,13 @@ strategies:
     account_alias: v31_pm                   # → deploy.accounts.v31_pm
     strategy_type: theta_harvester
     paper_mode: false                       # LIVE: real PM orders on v31_pm funder
+    # PM "BTC Up or Down" markets resolve on the Binance 1m close at the
+    # strike-ref ts, and the PM tuning (fav=0.9, eb=0.03) was calibrated
+    # against Binance σ + Binance p_model. Use Binance perp mark as the
+    # reference here so the live engine matches the backtester. HL "BTC"
+    # mark would lag Binance on macro moves and was the previous (buggy)
+    # default.
+    reference_symbol: BTCUSDT
 
     allowlist:
       - match:

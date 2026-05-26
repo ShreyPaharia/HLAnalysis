@@ -494,6 +494,7 @@ class EngineRuntime:
             strategy=strategy, cfg=s_cfg,
             market_state=self.market_state, dal=dal,
             kill_switch_path=kill_switch_path,
+            reference_symbol=s_cfg.reference_symbol,
             last_reconcile_ns=0,
             # Daily-loss cap reads from HL (venue truth) rather than the local
             # DB. The DB's realized_pnl is structurally near-zero — fills aren't

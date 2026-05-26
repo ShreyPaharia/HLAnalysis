@@ -177,6 +177,11 @@ class StrategyConfig(BaseModel):
     strategy_type: StrategyType = "late_resolution"
     # Optional theta_harvester params (ignored when strategy_type != theta_harvester).
     theta: ThetaParams | None = None
+    # Symbol whose MarkEvent feeds σ + p_model. Default "BTC" = HL perp mark
+    # (HL adapter emits MarkEvent with symbol="BTC"). For PM markets that
+    # resolve on Binance, set "BTCUSDT" so the Scanner reads Binance perp mark
+    # (Binance adapter emits with symbol="BTCUSDT").
+    reference_symbol: str = "BTC"
 
 
 class StrategiesConfig(BaseModel):
