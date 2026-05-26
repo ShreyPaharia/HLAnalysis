@@ -336,3 +336,76 @@ def test_discover_kind_both(binary_cache: Path, bucket_cache: Path, tmp_path: Pa
     descs = src.discover(start="1970-01-01", end="2999-12-31", kind="both")
     klasses = sorted([d.klass for d in descs])
     assert klasses == ["priceBinary", "priceBucket"]
+
+
+# ---- Parametrization tests --------------------------------------------------
+
+
+def test_default_kwargs_match_btc_behavior_bit_identical(tmp_path):
+    """Constructing with no kwargs must yield the BTC-flavored source —
+    same series slug, same underlying tag, same klines subdir as pre-refactor.
+    """
+    ds = PolymarketDataSource(cache_root=tmp_path)
+    assert ds._reference_symbol == "BTC"
+    assert ds._series_slug == "btc-up-or-down-daily"
+    assert ds._klines_subdir == "btc_klines"
+
+
+def test_wti_constructor_routes_to_wti_settings(tmp_path):
+    ds = PolymarketDataSource(
+        cache_root=tmp_path,
+        reference_symbol="WTI",
+        series_slug="oil-daily-up-or-down",
+        klines_subdir="wti_klines",
+    )
+    assert ds._reference_symbol == "WTI"
+    assert ds._series_slug == "oil-daily-up-or-down"
+    assert ds._klines_subdir == "wti_klines"
+
+
+def test_wti_reference_events_carry_wti_symbol(tmp_path):
+    """Smoke: write a tiny manifest + parquet + wti_klines, then call events()
+    and confirm the ReferenceEvent symbol is 'WTI' (not 'BTC'), and the
+    QuestionDescriptor.underlying tag is 'WTI'.
+    """
+    # Timestamps land in 2026-05 so the discover window "2026-01-01".."2026-12-31" includes them.
+    _kline_ts_ns = 1779796800_000_000_000   # 2026-05-26 12:00 UTC
+    _start_ts_ns = 1779796800_000_000_000 - 24 * 3600 * 1_000_000_000  # 24h before
+    _end_ts_ns   = 1779796800_000_000_000 + 3600 * 1_000_000_000        # 1h after
+    cache = tmp_path
+    (cache / "wti_klines").mkdir()
+    (cache / "wti_klines" / "2026-05.json").write_text(json.dumps([
+        {"ts_ns": _kline_ts_ns, "open": 60.0, "high": 60.5,
+         "low": 59.8, "close": 60.2},
+    ]))
+    (cache / "pm_trades").mkdir()
+    cond_id = "0xdead"
+    yes_t, no_t = "tok_yes", "tok_no"
+    table = pa.table({
+        "ts_ns": [_kline_ts_ns], "token_id": [yes_t],
+        "side": ["buy"], "price": [0.55], "size": [10.0],
+    })
+    pq.write_table(table, cache / "pm_trades" / f"{cond_id}.parquet")
+    (cache / "manifest.json").write_text(json.dumps({
+        cond_id: {
+            "kind": "binary",
+            "market": {
+                "condition_id": cond_id,
+                "yes_token_id": yes_t, "no_token_id": no_t,
+                "start_ts_ns": _start_ts_ns,
+                "end_ts_ns": _end_ts_ns,
+                "resolved_outcome": "yes",
+                "total_volume_usd": 100.0, "n_trades": 1,
+            },
+        }
+    }))
+
+    ds = PolymarketDataSource(
+        cache_root=cache, reference_symbol="WTI",
+        series_slug="oil-daily-up-or-down", klines_subdir="wti_klines",
+    )
+    descs = ds.discover(start="2026-01-01", end="2026-12-31", kind="binary")
+    assert len(descs) == 1
+    assert descs[0].underlying == "WTI"
+    refs = [ev for ev in ds.events(descs[0]) if type(ev).__name__ == "ReferenceEvent"]
+    assert refs and refs[0].symbol == "WTI"

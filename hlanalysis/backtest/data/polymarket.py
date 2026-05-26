@@ -43,7 +43,9 @@ from ._synthetic_l2 import L2Snapshot, trade_to_l2
 _GAMMA_BASE = "https://gamma-api.polymarket.com"
 _CLOB_DATA_BASE = "https://data-api.polymarket.com"
 _CLOB_BASE = "https://clob.polymarket.com"
-_BTC_UPDOWN_SERIES_SLUG = "btc-up-or-down-daily"
+_DEFAULT_REF_SYMBOL = "BTC"
+_DEFAULT_BINARY_SERIES_SLUG = "btc-up-or-down-daily"
+_DEFAULT_KLINES_SUBDIR = "btc_klines"
 _BTC_BUCKET_SERIES_SLUG = "bitcoin-multi-strikes-hourly"
 _SERIES_PAGE_LIMIT = 100  # Gamma /events caps responses at 100 even when limit > 100;
 # requesting 500 silently truncates and we mistake the short response for "end of data".
@@ -296,9 +298,15 @@ class PolymarketDataSource:
         cache_root: Path,
         half_spread: float = _HALF_SPREAD_DEFAULT,
         depth: float = _DEPTH_DEFAULT,
+        reference_symbol: str = _DEFAULT_REF_SYMBOL,
+        series_slug: str = _DEFAULT_BINARY_SERIES_SLUG,
+        klines_subdir: str = _DEFAULT_KLINES_SUBDIR,
     ) -> None:
         self._cache_root = Path(cache_root)
         self._stream_cfg = _StreamCfg(half_spread=half_spread, depth=depth)
+        self._reference_symbol = reference_symbol
+        self._series_slug = series_slug
+        self._klines_subdir = klines_subdir
         # Lazy caches populated on first read. Significant for tuning workers
         # that backtest dozens of markets per cell — without caches each
         # market would re-parse the manifest + the (large) BTC klines JSON.
@@ -413,7 +421,7 @@ class PolymarketDataSource:
             end_ts_ns=int(mk["end_ts_ns"]),
             leg_symbols=(str(mk["yes_token_id"]), str(mk["no_token_id"])),
             klass="priceBinary",
-            underlying="BTC",
+            underlying=self._reference_symbol,
         )
 
     def _descriptor_from_bucket(self, qid: str, entry: dict) -> QuestionDescriptor | None:
@@ -430,7 +438,7 @@ class PolymarketDataSource:
             end_ts_ns=int(b["end_ts_ns"]),
             leg_symbols=legs,
             klass="priceBucket",
-            underlying="BTC",
+            underlying=self._reference_symbol,
         )
 
     # -- internals: question_view ------------------------------------------
@@ -475,6 +483,10 @@ class PolymarketDataSource:
         """
         entry = self._load_manifest().get(q.question_id, {})
         strike_ts_ns = entry.get("strike_ref_ts_ns")
+        # Non-BTC underlyings (e.g. WTI) hit this fallback because the strike-rule
+        # regex is BTC-specific. The bisect-to-nearest-preceding-1m-candle behavior
+        # correctly resolves to the prior trading session's close on weekend gaps,
+        # matching PM's "most recent prior trading day" resolution semantics.
         if strike_ts_ns is None:
             strike_ts_ns = q.end_ts_ns - 24 * 3600 * 1_000_000_000
         strike_ts_ns = int(strike_ts_ns)
@@ -613,7 +625,7 @@ class PolymarketDataSource:
         # legacy `day_open_btc` convention.
         leg_event_streams.append(iter(
             ReferenceEvent(
-                ts_ns=int(k["ts_ns"]), symbol="BTC",
+                ts_ns=int(k["ts_ns"]), symbol=self._reference_symbol,
                 high=float(k["high"]), low=float(k["low"]),
                 close=float(k["close"]), open=float(k["open"]),
             )
@@ -680,7 +692,7 @@ class PolymarketDataSource:
         """
         if self._klines_cache is not None:
             return self._klines_cache
-        klines_dir = self._cache_root / "btc_klines"
+        klines_dir = self._cache_root / self._klines_subdir
         rows: list[dict] = []
         if klines_dir.exists():
             for f in sorted(klines_dir.glob("*.json")):
@@ -700,7 +712,7 @@ class PolymarketDataSource:
         self, manifest: dict, *, start_iso: str, end_iso: str,
         min_trades: int, min_volume_usd: float, refresh: bool,
     ) -> None:
-        raw = _fetch_series_events(_BTC_UPDOWN_SERIES_SLUG)
+        raw = _fetch_series_events(self._series_slug)
         in_window = [ev for ev in raw if _event_in_window(ev, start_iso, end_iso)]
         for ev in in_window:
             mkt = _parse_binary_event(ev)
