@@ -1,22 +1,21 @@
 from hlanalysis.backtest.data._pyth_klines import active_cl_contract
 
 
-def test_active_cl_contract_april_active_in_march():
-    # CL April-26 contract (J6) is active in early March until its last
-    # trade day. Anything in the J6 window should return J6.
-    assert active_cl_contract("2026-03-10") == "Commodities.WTIJ6/USD"
-
-
-def test_active_cl_contract_june_active_in_may():
-    assert active_cl_contract("2026-05-15") == "Commodities.WTIM6/USD"
-
-
-def test_active_cl_contract_july_active_late_may():
-    assert active_cl_contract("2026-05-26") == "Commodities.WTIN6/USD"
+def test_active_cl_contract_returns_pyth_wti_symbol():
+    # Pyth deprecates expired CL contracts and removes them from the
+    # tradingview shim, so the table collapses to the latest active
+    # contract that retains historical depth (currently WTIN6). Any date
+    # in the WTI Up/Down corpus window should map to a valid Pyth WTI
+    # symbol — exact contract is whatever the table backfills with.
+    for d in ("2026-03-10", "2026-04-15", "2026-05-15", "2026-05-26"):
+        sym = active_cl_contract(d)
+        assert sym.startswith("Commodities.WTI") and sym.endswith("/USD"), sym
 
 
 def test_active_cl_contract_pre_corpus_returns_first_entry():
-    assert active_cl_contract("2026-02-15").startswith("Commodities.WTI")
+    # Dates before the earliest table entry should clamp to the first
+    # entry rather than raise.
+    assert active_cl_contract("2025-01-01").startswith("Commodities.WTI")
 
 
 from unittest.mock import patch, Mock
