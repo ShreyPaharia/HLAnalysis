@@ -39,6 +39,20 @@ from .runner.result import summarise_run
 # `hl-bt tune` reach the same caches through the same env vars.
 _ENV_PM_CACHE = "HLBT_PM_CACHE_ROOT"
 _ENV_HL_DATA = "HLBT_HL_DATA_ROOT"
+_ENV_PM_FLAVOR = "HLBT_PM_FLAVOR"  # propagated to tune workers via env
+
+_PM_FLAVORS: dict[str, dict[str, str]] = {
+    "btc_updown": {
+        "reference_symbol": "BTC",
+        "series_slug": "btc-up-or-down-daily",
+        "klines_subdir": "btc_klines",
+    },
+    "wti_updown": {
+        "reference_symbol": "WTI",
+        "series_slug": "oil-daily-up-or-down",
+        "klines_subdir": "wti_klines",
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +64,7 @@ def _resolve_data_source(
     *,
     cache_root: str | None = None,
     ref_source: str | None = None,
+    pm_flavor: str | None = None,
 ) -> DataSource:
     """Map a CLI data-source name to a concrete DataSource instance.
 
@@ -71,7 +86,10 @@ def _resolve_data_source(
         from .data.polymarket import PolymarketDataSource
 
         root = cache_root or os.environ.get(_ENV_PM_CACHE, "data/sim")
-        return PolymarketDataSource(cache_root=Path(root))
+        flavor = pm_flavor or os.environ.get(_ENV_PM_FLAVOR, "btc_updown")
+        if flavor not in _PM_FLAVORS:
+            raise SystemExit(f"Unknown --pm-flavor: {flavor!r}. Choices: {sorted(_PM_FLAVORS)}")
+        return PolymarketDataSource(cache_root=Path(root), **_PM_FLAVORS[flavor])
     if name == "hl_hip4":
         from .data.hl_hip4 import HLHip4DataSource
 
@@ -89,7 +107,8 @@ def make_polymarket_source() -> "DataSource":
     from .data.polymarket import PolymarketDataSource
 
     root = os.environ.get(_ENV_PM_CACHE, "data/sim")
-    return PolymarketDataSource(cache_root=Path(root))
+    flavor = os.environ.get(_ENV_PM_FLAVOR, "btc_updown")
+    return PolymarketDataSource(cache_root=Path(root), **_PM_FLAVORS[flavor])
 
 
 def make_hl_hip4_source() -> "DataSource":
@@ -198,6 +217,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         args.data_source,
         cache_root=args.cache_root,
         ref_source=getattr(args, "ref_source", None),
+        pm_flavor=getattr(args, "pm_flavor", None),
     )
     start = args.start or ""
     end = args.end or ""
@@ -327,7 +347,8 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     from .data.polymarket import PolymarketDataSource
 
     cache_root = Path(args.cache_root or os.environ.get(_ENV_PM_CACHE, "data/sim"))
-    ds = PolymarketDataSource(cache_root=cache_root)
+    fcfg = _PM_FLAVORS[args.pm_flavor]
+    ds = PolymarketDataSource(cache_root=cache_root, **fcfg)
     descs = ds.fetch_and_cache(
         start=args.start,
         end=args.end,
@@ -359,10 +380,14 @@ def cmd_tune(args: argparse.Namespace) -> int:
         elif args.data_source == "hl_hip4":
             os.environ[_ENV_HL_DATA] = str(args.cache_root)
 
+    if args.data_source == "polymarket":
+        os.environ[_ENV_PM_FLAVOR] = args.pm_flavor
+
     data_source = _resolve_data_source(
         args.data_source,
         cache_root=args.cache_root,
         ref_source=getattr(args, "ref_source", None),
+        pm_flavor=getattr(args, "pm_flavor", None),
     )
     discover_kwargs: dict = {}
     if args.data_source == "polymarket" and args.kind != "both":
@@ -532,6 +557,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Override cache/data root (env: HLBT_PM_CACHE_ROOT / HLBT_HL_DATA_ROOT).",
     )
     pr.add_argument(
+        "--pm-flavor",
+        choices=["btc_updown", "wti_updown"],
+        default="btc_updown",
+        help="(polymarket only) Which PM series + reference asset. "
+        "btc_updown: BTC 'Up or Down Daily' (default). "
+        "wti_updown: WTI 'Oil Daily Up or Down'.",
+    )
+    pr.add_argument(
         "--hedge-data-path",
         default=None,
         help="Path to Binance perp/spot kline JSON for the hedge leg (v5 only). "
@@ -565,6 +598,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     pf.add_argument("--end", required=True, help="ISO date YYYY-MM-DD")
     pf.add_argument("--kind", choices=["binary", "bucket", "both"], default="both")
     pf.add_argument("--cache-root", default=None, help="Override env HLBT_PM_CACHE_ROOT")
+    pf.add_argument(
+        "--pm-flavor",
+        choices=["btc_updown", "wti_updown"],
+        default="btc_updown",
+        help="(polymarket only) Which PM series + reference asset. "
+        "btc_updown: BTC 'Up or Down Daily' (default). "
+        "wti_updown: WTI 'Oil Daily Up or Down'.",
+    )
     pf.add_argument("--min-trades", type=int, default=30)
     pf.add_argument("--min-volume-usd", type=float, default=1000.0)
     pf.add_argument("--refresh", action="store_true")
@@ -583,6 +624,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     pt.add_argument("--run-id", required=True)
     pt.add_argument("--workers", type=int, default=4)
     pt.add_argument("--cache-root", default=None)
+    pt.add_argument(
+        "--pm-flavor",
+        choices=["btc_updown", "wti_updown"],
+        default="btc_updown",
+        help="(polymarket only) Which PM series + reference asset. "
+        "btc_updown: BTC 'Up or Down Daily' (default). "
+        "wti_updown: WTI 'Oil Daily Up or Down'.",
+    )
     pt.add_argument("--start", default=None)
     pt.add_argument("--end", default=None)
     pt.add_argument("--scanner-interval-seconds", type=int, default=60)
