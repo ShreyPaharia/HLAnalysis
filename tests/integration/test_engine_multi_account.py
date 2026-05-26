@@ -188,15 +188,20 @@ async def test_two_strategies_isolated_state(deploy_cfg, tmp_path):
         f"v31 fills must carry 'hla-v31-' prefix, got {[f.cloid for f in v31_paper_fills]}"
 
     # Telegram alerts: ENTRY messages carry the originating account's alias as
-    # a prefix tag, so a v1 entry and a v31 entry are visually distinguishable
-    # on the same chat. The recipient should see e.g. "[v1] 🟢 ENTRY ...".
+    # a prefix tag (with the venue tag when configured), so a v1 entry and a
+    # v31 entry are visually distinguishable on the same chat. The recipient
+    # should see e.g. "[HL:v1] 🟢 ENTRY ..." or "[v1] 🟢 ENTRY ..." depending
+    # on whether the runtime registered a venue_by_alias map.
     entry_msgs = [m for m in fake_tg.messages if "ENTRY" in m]
-    v1_entry_msgs = [m for m in entry_msgs if "[v1]" in m]
-    v31_entry_msgs = [m for m in entry_msgs if "[v31]" in m]
-    assert v1_entry_msgs, f"expected at least one [v1] ENTRY alert; got {entry_msgs}"
-    assert v31_entry_msgs, f"expected at least one [v31] ENTRY alert; got {entry_msgs}"
+    v1_entry_msgs = [m for m in entry_msgs if ":v1]" in m or "[v1]" in m]
+    v31_entry_msgs = [m for m in entry_msgs if ":v31]" in m or "[v31]" in m]
+    assert v1_entry_msgs, f"expected at least one v1 ENTRY alert; got {entry_msgs}"
+    assert v31_entry_msgs, f"expected at least one v31 ENTRY alert; got {entry_msgs}"
     # Every entry alert MUST be prefixed — no untagged leakage.
-    untagged = [m for m in entry_msgs if "[v1]" not in m and "[v31]" not in m]
+    untagged = [
+        m for m in entry_msgs
+        if not any(tag in m for tag in ("[v1]", "[v31]", ":v1]", ":v31]"))
+    ]
     assert not untagged, f"untagged ENTRY alerts leaked through: {untagged}"
 
 

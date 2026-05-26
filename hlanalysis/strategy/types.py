@@ -92,6 +92,11 @@ class QuestionView:
     period: str           # e.g. "1d"
     settled: bool = False
     settled_side: Literal["yes", "no", "unknown"] | None = None
+    # Symbol of the winning leg, stamped by MarketState._mark_settled from
+    # SettlementEvent.symbol. Needed to compute realized PnL on
+    # held-to-settlement positions for multi-outcome buckets where
+    # settled_side alone (yes/no) doesn't identify which outcome won.
+    settled_symbol: str = ""
     leg_symbols: tuple[str, ...] = ()
     # Display fields from QuestionMetaEvent, used by alerts/reports for human
     # readable rendering. `name` is HL's question name (e.g. "Recurring").

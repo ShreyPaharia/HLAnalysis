@@ -137,7 +137,15 @@ class MarketState:
         except ValueError:
             strike = float("nan")
         # priceBinary expiry is keyed as "expiry" with format YYYYMMDD-HHMM
+        # (HL convention). PM adapters mirror the same key so this path is
+        # venue-agnostic; `expiry_ns` is accepted as an epoch-ns fallback
+        # for older PM payloads.
         expiry_ns = self._parse_expiry_ns(kv.get("expiry", ""))
+        if expiry_ns == 0:
+            try:
+                expiry_ns = int(kv.get("expiry_ns", "0") or 0)
+            except ValueError:
+                expiry_ns = 0
         # HL HIP-4 emits L2/trades keyed by f"#{10*outcome_idx + side_idx}" where
         # side_idx=0 is YES and side_idx=1 is NO (see adapters/hyperliquid.py).
         # priceBinary: 1 outcome × 2 sides → 2 legs ([yes, no]).
@@ -216,11 +224,14 @@ class MarketState:
                 continue
             leg_idx = legs.index(ev.symbol)
             # side_idx 0 = YES, 1 = NO (per HL coin convention #{10*o + s}).
-            # For non-binary questions, "side" is informational only — settled_side
-            # tells the strategy whether the held leg won, which it derives by
-            # comparing the position's symbol to the settled symbol elsewhere.
+            # For non-binary questions, "side" is informational only — the
+            # canonical "did our position win?" check uses `settled_symbol`
+            # below (which identifies the exact winning leg, including
+            # outcome index for buckets where side alone is ambiguous).
             side: str = "yes" if leg_idx % 2 == 0 else "no"
-            self._questions[idx] = dataclasses.replace(q, settled=True, settled_side=side)
+            self._questions[idx] = dataclasses.replace(
+                q, settled=True, settled_side=side, settled_symbol=ev.symbol,
+            )
 
     @staticmethod
     def _parse_expiry_ns(expiry: str) -> int:

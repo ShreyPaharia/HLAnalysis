@@ -130,6 +130,34 @@ def test_parse_gamma_market_to_question_meta_binary():
     assert keys["condition_id"] == "0xcond123"
     assert "strike_ref_ts_ns" in keys
     assert int(keys["expiry_ns"]) > 0
+    # The HL-shaped `expiry` (YYYYMMDD-HHMM) is what MarketState reads — PM
+    # daily 00:00Z endDate must mirror it so PM expiries land on alerts.
+    assert keys["expiry"] == "20260525-0000"
+    # No static strike on daily up/down — `targetPrice` should be absent
+    # rather than emitted as an empty string (which would render as "$").
+    assert "targetPrice" not in keys
+    # `question_name` carries the human-readable label used by the alert
+    # renderer's fallback path when no numeric strike is available.
+    assert keys["question_name"].startswith("Will BTC go up or down")
+
+
+def test_parse_gamma_market_emits_target_price_when_group_item_title_numeric():
+    """Polymarket bucket-style markets put their strike in `groupItemTitle`
+    (e.g. "$80,000"). The normalizer should lift it to `targetPrice` so
+    the existing render path picks it up."""
+    bucket_leg = dict(
+        _SAMPLE_GAMMA_MARKET,
+        groupItemTitle="$80,000",
+        question="BTC above $80,000 on May 25?",
+    )
+    ev = parse_gamma_market_to_question_meta(
+        bucket_leg,
+        series_slug="btc-strike-buckets",
+        local_recv_ts=1716545000000_000_000,
+    )
+    keys = dict(zip(ev.keys, ev.values))
+    assert keys["targetPrice"] == "80000"
+    assert keys["question_name"] == "BTC above $80,000 on May 25?"
 
 
 def test_parse_gamma_market_to_settlement_when_resolved_yes():

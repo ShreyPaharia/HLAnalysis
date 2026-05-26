@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import time
-from typing import Protocol
+from typing import Mapping, Protocol
 
 
 def _e(s) -> str:
@@ -44,11 +44,17 @@ class AlertRules:
         bus: EventBus,
         telegram: _TelegramLike,
         dedupe_window_s: int = 60,
+        venue_by_alias: Mapping[str, str] | None = None,
     ) -> None:
         self._bus = bus
         self._tg = telegram
         self._dedupe_window_s = dedupe_window_s
         self._last_sent: dict[str, float] = {}
+        # alias → short venue tag rendered in the alert prefix
+        # (e.g. {"v31": "HL", "v31_pm": "PM"}). Empty mapping reverts to
+        # the legacy alias-only prefix so single-venue deployments stay
+        # visually unchanged.
+        self._venue_by_alias = dict(venue_by_alias or {})
 
     async def run(self, sub: asyncio.Queue[BusEvent]) -> None:
         while True:
@@ -59,13 +65,17 @@ class AlertRules:
                     continue
                 key, text = msg
                 # Prefix the Telegram message with the originating account
-                # alias so v1 and v31 are visually distinct on the chat. Cross-
-                # slot events (NewQuestion) carry an empty alias and render
-                # unprefixed — preserves legacy behavior on single-account
-                # deployments.
+                # alias so v1 and v31 are visually distinct on the chat. When
+                # a venue tag is configured for the alias we render
+                # `[HL:v31]` so operators can tell HL and PM apart at a
+                # glance. Cross-slot events (NewQuestion) carry an empty
+                # alias and render unprefixed — preserves legacy behavior on
+                # single-account deployments.
                 alias = getattr(ev, "account_alias", "") or ""
                 if alias:
-                    text = f"<b>[{_e(alias)}]</b> {text}"
+                    venue = self._venue_by_alias.get(alias, "")
+                    label = f"{venue}:{alias}" if venue else alias
+                    text = f"<b>[{_e(label)}]</b> {text}"
                 # Scope the dedupe key per account so two slots emitting
                 # identically-shaped events (same RiskVeto reason on the same
                 # symbol, etc.) each get their own alert rather than collapsing.

@@ -38,7 +38,8 @@ def question_description(qv: QuestionView) -> str:
     """Human-readable summary of the question.
 
     Examples:
-      priceBinary: "BTC > $79,583 by 2026-05-09 06:00 UTC"
+      priceBinary HL/PM-bucket: "BTC > $79,583 by 2026-05-09 06:00 UTC"
+      priceBinary PM up/down (no static strike): "Will BTC go up or down on May 26? (2026-05-27 00:00 UTC)"
       priceBucket: "BTC bucketed by $77,991 / $81,174 by 2026-05-09 06:00 UTC"
     """
     underlying = qv.underlying or "?"
@@ -47,7 +48,15 @@ def question_description(qv: QuestionView) -> str:
         target = _kv(qv, "targetPrice") or _kv(qv, "strike")
         if not target and qv.strike == qv.strike:  # not NaN
             target = f"{qv.strike:.0f}"
-        return f"{underlying} > {_fmt_usd(target)} by {expiry}"
+        if target:
+            return f"{underlying} > {_fmt_usd(target)} by {expiry}"
+        # PM daily up/down markets resolve against a per-day reference
+        # candle, so no static strike is published at market creation. Fall
+        # back to the human-readable question text + expiry so the alert
+        # still carries enough context to identify the market.
+        if qv.name:
+            return f"{qv.name} ({expiry})" if expiry else qv.name
+        return f"{underlying} binary ({expiry})" if expiry else f"{underlying} binary"
     if qv.klass == "priceBucket":
         thresholds = _kv(qv, "priceThresholds")
         parts = [_fmt_usd(p) for p in thresholds.split(",") if p.strip()]
@@ -102,3 +111,33 @@ def outcome_description(qv: QuestionView, symbol: str) -> str:
         return f"{side_label} ({cond})"
 
     return f"{side_label} {symbol}"
+
+
+def settlement_pnl_usd(
+    qv: QuestionView | None, symbol: str, qty: float, avg_entry: float,
+    prior_realized: float = 0.0,
+) -> float:
+    """Expected PnL at settlement for a held position on a binary-payout
+    market (HL HIP-4 or Polymarket CLOB).
+
+    Both venues pay 1.0 per share to the winning leg and 0.0 to the rest.
+    `qv.settled_symbol` is the canonical "which leg won" signal (set by
+    MarketState._mark_settled from a SettlementEvent). When that's unknown
+    (e.g. position vanished from the venue before the settle event was
+    polled) we fall back to `qv.settled_side` + binary leg layout, then to
+    `prior_realized` so callers don't lie about realized PnL.
+
+    `prior_realized` is the per-position realized PnL accrued from partial
+    exits prior to settlement and is added on top of the settlement leg.
+    """
+    if qv is None or not qv.settled:
+        return prior_realized
+    payout: float | None = None
+    if qv.settled_symbol:
+        payout = 1.0 if symbol == qv.settled_symbol else 0.0
+    elif qv.settled_side and qv.yes_symbol and qv.no_symbol:
+        winning = qv.yes_symbol if qv.settled_side == "yes" else qv.no_symbol
+        payout = 1.0 if symbol == winning else 0.0
+    if payout is None:
+        return prior_realized
+    return prior_realized + qty * (payout - avg_entry)

@@ -369,7 +369,19 @@ class EngineRuntime:
 
         async with aiohttp.ClientSession() as http:
             tg = self._make_telegram(http)
-            rules = AlertRules(bus=self.bus, telegram=tg)
+            # Short venue tags ride in the alert prefix so HL and PM slots
+            # are visually distinct on Telegram (e.g. `[HL:v31]` vs
+            # `[PM:v31_pm]`). Tag picked off the venue-typed AccountConfig
+            # discriminator so adding a new venue requires no rules.py edit.
+            venue_by_alias: dict[str, str] = {}
+            for s in slots:
+                if isinstance(s.account_cfg, PolymarketAccount):
+                    venue_by_alias[s.alias] = "PM"
+                elif isinstance(s.account_cfg, HyperliquidAccount):
+                    venue_by_alias[s.alias] = "HL"
+            rules = AlertRules(
+                bus=self.bus, telegram=tg, venue_by_alias=venue_by_alias,
+            )
 
             # 2) Per-slot restart-drift gate
             now_ns0 = self._now_ns()
@@ -627,14 +639,25 @@ class EngineRuntime:
                 # strategy from re-entering on the now-closed market.
                 from ..strategy.render import (
                     outcome_description, question_description,
+                    settlement_pnl_usd,
                 )
                 for qidx, sym, lp in res.vanished_positions:
                     self.market_state.mark_question_settled(qidx)
                     qv = self.market_state.question(qidx)
+                    # When the position vanished before the settle event was
+                    # polled, `qv.settled_symbol` is still unset and
+                    # settlement_pnl_usd falls back to lp.realized_pnl. Once
+                    # the polled SettlementEvent lands the next vanish-style
+                    # alert (a re-emit on the same qidx) will carry the real
+                    # PnL.
+                    realized = settlement_pnl_usd(
+                        qv, sym, lp.qty, lp.avg_entry,
+                        prior_realized=lp.realized_pnl,
+                    )
                     await self.bus.publish(Exit(
                         ts_ns=now, account_alias=slot.alias,
                         question_idx=qidx, symbol=sym,
-                        qty=lp.qty, realized_pnl=lp.realized_pnl,
+                        qty=lp.qty, realized_pnl=realized,
                         reason="settlement",
                         question_description=question_description(qv) if qv else "",
                         outcome_description=outcome_description(qv, sym) if qv else "",

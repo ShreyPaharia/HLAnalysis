@@ -375,13 +375,19 @@ class Router:
         self._last_exit_ts[question_idx] = now_ns
         self._save_cooldowns()
         # Settlement: caller has already confirmed the question settled. We
-        # simply delete the local position; venue truth handles PnL.
+        # delete the local position; the venue payout is final at 1.0 for
+        # the winning leg and 0.0 elsewhere, so the alert's PnL is
+        # `qty * (payout - avg_entry) + prior_realized` — see render.
         self.dal.delete_position(question_idx)
+        from ..strategy.render import settlement_pnl_usd
+        realized = settlement_pnl_usd(
+            question, p.symbol, p.qty, p.avg_entry, prior_realized=p.realized_pnl,
+        )
         q_desc = question_description(question) if question else ""
         o_desc = outcome_description(question, p.symbol) if question else ""
         await self.bus.publish(Exit(
             ts_ns=now_ns, account_alias=self.account_alias,
             question_idx=question_idx, symbol=p.symbol,
-            qty=p.qty, realized_pnl=p.realized_pnl, reason="settlement",
+            qty=p.qty, realized_pnl=realized, reason="settlement",
             question_description=q_desc, outcome_description=o_desc,
         ))

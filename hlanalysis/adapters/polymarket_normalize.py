@@ -139,6 +139,37 @@ def _parse_iso_ns(s: str) -> int:
     return int(dt.timestamp() * 1e9)
 
 
+def _iso_to_hl_expiry(s: str) -> str:
+    """Render ISO `endDate` in HL's YYYYMMDD-HHMM form so MarketState picks
+    up PM expiries via the same kv["expiry"] path it already reads for HL.
+    """
+    if not s:
+        return ""
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y%m%d-%H%M")
+
+
+def _strike_from_group_item_title(title: str) -> float | None:
+    """PM bucket-style markets put their strike in `groupItemTitle` (e.g.
+    "$80,000"). Returns the numeric strike or None if unparseable. Daily
+    up/down binaries leave this blank and resolve against a per-day
+    reference candle — no static strike is known here."""
+    if not title:
+        return None
+    cleaned = title.strip().lstrip("$").replace(",", "")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
 def parse_gamma_market_to_question_meta(
     market: dict, *, series_slug: str, local_recv_ts: int,
 ) -> QuestionMetaEvent:
@@ -149,13 +180,34 @@ def parse_gamma_market_to_question_meta(
     yes_t, no_t = tokens
     end_iso = market.get("endDate") or ""
     desc = market.get("description") or ""
+    # Prefer the explicit `question` field, then the bucket-leg title, then
+    # the first sentence of the long-form description so daily up/down
+    # markets still get a useful label on Telegram.
+    question_text = (
+        market.get("question")
+        or market.get("groupItemTitle")
+        or (desc.split(".", 1)[0].strip() if desc else "")
+    )
     strike_ref_ts_ns = _parse_strike_ref_ts_ns(desc)
+    strike = _strike_from_group_item_title(market.get("groupItemTitle") or "")
+    expiry_ns_str = str(_parse_iso_ns(end_iso)) if end_iso else "0"
+    expiry_hl = _iso_to_hl_expiry(end_iso)
 
+    # `expiry` mirrors HL's YYYYMMDD-HHMM format so MarketState's existing
+    # parser picks PM expiries up without branching on venue. `expiry_ns` is
+    # retained for downstream consumers that want epoch ns directly.
+    # `question_name` is the human-readable label rendered as a fallback by
+    # the alert formatter when no numeric strike is available (daily PM
+    # up/down markets).
     keys = ["class", "underlying", "yes_token_id", "no_token_id",
-            "expiry_ns", "series_slug", "condition_id"]
+            "expiry", "expiry_ns", "series_slug", "condition_id",
+            "question_name"]
     values = ["priceBinary", "BTC", yes_t, no_t,
-              str(_parse_iso_ns(end_iso)) if end_iso else "0",
-              series_slug, cond_id]
+              expiry_hl, expiry_ns_str,
+              series_slug, cond_id, str(question_text)]
+    if strike is not None:
+        keys.append("targetPrice")
+        values.append(f"{strike:.0f}")
     if strike_ref_ts_ns is not None:
         keys.append("strike_ref_ts_ns")
         values.append(str(strike_ref_ts_ns))

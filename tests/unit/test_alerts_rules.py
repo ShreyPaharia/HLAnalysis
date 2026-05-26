@@ -179,6 +179,58 @@ async def test_order_unconfirmed_formats_with_age_and_cloid():
 
 
 @pytest.mark.asyncio
+async def test_venue_prefix_renders_when_configured():
+    """Two slots with same-shape events render with their respective venue
+    tags so HL and PM alerts are visually separable on Telegram."""
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(
+        bus=bus, telegram=tg, dedupe_window_s=60,
+        venue_by_alias={"v31": "HL", "v31_pm": "PM"},
+    )
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    await bus.publish(RiskVeto(
+        ts_ns=1, account_alias="v31", reason="max_position_usd", question_idx=7,
+    ))
+    await bus.publish(RiskVeto(
+        ts_ns=2, account_alias="v31_pm", reason="max_position_usd", question_idx=7,
+    ))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert any("[HL:v31]" in m for m in tg.messages)
+    assert any("[PM:v31_pm]" in m for m in tg.messages)
+
+
+@pytest.mark.asyncio
+async def test_venue_prefix_omitted_when_alias_not_in_map():
+    """An alias missing from venue_by_alias renders the legacy alias-only
+    prefix instead of "[:v1]" — preserves single-venue deployments."""
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(
+        bus=bus, telegram=tg, dedupe_window_s=60,
+        venue_by_alias={"v31_pm": "PM"},
+    )
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    await bus.publish(RiskVeto(
+        ts_ns=1, account_alias="v1", reason="max_position_usd", question_idx=7,
+    ))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert any("[v1]" in m and "[:v1]" not in m for m in tg.messages)
+
+
+@pytest.mark.asyncio
 async def test_redemption_timeout_formats_with_age_hours():
     tg = _FakeTelegram()
     bus = EventBus()
