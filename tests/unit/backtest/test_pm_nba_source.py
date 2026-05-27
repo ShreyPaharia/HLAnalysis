@@ -300,3 +300,98 @@ def test_question_view_strike_neutral(tmp_path: Path):
     assert qv.no_symbol == "TOK_AWAY"
     # Strike = 0.5 sentinel — no scalar reference price exists for NBA.
     assert qv.strike == 0.5
+
+
+from unittest.mock import patch
+
+
+def test_fetch_and_cache_writes_manifest_and_trades(tmp_path, monkeypatch):
+    """fetch_and_cache wires together Gamma `/events`, PM trades, ESPN scoreboard +
+    summary, WP-model inference. We mock the network calls and verify the
+    cache layout."""
+    cache_root = tmp_path / "pm_nba_live"
+    cache_root.mkdir(parents=True)
+
+    gamma_events = [{
+        "title": "Boston Celtics vs Los Angeles Lakers",
+        "endDate": "2024-12-25T22:30:00Z",
+        "startDate": "2024-12-25T20:00:00Z",
+        "markets": [{
+            "conditionId": "0xfeedbeef",
+            "clobTokenIds": '["TOK_LEFT","TOK_RIGHT"]',
+            "outcomes": '["Boston Celtics","Los Angeles Lakers"]',
+            "outcomePrices": '["1","0"]',
+            "startDate": "2024-12-25T20:00:00Z",
+            "endDate": "2024-12-25T22:30:00Z",
+            "volume": 12000.0,
+        }],
+    }]
+    pm_trades = [
+        {"timestamp": 1735156800.0, "asset": "TOK_LEFT", "side": "BUY",
+         "price": 0.45, "size": 100.0},
+        {"timestamp": 1735157000.0, "asset": "TOK_LEFT", "side": "BUY",
+         "price": 0.50, "size": 50.0},
+    ]
+    espn_scoreboard = [{
+        "id": "401584900", "home": "Boston Celtics", "away": "Los Angeles Lakers",
+        "status": "STATUS_FINAL", "start_iso": "2024-12-25T20:00:00Z",
+    }]
+    espn_summary = {
+        "plays": [
+            {"clock": {"displayValue": "12:00"}, "period": {"number": 1},
+             "homeScore": 0, "awayScore": 0,
+             "wallclock": "2024-12-25T20:00:00Z"},
+            {"clock": {"displayValue": "0:00"}, "period": {"number": 4},
+             "homeScore": 110, "awayScore": 100,
+             "wallclock": "2024-12-25T22:30:00Z"},
+        ]
+    }
+
+    # Stub a trivial WP model: returns 0.5 always.
+    class _StubModel:
+        def predict_proba(self, X):
+            import numpy as np
+            return np.array([[0.5, 0.5]] * len(X))
+
+    with patch(
+        "hlanalysis.backtest.data.pm_nba._fetch_nba_gamma_events",
+        return_value=gamma_events,
+    ), patch(
+        "hlanalysis.backtest.data.pm_nba._fetch_pm_trades_raw",
+        return_value=pm_trades,
+    ), patch(
+        "hlanalysis.backtest.data.pm_nba.fetch_scoreboard",
+        return_value=espn_scoreboard,
+    ), patch(
+        "hlanalysis.backtest.data.pm_nba.fetch_summary",
+        return_value=espn_summary,
+    ), patch(
+        "hlanalysis.backtest.data.pm_nba._load_wp_model",
+        return_value=_StubModel(),
+    ):
+        ds = PolymarketNBADataSource(cache_root=cache_root)
+        descs = ds.fetch_and_cache(
+            start="2024-12-01", end="2024-12-31",
+            wp_model_path=Path("data/nba_wp/wp_logistic.joblib"),
+        )
+
+    assert len(descs) == 1
+    # Verify cache layout
+    assert (cache_root / "manifest.json").exists()
+    manifest = json.loads((cache_root / "manifest.json").read_text())
+    assert "0xfeedbeef" in manifest
+    mk = manifest["0xfeedbeef"]["market"]
+    # Home team (Boston) matches the ESPN home field; PM outcomes have Boston
+    # listed first, so TOK_LEFT is the home token.
+    assert mk["home_team"] == "BOS"
+    assert mk["away_team"] == "LAL"
+    assert mk["home_token_id"] == "TOK_LEFT"
+    assert mk["espn_game_id"] == "401584900"
+    assert mk["resolved_outcome"] == "home"
+
+    # PM trades parquet
+    assert (cache_root / "pm_trades" / "0xfeedbeef.parquet").exists()
+    # WP series parquet
+    assert (cache_root / "wp_series" / "401584900.parquet").exists()
+    # PBP parquet
+    assert (cache_root / "pbp" / "401584900.parquet").exists()
