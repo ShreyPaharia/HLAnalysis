@@ -59,12 +59,22 @@ class GammaClient:
 
     @staticmethod
     def iter_binary_markets(events: list[dict]) -> Iterator[dict]:
-        """Yield single-market binary entries (skips multi-market bucket events)."""
+        """Yield every 2-outcome priceBinary market in each event.
+
+        Previously this filtered to events with exactly one market — that was
+        appropriate for BTC/ETH Up-or-Down dailies but skipped:
+          - crypto/equity weekly multi-strike events (one event, N "above X"
+            sub-markets, each a standalone 2-outcome priceBinary), and
+          - sports game events (one event, ~39 sub-markets: moneyline,
+            spreads, totals, props).
+
+        Each yielded market is independently CLOB-traded with its own
+        conditionId + 2 token IDs, so downstream subscription/recording
+        treats them as siblings. Engine slots filter further on the
+        subscription `match:` keys + their strategy allowlists.
+        """
         for ev in events:
-            markets = ev.get("markets") or []
-            if len(markets) != 1:
-                continue
-            mk = markets[0]
-            if not mk.get("clobTokenIds") or not mk.get("conditionId"):
-                continue
-            yield mk
+            for mk in (ev.get("markets") or []):
+                if not mk.get("clobTokenIds") or not mk.get("conditionId"):
+                    continue
+                yield mk

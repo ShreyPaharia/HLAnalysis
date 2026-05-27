@@ -172,6 +172,7 @@ def _strike_from_group_item_title(title: str) -> float | None:
 
 def parse_gamma_market_to_question_meta(
     market: dict, *, series_slug: str, local_recv_ts: int,
+    underlying: str = "BTC",
 ) -> QuestionMetaEvent:
     cond_id = str(market.get("conditionId") or market.get("id") or "")
     tokens = _parse_token_ids(market)
@@ -202,7 +203,7 @@ def parse_gamma_market_to_question_meta(
     keys = ["class", "underlying", "yes_token_id", "no_token_id",
             "expiry", "expiry_ns", "series_slug", "condition_id",
             "question_name"]
-    values = ["priceBinary", "BTC", yes_t, no_t,
+    values = ["priceBinary", underlying, yes_t, no_t,
               expiry_hl, expiry_ns_str,
               series_slug, cond_id, str(question_text)]
     if strike is not None:

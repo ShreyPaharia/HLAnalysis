@@ -90,6 +90,11 @@ class PolymarketAdapter(VenueAdapter):
                 if not series:
                     continue
                 series_str = series if isinstance(series, str) else series[0]
+                # Per-subscription underlying (BTC / ETH / NVDA / NBA / …).
+                # Default to "BTC" only for legacy single-subscription configs.
+                underlying = (sub.match or {}).get("underlying", "BTC")
+                if not isinstance(underlying, str):
+                    underlying = underlying[0] if underlying else "BTC"
                 events = self._gamma.fetch_events(
                     series_slug=series_str, closed=False,
                 )
@@ -101,6 +106,7 @@ class PolymarketAdapter(VenueAdapter):
                         qmeta = parse_gamma_market_to_question_meta(
                             mk, series_slug=series_str,
                             local_recv_ts=time.time_ns(),
+                            underlying=underlying,
                         )
                         await queue.put(qmeta)
                         toks = json.loads(mk["clobTokenIds"])
