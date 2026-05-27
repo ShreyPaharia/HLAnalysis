@@ -427,6 +427,15 @@ def _fetch_pm_trades_raw(condition_id: str) -> list[dict]:
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 400 and offset > 0:
                 break
+            # 408 Request Timeout — PM data API times out on large markets.
+            # Return what we have so far rather than crashing the entire run.
+            if e.response is not None and e.response.status_code in (408, 429, 503):
+                logger.warning(
+                    f"PM trades fetch timeout/throttle for {condition_id} "
+                    f"at offset={offset} (HTTP {e.response.status_code}); "
+                    f"returning {len(out)} trades fetched so far"
+                )
+                break
             raise
         if not page:
             break
@@ -577,7 +586,11 @@ def _fetch_and_cache(
         left_team, right_team = outs
         left_tok, right_tok = str(tokens[0]), str(tokens[1])
 
-        end_iso = mk_raw.get("endDate") or ev.get("endDate") or ""
+        # Use the EVENT-level endDate for game-date lookup. PM sometimes recycles
+        # market shells from prior weeks, so mk_raw.endDate can be +7 days vs the
+        # actual game date. ev.endDate is always the game's resolution date.
+        # Fall back to mk_raw.endDate only when ev.endDate is absent.
+        end_iso = ev.get("endDate") or mk_raw.get("endDate") or ""
         start_iso_mkt = mk_raw.get("startDate") or ev.get("startDate") or ""
         if not (end_iso and start_iso_mkt):
             continue
@@ -589,7 +602,26 @@ def _fetch_and_cache(
             except Exception as e:
                 logger.warning(f"ESPN scoreboard {date_yyyymmdd} failed: {e}")
                 scoreboard_cache[date_yyyymmdd] = []
-        candidate_games = list(scoreboard_cache.get(date_yyyymmdd, []))
+        # PM endDate is when the market resolves, not game start. NBA games tip
+        # off in US evening so the PM date can be ±1 UTC day vs the ESPN date.
+        # Fetch prior and next day too so match_pm_to_espn's ±1-day window is
+        # fully populated.
+        from datetime import timedelta
+        pm_dt = datetime.strptime(date_yyyymmdd, "%Y%m%d")
+        prior_date = (pm_dt - timedelta(days=1)).strftime("%Y%m%d")
+        next_date = (pm_dt + timedelta(days=1)).strftime("%Y%m%d")
+        for adj_date in (prior_date, next_date):
+            if adj_date not in scoreboard_cache:
+                try:
+                    scoreboard_cache[adj_date] = fetch_scoreboard(adj_date)
+                except Exception as e:
+                    logger.warning(f"ESPN scoreboard {adj_date} failed: {e}")
+                    scoreboard_cache[adj_date] = []
+        candidate_games = (
+            scoreboard_cache.get(date_yyyymmdd, [])
+            + scoreboard_cache.get(prior_date, [])
+            + scoreboard_cache.get(next_date, [])
+        )
 
         pm_event_for_match = {"title": title, "endDate": end_iso}
         espn_game = match_pm_to_espn(pm_event_for_match, candidate_games)
@@ -641,6 +673,14 @@ def _fetch_and_cache(
             self._cache_root / "wp_series" / f"{espn_game['id']}.parquet", wp_rows
         )
 
+        # end_ts_ns = actual game-end time (last WP row), not PM resolution
+        # cutoff. PM's endDate is when the market stops accepting bets; the game
+        # tips off ~10-15 min after that and ends ~2.5 h later. The strategy's
+        # TTE gate computes tau_s = (expiry_ns - now_ns) and must be positive
+        # during in-game play. Store pm_resolution_ts_ns separately for reference.
+        pm_resolution_ns = _parse_iso_ns_local(end_iso)
+        game_end_ns = int(wp_rows[-1]["ts_ns"]) if wp_rows else pm_resolution_ns
+
         manifest[str(cond_id)] = {
             "kind": "nba_winner",
             "n_rows": len(pm_trades),
@@ -649,7 +689,8 @@ def _fetch_and_cache(
                 "home_token_id": home_tok,
                 "away_token_id": away_tok,
                 "start_ts_ns": _parse_iso_ns_local(start_iso_mkt),
-                "end_ts_ns": _parse_iso_ns_local(end_iso),
+                "end_ts_ns": game_end_ns,
+                "pm_resolution_ts_ns": pm_resolution_ns,
                 "resolved_outcome": resolved,
                 "total_volume_usd": float(mk_raw.get("volume") or 0.0),
                 "n_trades": len(pm_trades),
