@@ -28,6 +28,10 @@ class RiskVerdict:
     approved: bool
     reason: str = ""
     detail: dict[str, str] | None = None
+    # Depth-walk gate may approve while clamping the intent down to whatever
+    # liquidity is available at-or-better-than the limit price. Router applies
+    # the clamp before submission; None means "no clamp, use intent.size".
+    clamped_size: float | None = None
 
 
 class RiskGate:
@@ -124,29 +128,42 @@ class RiskGate:
             if p.question_idx == intent.question_idx and p.symbol != intent.symbol:
                 return RiskVerdict(False, "opposite_leg_held")
 
-        # 13. Depth-walk slippage. Estimate the realized fill price by walking
-        # the ask ladder for buys (bid ladder for sells); reject when the
-        # blended fill exceeds the configured cap. Disabled when cap = 0 (HL
-        # default) or when the venue feed doesn't populate book levels.
+        # 13. Depth-walk slippage. Restrict the ladder to levels marketable at
+        # our limit (asks ≤ limit for buys, bids ≥ limit for sells) — a CLOB
+        # IOC won't lift offers above its limit price, so deeper-and-worse
+        # levels were never reachable. If the at-limit ladder can't cover the
+        # full size, *clamp* the intent down rather than veto — PM CLOB IOC
+        # partial-fills naturally, and the strategy's topup re-fires next tick
+        # to close the residual. The slip cap still applies when a strategy
+        # explicitly raises the limit to walk multiple price levels. Disabled
+        # when cap = 0 (HL default) or when the venue feed doesn't populate
+        # book levels.
         slip_cap = self.cfg.global_.max_slippage_pct
+        clamped_size: float | None = None
         if slip_cap > 0 and intent.size > 0 and intent.limit_price > 0:
             levels = (
                 inp.book.ask_levels if intent.side == "buy"
                 else inp.book.bid_levels
             )
             if levels:
+                if intent.side == "buy":
+                    usable = [(px, sz) for px, sz in levels if px <= intent.limit_price]
+                else:
+                    usable = [(px, sz) for px, sz in levels if px >= intent.limit_price]
+                if not usable:
+                    return RiskVerdict(False, "depth_walk_no_fill",
+                                       {"shortfall": f"{intent.size:.4f}"})
                 remaining = intent.size
                 cost = 0.0
-                for px, sz in levels:
+                filled = 0.0
+                for px, sz in usable:
                     take = min(remaining, sz)
                     cost += take * px
+                    filled += take
                     remaining -= take
                     if remaining <= 1e-9:
                         break
-                if remaining > 1e-9:
-                    return RiskVerdict(False, "depth_walk_no_fill",
-                                       {"shortfall": f"{remaining:.4f}"})
-                avg_px = cost / intent.size
+                avg_px = cost / filled
                 slip = (avg_px - intent.limit_price) / intent.limit_price
                 if intent.side == "sell":
                     slip = -slip
@@ -155,8 +172,24 @@ class RiskGate:
                                        {"avg_px": f"{avg_px:.5f}",
                                         "limit": f"{intent.limit_price:.5f}",
                                         "slip_pct": f"{slip*100:.3f}"})
+                if remaining > 1e-9:
+                    clamped_size = filled
 
-        return RiskVerdict(True, "approved")
+        # Min-order-notional floor. Applied to the *effective* size (clamped
+        # if the depth-walk shrank it, otherwise intent.size). Rejects orders
+        # too small to be worth submitting — PM CLOB will accept tiny IOCs
+        # but each one burns a network round-trip and a cloid for negligible
+        # fill notional. HL leaves min_order_notional_usd=0 → no-op.
+        min_ntl = self.cfg.global_.min_order_notional_usd
+        if min_ntl > 0:
+            effective_size = clamped_size if clamped_size is not None else intent.size
+            effective_ntl = effective_size * intent.limit_price
+            if effective_ntl < min_ntl:
+                return RiskVerdict(False, "order_below_min_notional",
+                                   {"effective_ntl": f"{effective_ntl:.2f}",
+                                    "min_ntl": f"{min_ntl:.2f}"})
+
+        return RiskVerdict(True, "approved", clamped_size=clamped_size)
 
     # ---- continuous checks ----
 

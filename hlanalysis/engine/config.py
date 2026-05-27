@@ -106,6 +106,12 @@ class GlobalRiskConfig(BaseModel):
     # BboEvent path doesn't populate BookState.ask_levels and the gate is a
     # no-op without ladder data.
     max_slippage_pct: float = 0.0
+    # After the depth-walk gate clamps an intent down to available at-limit
+    # liquidity, reject if the resulting notional falls below this floor.
+    # Prevents the engine from spamming the venue with micro-orders when only
+    # 1–2 contracts are quoted at the inside ask. 0 disables. PM: ~$11 (one
+    # 5-share clip of a 0.95-favorite); HL: 0 (legacy behaviour unchanged).
+    min_order_notional_usd: float = 0.0
     # Hour-of-day in UTC when the "daily" PnL accounting window resets.
     # Default 0 = UTC midnight (legacy). Set to 6 to align with HL HIP-4
     # binary settlement (markets resolve at 06:00 UTC = 11:30 IST). Aligning

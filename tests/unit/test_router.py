@@ -251,6 +251,58 @@ async def test_book_fill_persists_fill_row_with_closed_pnl(tmp_path):
     assert by_side["sell"].closed_pnl == pytest.approx((0.90 - 0.95) * 10)
 
 
+def _strategy_cfg_with_slippage(slip_cap: float = 0.005) -> StrategyConfig:
+    # Mirrors _strategy_cfg but enables the depth-walk gate (HL default 0).
+    entry = AllowlistEntry(
+        match={"class": "priceBinary", "underlying": "BTC", "period": "1h"},
+        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=60,
+        tte_max_seconds=1800, price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200, vol_max=0.5,
+    )
+    return StrategyConfig(
+        name="late_resolution", paper_mode=True,
+        allowlist=[entry], blocklist_question_idxs=[],
+        defaults=entry,
+        **{"global": GlobalRiskConfig(
+            max_total_inventory_usd=500, max_concurrent_positions=5,
+            daily_loss_cap_usd=200, max_strike_distance_pct=10,
+            min_recent_volume_usd=1000, stale_data_halt_seconds=5,
+            reconcile_interval_seconds=60, max_slippage_pct=slip_cap,
+        )},
+    )
+
+
+@pytest.mark.asyncio
+async def test_depth_walk_clamps_intent_size_before_place(tmp_path):
+    """When at-limit liquidity is below the intended size, the gate approves
+    with `clamped_size` and the router must resize the intent before placement
+    rather than veto. The DB row should reflect the clamped size — PM CLOB IOC
+    partial-fills at the inside ask, and the strategy's topup re-fires on the
+    next tick to close the residual."""
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    client = HLClient(account_address="0x", api_secret_key="0x",
+                      base_url="x", paper_mode=True)
+    cfg = _strategy_cfg_with_slippage(slip_cap=0.005)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
+    # Inside ask 0.95 has only 3 contracts. Strategy intends 10 @ 0.95.
+    inputs = replace(
+        _approval_inputs(),
+        book=BookState(
+            symbol="@30", bid_px=0.94, bid_sz=10.0, ask_px=0.95, ask_sz=3.0,
+            last_trade_ts_ns=10_000_000_000_000_000,
+            last_l2_ts_ns=10_000_000_000_000_000,
+            ask_levels=((0.95, 3.0), (0.97, 50.0)),
+        ),
+    )
+    await router.handle(_decision_enter(), inputs=inputs, now_ns=2)
+    o = dal.get_order("hla-router-1")
+    assert o is not None and o.status == "filled"
+    assert o.size == 3.0  # clamped from 10 → 3 (inside-ask depth)
+    assert o.price == 0.95
+
+
 @pytest.mark.asyncio
 async def test_vetoed_decision_publishes_veto_and_does_not_call_place(tmp_path):
     dal = StateDAL(tmp_path / "state.db")

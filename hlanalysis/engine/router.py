@@ -161,6 +161,15 @@ class Router:
                     intent.cloid, verdict.reason, verdict.detail,
                 )
                 continue
+            # Depth-walk may approve with a smaller size when at-limit liquidity
+            # is below the intended quantity. Resize the intent before placement;
+            # the strategy's topup loop closes the residual shortfall next tick.
+            if verdict.clamped_size is not None and verdict.clamped_size < intent.size:
+                logger.info(
+                    "depth_walk_clamp cloid={} intent_size={} clamped_size={} limit={}",
+                    intent.cloid, intent.size, verdict.clamped_size, intent.limit_price,
+                )
+                intent = _dc_replace(intent, size=verdict.clamped_size)
             await self._place(intent, now_ns=now_ns, decision=decision,
                               question=inputs.question,
                               question_fields=inputs.question_fields)

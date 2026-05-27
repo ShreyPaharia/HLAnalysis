@@ -358,10 +358,17 @@ strategies:
       reconcile_interval_seconds: 15
       daily_window_start_hour_utc: 6
       # Depth-walk slippage cap — ~0.5¢ at a 0.95-favorite leg. PM books are
-      # thin at the top; the gate vetoes intents whose blended fill across
-      # ask_levels would slip more than this. HL slots leave this at 0
-      # (default) because the BboEvent feed doesn't populate ask_levels.
+      # thin at the top; the gate clamps intent size down to available
+      # at-limit liquidity (used to veto outright; partial fills now flow
+      # through and the strategy's topup loop closes the residual). HL slots
+      # leave this at 0 (default) because the BboEvent feed doesn't populate
+      # ask_levels.
       max_slippage_pct: 0.005
+      # Floor on (clamped) order notional. Stops the depth-walk clamp from
+      # submitting a $0.95 order when only 1 share is on the inside ask.
+      # $11 is the same threshold the strategy's topup uses (one 5-share
+      # clip at a 0.95 favorite ≈ $4.75 + headroom).
+      min_order_notional_usd: 11.0
 
     theta:
       vol_lookback_seconds: 3600
@@ -381,7 +388,12 @@ strategies:
       exit_fee: 0.0007
       min_distance_pct: null
       min_bid_notional_usd: 10.0            # safety gate kept per [[feedback-keep-safety-gates]]
-      topup_enabled: false                  # PM has no partial fills
+      # 2026-05-27: enabled. The "no partial fills" assumption was wrong —
+      # PM CLOB IOC partial-fills naturally; the risk-gate depth-walk now
+      # clamps intent size to inside-ask depth (was: outright veto). Topup
+      # re-evaluates entry gates every scan tick and closes the residual
+      # shortfall up to max_position_usd when liquidity returns.
+      topup_enabled: true
       topup_threshold_pct: 0.2
       topup_min_notional_usd: 11.0
       exit_safety_d: 1.0
