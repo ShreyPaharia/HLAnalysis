@@ -12,6 +12,7 @@ flag (period >= 5).
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -140,6 +141,40 @@ def fetch_summary(game_id: str) -> dict:
     return _http_get(f"{_ESPN_BASE}/summary", params={"event": game_id})
 
 
+_REGULATION_PERIODS = 4
+_PERIOD_SECONDS = 12 * 60  # NBA quarter length
+
+
+def total_regulation_seconds_remaining(*, period: int, seconds_remaining_in_period: int) -> int:
+    """Total seconds left in regulation given (period, seconds_left_in_period).
+
+    Returns 0 if we are at/past the end of regulation (period 4 with 0s left)
+    OR in overtime (period >= 5). Callers gate OT off — see report §Gotchas.
+    """
+    if period >= _REGULATION_PERIODS + 1:
+        return 0
+    if period < 1 or period > _REGULATION_PERIODS:
+        return 0
+    return (_REGULATION_PERIODS - period) * _PERIOD_SECONDS + max(0, int(seconds_remaining_in_period))
+
+
+def wp_features(
+    *,
+    score_diff_home: int,
+    total_seconds_remaining: int,
+    period: int,
+) -> tuple[float, float, float]:
+    """Three-feature WP input vector in canonical training order:
+    (score_diff_home, log(total_seconds_remaining + 1), period_indicator).
+    `period_indicator` is 1 for OT (period >= 5), 0 otherwise.
+    """
+    return (
+        float(score_diff_home),
+        math.log(max(0, total_seconds_remaining) + 1.0),
+        1.0 if period >= _REGULATION_PERIODS + 1 else 0.0,
+    )
+
+
 __all__ = [
     "parse_clock_to_seconds",
     "pbp_to_rows",
@@ -147,4 +182,6 @@ __all__ = [
     "read_pbp_parquet",
     "fetch_scoreboard",
     "fetch_summary",
+    "total_regulation_seconds_remaining",
+    "wp_features",
 ]

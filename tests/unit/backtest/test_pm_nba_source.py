@@ -71,3 +71,42 @@ def test_pbp_parquet_roundtrip(tmp_path: Path):
     assert len(back) == 2
     assert back[0]["score_diff_home"] == 0
     assert back[1]["score_diff_home"] == 4
+
+
+from hlanalysis.backtest.data._espn_pbp import (
+    total_regulation_seconds_remaining,
+    wp_features,
+)
+
+
+def test_total_remaining_regulation_start():
+    # Tipoff: period 1, 12:00 left → 4 × 12min = 2880 s
+    assert total_regulation_seconds_remaining(period=1, seconds_remaining_in_period=720) == 2880
+
+
+def test_total_remaining_q4_end():
+    # End of Q4 → 0
+    assert total_regulation_seconds_remaining(period=4, seconds_remaining_in_period=0) == 0
+
+
+def test_total_remaining_q3_halftime_to_quarter():
+    # Start of Q3, 12:00 → 2 quarters × 12 min = 1440 s
+    assert total_regulation_seconds_remaining(period=3, seconds_remaining_in_period=720) == 1440
+
+
+def test_total_remaining_overtime_is_zero():
+    # In OT (period 5+) regulation is over → 0
+    assert total_regulation_seconds_remaining(period=5, seconds_remaining_in_period=300) == 0
+
+
+def test_wp_features_shape():
+    feats = wp_features(score_diff_home=5, total_seconds_remaining=600, period=3)
+    # Exactly three features in canonical order
+    assert len(feats) == 3
+    # Feature 0: score_diff_home
+    assert feats[0] == 5
+    # Feature 1: log(total_seconds_remaining + 1)
+    import math
+    assert abs(feats[1] - math.log(601)) < 1e-9
+    # Feature 2: period_indicator (1 for OT, 0 otherwise)
+    assert feats[2] == 0
