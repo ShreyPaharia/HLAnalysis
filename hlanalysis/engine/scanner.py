@@ -17,6 +17,35 @@ from ..strategy.types import (
 )
 
 
+def _binary_favorite_sym(
+    question: QuestionView, books: dict[str, BookState],
+) -> str | None:
+    """Return the higher-mid leg of a binary question, or None if not binary
+    or no leg has a usable quote. Used by the gate-log snapshot to identify
+    which leg the strategy was actually reasoning about when the diagnostic
+    didn't carry an explicit `chosen_leg` field."""
+    if question.klass != "priceBinary":
+        return None
+    y = books.get(question.yes_symbol)
+    n = books.get(question.no_symbol)
+
+    def _mid(b: BookState | None) -> float | None:
+        if b is None:
+            return None
+        if b.bid_px is not None and b.ask_px is not None:
+            return (b.bid_px + b.ask_px) / 2.0
+        return b.ask_px if b.ask_px is not None else b.bid_px
+
+    ym, nm = _mid(y), _mid(n)
+    if ym is None and nm is None:
+        return None
+    if ym is None:
+        return question.no_symbol
+    if nm is None:
+        return question.yes_symbol
+    return question.yes_symbol if ym >= nm else question.no_symbol
+
+
 @dataclass(frozen=True, slots=True)
 class ScannedDecision:
     decision: Decision
@@ -255,6 +284,16 @@ class Scanner:
                 break
         if chosen_sym is None and position is not None:
             chosen_sym = position.symbol
+        if chosen_sym is None:
+            # For binary markets every leg-aware gate (no_favorite,
+            # bid_notional_too_thin, edge) reasons about the favourite — the
+            # higher-mid leg. Snapshotting the favourite's book makes the
+            # row reflect the leg the strategy was actually evaluating,
+            # instead of an arbitrary insertion-order pick that may be the
+            # underdog and mislead operators (was: PM gate log showed YES
+            # quotes 0.06–0.10 while the strategy was failing checks against
+            # the NO leg at 0.90+).
+            chosen_sym = _binary_favorite_sym(question, books)
         sample_book: BookState | None = (
             books.get(chosen_sym) if chosen_sym else None
         ) or next(iter(books.values()), None)

@@ -377,6 +377,65 @@ def test_gate_log_snapshot_uses_held_position_book_when_no_chosen_leg(tmp_path):
     assert row["bid_px"] == 0.94
 
 
+def test_gate_log_snapshot_prefers_binary_favorite_leg_when_no_chosen_leg(tmp_path):
+    """For binary HOLDs without an explicit chosen_leg in the diagnostic
+    (bid_notional_too_thin, no_favorite, edge), the snapshot should record
+    the favourite (higher-mid) leg — that's the leg every leg-aware gate
+    actually reasoned about. Was: PM gate log surfaced the underdog YES
+    book (0.06–0.10) while the strategy was blocking on the NO favourite
+    (0.90+), making the row mathematically inconsistent with the diag."""
+    import json
+    from hlanalysis.strategy.types import (
+        Action, BookState, Decision, Diagnostic, QuestionView,
+    )
+
+    now = 1_700_000_000_000_000_000
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    cfg = _strategy_cfg()
+    rcfg = LateResolutionConfig(
+        tte_min_seconds=60, tte_max_seconds=1800,
+        price_extreme_threshold=0.95, distance_from_strike_usd_min=200.0,
+        vol_max=0.5, max_position_usd=100.0, stop_loss_pct=10.0,
+        max_strike_distance_pct=10.0, min_recent_volume_usd=0.0,
+        stale_data_halt_seconds=5,
+    )
+    log_path = tmp_path / "gate_decisions.jsonl"
+    scanner = Scanner(
+        strategy=LateResolutionStrategy(rcfg),
+        cfg=cfg, market_state=MarketState(), dal=dal,
+        kill_switch_path=tmp_path / "halt",
+        last_reconcile_ns=now,
+        gate_log_path=log_path,
+    )
+
+    q = QuestionView(
+        question_idx=42, yes_symbol="@yes", no_symbol="@no", strike=80_000.0,
+        expiry_ns=now + 600 * 1_000_000_000,
+        underlying="BTC", klass="priceBinary", period="1h",
+    )
+    # NO is the favorite (mid 0.94), YES is the underdog (mid 0.07).
+    books = {
+        "@yes": BookState(symbol="@yes", bid_px=0.06, bid_sz=200.0,
+                         ask_px=0.08, ask_sz=10.0,
+                         last_trade_ts_ns=now, last_l2_ts_ns=now),
+        "@no":  BookState(symbol="@no",  bid_px=0.93, bid_sz=5.0,
+                         ask_px=0.95, ask_sz=10.0,
+                         last_trade_ts_ns=now, last_l2_ts_ns=now),
+    }
+    decision = Decision(action=Action.HOLD, diagnostics=(
+        Diagnostic("info", "bid_notional_too_thin", (("min_usd", "10.00"),)),
+    ))
+    scanner._maybe_log_gate_transition(
+        question=q, decision=decision, books=books, now_ns=now,
+    )
+    row = json.loads(log_path.read_text().strip())
+    assert row["ask_px"] == 0.95, f"should log NO favourite ask, got {row['ask_px']}"
+    assert row["bid_px"] == 0.93
+    assert row["bid_sz"] == 5.0  # the actually-failing notional, $4.65
+    assert row["reason"] == "bid_notional_too_thin"
+
+
 def test_gate_log_snapshot_falls_back_to_first_leg_when_no_chosen_leg(tmp_path):
     """When the diagnostic doesn't carry chosen_leg (binary path, or other
     reasons like tte_out_of_window), preserve the legacy first-leg snapshot."""
