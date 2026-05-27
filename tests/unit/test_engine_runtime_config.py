@@ -123,3 +123,56 @@ def test_runtime_falls_back_to_defaults_when_yaml_omits_safety_gates(tmp_path: P
     assert rcfg.size_cap_near_strike_pct == 0.0
     assert rcfg.size_cap_max_dist_pct == 1.5
     assert rcfg.size_cap_min_ask == 0.88
+    # Fee model defaults to flat / 0 — HL slot behaviour is unchanged.
+    assert rcfg.fee_model == "flat"
+    assert rcfg.fee_rate == 0.0
+
+
+_YAML_PM_FEES = """
+strategy:
+  name: late_resolution
+  paper_mode: true
+  allowlist:
+    - match: {class: priceBinary, underlying: BTC}
+      max_position_usd: 50
+      stop_loss_pct: null
+      tte_min_seconds: 0
+      tte_max_seconds: 86400
+      price_extreme_threshold: 0.85
+      distance_from_strike_usd_min: 0
+      vol_max: 100
+      fee_model: pm_binary
+      fee_rate: 0.07
+  blocklist_question_idxs: []
+  defaults:
+    match: {}
+    max_position_usd: 50
+    stop_loss_pct: null
+    tte_min_seconds: 0
+    tte_max_seconds: 86400
+    price_extreme_threshold: 0.85
+    distance_from_strike_usd_min: 0
+    vol_max: 100
+    fee_model: pm_binary
+    fee_rate: 0.07
+  global:
+    max_total_inventory_usd: 500
+    max_concurrent_positions: 5
+    daily_loss_cap_usd: 200
+    max_strike_distance_pct: 50
+    min_recent_volume_usd: 100
+    stale_data_halt_seconds: 30
+    reconcile_interval_seconds: 60
+"""
+
+
+def test_runtime_threads_pm_binary_fee_model_into_strategy_config(tmp_path: Path):
+    """v1 on Polymarket: pm_binary fee declaration must round-trip from YAML
+    through AllowlistEntry into LateResolutionConfig so the live slot's fee
+    curve is explicit and matches what the backtest used."""
+    p = tmp_path / "strategy.yaml"
+    p.write_text(_YAML_PM_FEES)
+    cfg = load_strategy_config(p)
+    rcfg = build_late_resolution_config(cfg)
+    assert rcfg.fee_model == "pm_binary"
+    assert rcfg.fee_rate == 0.07
