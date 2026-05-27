@@ -49,9 +49,18 @@ subscriptions:
     symbol: BTCUSDT
     channels: [trades, book, bbo]
 
-  # Polymarket BTC Up/Down daily binary — read-side feed for the new
-  # v31_pm engine slot. Wildcard `*` symbol so the adapter discovers
-  # currently-active markets via Gamma and subscribes their token IDs.
+  # ── Polymarket subscriptions ────────────────────────────────────────
+  # Adapter discovers active markets via Gamma per series_slug, then
+  # subscribes their CLOB token IDs to the websocket. Symbol="*" is a
+  # wildcard signal — actual market discovery is series-driven.
+  #
+  # `match:` keys ride along as QuestionMetaEvent metadata; downstream
+  # engine slots filter by `class + underlying + series_slug` via their
+  # strategy allowlist, so adding subscriptions here is recorder-side
+  # data ingestion only — it does NOT cause existing engine slots to
+  # trade new markets (allowlists guard that).
+
+  # Crypto Up/Down daily — single-market priceBinary events.
   - venue: polymarket
     product_type: prediction_binary
     mechanism: clob
@@ -61,3 +70,158 @@ subscriptions:
       underlying: BTC
       class: priceBinary
       series_slug: btc-up-or-down-daily
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: ETH
+      class: priceBinary
+      series_slug: eth-up-or-down-daily
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: XRP
+      class: priceBinary
+      series_slug: xrp-up-or-down-daily
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: HYPE
+      class: priceBinary
+      series_slug: hype-up-or-down-daily
+
+  # Equity hit-price multi-strike (monthly cadence — 14-22 strikes/event,
+  # each a standalone 2-outcome priceBinary "Will TICKER hit $X this month?").
+  # Top equity tickers by PM volume as of 2026-05-27.
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: NVDA
+      class: priceBinary
+      series_slug: nvidia-hit-price-monthly
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: TSLA
+      class: priceBinary
+      series_slug: tesla-hit-price-monthly
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: AAPL
+      class: priceBinary
+      series_slug: apple-hit-price-monthly
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: GOOG
+      class: priceBinary
+      series_slug: google-hit-price-monthly
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: MSFT
+      class: priceBinary
+      series_slug: microsoft-hit-price-monthly
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: AMZN
+      class: priceBinary
+      series_slug: amazon-hit-price-monthly
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: META
+      class: priceBinary
+      series_slug: meta-hit-price-monthly
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: NFLX
+      class: priceBinary
+      series_slug: netflix-hit-price-monthly
+
+  # Commodity hit/settle multi-strike (monthly).
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: GOLD
+      class: priceBinary
+      series_slug: what-will-gold-gc-hit
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: GOLD
+      class: priceBinary
+      series_slug: what-will-gold-gc-settle-at
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: OIL
+      class: priceBinary
+      series_slug: crude-oil-cl-hit
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: OIL
+      class: priceBinary
+      series_slug: crude-oil-cl-settle
+
+  # NBA per-game multi-market events. Each game event has ~39 sub-markets
+  # (moneyline, spreads, totals, props). The widened iter_binary_markets
+  # yields all of them; the recorder captures L2 on every leg. Engine
+  # slots ignore NBA via allowlist (no NBA strategy registered).
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: NBA
+      class: priceBinary
+      series_slug: nba-2026
