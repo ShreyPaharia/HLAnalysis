@@ -18,7 +18,7 @@ import heapq
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Literal
 
@@ -606,7 +606,6 @@ def _fetch_and_cache(
         # off in US evening so the PM date can be ±1 UTC day vs the ESPN date.
         # Fetch prior and next day too so match_pm_to_espn's ±1-day window is
         # fully populated.
-        from datetime import timedelta
         pm_dt = datetime.strptime(date_yyyymmdd, "%Y%m%d")
         prior_date = (pm_dt - timedelta(days=1)).strftime("%Y%m%d")
         next_date = (pm_dt + timedelta(days=1)).strftime("%Y%m%d")

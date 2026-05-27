@@ -169,9 +169,6 @@ def test_match_pm_to_espn_returns_none_when_no_team_match():
     assert match_pm_to_espn(pm_event, espn_games) is None
 
 
-import json
-from pathlib import Path
-
 import pyarrow as pa
 import pyarrow.parquet as pq
 
