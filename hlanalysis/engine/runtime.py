@@ -545,13 +545,30 @@ class EngineRuntime:
                             leg_count=len(qv.leg_symbols),
                         )
                         # Mark seen in EVERY slot's DB so the alert doesn't
-                        # re-fire after restart, then emit one alert globally.
+                        # re-fire after restart, then emit one alert globally —
+                        # but only if at least one slot's allowlist matches the
+                        # question. symbols.yaml now subscribes to many PM series
+                        # (ETH/NVDA/NBA/...) for recorder-side data ingestion,
+                        # and none of those have a corresponding strategy slot;
+                        # alerting on them would spam Telegram with markets no
+                        # strategy will ever trade.
+                        from .config import match_question
+                        fields = {
+                            "class": qv.klass,
+                            "underlying": qv.underlying,
+                            "period": qv.period,
+                        }
                         any_unseen = False
+                        any_tradeable = False
                         for slot in slots:
                             if not slot.dal.has_seen_question(qidx):
                                 slot.dal.mark_question_seen(qidx, now_ns=now_ns)
                                 any_unseen = True
-                        if any_unseen:
+                            if match_question(
+                                slot.cfg, question_idx=qidx, fields=fields,
+                            ) is not None:
+                                any_tradeable = True
+                        if any_unseen and any_tradeable:
                             await self.bus.publish(new_q_event)
         except asyncio.CancelledError:
             raise
