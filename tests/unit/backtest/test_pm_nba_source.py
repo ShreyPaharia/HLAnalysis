@@ -110,3 +110,60 @@ def test_wp_features_shape():
     assert abs(feats[1] - math.log(601)) < 1e-9
     # Feature 2: period_indicator (1 for OT, 0 otherwise)
     assert feats[2] == 0
+
+
+from hlanalysis.backtest.data.pm_nba import (
+    parse_nba_market_title,
+    is_series_market,
+    match_pm_to_espn,
+)
+
+
+def test_parse_winner_title_simple():
+    # PM canonical form: "Lakers vs. Celtics" or "Boston Celtics vs Los Angeles Lakers"
+    teams = parse_nba_market_title("Boston Celtics vs Los Angeles Lakers")
+    assert teams == ("BOS", "LAL")
+
+
+def test_parse_winner_title_with_period():
+    teams = parse_nba_market_title("Lakers vs. Celtics")
+    assert teams == ("LAL", "BOS")
+
+
+def test_parse_winner_title_unknown_team_returns_none():
+    assert parse_nba_market_title("Lakers vs Atlantis Sharks") is None
+
+
+def test_is_series_market_filters_playoff_series():
+    assert is_series_market("Celtics vs Heat: Series Winner") is True
+    assert is_series_market("Celtics win series 4-0") is True
+    assert is_series_market("Boston Celtics vs Los Angeles Lakers") is False
+
+
+def test_match_pm_to_espn_by_date_and_teams():
+    pm_event = {
+        "title": "Boston Celtics vs Los Angeles Lakers",
+        # PM endDate is the resolution time — game end. We match on the date prefix.
+        "endDate": "2024-12-25T22:30:00Z",
+    }
+    espn_games = [
+        {"id": "401584900", "away": "Boston Celtics", "home": "Los Angeles Lakers",
+         "status": "STATUS_FINAL", "start_iso": "2024-12-25T20:00:00Z"},
+        {"id": "401584901", "away": "Knicks", "home": "Heat",
+         "status": "STATUS_FINAL", "start_iso": "2024-12-25T19:00:00Z"},
+    ]
+    match = match_pm_to_espn(pm_event, espn_games)
+    assert match is not None
+    assert match["id"] == "401584900"
+
+
+def test_match_pm_to_espn_returns_none_when_no_team_match():
+    pm_event = {
+        "title": "Boston Celtics vs Los Angeles Lakers",
+        "endDate": "2024-12-25T22:30:00Z",
+    }
+    espn_games = [
+        {"id": "401584901", "away": "Knicks", "home": "Heat",
+         "status": "STATUS_FINAL", "start_iso": "2024-12-25T19:00:00Z"},
+    ]
+    assert match_pm_to_espn(pm_event, espn_games) is None
