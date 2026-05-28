@@ -98,6 +98,45 @@ subscriptions:
       class: priceBinary
       series_slug: hype-up-or-down-daily
 
+  # Commodity hit/settle multi-strike (monthly cadence — kept per operator
+  # request as the only non-crypto/non-sports asset class in the recorder).
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: GOLD
+      class: priceBinary
+      series_slug: what-will-gold-gc-hit
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: GOLD
+      class: priceBinary
+      series_slug: what-will-gold-gc-settle-at
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: OIL
+      class: priceBinary
+      series_slug: crude-oil-cl-hit
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: OIL
+      class: priceBinary
+      series_slug: crude-oil-cl-settle
+
   # NBA per-game multi-market events. Each game event has ~39 sub-markets
   # (moneyline, spreads, totals, props). The widened iter_binary_markets
   # yields all of them; the recorder captures L2 on every leg. Engine
