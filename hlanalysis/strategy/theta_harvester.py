@@ -637,19 +637,48 @@ class ThetaHarvesterStrategy(Strategy):
                 ("chosen_leg", chosen_sym),
             ))
 
-        if effective_edge <= self.cfg.edge_buffer:
-            # Diagnose whether gamma penalty was the deciding factor — helps
-            # post-hoc tuning of gamma_lambda.
-            if gamma_lambda > 0.0 and chosen_edge > self.cfg.edge_buffer:
-                return Decision(action=Action.HOLD, diagnostics=(
-                    Diagnostic("info", "edge_after_gamma_below_buffer", (
-                        ("raw_edge", f"{chosen_edge:.4f}"),
-                        ("phi_d", f"{chosen_phi:.4f}"),
-                        ("gamma_penalty", f"{gamma_lambda * chosen_phi:.4f}"),
-                    )),
-                    diag,
-                ))
-            return Decision(action=Action.HOLD, diagnostics=(diag,))
+        # v3.5: momentum / MR tilt — scale the effective edge_buffer by
+        # (1 - alpha_tilt * score). Aligned momentum (score > 0) lowers the
+        # bar; MR against favorite (score < 0) raises it.
+        effective_edge_buffer = self.cfg.edge_buffer
+        if (
+            self.cfg.momentum_mr_enabled
+            and self.cfg.momentum_mr_mode == "tilt"
+        ):
+            from hlanalysis.strategy.momentum_mr import momentum_mr_score
+            fav_side = +1 if chosen_sym == question.yes_symbol else -1
+            mm_score, mm_regime = momentum_mr_score(
+                recent_returns=recent_returns,
+                lookback_min=self.cfg.momentum_mr_lookback_min,
+                indicator=self.cfg.momentum_mr_indicator,
+                favorite_side=fav_side,
+            )
+            effective_edge_buffer = self.cfg.edge_buffer * (
+                1.0 - self.cfg.momentum_mr_alpha_tilt * mm_score
+            )
+            # Append a single tilt diagnostic alongside `diag` below.
+            tilt_diag = Diagnostic("info", "momentum_mr_tilt", (
+                ("indicator", self.cfg.momentum_mr_indicator),
+                ("score", f"{mm_score:.3f}"),
+                ("regime", mm_regime),
+                ("eff_edge_buffer", f"{effective_edge_buffer:.5f}"),
+                ("base_edge_buffer", f"{self.cfg.edge_buffer:.5f}"),
+                ("fav_side", str(fav_side)),
+            ))
+        else:
+            tilt_diag = None
+
+        if effective_edge <= effective_edge_buffer:
+            diags: tuple = (diag,)
+            if tilt_diag is not None:
+                diags = (tilt_diag,) + diags
+            if gamma_lambda > 0.0 and chosen_edge > effective_edge_buffer:
+                diags = (Diagnostic("info", "edge_after_gamma_below_buffer", (
+                    ("raw_edge", f"{chosen_edge:.4f}"),
+                    ("phi_d", f"{chosen_phi:.4f}"),
+                    ("gamma_penalty", f"{gamma_lambda * chosen_phi:.4f}"),
+                )),) + diags
+            return Decision(action=Action.HOLD, diagnostics=diags)
 
         if self.cfg.edge_max is not None and chosen_edge >= self.cfg.edge_max:
             return Decision(action=Action.HOLD, diagnostics=(
@@ -702,10 +731,13 @@ class ThetaHarvesterStrategy(Strategy):
             cloid=f"hla-{uuid.uuid4()}",
             time_in_force="ioc",
         )
+        diags_out: tuple = (Diagnostic("info", "entry"), diag)
+        if tilt_diag is not None:
+            diags_out = (tilt_diag,) + diags_out
         return Decision(
             action=Action.ENTER,
             intents=(intent,),
-            diagnostics=(Diagnostic("info", "entry"), diag),
+            diagnostics=diags_out,
         )
 
     def _evaluate_exits(
