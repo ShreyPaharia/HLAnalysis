@@ -315,6 +315,20 @@ class ThetaHarvesterConfig:
     # and tapers to ~0 for deep favorites. Default "flat" keeps HL bit-identical.
     fee_model: str = "flat"
     fee_rate: float = 0.0
+    # v3.5: momentum / mean-reversion (MR) gate or tilt on the favorite-side
+    # entry rule. Default off → v3.1 behavior is preserved bit-for-bit.
+    # When `enabled` and `mode == "gate"`: skip entries where the momentum_mr
+    # regime is "mr" against the favorite side and |score| > tau_gate.
+    # When `enabled` and `mode == "tilt"`: scale the effective edge_buffer
+    # by (1 − alpha_tilt * score). Score is signed: + = aligned with favorite.
+    # See hlanalysis/strategy/momentum_mr.py and
+    # docs/specs/2026-05-28-v35-momentum-mr-design.md.
+    momentum_mr_enabled: bool = False
+    momentum_mr_indicator: str = "z_ret"      # "z_ret" | "rsi" | "ma_sigma" | "hurst_ou"
+    momentum_mr_lookback_min: int = 15
+    momentum_mr_mode: str = "gate"            # "gate" | "tilt"
+    momentum_mr_tau_gate: float = 1.0
+    momentum_mr_alpha_tilt: float = 0.5
 
 
 class ThetaHarvesterStrategy(Strategy):
@@ -986,6 +1000,12 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         exit_fee=float(params.get("exit_fee", 0.0007)),
         fee_model=str(params.get("fee_model", "flat")),
         fee_rate=float(params.get("fee_rate", 0.0)),
+        momentum_mr_enabled=bool(params.get("momentum_mr_enabled", False)),
+        momentum_mr_indicator=str(params.get("momentum_mr_indicator", "z_ret")),
+        momentum_mr_lookback_min=int(params.get("momentum_mr_lookback_min", 15)),
+        momentum_mr_mode=str(params.get("momentum_mr_mode", "gate")),
+        momentum_mr_tau_gate=float(params.get("momentum_mr_tau_gate", 1.0)),
+        momentum_mr_alpha_tilt=float(params.get("momentum_mr_alpha_tilt", 0.5)),
     )
     return ThetaHarvesterStrategy(cfg)
 
@@ -1020,4 +1040,17 @@ def build_v3_4_lmgate(params: dict) -> ThetaHarvesterStrategy:
     params_with_default = dict(params)
     params_with_default.setdefault("vol_estimator", "bipower")
     params_with_default.setdefault("lm_threshold", 4.0)
+    return build_v3_theta_harvester(params_with_default)
+
+
+@register("v3_5_momentum_mr")
+def build_v3_5_momentum_mr(params: dict) -> ThetaHarvesterStrategy:
+    """v3.5 — v3.1 final + momentum/MR gate or tilt on favorite-side entries.
+
+    Defaults to v3.1 final state plus momentum_mr_enabled=True. Sweep params
+    expose `momentum_mr_indicator`, `momentum_mr_lookback_min`,
+    `momentum_mr_mode`, `momentum_mr_tau_gate`, `momentum_mr_alpha_tilt`.
+    """
+    params_with_default = dict(params)
+    params_with_default.setdefault("momentum_mr_enabled", True)
     return build_v3_theta_harvester(params_with_default)
