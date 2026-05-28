@@ -552,6 +552,32 @@ class ThetaHarvesterStrategy(Strategy):
         )
         effective_edge = chosen_edge - gamma_lambda * chosen_phi
 
+        # v3.5: momentum / MR gate — skip if regime == "mr" and aligned-signed
+        # score < -tau_gate. Computed AFTER favorite is chosen so we know which
+        # side to align to.
+        if (
+            self.cfg.momentum_mr_enabled
+            and self.cfg.momentum_mr_mode == "gate"
+        ):
+            from hlanalysis.strategy.momentum_mr import momentum_mr_score
+            fav_side = +1 if chosen_sym == question.yes_symbol else -1
+            mm_score, mm_regime = momentum_mr_score(
+                recent_returns=recent_returns,
+                lookback_min=self.cfg.momentum_mr_lookback_min,
+                indicator=self.cfg.momentum_mr_indicator,
+                favorite_side=fav_side,
+            )
+            if mm_regime == "mr" and mm_score < -self.cfg.momentum_mr_tau_gate:
+                return Decision(action=Action.HOLD, diagnostics=(
+                    Diagnostic("info", "momentum_mr_gate", (
+                        ("indicator", self.cfg.momentum_mr_indicator),
+                        ("score", f"{mm_score:.3f}"),
+                        ("regime", mm_regime),
+                        ("tau_gate", f"{self.cfg.momentum_mr_tau_gate:.3f}"),
+                        ("fav_side", str(fav_side)),
+                    )),
+                ))
+
         # Build a diagnostic preserving the binary schema (p_model/edge_yes/edge_no)
         # so existing parquet writers and tests keep working unchanged.
         if is_binary:
