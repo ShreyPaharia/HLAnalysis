@@ -65,6 +65,7 @@ def _resolve_data_source(
     cache_root: str | None = None,
     ref_source: str | None = None,
     pm_flavor: str | None = None,
+    hl_reference_resample_seconds: int | None = None,
 ) -> DataSource:
     """Map a CLI data-source name to a concrete DataSource instance.
 
@@ -95,7 +96,14 @@ def _resolve_data_source(
 
         root = cache_root or os.environ.get(_ENV_HL_DATA, "data")
         rs = ref_source or "hl_perp"
-        return HLHip4DataSource(data_root=Path(root), ref_source=rs)  # type: ignore[arg-type]
+        # Keep the loader's reference resample period coupled to the strategy's
+        # vol_sampling_dt_seconds (passed via the run config). Defaults to 60s.
+        rrs = int(hl_reference_resample_seconds) if hl_reference_resample_seconds else 60
+        return HLHip4DataSource(
+            data_root=Path(root),
+            ref_source=rs,  # type: ignore[arg-type]
+            reference_resample_seconds=rrs,
+        )
     if name == "pm_nba":
         from .data.pm_nba import PolymarketNBADataSource
 
@@ -223,6 +231,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         cache_root=args.cache_root,
         ref_source=getattr(args, "ref_source", None),
         pm_flavor=getattr(args, "pm_flavor", None),
+        # Keep the HL reference downsampler in lockstep with the strategy's
+        # vol_sampling_dt_seconds — same param, same source-of-truth.
+        hl_reference_resample_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
     )
     start = args.start or ""
     end = args.end or ""

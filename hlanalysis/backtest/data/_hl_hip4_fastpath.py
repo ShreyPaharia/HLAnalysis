@@ -94,15 +94,17 @@ from ..core.events import ReferenceEvent, SettlementEvent
 log = logging.getLogger(__name__)
 
 
-_REFERENCE_RESAMPLE_NS = 60 * 1_000_000_000
+_DEFAULT_REFERENCE_RESAMPLE_NS = 60 * 1_000_000_000
 
 
-def _resample_reference_rows_to_1m(
+def _resample_reference_rows(
     events: list[ReferenceEvent],
+    *,
+    resample_ns: int,
 ) -> list[ReferenceEvent]:
-    """List-input twin of ``hl_hip4._resample_reference_to_1m``. Aggregates
-    consecutive ReferenceEvents into 1-minute OHLC bars. See that function
-    for rationale.
+    """List-input twin of ``hl_hip4._resample_reference``. Aggregates
+    consecutive ReferenceEvents into OHLC bars of width ``resample_ns``.
+    See that function for rationale.
     """
     out: list[ReferenceEvent] = []
     if not events:
@@ -112,7 +114,7 @@ def _resample_reference_rows_to_1m(
     last_ts = 0
     sym = "BTC"
     for ev in events:
-        bucket = ev.ts_ns // _REFERENCE_RESAMPLE_NS
+        bucket = ev.ts_ns // resample_ns
         if cur_bucket is None:
             cur_bucket = bucket
             h, l, c = ev.high, ev.low, ev.close
@@ -366,6 +368,7 @@ def build_fast_path_bundle(
     settlement_glob_for: Any,
     reference_rows: list[tuple],
     ref_event_kind: Literal["bbo", "mark"],
+    reference_resample_ns: int = _DEFAULT_REFERENCE_RESAMPLE_NS,
 ) -> FastPathBundle:
     """Assemble the per-leg event arrays + reference + settlement events.
 
@@ -385,12 +388,12 @@ def build_fast_path_bundle(
         leg_arrays[leg] = LegArrays(events=arr, book_ts=book_ts)
 
     # Reference events: already fetched as flat rows in legacy path. Convert
-    # here and resample to 1m OHLC bars so σ-annualization in the strategy
-    # (which assumes vol_sampling_dt_seconds=60 inter-sample spacing) is
-    # honest. Raw HL BBO/mark feeds tick ~1-6/s; without bucketing, the
-    # strategy's last-N returns span ~5-30s of price action while the
-    # annualization treats them as 60min. See hl_hip4.py::_resample_reference_to_1m
-    # for the legacy-path twin and the rationale memo.
+    # here and resample to OHLC bars of width ``reference_resample_ns`` so
+    # σ-annualization in the strategy (which assumes vol_sampling_dt_seconds
+    # inter-sample spacing) is honest. Raw HL BBO/mark feeds tick ~1-6/s;
+    # without bucketing the strategy's last-N returns span ~5-30s of price
+    # action while the annualization treats them as `dt` apart. See
+    # hl_hip4.py::_resample_reference for the legacy-path twin and rationale.
     ref_events_raw: list[ReferenceEvent] = []
     if ref_event_kind == "bbo":
         for ts, bid, ask in reference_rows:
@@ -400,7 +403,9 @@ def build_fast_path_bundle(
         for ts, px in reference_rows:
             p = float(px)
             ref_events_raw.append(ReferenceEvent(int(ts), "BTC", p, p, p))
-    ref_events: list[ReferenceEvent] = _resample_reference_rows_to_1m(ref_events_raw)
+    ref_events: list[ReferenceEvent] = _resample_reference_rows(
+        ref_events_raw, resample_ns=reference_resample_ns
+    )
 
     # Settlement events: per-leg.
     settle_events: list[SettlementEvent] = []
