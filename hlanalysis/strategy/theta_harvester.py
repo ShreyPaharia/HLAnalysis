@@ -204,6 +204,22 @@ def _p_leg_win_prob(
     return res[0]
 
 
+def _jr_trust_weight(recent_returns: tuple[float, ...], lookback_min: int) -> float:
+    """Jump fraction JR = max(0, (RV − BPV)/RV) over the last lookback_min returns.
+    Returns the trust scalar `(1 − JR)` ∈ [0, 1]. 1.0 = pure continuous, 0.0 = pure jump."""
+    if len(recent_returns) < max(lookback_min, 3):
+        return 1.0
+    arr = np.asarray(recent_returns[-lookback_min:], dtype=np.float64)
+    rv = float(np.sum(arr * arr))
+    if rv <= 0.0:
+        return 1.0
+    # Bipower variation: π/2 · Σ |r_i|·|r_{i-1}| (over consecutive pairs)
+    abs_r = np.abs(arr)
+    bpv = (np.pi / 2.0) * float(np.sum(abs_r[1:] * abs_r[:-1]))
+    jr = max(0.0, min(1.0, (rv - bpv) / rv))
+    return 1.0 - jr
+
+
 @dataclass(frozen=True, slots=True)
 class ThetaHarvesterConfig:
     # v2 entry knobs (copied; we deliberately do NOT import ModelEdgeConfig to
@@ -315,6 +331,25 @@ class ThetaHarvesterConfig:
     # and tapers to ~0 for deep favorites. Default "flat" keeps HL bit-identical.
     fee_model: str = "flat"
     fee_rate: float = 0.0
+    # v3.5: momentum / mean-reversion (MR) gate or tilt on the favorite-side
+    # entry rule. Default off → v3.1 behavior is preserved bit-for-bit.
+    # When `enabled` and `mode == "gate"`: skip entries where the momentum_mr
+    # regime is "mr" against the favorite side and |score| > tau_gate.
+    # When `enabled` and `mode == "tilt"`: scale the effective edge_buffer
+    # by (1 − alpha_tilt * score). Score is signed: + = aligned with favorite.
+    # See hlanalysis/strategy/momentum_mr.py and
+    # docs/specs/2026-05-28-v35-momentum-mr-design.md.
+    momentum_mr_enabled: bool = False
+    momentum_mr_indicator: str = "z_ret"      # "z_ret" | "rsi" | "ma_sigma" | "hurst_ou"
+    momentum_mr_lookback_min: int = 15
+    momentum_mr_mode: str = "gate"            # "gate" | "tilt"
+    momentum_mr_tau_gate: float = 1.0
+    momentum_mr_alpha_tilt: float = 0.5
+    # v3.6: Jump-Ratio trust weight. When True (and momentum_mr_enabled),
+    # shrink the indicator score by (1 - JR) where JR = (RV - BPV) / RV is the
+    # jump fraction over the same lookback as the indicator. Throttles the tilt
+    # when the underlying is gapping (BPV diverges from RV). Default off.
+    momentum_mr_jr_trust_weight: bool = False
 
 
 class ThetaHarvesterStrategy(Strategy):
@@ -538,6 +573,40 @@ class ThetaHarvesterStrategy(Strategy):
         )
         effective_edge = chosen_edge - gamma_lambda * chosen_phi
 
+        # v3.5: momentum / MR gate — skip if regime == "mr" and aligned-signed
+        # score < -tau_gate. Computed AFTER favorite is chosen so we know which
+        # side to align to.
+        if (
+            self.cfg.momentum_mr_enabled
+            and self.cfg.momentum_mr_mode == "gate"
+        ):
+            from hlanalysis.strategy.momentum_mr import momentum_mr_score
+            fav_side = +1 if chosen_sym == question.yes_symbol else -1
+            mm_score, mm_regime = momentum_mr_score(
+                recent_returns=recent_returns,
+                lookback_min=self.cfg.momentum_mr_lookback_min,
+                indicator=self.cfg.momentum_mr_indicator,
+                favorite_side=fav_side,
+            )
+            if self.cfg.momentum_mr_jr_trust_weight:
+                trust = _jr_trust_weight(recent_returns, self.cfg.momentum_mr_lookback_min)
+                mm_score = mm_score * trust
+            else:
+                trust = 1.0
+            gate_diag_kv: list = [
+                ("indicator", self.cfg.momentum_mr_indicator),
+                ("score", f"{mm_score:.3f}"),
+                ("regime", mm_regime),
+                ("tau_gate", f"{self.cfg.momentum_mr_tau_gate:.3f}"),
+                ("fav_side", str(fav_side)),
+            ]
+            if self.cfg.momentum_mr_jr_trust_weight:
+                gate_diag_kv.append(("jr_trust", f"{trust:.3f}"))
+            if mm_regime == "mr" and mm_score < -self.cfg.momentum_mr_tau_gate:
+                return Decision(action=Action.HOLD, diagnostics=(
+                    Diagnostic("info", "momentum_mr_gate", tuple(gate_diag_kv)),
+                ))
+
         # Build a diagnostic preserving the binary schema (p_model/edge_yes/edge_no)
         # so existing parquet writers and tests keep working unchanged.
         if is_binary:
@@ -597,19 +666,56 @@ class ThetaHarvesterStrategy(Strategy):
                 ("chosen_leg", chosen_sym),
             ))
 
-        if effective_edge <= self.cfg.edge_buffer:
-            # Diagnose whether gamma penalty was the deciding factor — helps
-            # post-hoc tuning of gamma_lambda.
-            if gamma_lambda > 0.0 and chosen_edge > self.cfg.edge_buffer:
-                return Decision(action=Action.HOLD, diagnostics=(
-                    Diagnostic("info", "edge_after_gamma_below_buffer", (
-                        ("raw_edge", f"{chosen_edge:.4f}"),
-                        ("phi_d", f"{chosen_phi:.4f}"),
-                        ("gamma_penalty", f"{gamma_lambda * chosen_phi:.4f}"),
-                    )),
-                    diag,
-                ))
-            return Decision(action=Action.HOLD, diagnostics=(diag,))
+        # v3.5: momentum / MR tilt — scale the effective edge_buffer by
+        # (1 - alpha_tilt * score). Aligned momentum (score > 0) lowers the
+        # bar; MR against favorite (score < 0) raises it.
+        effective_edge_buffer = self.cfg.edge_buffer
+        if (
+            self.cfg.momentum_mr_enabled
+            and self.cfg.momentum_mr_mode == "tilt"
+        ):
+            from hlanalysis.strategy.momentum_mr import momentum_mr_score
+            fav_side = +1 if chosen_sym == question.yes_symbol else -1
+            mm_score, mm_regime = momentum_mr_score(
+                recent_returns=recent_returns,
+                lookback_min=self.cfg.momentum_mr_lookback_min,
+                indicator=self.cfg.momentum_mr_indicator,
+                favorite_side=fav_side,
+            )
+            if self.cfg.momentum_mr_jr_trust_weight:
+                trust = _jr_trust_weight(recent_returns, self.cfg.momentum_mr_lookback_min)
+                mm_score = mm_score * trust
+            else:
+                trust = 1.0
+            effective_edge_buffer = self.cfg.edge_buffer * (
+                1.0 - self.cfg.momentum_mr_alpha_tilt * mm_score
+            )
+            # Append a single tilt diagnostic alongside `diag` below.
+            tilt_diag_kv: list = [
+                ("indicator", self.cfg.momentum_mr_indicator),
+                ("score", f"{mm_score:.3f}"),
+                ("regime", mm_regime),
+                ("eff_edge_buffer", f"{effective_edge_buffer:.5f}"),
+                ("base_edge_buffer", f"{self.cfg.edge_buffer:.5f}"),
+                ("fav_side", str(fav_side)),
+            ]
+            if self.cfg.momentum_mr_jr_trust_weight:
+                tilt_diag_kv.append(("jr_trust", f"{trust:.3f}"))
+            tilt_diag = Diagnostic("info", "momentum_mr_tilt", tuple(tilt_diag_kv))
+        else:
+            tilt_diag = None
+
+        if effective_edge <= effective_edge_buffer:
+            diags: tuple = (diag,)
+            if tilt_diag is not None:
+                diags = (tilt_diag,) + diags
+            if gamma_lambda > 0.0 and chosen_edge > effective_edge_buffer:
+                diags = (Diagnostic("info", "edge_after_gamma_below_buffer", (
+                    ("raw_edge", f"{chosen_edge:.4f}"),
+                    ("phi_d", f"{chosen_phi:.4f}"),
+                    ("gamma_penalty", f"{gamma_lambda * chosen_phi:.4f}"),
+                )),) + diags
+            return Decision(action=Action.HOLD, diagnostics=diags)
 
         if self.cfg.edge_max is not None and chosen_edge >= self.cfg.edge_max:
             return Decision(action=Action.HOLD, diagnostics=(
@@ -662,10 +768,13 @@ class ThetaHarvesterStrategy(Strategy):
             cloid=f"hla-{uuid.uuid4()}",
             time_in_force="ioc",
         )
+        diags_out: tuple = (Diagnostic("info", "entry"), diag)
+        if tilt_diag is not None:
+            diags_out = (tilt_diag,) + diags_out
         return Decision(
             action=Action.ENTER,
             intents=(intent,),
-            diagnostics=(Diagnostic("info", "entry"), diag),
+            diagnostics=diags_out,
         )
 
     def _evaluate_exits(
@@ -986,6 +1095,13 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         exit_fee=float(params.get("exit_fee", 0.0007)),
         fee_model=str(params.get("fee_model", "flat")),
         fee_rate=float(params.get("fee_rate", 0.0)),
+        momentum_mr_enabled=bool(params.get("momentum_mr_enabled", False)),
+        momentum_mr_indicator=str(params.get("momentum_mr_indicator", "z_ret")),
+        momentum_mr_lookback_min=int(params.get("momentum_mr_lookback_min", 15)),
+        momentum_mr_mode=str(params.get("momentum_mr_mode", "gate")),
+        momentum_mr_tau_gate=float(params.get("momentum_mr_tau_gate", 1.0)),
+        momentum_mr_alpha_tilt=float(params.get("momentum_mr_alpha_tilt", 0.5)),
+        momentum_mr_jr_trust_weight=bool(params.get("momentum_mr_jr_trust_weight", False)),
     )
     return ThetaHarvesterStrategy(cfg)
 
@@ -1020,4 +1136,17 @@ def build_v3_4_lmgate(params: dict) -> ThetaHarvesterStrategy:
     params_with_default = dict(params)
     params_with_default.setdefault("vol_estimator", "bipower")
     params_with_default.setdefault("lm_threshold", 4.0)
+    return build_v3_theta_harvester(params_with_default)
+
+
+@register("v3_5_momentum_mr")
+def build_v3_5_momentum_mr(params: dict) -> ThetaHarvesterStrategy:
+    """v3.5 — v3.1 final + momentum/MR gate or tilt on favorite-side entries.
+
+    Defaults to v3.1 final state plus momentum_mr_enabled=True. Sweep params
+    expose `momentum_mr_indicator`, `momentum_mr_lookback_min`,
+    `momentum_mr_mode`, `momentum_mr_tau_gate`, `momentum_mr_alpha_tilt`.
+    """
+    params_with_default = dict(params)
+    params_with_default.setdefault("momentum_mr_enabled", True)
     return build_v3_theta_harvester(params_with_default)

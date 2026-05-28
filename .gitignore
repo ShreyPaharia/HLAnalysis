@@ -30,3 +30,10 @@ docs/superpowers/
 
 # Executed notebook copies emitted by smoke tests / scheduled runs
 docs/reports/*.executed.ipynb
+
+# Auto-generated per-cell tuning grids written by v3.5/v3.6 sweep runners
+config/tuning.v3-5-gate-*.yaml
+config/tuning.v3-5-tilt-*.yaml
+config/tuning.v3-5-ext-*.yaml
+config/tuning.v3-6-tilt-*.yaml
+config/tuning.v3-6-jr-tilt-*.yaml
