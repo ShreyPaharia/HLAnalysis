@@ -31,6 +31,9 @@ _MA_SIGMA_MR_THRESHOLD = 2.0
 _MA_SIGMA_MOMENTUM_THRESHOLD = 0.5
 _HURST_MR_BAND = 0.45
 _HURST_MOMENTUM_BAND = 0.55
+_SDR_MR_THRESHOLD = _Z_RET_MR_THRESHOLD
+_SDR_MOMENTUM_THRESHOLD = _Z_RET_MOMENTUM_THRESHOLD
+_OU_Z_MR_THRESHOLD = 2.0
 
 
 def momentum_mr_score(
@@ -46,7 +49,7 @@ def momentum_mr_score(
     ----------
     recent_returns: chronological tuple of 60s log-returns.
     lookback_min:   number of trailing 1-minute bars to read.
-    indicator:      one of "z_ret", "rsi", "ma_sigma", "hurst_ou".
+    indicator:      one of "z_ret", "rsi", "ma_sigma", "hurst_ou", "sdr", "ou_z".
     favorite_side:  +1 if current favorite is UP (yes), -1 if DOWN (no).
 
     Score is always signed relative to favorite_side: positive ⇒ underlying
@@ -65,6 +68,10 @@ def momentum_mr_score(
         return _ma_sigma(recent_returns, lookback_min, favorite_side)
     if indicator == "hurst_ou":
         return _hurst_ou(recent_returns, lookback_min, favorite_side)
+    if indicator == "sdr":
+        return _sdr(recent_returns, lookback_min, favorite_side)
+    if indicator == "ou_z":
+        return _ou_z(recent_returns, lookback_min, favorite_side)
     raise ValueError(f"Unknown indicator: {indicator!r}")
 
 
@@ -200,4 +207,108 @@ def _hurst_ou(
         regime = "mr"
     elif H > _HURST_MOMENTUM_BAND:
         regime = "momentum"
+    return score, regime
+
+
+def _sdr(
+    recent_returns: tuple[float, ...], lookback_min: int, favorite_side: int,
+) -> tuple[float, str]:
+    """Signed Drift Ratio — same as z_ret but uses √BPV as the denominator
+    instead of rolling sample-std, making it robust to jump contamination.
+
+    BPV (bipower variation) per bar: (π/2) · Σ|r_i||r_{i-1}| / (n-1).
+    Denominator: √BPV · √lookback_min (matching z_ret's σ·√n structure).
+
+    Falls back to z_ret-style sample-std when BPV ≤ 0 (pure-trend / flat).
+    """
+    if len(recent_returns) < max(lookback_min, 30):
+        return 0.0, "neutral"
+    arr = np.asarray(recent_returns, dtype=np.float64)
+    window = arr[-lookback_min:]
+    n = len(window)
+    cum_ret = float(np.sum(window))
+
+    # Bipower variation over the lookback window
+    abs_r = np.abs(window)
+    if n >= 2:
+        bpv_sum = float(np.sum(abs_r[1:] * abs_r[:-1]))
+        bpv_per_bar = (math.pi / 2.0) * bpv_sum / (n - 1)
+    else:
+        bpv_per_bar = 0.0
+
+    if bpv_per_bar <= 0.0:
+        return 0.0, "neutral"
+
+    sigma_bpv = math.sqrt(bpv_per_bar)
+    z = cum_ret / (sigma_bpv * math.sqrt(n))
+    signed_z = z * favorite_side
+    score = float(np.clip(signed_z / _SDR_MR_THRESHOLD, -1.0, 1.0))
+    abs_z = abs(z)
+    regime = "neutral"
+    if abs_z >= _SDR_MR_THRESHOLD:
+        last3 = window[-3:] if len(window) >= 3 else window
+        if len(last3) >= 2 and float(np.sign(last3[-1])) != float(np.sign(cum_ret)):
+            regime = "mr"
+        else:
+            regime = "momentum" if signed_z > 0 else "mr"
+    elif abs_z >= _SDR_MOMENTUM_THRESHOLD:
+        regime = "momentum" if signed_z > 0 else "mr"
+    return score, regime
+
+
+def _ou_z(
+    recent_returns: tuple[float, ...], lookback_min: int, favorite_side: int,
+) -> tuple[float, str]:
+    """OU mean-reversion z-score.
+
+    Fits AR(1) P_t = c + φ·P_{t-1} + ε_t to the log-price path (cumsum of
+    returns). Scores the current price vs the equilibrium mean μ_eq = c/(1−φ)
+    in units of the equilibrium std σ_eq = std(ε) / √(1−φ²).
+
+    φ ∈ (0, 1) → mean-reverting; regime "mr" when |z_eq| ≥ 2.
+    φ ≥ 0.99   → near-unit-root / trending; score 0, regime "momentum".
+    φ ≤ 0      → explosive or anti-persistent; score 0, regime "neutral".
+    """
+    needed = lookback_min + 1  # need LB+1 bars for LB log-price diffs
+    min_reliable = 30
+    if len(recent_returns) < max(needed, min_reliable):
+        return 0.0, "neutral"
+
+    arr = np.asarray(recent_returns[-(needed):], dtype=np.float64)
+    log_price = np.cumsum(arr)  # length = needed
+
+    # OLS: P[1:] = c + φ·P[:-1]
+    # numpy.polyfit(x, y, 1) → [slope, intercept] i.e. y = slope·x + intercept
+    phi, c = np.polyfit(log_price[:-1], log_price[1:], 1)
+    phi = float(phi)
+    c = float(c)
+
+    if phi >= 0.99:
+        # Near-unit-root or trending — not mean-reverting
+        return 0.0, "momentum"
+    if phi <= 0.0:
+        # Anti-persistent or explosive
+        return 0.0, "neutral"
+
+    mu_eq = c / (1.0 - phi)
+    residuals = log_price[1:] - (c + phi * log_price[:-1])
+    sigma_e = float(np.std(residuals, ddof=1)) if len(residuals) > 1 else 0.0
+
+    one_minus_phi2 = 1.0 - phi ** 2
+    if one_minus_phi2 <= 0.0 or sigma_e <= 0.0:
+        return 0.0, "neutral"
+
+    sigma_eq = sigma_e / math.sqrt(one_minus_phi2)
+    if sigma_eq <= 0.0:
+        return 0.0, "neutral"
+
+    p_last = float(log_price[-1])
+    z_eq = (p_last - mu_eq) / sigma_eq
+    # Divide by 2 to map |z_eq|=2 (MR threshold) onto |score|=1
+    signed = z_eq * favorite_side / 2.0
+    score = float(np.clip(signed, -1.0, 1.0))
+
+    regime = "neutral"
+    if abs(z_eq) >= _OU_Z_MR_THRESHOLD:
+        regime = "mr"
     return score, regime
