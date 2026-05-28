@@ -1,0 +1,13 @@
+{
+  "vol_lookback_seconds": 300,
+  "vol_sampling_dt_seconds": 60,
+  "edge_buffer": 0.03,
+  "favorite_threshold": 0.9,
+  "max_position_usd": 100,
+  "stop_loss_pct": null,
+  "exit_edge_threshold": 0.0,
+  "time_stop_seconds": 0,
+  "fee_model": "pm_binary",
+  "fee_rate": 0.03,
+  "min_bid_notional_usd": 0
+}

@@ -96,6 +96,11 @@ def _resolve_data_source(
         root = cache_root or os.environ.get(_ENV_HL_DATA, "data")
         rs = ref_source or "hl_perp"
         return HLHip4DataSource(data_root=Path(root), ref_source=rs)  # type: ignore[arg-type]
+    if name == "pm_nba":
+        from .data.pm_nba import PolymarketNBADataSource
+
+        root = cache_root or os.environ.get("HLBT_PM_NBA_CACHE_ROOT", "data/sim/pm_nba")
+        return PolymarketNBADataSource(cache_root=Path(root))
     raise SystemExit(f"Unknown --data-source: {name}")
 
 
@@ -522,7 +527,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     pr.add_argument(
         "--data-source",
         required=True,
-        choices=["synthetic", "polymarket", "hl_hip4"],
+        choices=["synthetic", "polymarket", "hl_hip4", "pm_nba"],
     )
     pr.add_argument("--config", required=True, help="JSON file of param dict")
     pr.add_argument("--out-dir", required=True)
@@ -616,7 +621,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     pt.add_argument(
         "--data-source",
         required=True,
-        choices=["polymarket", "hl_hip4"],
+        choices=["polymarket", "hl_hip4", "pm_nba"],
         help="Synthetic is not supported by tune.",
     )
     pt.add_argument("--grid", required=True, help="YAML file with `grids.<strategy>` + `run.*`")

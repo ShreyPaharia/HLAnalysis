@@ -17,6 +17,7 @@ from . import model_edge  # noqa: F401
 from . import theta_harvester  # noqa: F401
 from . import binary_statarb  # noqa: F401
 from . import delta_hedged  # noqa: F401
+from . import nba_wp  # noqa: F401
 
 __all__ = [
     "Action",

@@ -23,6 +23,8 @@ dependencies = [
   "plotly>=5.20",
   "py-clob-client-v2>=1.0.1",
   "httpx[http2]>=0.27",
+  "scikit-learn>=1.6",
+  "joblib>=1.4",
 ]
 
 [project.optional-dependencies]
