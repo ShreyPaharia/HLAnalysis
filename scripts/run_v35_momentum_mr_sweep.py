@@ -12,6 +12,7 @@ Cells:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -89,7 +90,7 @@ def write_grid(label: str, grid: dict) -> Path:
     return out_path
 
 
-def run_tune(label: str, grid_path: Path) -> Path:
+def run_tune(label: str, grid_path: Path, workers: int = 4) -> Path:
     run_id = f"v3-5-{label}-2026-05-28"
     out_run = TUNE_OUT / run_id
     if (out_run / "results.jsonl").exists():
@@ -105,7 +106,7 @@ def run_tune(label: str, grid_path: Path) -> Path:
         "--start", "2025-05-08", "--end", "2026-05-08",
         "--fee-model", "pm_binary", "--fee-rate", "0.07",
         "--kind", "binary",
-        "--workers", "4",
+        "--workers", str(workers),
     ]
     env = {**os.environ, "HLBT_PM_CACHE_ROOT": str(DATA_ROOT)}
     t0 = time.time()
@@ -137,11 +138,69 @@ def summarize(results_path: Path) -> dict:
             "splits": len(ss)}
 
 
+def run_baseline(workers: int = 4) -> Path:
+    """Run v3.1 final on the same date window so v3.5 cells can be Δ-compared."""
+    run_id = "v3-1-final-pm-walkforward-2026-05-28"
+    out_run = TUNE_OUT / run_id
+    if (out_run / "results.jsonl").exists():
+        print(f"[skip] baseline already exists at {out_run}")
+        return out_run
+    cmd = [
+        "uv", "run", "hl-bt", "tune",
+        "--strategy", "v3_theta_harvester",
+        "--data-source", "polymarket",
+        "--grid", "config/tuning.v3-1-final-pm.yaml",
+        "--run-id", run_id,
+        "--out-dir", str(TUNE_OUT),
+        "--start", "2025-05-08", "--end", "2026-05-08",
+        "--fee-model", "pm_binary", "--fee-rate", "0.07",
+        "--kind", "binary",
+        "--workers", str(workers),
+    ]
+    env = {**os.environ, "HLBT_PM_CACHE_ROOT": str(DATA_ROOT)}
+    t0 = time.time()
+    proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+    dt = time.time() - t0
+    if proc.returncode != 0:
+        print(f"[FAIL baseline] rc={proc.returncode}")
+        print(proc.stderr[-2000:])
+        raise SystemExit(1)
+    print(f"[ok] baseline in {dt:.1f}s")
+    return out_run
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--indicator",
+        choices=INDICATORS + ["all"],
+        default="all",
+        help="Restrict sweep to a single indicator (default: all 4).",
+    )
+    parser.add_argument(
+        "--baseline-only", action="store_true",
+        help="Only run the v3.1 baseline, then exit. Use to pre-compute Δ-reference.",
+    )
+    parser.add_argument(
+        "--skip-baseline", action="store_true",
+        help="Skip generating the v3.1 baseline (assume it exists).",
+    )
+    parser.add_argument(
+        "--workers", type=int, default=4,
+        help="Workers for each `hl-bt tune` invocation.",
+    )
+    args = parser.parse_args()
+
+    if not args.skip_baseline:
+        run_baseline(workers=args.workers)
+    if args.baseline_only:
+        return 0
+
+    indicators = INDICATORS if args.indicator == "all" else [args.indicator]
     results: dict[str, dict] = {}
     cells: list[tuple[str, dict]] = []
 
-    for ind in INDICATORS:
+    for ind in indicators:
         for lb in LOOKBACKS:
             for tau in TAU_GATES:
                 label = f"gate-{ind}-lb{lb}-tau{int(tau*10):02d}"
@@ -154,14 +213,14 @@ def main() -> int:
                     indicator=ind, lookback_min=lb, mode="tilt", alpha_tilt=alpha,
                 )))
 
-    print(f"running {len(cells)} cells")
+    print(f"running {len(cells)} cells for indicator(s): {indicators}")
     for label, grid in cells:
         gp = write_grid(label, grid)
-        rd = run_tune(label, gp)
+        rd = run_tune(label, gp, workers=args.workers)
         results[label] = summarize(rd / "results.jsonl")
 
-    # Baseline: v3.1 final on identical splits
-    baseline_run = TUNE_OUT / "v3-1-final-pm-walkforward-2026-05-23"
+    # Baseline: v3.1 final on identical splits (regenerated above if needed)
+    baseline_run = TUNE_OUT / "v3-1-final-pm-walkforward-2026-05-28"
     if (baseline_run / "results.jsonl").exists():
         base = summarize(baseline_run / "results.jsonl")
     else:
