@@ -204,6 +204,22 @@ def _p_leg_win_prob(
     return res[0]
 
 
+def _jr_trust_weight(recent_returns: tuple[float, ...], lookback_min: int) -> float:
+    """Jump fraction JR = max(0, (RV − BPV)/RV) over the last lookback_min returns.
+    Returns the trust scalar `(1 − JR)` ∈ [0, 1]. 1.0 = pure continuous, 0.0 = pure jump."""
+    if len(recent_returns) < max(lookback_min, 3):
+        return 1.0
+    arr = np.asarray(recent_returns[-lookback_min:], dtype=np.float64)
+    rv = float(np.sum(arr * arr))
+    if rv <= 0.0:
+        return 1.0
+    # Bipower variation: π/2 · Σ |r_i|·|r_{i-1}| (over consecutive pairs)
+    abs_r = np.abs(arr)
+    bpv = (np.pi / 2.0) * float(np.sum(abs_r[1:] * abs_r[:-1]))
+    jr = max(0.0, min(1.0, (rv - bpv) / rv))
+    return 1.0 - jr
+
+
 @dataclass(frozen=True, slots=True)
 class ThetaHarvesterConfig:
     # v2 entry knobs (copied; we deliberately do NOT import ModelEdgeConfig to
@@ -329,6 +345,11 @@ class ThetaHarvesterConfig:
     momentum_mr_mode: str = "gate"            # "gate" | "tilt"
     momentum_mr_tau_gate: float = 1.0
     momentum_mr_alpha_tilt: float = 0.5
+    # v3.6: Jump-Ratio trust weight. When True (and momentum_mr_enabled),
+    # shrink the indicator score by (1 - JR) where JR = (RV - BPV) / RV is the
+    # jump fraction over the same lookback as the indicator. Throttles the tilt
+    # when the underlying is gapping (BPV diverges from RV). Default off.
+    momentum_mr_jr_trust_weight: bool = False
 
 
 class ThetaHarvesterStrategy(Strategy):
@@ -567,15 +588,23 @@ class ThetaHarvesterStrategy(Strategy):
                 indicator=self.cfg.momentum_mr_indicator,
                 favorite_side=fav_side,
             )
+            if self.cfg.momentum_mr_jr_trust_weight:
+                trust = _jr_trust_weight(recent_returns, self.cfg.momentum_mr_lookback_min)
+                mm_score = mm_score * trust
+            else:
+                trust = 1.0
+            gate_diag_kv: list = [
+                ("indicator", self.cfg.momentum_mr_indicator),
+                ("score", f"{mm_score:.3f}"),
+                ("regime", mm_regime),
+                ("tau_gate", f"{self.cfg.momentum_mr_tau_gate:.3f}"),
+                ("fav_side", str(fav_side)),
+            ]
+            if self.cfg.momentum_mr_jr_trust_weight:
+                gate_diag_kv.append(("jr_trust", f"{trust:.3f}"))
             if mm_regime == "mr" and mm_score < -self.cfg.momentum_mr_tau_gate:
                 return Decision(action=Action.HOLD, diagnostics=(
-                    Diagnostic("info", "momentum_mr_gate", (
-                        ("indicator", self.cfg.momentum_mr_indicator),
-                        ("score", f"{mm_score:.3f}"),
-                        ("regime", mm_regime),
-                        ("tau_gate", f"{self.cfg.momentum_mr_tau_gate:.3f}"),
-                        ("fav_side", str(fav_side)),
-                    )),
+                    Diagnostic("info", "momentum_mr_gate", tuple(gate_diag_kv)),
                 ))
 
         # Build a diagnostic preserving the binary schema (p_model/edge_yes/edge_no)
@@ -653,18 +682,26 @@ class ThetaHarvesterStrategy(Strategy):
                 indicator=self.cfg.momentum_mr_indicator,
                 favorite_side=fav_side,
             )
+            if self.cfg.momentum_mr_jr_trust_weight:
+                trust = _jr_trust_weight(recent_returns, self.cfg.momentum_mr_lookback_min)
+                mm_score = mm_score * trust
+            else:
+                trust = 1.0
             effective_edge_buffer = self.cfg.edge_buffer * (
                 1.0 - self.cfg.momentum_mr_alpha_tilt * mm_score
             )
             # Append a single tilt diagnostic alongside `diag` below.
-            tilt_diag = Diagnostic("info", "momentum_mr_tilt", (
+            tilt_diag_kv: list = [
                 ("indicator", self.cfg.momentum_mr_indicator),
                 ("score", f"{mm_score:.3f}"),
                 ("regime", mm_regime),
                 ("eff_edge_buffer", f"{effective_edge_buffer:.5f}"),
                 ("base_edge_buffer", f"{self.cfg.edge_buffer:.5f}"),
                 ("fav_side", str(fav_side)),
-            ))
+            ]
+            if self.cfg.momentum_mr_jr_trust_weight:
+                tilt_diag_kv.append(("jr_trust", f"{trust:.3f}"))
+            tilt_diag = Diagnostic("info", "momentum_mr_tilt", tuple(tilt_diag_kv))
         else:
             tilt_diag = None
 
@@ -1064,6 +1101,7 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         momentum_mr_mode=str(params.get("momentum_mr_mode", "gate")),
         momentum_mr_tau_gate=float(params.get("momentum_mr_tau_gate", 1.0)),
         momentum_mr_alpha_tilt=float(params.get("momentum_mr_alpha_tilt", 0.5)),
+        momentum_mr_jr_trust_weight=bool(params.get("momentum_mr_jr_trust_weight", False)),
     )
     return ThetaHarvesterStrategy(cfg)
 
