@@ -279,9 +279,14 @@ def _ou_z(
 
     # OLS: P[1:] = c + φ·P[:-1]
     # numpy.polyfit(x, y, 1) → [slope, intercept] i.e. y = slope·x + intercept
-    phi, c = np.polyfit(log_price[:-1], log_price[1:], 1)
+    try:
+        phi, c = np.polyfit(log_price[:-1], log_price[1:], 1)
+    except (np.linalg.LinAlgError, ValueError):
+        return 0.0, "neutral"
     phi = float(phi)
     c = float(c)
+    if not (np.isfinite(phi) and np.isfinite(c)):
+        return 0.0, "neutral"
 
     if phi >= 0.99:
         # Near-unit-root or trending — not mean-reverting
