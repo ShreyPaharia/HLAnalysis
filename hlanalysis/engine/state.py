@@ -41,9 +41,10 @@ class Fill(SQLModel, table=True):
     size: float
     fee: float
     ts_ns: int
-    # HL-reported realized PnL on this fill (0 on opens, signed on reduces).
-    # Populated by Router._book_fill from the venue ack so the local DB stays
-    # diagnosable even though the daily-loss gate now reads from HL directly.
+    # Locally computed realized PnL on this fill (0 on opens, signed on
+    # reduces): (fill_price − position.avg_entry) × closed_qty. Populated by
+    # Router._book_fill for post-hoc audit; the daily-loss gate reads HL's
+    # closedPnl directly via HLClient.hl_realized_pnl_since.
     closed_pnl: float = 0.0
 
 

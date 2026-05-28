@@ -251,6 +251,91 @@ async def test_book_fill_persists_fill_row_with_closed_pnl(tmp_path):
     assert by_side["sell"].closed_pnl == pytest.approx((0.90 - 0.95) * 10)
 
 
+@pytest.mark.asyncio
+async def test_partial_reduce_preserves_avg_entry_and_pnl(tmp_path):
+    """Closing a long via multiple partial reduce-only sells must:
+    1) keep position.avg_entry pinned at the original cost basis
+    2) record per-fill closed_pnl using that original cost basis
+
+    Regression: prior code recomputed avg as
+    (qty*avg + signed*price)/new_qty on every reduce. With signed<0 on a
+    sell, this *inflates* avg_entry on each subsequent partial close, and
+    each subsequent fill's closed_pnl absorbs that inflation. On the prod
+    v31 q=21 trade on 2026-05-27 this turned a real $94 loss into a
+    reported $161 loss.
+    """
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    bus.subscribe()
+    client = HLClient(account_address="0x", api_secret_key="0x",
+                      base_url="x", paper_mode=True)
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
+
+    # Open 10 @ 0.95 (cost basis = 0.95).
+    await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
+    p = dal.get_position(42)
+    assert p is not None and p.qty == pytest.approx(10.0)
+    assert p.avg_entry == pytest.approx(0.95)
+
+    # Partial reduce 1: sell 4 @ 0.80.
+    sell1 = OrderIntent(
+        question_idx=42, symbol="@30", side="sell", size=4.0,
+        limit_price=0.80, cloid="hla-router-sell1", time_in_force="ioc",
+        reduce_only=True, exit_reason="exit_edge",
+    )
+    await router.handle(Decision(action=Action.EXIT, intents=(sell1,)),
+                        inputs=_approval_inputs(), now_ns=3)
+    p = dal.get_position(42)
+    assert p is not None and p.qty == pytest.approx(6.0)
+    assert p.avg_entry == pytest.approx(0.95), \
+        f"avg_entry drifted after partial reduce: {p.avg_entry}"
+    f1 = dal.fills_for_cloid("hla-router-sell1")[0]
+    assert f1.closed_pnl == pytest.approx((0.80 - 0.95) * 4.0)
+
+    # Partial reduce 2: sell 3 @ 0.70. Must use the ORIGINAL 0.95 basis.
+    sell2 = OrderIntent(
+        question_idx=42, symbol="@30", side="sell", size=3.0,
+        limit_price=0.70, cloid="hla-router-sell2", time_in_force="ioc",
+        reduce_only=True, exit_reason="exit_edge",
+    )
+    await router.handle(Decision(action=Action.EXIT, intents=(sell2,)),
+                        inputs=_approval_inputs(), now_ns=4)
+    p = dal.get_position(42)
+    assert p is not None and p.qty == pytest.approx(3.0)
+    assert p.avg_entry == pytest.approx(0.95)
+    f2 = dal.fills_for_cloid("hla-router-sell2")[0]
+    assert f2.closed_pnl == pytest.approx((0.70 - 0.95) * 3.0)
+
+
+@pytest.mark.asyncio
+async def test_addon_buy_recomputes_avg_entry(tmp_path):
+    """Same-direction add-on (topup buy on an existing long) must
+    qty-weight-average the prior basis with the new fill price."""
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    bus.subscribe()
+    client = HLClient(account_address="0x", api_secret_key="0x",
+                      base_url="x", paper_mode=True)
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
+
+    await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
+
+    addon = OrderIntent(
+        question_idx=42, symbol="@30", side="buy", size=5.0,
+        limit_price=0.92, cloid="hla-router-addon", time_in_force="ioc",
+    )
+    await router.handle(Decision(action=Action.ENTER, intents=(addon,)),
+                        inputs=_approval_inputs(), now_ns=3)
+    p = dal.get_position(42)
+    expected = (10.0 * 0.95 + 5.0 * 0.92) / 15.0
+    assert p is not None and p.qty == pytest.approx(15.0)
+    assert p.avg_entry == pytest.approx(expected)
+
+
 def _strategy_cfg_with_slippage(slip_cap: float = 0.005) -> StrategyConfig:
     # Mirrors _strategy_cfg but enables the depth-walk gate (HL default 0).
     entry = AllowlistEntry(

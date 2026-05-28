@@ -340,7 +340,21 @@ class Router:
                     (existing.qty > 0 and intent.side == "buy")
                     or (existing.qty < 0 and intent.side == "sell")
                 )
-                avg = (existing.qty * existing.avg_entry + signed * price) / new_qty if new_qty else 0.0
+                # On an add-on (same-direction fill) the cost basis is the
+                # qty-weighted average of the prior position and this fill.
+                # On a partial reduce the cost basis MUST stay unchanged —
+                # the closed lot's PnL is already captured in
+                # realized_this_fill above. Recomputing avg by treating the
+                # opposite-side fill as a position update inflates avg_entry
+                # on every subsequent reduce (a sell at 0.72 on a 0.89-cost
+                # long pushes avg toward 0.93, then the next sell's
+                # closed_pnl uses the inflated basis, etc.) and produces
+                # nonsensical reported losses when a position is closed via
+                # multiple partial reduces.
+                if is_addon:
+                    avg = (existing.qty * existing.avg_entry + signed * price) / new_qty
+                else:
+                    avg = existing.avg_entry
                 self.dal.upsert_position(Position(
                     question_idx=intent.question_idx, symbol=intent.symbol,
                     qty=new_qty, avg_entry=avg,
