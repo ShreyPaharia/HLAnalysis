@@ -66,6 +66,8 @@ def _resolve_data_source(
     ref_source: str | None = None,
     pm_flavor: str | None = None,
     hl_reference_resample_seconds: int | None = None,
+    pm_reference_source: str | None = None,
+    pm_reference_resample_seconds: int | None = None,
 ) -> DataSource:
     """Map a CLI data-source name to a concrete DataSource instance.
 
@@ -90,7 +92,17 @@ def _resolve_data_source(
         flavor = pm_flavor or os.environ.get(_ENV_PM_FLAVOR, "btc_updown")
         if flavor not in _PM_FLAVORS:
             raise SystemExit(f"Unknown --pm-flavor: {flavor!r}. Choices: {sorted(_PM_FLAVORS)}")
-        return PolymarketDataSource(cache_root=Path(root), **_PM_FLAVORS[flavor])
+        # Optional cadence-sweep knobs. Default preserves the 1m-klines path
+        # used by the 12-month tune — only the BBO-overlap window probe sets
+        # these to "binance_bbo" + sub-minute dt.
+        prs = pm_reference_source or "klines"
+        prrs = int(pm_reference_resample_seconds) if pm_reference_resample_seconds else 60
+        return PolymarketDataSource(
+            cache_root=Path(root),
+            reference_source=prs,  # type: ignore[arg-type]
+            reference_resample_seconds=prrs,
+            **_PM_FLAVORS[flavor],
+        )
     if name == "hl_hip4":
         from .data.hl_hip4 import HLHip4DataSource
 
@@ -234,6 +246,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         # Keep the HL reference downsampler in lockstep with the strategy's
         # vol_sampling_dt_seconds — same param, same source-of-truth.
         hl_reference_resample_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
+        pm_reference_source=getattr(args, "pm_reference_source", None),
+        pm_reference_resample_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
     )
     start = args.start or ""
     end = args.end or ""
@@ -600,6 +614,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="hl_perp",
         help="(hl_hip4 only) Reference-price feed for σ + p_model. "
         "`hl_perp` reads HL BBO/mark; `binance_perp` reads Binance perp BBO/mark.",
+    )
+    pr.add_argument(
+        "--pm-reference-source",
+        choices=["klines", "binance_bbo"],
+        default="klines",
+        help="(polymarket only) Reference-feed source. `klines` (default) reads "
+        "cached 1m Binance klines (12-month corpus). `binance_bbo` reads "
+        "recorded Binance perp BBO ticks and buckets to vol_sampling_dt_seconds "
+        "(BBO-overlap window only).",
     )
     pr.set_defaults(func=cmd_run)
 

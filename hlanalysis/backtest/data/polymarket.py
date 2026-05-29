@@ -47,6 +47,11 @@ _CLOB_BASE = "https://clob.polymarket.com"
 _DEFAULT_REF_SYMBOL = "BTC"
 _DEFAULT_BINARY_SERIES_SLUG = "btc-up-or-down-daily"
 _DEFAULT_KLINES_SUBDIR = "btc_klines"
+# Map PM reference_symbol → Binance perp partition symbol for the BBO-tick
+# reference variant (cadence-sweep path). Only BTC has overlapping recorded
+# tick coverage right now.
+_BINANCE_PERP_REF_SYMBOL = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
+_BINANCE_PERP_DATA_SUBPATH = "venue=binance/product_type=perp/mechanism=clob"
 _BTC_BUCKET_SERIES_SLUG = "bitcoin-multi-strikes-hourly"
 _SERIES_PAGE_LIMIT = 100  # Gamma /events caps responses at 100 even when limit > 100;
 # requesting 500 silently truncates and we mistake the short response for "end of data".
@@ -302,17 +307,42 @@ class PolymarketDataSource:
         reference_symbol: str = _DEFAULT_REF_SYMBOL,
         series_slug: str = _DEFAULT_BINARY_SERIES_SLUG,
         klines_subdir: str = _DEFAULT_KLINES_SUBDIR,
+        reference_source: Literal["klines", "binance_bbo"] = "klines",
+        reference_resample_seconds: int = 60,
+        binance_data_root: Path | str | None = None,
     ) -> None:
         self._cache_root = Path(cache_root)
         self._stream_cfg = _StreamCfg(half_spread=half_spread, depth=depth)
         self._reference_symbol = reference_symbol
         self._series_slug = series_slug
         self._klines_subdir = klines_subdir
+        # Reference-feed mode.
+        # - "klines" (default): emit cached 1m Binance klines as ReferenceEvents.
+        #   This is the 12-month-corpus path used by the v3.1/v3.5/v3.6 tune.
+        # - "binance_bbo": read recorded Binance perp BBO ticks from
+        #   `<binance_data_root>/venue=binance/product_type=perp/...` and
+        #   bucket to `reference_resample_seconds` OHLC. Lets us probe
+        #   sub-minute cadence on the BBO-tick overlap window; symmetrical to
+        #   the HL HIP-4 cadence-parameterization story.
+        if reference_source not in ("klines", "binance_bbo"):
+            raise ValueError(f"reference_source must be 'klines' or 'binance_bbo', got {reference_source!r}")
+        if reference_resample_seconds <= 0:
+            raise ValueError(f"reference_resample_seconds must be positive, got {reference_resample_seconds}")
+        self._reference_source = reference_source
+        self._reference_resample_seconds = int(reference_resample_seconds)
+        self._reference_resample_ns = int(reference_resample_seconds) * 1_000_000_000
+        # Binance tick partitions live next to PM cache root by default
+        # (`data/venue=binance/...` while PM cache lives in `data/sim/`).
+        self._binance_data_root = (
+            Path(binance_data_root) if binance_data_root is not None
+            else self._cache_root.parent
+        )
         # Lazy caches populated on first read. Significant for tuning workers
         # that backtest dozens of markets per cell — without caches each
         # market would re-parse the manifest + the (large) BTC klines JSON.
         self._manifest_cache: dict | None = None
         self._klines_cache: list[dict] | None = None
+        # BBO ticks are window-scoped (per-question) so we don't pre-cache.
 
     # -- public API --------------------------------------------------------
 
@@ -621,17 +651,29 @@ class PolymarketDataSource:
                     leg_events.append(_book_from_l2(comp_snap))
         leg_event_streams.append(iter(leg_events))
 
-        # Reference stream from klines. Populate `open` so binary-market runners
-        # can use the first bar's open as the canonical strike — matching the
-        # legacy `day_open_btc` convention.
-        leg_event_streams.append(iter(
-            ReferenceEvent(
-                ts_ns=int(k["ts_ns"]), symbol=self._reference_symbol,
-                high=float(k["high"]), low=float(k["low"]),
-                close=float(k["close"]), open=float(k["open"]),
-            )
-            for k in sorted(klines, key=lambda k: int(k["ts_ns"]))
-        ))
+        # Reference stream. Two sources:
+        # - "klines": cached 1m Binance klines (legacy 12-month-corpus path).
+        # - "binance_bbo": recorded Binance perp BBO ticks, bucketed to
+        #   `reference_resample_seconds` OHLC bars. Lets us probe cadence on
+        #   the BBO-tick overlap window symmetrically with HL HIP-4.
+        # Strike resolution (_binary_strike) ALWAYS uses 1m klines because
+        # PM's resolution rule is defined by Binance spot 1m closes — that
+        # contract is not negotiable. Only σ-feeding ReferenceEvents change.
+        if self._reference_source == "binance_bbo":
+            ref_events = self._load_binance_bbo_reference(q.start_ts_ns, q.end_ts_ns)
+        else:
+            # Populate `open` so binary-market runners can use the first bar's
+            # open as the canonical strike — matching the legacy `day_open_btc`
+            # convention.
+            ref_events = [
+                ReferenceEvent(
+                    ts_ns=int(k["ts_ns"]), symbol=self._reference_symbol,
+                    high=float(k["high"]), low=float(k["low"]),
+                    close=float(k["close"]), open=float(k["open"]),
+                )
+                for k in sorted(klines, key=lambda k: int(k["ts_ns"]))
+            ]
+        leg_event_streams.append(iter(ref_events))
 
         # Per-leg settlement at end_ts_ns.
         settle_events: list[SettlementEvent] = []
@@ -706,6 +748,92 @@ class PolymarketDataSource:
     def _load_klines_window(self, start_ns: int, end_ns: int) -> list[dict]:
         rows = self._load_all_klines()
         return [r for r in rows if start_ns <= int(r["ts_ns"]) <= end_ns]
+
+    def _load_binance_bbo_reference(
+        self, start_ns: int, end_ns: int,
+    ) -> list[ReferenceEvent]:
+        """Read recorded Binance perp BBO ticks for [start_ns, end_ns) and
+        bucket to ``reference_resample_seconds`` OHLC ReferenceEvents.
+
+        Mirrors the HL HIP-4 `_resample_reference` contract: each bar's high/low
+        track bucket extremes, close is the bucket's last tick, ts is the
+        bucket's last-tick timestamp so monotone ordering is preserved.
+        Returns an empty list (caller proceeds with klines-only or no ref) if
+        no partitions match the window — strategy gates degrade gracefully.
+        """
+        import duckdb
+        sym = _BINANCE_PERP_REF_SYMBOL.get(self._reference_symbol)
+        if sym is None:
+            logger.warning(
+                f"binance_bbo reference unsupported for symbol {self._reference_symbol!r}"
+            )
+            return []
+        # Hive partitions are `date=YYYY-MM-DD`. Cover the question window
+        # with one-day padding on each side to catch tick-boundary spills.
+        start_d = datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).date()
+        end_d = datetime.fromtimestamp(end_ns / 1e9, tz=timezone.utc).date()
+        date_list: list[str] = []
+        d = start_d
+        from datetime import timedelta
+        while d <= end_d + timedelta(days=1):
+            date_list.append(d.isoformat())
+            d += timedelta(days=1)
+        glob = str(
+            self._binance_data_root
+            / _BINANCE_PERP_DATA_SUBPATH
+            / "event=bbo" / f"symbol={sym}"
+            / "**" / "*.parquet"
+        )
+        from glob import glob as _glob
+        if not _glob(glob, recursive=True):
+            logger.warning(f"binance_bbo: no parquet at {glob}")
+            return []
+        con = duckdb.connect()
+        try:
+            rows = con.sql(
+                f"""
+                SELECT exchange_ts, bid_px, ask_px
+                FROM read_parquet('{glob}', hive_partitioning=1)
+                WHERE date IN ({','.join(repr(d) for d in date_list)})
+                  AND exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
+                ORDER BY exchange_ts
+                """
+            ).fetchall()
+        finally:
+            con.close()
+        if not rows:
+            return []
+        # Bucket to OHLC. Same algorithm as HL HIP-4's `_resample_reference`.
+        resample_ns = self._reference_resample_ns
+        out: list[ReferenceEvent] = []
+        cur_bucket: int | None = None
+        h = l = c = o = 0.0
+        last_ts = 0
+        for ts, bid, ask in rows:
+            mid = (float(bid) + float(ask)) / 2.0
+            bucket = int(ts) // resample_ns
+            if cur_bucket is None:
+                cur_bucket = bucket
+                h = l = c = o = mid
+                last_ts = int(ts)
+            elif bucket != cur_bucket:
+                out.append(ReferenceEvent(
+                    ts_ns=last_ts, symbol=self._reference_symbol,
+                    high=h, low=l, close=c, open=o,
+                ))
+                cur_bucket = bucket
+                h = l = c = o = mid
+                last_ts = int(ts)
+            else:
+                if mid > h: h = mid
+                if mid < l: l = mid
+                c = mid
+                last_ts = int(ts)
+        out.append(ReferenceEvent(
+            ts_ns=last_ts, symbol=self._reference_symbol,
+            high=h, low=l, close=c, open=o,
+        ))
+        return out
 
     # -- internals: live fetch (used by fetch_and_cache only) --------------
 
