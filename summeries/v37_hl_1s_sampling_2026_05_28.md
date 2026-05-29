@@ -151,11 +151,83 @@ better when fed the data resolution it expects.
 4. Separate: run the same cadence sweep on PM (12-month corpus is the
    load-bearing benchmark).
 
+## PM companion sweep (2026-05-29 follow-up)
+
+Mirrored the HL sweep on PM's BTC Up/Down binary corpus over the BBO-tick
+overlap window. Required two additions:
+
+1. Refresh PM cache to 2026-05-28 via `hl-bt fetch` — 22 new markets cached.
+2. New BBO reference variant in `PolymarketDataSource`: `reference_source=
+   "binance_bbo"` reads `data/venue=binance/product_type=perp/.../event=bbo/
+   symbol=BTCUSDT/` parquet ticks and buckets to
+   `reference_resample_seconds`, mirroring the HL HIP-4 contract. The
+   `klines` path (default) is unchanged so the 12-month tune corpus still
+   works.
+
+Sweep on 22 PM BTC binaries, 2026-05-04 → 2026-05-28:
+
+| Cell        | dt(s) | Ref          | PnL     | Trades | Hit   | Sharpe | maxDD  |
+|-------------|-------|--------------|---------|--------|-------|--------|--------|
+| klines_dt60 | 60    | klines (1m)  | $32     | 8      | 9.1%  | 4.63   | $7     |
+| bbo_dt60    | 60    | binance_bbo  | $135    | 36     | 50.0% | 9.67   | $35    |
+| bbo_dt10    | 10    | binance_bbo  | $109    | 38     | 45.5% | 7.33   | $45    |
+| bbo_dt5     | 5     | binance_bbo  | $121    | 38     | 50.0% | 8.51   | $44    |
+| **bbo_dt1** | **1** | **binance_bbo** | **$164** | 36 | **59.1%** | **12.30** | **$29** |
+
+**Headline (BBO dt=60 → dt=1):** +$29 (+22% PnL), +9pp hit rate, max DD
+$35 → $29. Same direction as HL, similar magnitude.
+
+**Curve shape:** PM is non-monotonic — dt=10 and dt=5 *under*perform dt=60
+(slightly worse PnL / DD / hit). dt=1 then dominates. The U-shape suggests
+the JR/ma_sigma window sits in an uncomfortable middle ground at
+intermediate cadences — denser samples haven't yet stabilized but the
+1m-bar smoothing is already gone. dt=1 has enough samples for σ + JR-trust
+to lock onto the right regime.
+
+**Caveat — `klines_dt60` is not a fair baseline.** The cached 1m kline file
+ends `2026-05-09`; most PM markets in this 2026-05-04 → 28 window therefore
+have *no* reference data and the strategy doesn't enter. The legitimate
+cadence comparison is bbo_dt60 vs bbo_dt1. A proper kline-baseline would
+require extending `data/sim/btc_klines/` to 2026-05-28 — separate fetcher
+task (Binance spot klines fetch; not blocked by the perp geo quirk).
+
+**Caveat — strike resolution also broken past 2026-05-09.** `_binary_strike`
+reads from the same kline cache, so strikes for new markets degrade to
+`0.0`. The strategy still enters because it falls back to reference-price
+gates, but absolute PnL is suspect. The *relative* comparison across
+cadences is fair (all cells suffer identical broken-strike conditions),
+which is what we need for the decision.
+
+**Caveat — n=22 markets**, smaller than the 12-month tune (300 markets).
+Treat as suggestive, not load-bearing. Re-run when the kline cache + Binance
+BBO coverage both extend through a longer window.
+
+### Updated decision
+
+Two independent venues (HL HIP-4 + PM BTC) both show sub-minute reference
+sampling adds material PnL on top of the v3.6 universal config. Magnitude
+is similar (+20-30% PnL on the small per-venue corpus). Mechanism
+(JR-trust × ma_sigma_tilt at the data's native resolution) is the same.
+This strengthens the SHIP-CADENCE-CHANGE recommendation:
+
+1. Land this PR (HL + PM loader refactors, both data spikes). Live behavior
+   unchanged.
+2. **Engine port** of `_mark_bucket_ns` (HL live path) is still the gate
+   for any live cutover.
+3. **PM live path** (if/when we deploy PM live) needs the same
+   `reference_source` plumbing in whatever live PM adapter we build. Today
+   PM is backtest-only.
+4. Follow-up: extend kline cache through 2026-05-28 and re-run
+   `klines_dt60` for a true source-effect baseline (currently the
+   $32-vs-$135 gap conflates "no data" with "cadence").
+
 ## Artifacts
 
-- Runner: `scripts/run_v37_hl_1s_sampling.py`
-- Results: `data/sim/runs/v3-7-hl-1s-sampling-2026-05-28/{dt60,dt10,dt5,dt1}/`
-- Summary: `data/sim/runs/v3-7-hl-1s-sampling-2026-05-28/summary.json`
+- HL runner: `scripts/run_v37_hl_1s_sampling.py`
+- HL results: `data/sim/runs/v3-7-hl-1s-sampling-2026-05-28/{dt60,dt10,dt5,dt1}/`
+- PM runner: `scripts/run_v37_pm_1s_sampling.py`
+- PM results: `data/sim/runs/v3-7-pm-1s-sampling-2026-05-28/{klines_dt60,bbo_dt*}/`
 - Code: `hlanalysis/backtest/data/hl_hip4.py`,
   `hlanalysis/backtest/data/_hl_hip4_fastpath.py`,
+  `hlanalysis/backtest/data/polymarket.py`,
   `hlanalysis/backtest/cli.py`
