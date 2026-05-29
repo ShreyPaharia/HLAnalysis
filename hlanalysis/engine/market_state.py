@@ -61,6 +61,22 @@ class MarketState:
         # p_model/safety_d go to extremes. See bug memo
         # `engine_sigma_sampling_bug_2026_05_21.md`.
         self._mark_bucket_ns = mark_bucket_ns
+        # Per-symbol overrides of the bucket period, registered by the live
+        # runtime via ``set_reference_cadence`` so each strategy slot's σ
+        # formula (which assumes returns spaced ``vol_sampling_dt_seconds``
+        # apart) sees a series bucketed at exactly that cadence. A single
+        # MarketState is shared across all slots, but each slot reads its own
+        # ``reference_symbol`` (HL=BTC, PM=BTCUSDT), so per-symbol bucketing
+        # gives HL/PM independence. Symbols with no override fall back to
+        # ``_mark_bucket_ns`` (60s), preserving legacy behaviour. See
+        # `engine_sigma_sampling_bug_2026_05_21.md` and the v3.7 cadence port.
+        self._mark_bucket_ns_by_symbol: dict[str, int] = {}
+        # Per-symbol deque maxlen overrides. At sub-minute cadences the default
+        # 256-entry history is too short to cover ``vol_lookback_seconds`` of
+        # returns (e.g. dt=5s / 3600s lookback needs ~720 bars), which would
+        # silently truncate the σ window relative to the backtest (whose ring
+        # buffer auto-grows). Registered alongside the bucket period.
+        self._mark_history_by_symbol: dict[str, int] = {}
         # Last-bucket-id we wrote to ``_marks`` per symbol; used to coalesce
         # within-bucket markPx updates into one entry (last-tick close).
         self._last_mark_bucket: dict[str, int] = {}
@@ -71,6 +87,65 @@ class MarketState:
         # ~15s and previously rebuilt this from O(N legs × M questions) on
         # every cycle; the cache makes that O(1) on the steady-state path.
         self._sym_to_q_cache: dict[str, int] | None = None
+
+    # ---- cadence registration ----
+
+    def set_reference_cadence(
+        self,
+        symbol: str,
+        *,
+        sampling_dt_seconds: int,
+        lookback_seconds: int | None = None,
+    ) -> None:
+        """Register the mark-bucketing cadence for ``symbol``.
+
+        Couples MarketState's per-symbol bucket period to the consuming
+        strategy's ``vol_sampling_dt_seconds`` so there is no train/serve skew:
+        the period the strategy's σ formula assumes equals the period the marks
+        are bucketed at.
+
+        Because a single MarketState is shared across all slots, two slots that
+        read the *same* ``reference_symbol`` must agree on the cadence — the one
+        mark history for that symbol can only be bucketed one way. Conflicting
+        registrations raise, failing fast at startup rather than silently
+        skewing whichever slot loses. (On HL today both v1 and v31 read "BTC",
+        so flipping one to dt=5 requires the other to move in lockstep.)
+
+        ``lookback_seconds`` (when given) sizes the per-symbol history deque so
+        it can hold ``ceil(lookback/dt)`` returns; never shrinks below the
+        default ``mark_history``.
+        """
+        ns = int(sampling_dt_seconds) * 1_000_000_000
+        if ns <= 0:
+            raise ValueError(
+                f"sampling_dt_seconds must be positive, got {sampling_dt_seconds!r}"
+            )
+        prev = self._mark_bucket_ns_by_symbol.get(symbol)
+        if prev is not None and prev != ns:
+            raise ValueError(
+                f"conflicting mark-bucket cadence for symbol {symbol!r}: "
+                f"already registered at {prev // 1_000_000_000}s, refused "
+                f"re-registration at {sampling_dt_seconds}s. All strategy slots "
+                f"reading the same reference_symbol must share one "
+                f"vol_sampling_dt_seconds (the shared mark history can only be "
+                f"bucketed one way)."
+            )
+        self._mark_bucket_ns_by_symbol[symbol] = ns
+        if lookback_seconds is not None:
+            # +2: recent_returns needs n+1 prices for n returns, plus a margin
+            # so the oldest bar isn't evicted before the window is full.
+            needed = int(lookback_seconds) // int(sampling_dt_seconds) + 2
+            self._mark_history_by_symbol[symbol] = max(
+                self._mark_history_by_symbol.get(symbol, self._mark_history),
+                needed,
+            )
+
+    def mark_bucket_ns_for(self, symbol: str) -> int:
+        """The bucket period (ns) applied to ``symbol``'s marks. Returns the
+        per-symbol override if registered, else the default. Exposed so the
+        runtime/tests can assert no train/serve skew against the strategy's
+        configured vol_sampling_dt_seconds."""
+        return self._mark_bucket_ns_by_symbol.get(symbol, self._mark_bucket_ns)
 
     # ---- ingest ----
 
@@ -103,15 +178,23 @@ class MarketState:
                 b.last_trade_ts_ns = max(b.last_trade_ts_ns, ev.exchange_ts or ev.local_recv_ts)
             case MarkEvent():
                 self._last_mark[ev.symbol] = ev.mark_px
-                hist = self._marks.setdefault(ev.symbol, deque(maxlen=self._mark_history))
-                # Bucket marks to 1m windows. Within a bucket, the LAST mark
-                # wins (canonical bar close). New bucket → append a fresh
-                # entry. This keeps the strategy's ``recent_returns(n=32)``
-                # spanning ~32 minutes of price action (matching its
-                # vol_sampling_dt=60s assumption), not ~26 seconds at HL's
-                # ~1.2/s markPx tick rate.
+                hist = self._marks.get(ev.symbol)
+                if hist is None:
+                    maxlen = self._mark_history_by_symbol.get(
+                        ev.symbol, self._mark_history,
+                    )
+                    hist = deque(maxlen=maxlen)
+                    self._marks[ev.symbol] = hist
+                # Bucket marks to ``vol_sampling_dt_seconds``-wide windows
+                # (default 60s; per-symbol override via set_reference_cadence).
+                # Within a bucket, the LAST mark wins (canonical bar close);
+                # a new bucket appends a fresh entry. This keeps the strategy's
+                # ``recent_returns`` spanning the wall-clock window its σ
+                # formula assumes, not the raw ~1.2/s markPx tick rate.
                 ts = ev.exchange_ts or ev.local_recv_ts
-                bucket = ts // self._mark_bucket_ns
+                bucket = ts // self._mark_bucket_ns_by_symbol.get(
+                    ev.symbol, self._mark_bucket_ns,
+                )
                 last_bucket = self._last_mark_bucket.get(ev.symbol)
                 if last_bucket is None or bucket != last_bucket:
                     hist.append(ev.mark_px)

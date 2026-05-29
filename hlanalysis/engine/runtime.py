@@ -243,6 +243,34 @@ def build_theta_harvester_config(cfg: StrategyConfig) -> ThetaHarvesterConfig:
     )
 
 
+def reference_sampling_dt_seconds(cfg: StrategyConfig) -> int:
+    """Effective ``vol_sampling_dt_seconds`` for a slot's reference feed.
+
+    Single source of truth coupling MarketState's mark-bucket period to the
+    cadence the strategy's σ formula assumes. theta_harvester carries it in the
+    `theta:` block; late_resolution has no engine-side knob today (its
+    ModelEdgeConfig.vol_sampling_dt_seconds defaults to 60), so it stays 60.
+    """
+    if cfg.theta is not None:
+        return int(cfg.theta.vol_sampling_dt_seconds)
+    return 60
+
+
+def reference_vol_lookback_seconds(cfg: StrategyConfig) -> int:
+    """Largest σ/drift lookback window the slot's strategy will request, across
+    defaults, every allowlist entry, and (for theta) the theta block. Used to
+    size MarketState's per-symbol mark history so sub-minute cadences don't
+    truncate the σ window. Mirrors Scanner._required_returns_n's inputs."""
+    secs = cfg.defaults.vol_lookback_seconds
+    for entry in cfg.allowlist:
+        secs = max(secs, entry.vol_lookback_seconds)
+    if cfg.theta is not None:
+        secs = max(
+            secs, cfg.theta.vol_lookback_seconds, cfg.theta.drift_lookback_seconds,
+        )
+    return secs
+
+
 def _build_strategy_for_slot(cfg: StrategyConfig) -> Strategy:
     """Dispatch on strategy_type. Add new strategies here as they're surfaced
     for live trading."""
@@ -368,6 +396,9 @@ class EngineRuntime:
                 "Duplicate account_alias across slots — each (strategy, account) "
                 "pair must use a distinct alias",
             )
+        # Couple the shared MarketState's per-symbol mark-bucket period to each
+        # slot's vol_sampling_dt_seconds before the ingest loop streams marks.
+        self._register_reference_cadences(slots)
 
         async with aiohttp.ClientSession() as http:
             tg = self._make_telegram(http)
@@ -437,6 +468,21 @@ class EngineRuntime:
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    # ---------- cadence registration ----------
+
+    def _register_reference_cadences(self, slots: list[AccountSlot]) -> None:
+        """Register each slot's (reference_symbol → vol_sampling_dt_seconds)
+        on the shared MarketState so marks are bucketed at exactly the cadence
+        the strategy's σ formula assumes (no train/serve skew). Raises on
+        conflicting cadences for the same reference_symbol (see
+        MarketState.set_reference_cadence)."""
+        for slot in slots:
+            self.market_state.set_reference_cadence(
+                slot.cfg.reference_symbol,
+                sampling_dt_seconds=reference_sampling_dt_seconds(slot.cfg),
+                lookback_seconds=reference_vol_lookback_seconds(slot.cfg),
+            )
 
     # ---------- slot construction ----------
 

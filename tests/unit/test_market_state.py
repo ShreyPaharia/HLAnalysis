@@ -4,6 +4,8 @@ from __future__ import annotations
 import math
 from collections import deque
 
+import pytest
+
 from hlanalysis.engine.market_state import MarketState
 from hlanalysis.events import (
     BboEvent, BookSnapshotEvent, MarkEvent, Mechanism, ProductType,
@@ -141,6 +143,73 @@ def test_marks_bucketed_to_1m_within_bucket_last_wins():
     assert math.isclose(rets[0], math.log(101.0 / 100.5), rel_tol=1e-9)
     # last_mark still tracks the absolute latest tick, unbucketed.
     assert ms.last_mark("BTC") == 101.0
+
+
+def _mark(symbol: str, px: float, ts: int) -> MarkEvent:
+    return MarkEvent(
+        venue="hyperliquid", product_type=ProductType.PERP,
+        mechanism=Mechanism.CLOB, symbol=symbol,
+        exchange_ts=ts, local_recv_ts=ts, mark_px=px,
+    )
+
+
+def test_default_mark_bucket_is_60s():
+    """Cadence port: with no registration the bucket period stays 60s, so
+    existing deployments are bit-for-bit unchanged."""
+    ms = MarketState()
+    assert ms.mark_bucket_ns_for("BTC") == 60 * 1_000_000_000
+    assert ms.mark_bucket_ns_for("BTCUSDT") == 60 * 1_000_000_000
+
+
+def test_set_reference_cadence_buckets_per_symbol():
+    """Registering BTC at 5s buckets its marks every 5s; an unregistered
+    symbol (BTCUSDT) still buckets at the 60s default — HL/PM independence."""
+    ms = MarketState()
+    ms.set_reference_cadence("BTC", sampling_dt_seconds=5)
+    assert ms.mark_bucket_ns_for("BTC") == 5 * 1_000_000_000
+    assert ms.mark_bucket_ns_for("BTCUSDT") == 60 * 1_000_000_000
+
+    s = 1_000_000_000  # 1s in ns
+    # Four BTC ticks 5s apart → four buckets → three returns.
+    for i, px in enumerate([100.0, 100.1, 100.2, 100.3]):
+        ms.apply(_mark("BTC", px, ts=(i + 1) * 5 * s))
+    assert len(ms.recent_returns("BTC", n=10)) == 3
+
+    # Within one 5s bucket, sub-period ticks collapse (last-wins).
+    ms2 = MarketState()
+    ms2.set_reference_cadence("BTC", sampling_dt_seconds=5)
+    base = 100 * s
+    for i, px in enumerate([200.0, 200.1, 200.2]):  # t = 100s + 0,1,2s → same bucket
+        ms2.apply(_mark("BTC", px, ts=base + i * s))
+    ms2.apply(_mark("BTC", 201.0, ts=base + 5 * s))  # next bucket
+    rets = ms2.recent_returns("BTC", n=10)
+    assert len(rets) == 1
+    assert math.isclose(rets[0], math.log(201.0 / 200.2), rel_tol=1e-9)
+
+
+def test_set_reference_cadence_conflict_raises():
+    """The shared mark history for a symbol can only be bucketed one way, so a
+    second registration at a different cadence must fail fast (prevents silent
+    skew when two slots read the same reference_symbol)."""
+    ms = MarketState()
+    ms.set_reference_cadence("BTC", sampling_dt_seconds=5)
+    # Same value is idempotent.
+    ms.set_reference_cadence("BTC", sampling_dt_seconds=5)
+    with pytest.raises(ValueError, match="conflicting mark-bucket cadence"):
+        ms.set_reference_cadence("BTC", sampling_dt_seconds=60)
+
+
+def test_set_reference_cadence_sizes_history_for_sub_minute():
+    """At dt=5s / 3600s lookback the default 256-entry deque is too short
+    (~720 bars needed); registration grows it so the σ window isn't truncated
+    relative to the backtest's auto-growing buffer."""
+    ms = MarketState()
+    ms.set_reference_cadence("BTC", sampling_dt_seconds=5, lookback_seconds=3600)
+    s = 1_000_000_000
+    for i in range(800):
+        ms.apply(_mark("BTC", 100.0 + 0.001 * i, ts=(i + 1) * 5 * s))
+    # Would be capped at 255 returns under the legacy 256-deep deque.
+    assert len(ms.recent_returns("BTC", n=10_000)) > 256
 
 
 def test_recent_volume_usd_sums_recent_trades():

@@ -31,11 +31,22 @@ class ReplayRunner:
         strategy: Strategy,
         reference_symbol: str = "BTC",
         position_lookup: dict[int, Position] | None = None,
+        sampling_dt_seconds: int = 60,
     ) -> None:
         self._strategy = strategy
         self._ref = reference_symbol
         self._positions = position_lookup or {}
         self._market = MarketState()
+        # Honor the same mark-bucketing cadence as the live engine so replay /
+        # paper validation sees the σ window the strategy assumes. Default 60s
+        # preserves legacy replay behaviour (32 one-minute bars).
+        self._sampling_dt_seconds = int(sampling_dt_seconds)
+        self._market.set_reference_cadence(
+            reference_symbol, sampling_dt_seconds=self._sampling_dt_seconds,
+        )
+        # Hold the same wall-clock σ window as the legacy 32×60s default,
+        # scaled to the configured cadence (32 bars at 60s; 384 bars at 5s).
+        self._recent_returns_n = max(32, (32 * 60) // self._sampling_dt_seconds)
 
     def run_iter(self, events: Iterable[NormalizedEvent]) -> Iterator[Decision]:
         for ev in events:
@@ -60,7 +71,9 @@ class ReplayRunner:
                     question=q,
                     books=books,
                     reference_price=ref,
-                    recent_returns=self._market.recent_returns(self._ref, n=32),
+                    recent_returns=self._market.recent_returns(
+                        self._ref, n=self._recent_returns_n,
+                    ),
                     recent_volume_usd=self._market.recent_volume_usd(
                         q.yes_symbol, now=now_ns
                     ) + self._market.recent_volume_usd(

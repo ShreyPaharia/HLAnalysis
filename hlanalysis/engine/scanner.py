@@ -120,9 +120,14 @@ class Scanner:
                 cfg.theta.vol_lookback_seconds,
                 cfg.theta.drift_lookback_seconds,
             )
-        # MarketState resamples the ref feed to 1m bars, so each sample = 60s.
-        # Round up to a whole bar; floor at 32 for the legacy behavior.
-        bars = (secs + 59) // 60
+        # MarketState resamples the ref feed to vol_sampling_dt_seconds bars, so
+        # each sample = dt. Derive the divisor from the same config the bucket
+        # period is coupled to — at the default dt=60 this is unchanged, but at
+        # sub-minute cadences we must request more bars to cover the lookback
+        # (else the σ window silently shrinks vs the backtest). Round up to a
+        # whole bar; floor at 32 for the legacy behavior.
+        dt = cfg.theta.vol_sampling_dt_seconds if cfg.theta is not None else 60
+        bars = (secs + dt - 1) // dt
         return max(32, bars)
 
     def scan(self, *, now_ns: int) -> list[ScannedDecision]:
