@@ -50,20 +50,22 @@ _BINANCE_PERP_PATH = "venue=binance/product_type=perp/mechanism=clob"
 # Map HL underlying → Binance perp symbol for the reference-price swap.
 _BINANCE_REF_SYMBOL = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
 
-# Reference-feed resampling period. Must match the strategy's
-# vol_sampling_dt_seconds contract (currently 60s). Aggregating raw
-# BBO/mark ticks into 1m OHLC bars keeps σ-annualization honest.
-_REFERENCE_RESAMPLE_NS = 60 * 1_000_000_000
+# Default reference-feed resampling period (60s = legacy behavior).
+# Per-instance value lives on HLHip4DataSource and must match the strategy's
+# vol_sampling_dt_seconds contract.
+_DEFAULT_REFERENCE_RESAMPLE_NS = 60 * 1_000_000_000
 
 
-def _resample_reference_to_1m(
+def _resample_reference(
     inner: Iterator[tuple[int, ReferenceEvent]],
+    *,
+    resample_ns: int,
 ) -> Iterator[tuple[int, ReferenceEvent]]:
-    """Aggregate consecutive ReferenceEvents into 1-minute OHLC bars.
+    """Aggregate consecutive ReferenceEvents into ``resample_ns`` OHLC bars.
 
     Why: the strategy's σ formula annualizes the last N returns assuming a
     fixed inter-sample spacing of ``vol_sampling_dt_seconds``. Raw HL
-    BBO/mark feeds are far denser than that. Bucketing by floor(ts/60s) and
+    BBO/mark feeds are far denser than that. Bucketing by floor(ts/Δ) and
     emitting one bar per bucket restores the assumed contract — high/low
     track the bucket extremes, close is the bucket's last tick, ts is the
     bucket's last-tick timestamp so monotone ordering is preserved.
@@ -75,7 +77,7 @@ def _resample_reference_to_1m(
     last_ts: int = 0
     sym: str = "BTC"
     for ts, ev in inner:
-        bucket = ts // _REFERENCE_RESAMPLE_NS
+        bucket = ts // resample_ns
         if cur_bucket is None:
             cur_bucket = bucket
             h, l, c = ev.high, ev.low, ev.close
@@ -173,6 +175,7 @@ class HLHip4DataSource:
         *,
         ref_event: Literal["bbo", "mark"] = "bbo",
         ref_source: Literal["hl_perp", "binance_perp"] = "hl_perp",
+        reference_resample_seconds: int = 60,
     ) -> None:
         self.data_root = Path(data_root)
         self.ref_event = ref_event
@@ -183,6 +186,14 @@ class HLHip4DataSource:
         # this lets us A/B whether feeding p_model (and σ) from Binance
         # changes the strategy's edges on HL HIP-4 markets.
         self.ref_source = ref_source
+        # Reference resample period must match strategy.vol_sampling_dt_seconds —
+        # the CLI threads this from the same param so train/serve stay coupled.
+        if reference_resample_seconds <= 0:
+            raise ValueError(
+                f"reference_resample_seconds must be positive, got {reference_resample_seconds}"
+            )
+        self.reference_resample_seconds = int(reference_resample_seconds)
+        self._reference_resample_ns = int(reference_resample_seconds) * 1_000_000_000
         # Cached per-instance: question_id -> parsed metadata bundle.
         self._meta_cache: dict[str, _QuestionMeta] = {}
 
@@ -309,6 +320,7 @@ class HLHip4DataSource:
                 settlement_glob_for=lambda leg: self._partition_glob("settlement", symbol=leg),
                 reference_rows=ref_rows,
                 ref_event_kind=evt,
+                reference_resample_ns=self._reference_resample_ns,
             )
         finally:
             con.close()
@@ -414,28 +426,30 @@ class HLHip4DataSource:
         if not rows:
             return iter(())
 
-        # 2026-05-21: resample to 1m OHLC bars. Why: the strategy's σ formula
-        # (`theta_harvester._sigma`) takes the LAST `vol_lookback/vol_sampling_dt`
-        # = 60 returns and annualizes assuming each return spans
-        # `vol_sampling_dt_seconds`=60s. HL BTC perp BBO ticks ~6/s and markPx
-        # ~1.2/s — without resampling, those 60 returns span 5-30 seconds, but
-        # the annualization treats them as if they spanned 60 minutes, giving a
-        # ~100-650× time-scale mismatch. The σ collapses to the vol_clip_min
-        # floor (0.05) on 100% of HL ticks, making p_model→{0,1} at entry and
-        # safety_d fire on tiny BTC moves. PM's source already feeds 1m bars,
-        # so this brings HL into the same contract.
+        # 2026-05-21: resample to OHLC bars of width vol_sampling_dt_seconds.
+        # Why: the strategy's σ formula (`theta_harvester._sigma`) takes the LAST
+        # `vol_lookback / vol_sampling_dt` returns and annualizes assuming each
+        # return spans `vol_sampling_dt_seconds`. HL BTC perp BBO ticks ~6/s
+        # and markPx ~1.2/s — without bucketing, those returns span 5-30s of
+        # price action, but the annualization treats them as `vol_sampling_dt`
+        # apart, giving a ~100-650× time-scale mismatch when dt=60s. Bucketing
+        # by floor(ts/dt) restores the assumed contract. PM's source already
+        # feeds 1m bars, so this brings HL into the same contract — and the
+        # per-instance period lets us A/B sub-minute sampling without touching
+        # call sites.
+        resample_ns = self._reference_resample_ns
         if evt == "bbo":
             def gen_bbo_raw() -> Iterator[tuple[int, ReferenceEvent]]:
                 for ts, bid, ask in rows:
                     mid = (float(bid) + float(ask)) / 2.0
                     yield int(ts), ReferenceEvent(int(ts), "BTC", mid, mid, mid)
-            return _resample_reference_to_1m(gen_bbo_raw())
+            return _resample_reference(gen_bbo_raw(), resample_ns=resample_ns)
 
         def gen_mark_raw() -> Iterator[tuple[int, ReferenceEvent]]:
             for ts, px in rows:
                 p = float(px)
                 yield int(ts), ReferenceEvent(int(ts), "BTC", p, p, p)
-        return _resample_reference_to_1m(gen_mark_raw())
+        return _resample_reference(gen_mark_raw(), resample_ns=resample_ns)
 
     def _reference_rows(
         self,
