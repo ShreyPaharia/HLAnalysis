@@ -68,6 +68,7 @@ def _resolve_data_source(
     hl_reference_resample_seconds: int | None = None,
     pm_reference_source: str | None = None,
     pm_reference_resample_seconds: int | None = None,
+    pm_book_source: str | None = None,
 ) -> DataSource:
     """Map a CLI data-source name to a concrete DataSource instance.
 
@@ -97,10 +98,12 @@ def _resolve_data_source(
         # these to "binance_bbo" + sub-minute dt.
         prs = pm_reference_source or "klines"
         prrs = int(pm_reference_resample_seconds) if pm_reference_resample_seconds else 60
+        pbs = pm_book_source or "synthetic"
         return PolymarketDataSource(
             cache_root=Path(root),
             reference_source=prs,  # type: ignore[arg-type]
             reference_resample_seconds=prrs,
+            book_source=pbs,  # type: ignore[arg-type]
             **_PM_FLAVORS[flavor],
         )
     if name == "hl_hip4":
@@ -248,6 +251,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         hl_reference_resample_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
         pm_reference_source=getattr(args, "pm_reference_source", None),
         pm_reference_resample_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
+        pm_book_source=getattr(args, "pm_book_source", None),
     )
     start = args.start or ""
     end = args.end or ""
@@ -623,6 +627,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "cached 1m Binance klines (12-month corpus). `binance_bbo` reads "
         "recorded Binance perp BBO ticks and buckets to vol_sampling_dt_seconds "
         "(BBO-overlap window only).",
+    )
+    pr.add_argument(
+        "--pm-book-source",
+        choices=["synthetic", "recorded"],
+        default="synthetic",
+        help="(polymarket only) Fill-book source. `synthetic` (default) builds "
+        "a flat 1-level book per trade print + `1−p` parity. `recorded` feeds "
+        "the real multi-level L2 `book_snapshot` parquet per leg (HL parity; "
+        "coverage from 2026-05-27).",
     )
     pr.set_defaults(func=cmd_run)
 
