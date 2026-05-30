@@ -25,6 +25,7 @@ strategy:
       vol_lookback_seconds: 3600
       exit_safety_d: 1.0
       vol_ewma_lambda: 0.85
+      vol_estimator: parkinson
       size_cap_near_strike_pct: 0.5
       size_cap_max_dist_pct: 1.0
       size_cap_min_ask: 0.88
@@ -43,6 +44,7 @@ strategy:
     vol_lookback_seconds: 3600
     exit_safety_d: 1.0
     vol_ewma_lambda: 0.85
+    vol_estimator: parkinson
     size_cap_near_strike_pct: 0.5
     size_cap_max_dist_pct: 1.0
     size_cap_min_ask: 0.88
@@ -105,6 +107,7 @@ def test_runtime_threads_safety_gate_fields_into_strategy_config(tmp_path: Path)
     assert rcfg.vol_lookback_seconds == 3600
     assert rcfg.exit_safety_d == 1.0
     assert rcfg.vol_ewma_lambda == 0.85
+    assert rcfg.vol_estimator == "parkinson"
     assert rcfg.size_cap_near_strike_pct == 0.5
     assert rcfg.size_cap_max_dist_pct == 1.0
     assert rcfg.size_cap_min_ask == 0.88
@@ -120,6 +123,7 @@ def test_runtime_falls_back_to_defaults_when_yaml_omits_safety_gates(tmp_path: P
     assert rcfg.vol_lookback_seconds == 1800
     assert rcfg.exit_safety_d == 0.0
     assert rcfg.vol_ewma_lambda == 0.0
+    assert rcfg.vol_estimator == "stdev"
     assert rcfg.size_cap_near_strike_pct == 0.0
     assert rcfg.size_cap_max_dist_pct == 1.5
     assert rcfg.size_cap_min_ask == 0.88

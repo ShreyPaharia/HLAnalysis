@@ -57,6 +57,12 @@ class AllowlistEntry(BaseModel):
     # (0 = legacy sample stdev). Layered on top of the entry gates above.
     exit_safety_d: float = 0.0
     vol_ewma_lambda: float = 0.0
+    # σ estimator for the safety_d + vol_max gates. "stdev" = close-to-close
+    # sample std (legacy). "parkinson" = range-based (H/L), ~5× more
+    # sample-efficient and robust to bid-ask bounce on dense reference bars —
+    # the v1 cadence validation (2026-05-30) found it lifts HL PnL ~+$48 at the
+    # current 60s cadence. See LateResolutionConfig.vol_estimator.
+    vol_estimator: Literal["stdev", "parkinson"] = "stdev"
     # Targeted size cap (Plan: v1-buckets-and-sizing). Defaults preserve pre-cap
     # behavior (pct=0 disables). See LateResolutionConfig docstring.
     size_cap_near_strike_pct: float = 0.0

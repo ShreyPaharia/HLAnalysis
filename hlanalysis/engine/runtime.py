@@ -152,6 +152,7 @@ def _late_resolution_config_from_entry(
         vol_lookback_seconds=getattr(entry, "vol_lookback_seconds", 1800),
         exit_safety_d=getattr(entry, "exit_safety_d", 0.0),
         vol_ewma_lambda=getattr(entry, "vol_ewma_lambda", 0.0),
+        vol_estimator=getattr(entry, "vol_estimator", "stdev"),
         size_cap_near_strike_pct=getattr(entry, "size_cap_near_strike_pct", 0.0),
         size_cap_max_dist_pct=getattr(entry, "size_cap_max_dist_pct", 1.5),
         size_cap_min_ask=getattr(entry, "size_cap_min_ask", 0.88),

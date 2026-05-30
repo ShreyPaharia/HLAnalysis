@@ -42,6 +42,11 @@ strategies:
         vol_lookback_seconds: 3600
         exit_safety_d: 1.0
         vol_ewma_lambda: 0.85
+        # 2026-05-30 v1 cadence validation: Parkinson (range/HL) σ lifts HL
+        # PnL ~$212 → ~$260 at this 60s cadence (cadence-independent, +$48,
+        # DD ≈ flat) — robust across the dt sweep. See
+        # summeries/v1_cadence_validation_2026_05_30.md.
+        vol_estimator: parkinson
         distance_from_strike_usd_min: 0
         vol_max: 100
         # Targeted near-strike low-ask size cap — zero size on the 4 catastrophic
@@ -96,6 +101,7 @@ strategies:
         vol_lookback_seconds: 3600
         exit_safety_d: 0.0                # mid-hold disabled on buckets per retune
         vol_ewma_lambda: 0.85
+        vol_estimator: parkinson          # see priceBinary slot — 2026-05-30 cadence validation
         distance_from_strike_usd_min: 0
         vol_max: 100
         # See priceBinary entry above for rationale on these three.
@@ -118,6 +124,7 @@ strategies:
       vol_lookback_seconds: 3600
       exit_safety_d: 1.0
       vol_ewma_lambda: 0.85
+      vol_estimator: parkinson            # see priceBinary slot — 2026-05-30 cadence validation
       distance_from_strike_usd_min: 0
       vol_max: 100
       # See per-allowlist entries above; engine `build_late_resolution_config`
