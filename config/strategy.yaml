@@ -38,15 +38,19 @@ strategies:
         # exactly where stale-high asks live. HL backtest unchanged (no entries
         # in [0.99, 0.999] in 13-day corpus); strictly defensive.
         price_extreme_max: 0.99
-        min_safety_d: 1.0
+        min_safety_d: 3.0
         vol_lookback_seconds: 3600
         exit_safety_d: 1.0
-        vol_ewma_lambda: 0.85
-        # 2026-05-30 v1 cadence validation: Parkinson (range/HL) σ lifts HL
-        # PnL ~$212 → ~$260 at this 60s cadence (cadence-independent, +$48,
-        # DD ≈ flat) — robust across the dt sweep. See
-        # summeries/v1_cadence_validation_2026_05_30.md.
+        vol_ewma_lambda: 0.97
+        # 2026-05-30 v1 cadence validation. Parkinson (range/HL) σ is the robust
+        # +$48 lever; paired with dt=5 sub-minute sampling + the gate retune
+        # (min_safety_d 1.0→3.0, λ 0.85→0.97) the dt=5 winner is $269.52 / Sharpe
+        # 9.73 / DD $33 vs the dt=60 baseline $212. v1 + v31 share the BTC feed
+        # and MUST move to dt=5 IN LOCKSTEP (engine conflict-guards a mismatch).
+        # ⚠️ GATE: requires ≥1-week paper validation before live cutover.
+        # See summeries/v1_cadence_validation_2026_05_30.md.
         vol_estimator: parkinson
+        vol_sampling_dt_seconds: 5
         distance_from_strike_usd_min: 0
         vol_max: 100
         # Targeted near-strike low-ask size cap — zero size on the 4 catastrophic
@@ -97,11 +101,12 @@ strategies:
         tte_max_seconds: 21600
         price_extreme_threshold: 0.85
         price_extreme_max: 0.999          # HL HIP-4 favorites trade 0.98-0.9999; 0.97 cap blocked every trade live
-        min_safety_d: 1.0
+        min_safety_d: 3.0                 # dt=5 retune; see priceBinary slot
         vol_lookback_seconds: 3600
         exit_safety_d: 0.0                # mid-hold disabled on buckets per retune
-        vol_ewma_lambda: 0.85
+        vol_ewma_lambda: 0.97             # dt=5 retune; see priceBinary slot
         vol_estimator: parkinson          # see priceBinary slot — 2026-05-30 cadence validation
+        vol_sampling_dt_seconds: 5        # LOCKSTEP with v31 on shared BTC feed; ⚠️ paper-validate first
         distance_from_strike_usd_min: 0
         vol_max: 100
         # See priceBinary entry above for rationale on these three.
@@ -120,11 +125,12 @@ strategies:
       tte_max_seconds: 7200
       price_extreme_threshold: 0.85
       price_extreme_max: 0.999
-      min_safety_d: 1.0
+      min_safety_d: 3.0                    # dt=5 retune; see priceBinary slot
       vol_lookback_seconds: 3600
       exit_safety_d: 1.0
-      vol_ewma_lambda: 0.85
+      vol_ewma_lambda: 0.97                # dt=5 retune; see priceBinary slot
       vol_estimator: parkinson            # see priceBinary slot — 2026-05-30 cadence validation
+      vol_sampling_dt_seconds: 5          # LOCKSTEP with v31 on shared BTC feed; ⚠️ paper-validate first
       distance_from_strike_usd_min: 0
       vol_max: 100
       # See per-allowlist entries above; engine `build_late_resolution_config`
@@ -236,7 +242,11 @@ strategies:
 
     theta:
       vol_lookback_seconds: 3600
-      vol_sampling_dt_seconds: 60
+      # 2026-05-30: 60 → 5 (v3.7 T13). v31 + v1 share the BTC reference feed and
+      # MUST move in lockstep — the engine conflict-guards a same-symbol cadence
+      # mismatch. ⚠️ GATE: ≥1-week paper validation before live cutover (see
+      # engine_cadence_port_2026_05_29.md + v1_cadence_validation_2026_05_30.md).
+      vol_sampling_dt_seconds: 5
       # 2026-05-24: 0.05 → 0.0 (kill). Post-σ-fix (commit cc44bf6) the 1m
       # bar resampling makes σ_RV never approach the 0.05 floor. HL
       # binary+bucket kill-only ablation produced bit-identical

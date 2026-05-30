@@ -47,10 +47,14 @@ supports more selectivity. Both optima land ~$260–270, ~25% above today's $212
    38-question HL window makes the +$10 dt=5-over-dt=60 edge noise-level; the
    +$48 Parkinson effect is the only robust-magnitude result).
 
-> No live/production config changed in this PR. `config/strategy.yaml` keeps
-> every slot at `vol_sampling_dt_seconds: 60` and `vol_estimator: stdev`. The
-> only code change is making v1's σ math cadence-aware (bit-identical at the
-> default dt=60; 613 tests pass).
+> **Implementation status (2026-05-30):** both follow-ups are now implemented on
+> this branch (NOT deployed). #1 — HL v1 → Parkinson. #2 — engine plumbing
+> (`AllowlistEntry.vol_sampling_dt_seconds`/`vol_estimator`, `build_late_resolution_config`,
+> `reference_sampling_dt_seconds` reads the late_resolution slot) + `config/strategy.yaml`
+> HL v1 & v31 BTC slots flipped to `vol_sampling_dt_seconds: 5` in lockstep with
+> the v1 gate retune (msd 3.0 / λ 0.97 / parkinson). PM slots untouched (dt=60).
+> ⚠️ The dt=5 cutover is gated on ≥1-week paper validation before deploy — the
+> YAML carries warning comments and this branch is review-only. 625 tests pass.
 
 ---
 
@@ -297,8 +301,21 @@ Three things follow, in priority order:
    `run_v1_cadence_hl_tune_dt5.py`, `run_v1_cadence_hl_tune_dt5_estimator.py`,
    `run_v1_cadence_hl_control_dt60.py`.
 
-No engine code, no live config, no safety gates touched. (The recommended
-Parkinson + lockstep-dt=5 changes are deferred, human-gated config edits.)
+### Follow-up implementation landed on this branch (review-only, not deployed)
+
+4. **Engine plumbing** — `AllowlistEntry` gains `vol_estimator` +
+   `vol_sampling_dt_seconds`; `_late_resolution_config_from_entry` threads both;
+   `reference_sampling_dt_seconds` now reads the late_resolution slot's cadence
+   (so v1 participates in the shared-feed cadence registration / conflict guard).
+   Tests in `test_engine_runtime_config.py` + `test_engine_runtime_cadence.py`.
+5. **Live config flip** (`config/strategy.yaml`, DEPLOY-AFFECTING, paper-gated):
+   HL v1 (ref BTC) binary+bucket+defaults → `vol_estimator: parkinson`,
+   `vol_sampling_dt_seconds: 5`, `min_safety_d: 3.0`, `vol_ewma_lambda: 0.97`;
+   v31 (ref BTC) theta block → `vol_sampling_dt_seconds: 5` (lockstep). PM slots
+   (ref BTCUSDT) untouched at dt=60/stdev. Verified coherent: BTC→{5}, BTCUSDT→{60}.
+
+Safety gates untouched. The dt=5 cutover still requires ≥1-week paper validation
+before deploy (warning comments in the YAML).
 
 ## Artifacts
 

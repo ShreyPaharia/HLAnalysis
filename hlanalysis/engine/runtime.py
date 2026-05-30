@@ -153,6 +153,7 @@ def _late_resolution_config_from_entry(
         exit_safety_d=getattr(entry, "exit_safety_d", 0.0),
         vol_ewma_lambda=getattr(entry, "vol_ewma_lambda", 0.0),
         vol_estimator=getattr(entry, "vol_estimator", "stdev"),
+        vol_sampling_dt_seconds=getattr(entry, "vol_sampling_dt_seconds", 60),
         size_cap_near_strike_pct=getattr(entry, "size_cap_near_strike_pct", 0.0),
         size_cap_max_dist_pct=getattr(entry, "size_cap_max_dist_pct", 1.5),
         size_cap_min_ask=getattr(entry, "size_cap_min_ask", 0.88),
@@ -249,12 +250,14 @@ def reference_sampling_dt_seconds(cfg: StrategyConfig) -> int:
 
     Single source of truth coupling MarketState's mark-bucket period to the
     cadence the strategy's σ formula assumes. theta_harvester carries it in the
-    `theta:` block; late_resolution has no engine-side knob today (its
-    ModelEdgeConfig.vol_sampling_dt_seconds defaults to 60), so it stays 60.
+    `theta:` block; late_resolution carries it on its allowlist/defaults
+    (`AllowlistEntry.vol_sampling_dt_seconds`). Default 60 preserves legacy
+    1m bucketing for both. This lets v1 + v31 move to dt=5 in lockstep on the
+    shared BTC feed (see summeries/v1_cadence_validation_2026_05_30.md).
     """
     if cfg.theta is not None:
         return int(cfg.theta.vol_sampling_dt_seconds)
-    return 60
+    return int(cfg.defaults.vol_sampling_dt_seconds)
 
 
 def reference_vol_lookback_seconds(cfg: StrategyConfig) -> int:

@@ -63,6 +63,12 @@ class AllowlistEntry(BaseModel):
     # the v1 cadence validation (2026-05-30) found it lifts HL PnL ~+$48 at the
     # current 60s cadence. See LateResolutionConfig.vol_estimator.
     vol_estimator: Literal["stdev", "parkinson"] = "stdev"
+    # Reference-bar cadence (seconds) the strategy's σ math assumes. Couples to
+    # the live MarketState mark-bucket period via runtime.reference_sampling_dt_seconds.
+    # Default 60 preserves legacy 1m bucketing. Mirrors theta's
+    # vol_sampling_dt_seconds so v1+v31 can move in lockstep on the shared BTC
+    # feed (see summeries/v1_cadence_validation_2026_05_30.md).
+    vol_sampling_dt_seconds: int = 60
     # Targeted size cap (Plan: v1-buckets-and-sizing). Defaults preserve pre-cap
     # behavior (pct=0 disables). See LateResolutionConfig docstring.
     size_cap_near_strike_pct: float = 0.0
