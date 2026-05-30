@@ -51,7 +51,14 @@ class MarketState:
         self._books: dict[str, _MutableBook] = {}
         self._questions: dict[int, QuestionView] = {}
         self._trades: dict[str, deque[TradeEvent]] = {}
-        self._marks: dict[str, deque[float]] = {}
+        # Per reference symbol, a deque of per-bucket OHLC bars stored as
+        # ``(high, low, close)``. Close-to-close drives ``recent_returns`` (the
+        # legacy stdev path, bit-identical); high/low drive ``recent_hl_bars``
+        # which activates the strategy's Parkinson σ estimator. Open is not
+        # retained (no consumer needs it). Within a bucket the bar is updated
+        # in place (high=max, low=min, close=last); a new bucket appends a
+        # fresh bar. Maxlen is sized per symbol via ``set_reference_cadence``.
+        self._marks: dict[str, deque[tuple[float, float, float]]] = {}
         self._last_mark: dict[str, float] = {}
         # 2026-05-21: bucket marks into ``mark_bucket_ns``-wide windows so the
         # strategy's σ formula (which assumes 60s-spaced returns) sees a
@@ -77,8 +84,19 @@ class MarketState:
         # silently truncate the σ window relative to the backtest (whose ring
         # buffer auto-grows). Registered alongside the bucket period.
         self._mark_history_by_symbol: dict[str, int] = {}
+        # Per reference symbol, which feed sources the σ/OHLC reference:
+        #   "mark" (default) — the venue MarkEvent (HL perp mark; Binance perp
+        #     mark REST-poll). Legacy behaviour, unchanged.
+        #   "bbo"            — the dense BBO mid = (bid_px+ask_px)/2. Used to
+        #     give PM (BTCUSDT) a sub-second reference so dt=5 bars don't
+        #     degenerate (the 3s mark poll yields ~1.6 pts/5s bar). The chosen
+        #     feed drives BOTH the OHLC bars and ``last_mark`` so the strategy's
+        #     reference price S is consistent with its σ source. A symbol can be
+        #     fed only one way (shared history), so conflicting registrations
+        #     raise — same fail-fast rule as ``set_reference_cadence``.
+        self._reference_source_by_symbol: dict[str, str] = {}
         # Last-bucket-id we wrote to ``_marks`` per symbol; used to coalesce
-        # within-bucket markPx updates into one entry (last-tick close).
+        # within-bucket reference-price updates into one bar.
         self._last_mark_bucket: dict[str, int] = {}
         self._volume_window_ns = volume_window_ns
         self._mark_history = mark_history
@@ -147,6 +165,34 @@ class MarketState:
         configured vol_sampling_dt_seconds."""
         return self._mark_bucket_ns_by_symbol.get(symbol, self._mark_bucket_ns)
 
+    def set_reference_source(self, symbol: str, source: str) -> None:
+        """Register which feed sources ``symbol``'s σ/OHLC reference.
+
+        ``"mark"`` (default) reads the venue MarkEvent; ``"bbo"`` reads the
+        dense BBO mid. Like ``set_reference_cadence`` this couples a per-symbol
+        choice to the shared MarketState, so two slots reading the same
+        reference symbol must agree — a conflicting re-registration raises
+        rather than silently feeding the shared history two ways.
+        """
+        if source not in ("mark", "bbo"):
+            raise ValueError(
+                f"reference source must be 'mark' or 'bbo', got {source!r}"
+            )
+        prev = self._reference_source_by_symbol.get(symbol)
+        if prev is not None and prev != source:
+            raise ValueError(
+                f"conflicting reference source for symbol {symbol!r}: already "
+                f"registered as {prev!r}, refused re-registration as {source!r}. "
+                f"All strategy slots reading the same reference_symbol must share "
+                f"one σ source (the shared OHLC history can only be fed one way)."
+            )
+        self._reference_source_by_symbol[symbol] = source
+
+    def reference_source_for(self, symbol: str) -> str:
+        """The σ/OHLC source for ``symbol`` — the per-symbol override if
+        registered, else the ``"mark"`` default."""
+        return self._reference_source_by_symbol.get(symbol, "mark")
+
     # ---- ingest ----
 
     def apply(self, ev: NormalizedEvent) -> None:
@@ -156,6 +202,15 @@ class MarketState:
                 b.bid_px, b.bid_sz = ev.bid_px, ev.bid_sz
                 b.ask_px, b.ask_sz = ev.ask_px, ev.ask_sz
                 b.last_l2_ts_ns = max(b.last_l2_ts_ns, ev.exchange_ts or ev.local_recv_ts)
+                # When this symbol is bbo-sourced, the BBO mid feeds the σ/OHLC
+                # reference (mirrors backtest `_load_binance_bbo_reference`:
+                # mid=(bid+ask)/2, per-bucket OHLC). Mark-sourced symbols ignore
+                # the bbo for σ (book only) — legacy behaviour.
+                if self._reference_source_by_symbol.get(ev.symbol) == "bbo":
+                    mid = (ev.bid_px + ev.ask_px) / 2.0
+                    self._ingest_reference_price(
+                        ev.symbol, mid, ev.exchange_ts or ev.local_recv_ts,
+                    )
             case BookSnapshotEvent():
                 b = self._books.setdefault(ev.symbol, _MutableBook())
                 if ev.bid_px:
@@ -177,36 +232,51 @@ class MarketState:
                 b = self._books.setdefault(ev.symbol, _MutableBook())
                 b.last_trade_ts_ns = max(b.last_trade_ts_ns, ev.exchange_ts or ev.local_recv_ts)
             case MarkEvent():
-                self._last_mark[ev.symbol] = ev.mark_px
-                hist = self._marks.get(ev.symbol)
-                if hist is None:
-                    maxlen = self._mark_history_by_symbol.get(
-                        ev.symbol, self._mark_history,
+                # bbo-sourced symbols take their σ/OHLC reference from the BBO
+                # mid (handled in the BboEvent case); a stray MarkEvent for such
+                # a symbol must NOT touch the reference price or bars.
+                if self._reference_source_by_symbol.get(ev.symbol) != "bbo":
+                    self._ingest_reference_price(
+                        ev.symbol, ev.mark_px, ev.exchange_ts or ev.local_recv_ts,
                     )
-                    hist = deque(maxlen=maxlen)
-                    self._marks[ev.symbol] = hist
-                # Bucket marks to ``vol_sampling_dt_seconds``-wide windows
-                # (default 60s; per-symbol override via set_reference_cadence).
-                # Within a bucket, the LAST mark wins (canonical bar close);
-                # a new bucket appends a fresh entry. This keeps the strategy's
-                # ``recent_returns`` spanning the wall-clock window its σ
-                # formula assumes, not the raw ~1.2/s markPx tick rate.
-                ts = ev.exchange_ts or ev.local_recv_ts
-                bucket = ts // self._mark_bucket_ns_by_symbol.get(
-                    ev.symbol, self._mark_bucket_ns,
-                )
-                last_bucket = self._last_mark_bucket.get(ev.symbol)
-                if last_bucket is None or bucket != last_bucket:
-                    hist.append(ev.mark_px)
-                    self._last_mark_bucket[ev.symbol] = bucket
-                else:
-                    hist[-1] = ev.mark_px
             case QuestionMetaEvent():
                 self._update_question(ev)
             case SettlementEvent():
                 self._mark_settled(ev)
             case _:
                 pass  # other events ignored in Phase 1
+
+    def _ingest_reference_price(self, symbol: str, price: float, ts: int) -> None:
+        """Feed one reference-price tick into the per-symbol OHLC bars +
+        ``last_mark``.
+
+        Shared by the mark-sourced (MarkEvent) and bbo-sourced (BboEvent mid)
+        paths so both produce identical per-bucket ``(high, low, close)`` bars.
+        ``last_mark`` tracks the absolute latest tick (unbucketed). Ticks are
+        bucketed to ``vol_sampling_dt_seconds``-wide windows (default 60s;
+        per-symbol override via ``set_reference_cadence``): within a bucket the
+        bar updates in place (high=max, low=min, close=last); a new bucket
+        appends a fresh ``(price, price, price)`` bar. This keeps the strategy's
+        ``recent_returns`` spanning the wall-clock window its σ formula assumes
+        (not the raw sub-second tick rate) and supplies per-bar H/L for
+        Parkinson.
+        """
+        self._last_mark[symbol] = price
+        hist = self._marks.get(symbol)
+        if hist is None:
+            maxlen = self._mark_history_by_symbol.get(symbol, self._mark_history)
+            hist = deque(maxlen=maxlen)
+            self._marks[symbol] = hist
+        bucket = ts // self._mark_bucket_ns_by_symbol.get(
+            symbol, self._mark_bucket_ns,
+        )
+        last_bucket = self._last_mark_bucket.get(symbol)
+        if last_bucket is None or bucket != last_bucket or not hist:
+            hist.append((price, price, price))
+            self._last_mark_bucket[symbol] = bucket
+        else:
+            h, l, _c = hist[-1]
+            hist[-1] = (h if h >= price else price, l if l <= price else price, price)
 
     def _evict_old_trades(self, dq: "deque[TradeEvent]", *, now: int) -> None:
         cutoff = now - self._volume_window_ns
@@ -371,15 +441,37 @@ class MarketState:
         return self._last_mark.get(symbol)
 
     def recent_returns(self, symbol: str, n: int) -> tuple[float, ...]:
+        """Last ``n`` close-to-close log returns for ``symbol``'s OHLC bars.
+
+        Close-to-close is the legacy stdev input; bit-identical to the pre-OHLC
+        behaviour since the per-bucket close is still the bucket's last tick."""
         hist = self._marks.get(symbol)
         if hist is None or len(hist) < 2:
             return ()
-        prices = list(hist)[-(n + 1):]
+        bars = list(hist)[-(n + 1):]
         rets: list[float] = []
-        for prev, curr in zip(prices, prices[1:], strict=False):
-            if prev > 0 and curr > 0:
-                rets.append(math.log(curr / prev))
+        for prev, curr in zip(bars, bars[1:], strict=False):
+            prev_c, curr_c = prev[2], curr[2]
+            if prev_c > 0 and curr_c > 0:
+                rets.append(math.log(curr_c / prev_c))
         return tuple(rets)
+
+    def recent_hl_bars(self, symbol: str, n: int) -> tuple[tuple[float, float], ...]:
+        """Last ``n`` per-bucket ``(high, low)`` bars for ``symbol``.
+
+        Mirrors the backtest MarketState's ``recent_hl_bars`` (KlineRingBuffer
+        rows ``[high, low]``) so the strategy's Parkinson σ estimator receives
+        the same input shape on the live path as in the backtest. Empty tuple
+        when the symbol has no bars yet. Threading this into the Scanner is what
+        activates Parkinson for ``vol_estimator: parkinson`` slots live (the
+        dormant-Parkinson fix); ``(ln(H/L))²`` is order-invariant so the (high,
+        low) row order does not affect σ, but it matches the backtest column
+        order for clarity."""
+        hist = self._marks.get(symbol)
+        if not hist:
+            return ()
+        bars = list(hist)[-n:]
+        return tuple((b[0], b[1]) for b in bars)
 
     def recent_volume_usd(self, symbol: str, *, now: int) -> float:
         dq = self._trades.get(symbol)

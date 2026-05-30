@@ -487,6 +487,12 @@ class EngineRuntime:
                 sampling_dt_seconds=reference_sampling_dt_seconds(slot.cfg),
                 lookback_seconds=reference_vol_lookback_seconds(slot.cfg),
             )
+            # Couple the σ/OHLC source (mark | bbo) per reference symbol. Same
+            # fail-fast conflict guard as the cadence — slots sharing a symbol
+            # must agree. Default "mark" preserves HL behaviour bit-identically.
+            self.market_state.set_reference_source(
+                slot.cfg.reference_symbol, slot.cfg.reference_sigma_source,
+            )
 
     # ---------- slot construction ----------
 
