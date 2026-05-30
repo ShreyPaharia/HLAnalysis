@@ -276,6 +276,21 @@ class LateResolutionConfig:
     # bit-identical (flat, fee_taker=0).
     fee_model: str = "flat"
     fee_rate: float = 0.0
+    # Vol-scaled (variable) TTE entry window. When enabled, the upper TTE bound
+    # is no longer the fixed `tte_max_seconds`; it scales with the entry σ:
+    #   tte_max_eff = tte_max_seconds * (vol_scaled_tte_ref_sigma / σ) ** exp,
+    #   clamped to [0, vol_scaled_tte_ceiling_seconds].
+    # Low vol → ratio > 1 → wider window (enter earlier in the day); high vol →
+    # ratio < 1 → narrower window (require closer to resolution). This is the
+    # explicit form of the "joint (TTE, vol, distance)" entry idea — note the
+    # existing min_safety_d gate already imposes an implicit vol-scaled cap
+    # (safety_d ≥ d ⟺ τ ≤ dt·(ln(S/K)/(d·σ))²); this knob lets the window be
+    # swept independently of the distance term. Default OFF → the step-1 gate
+    # uses the fixed `tte_max_seconds` and this path is bit-identical to legacy.
+    vol_scaled_tte_enabled: bool = False
+    vol_scaled_tte_ref_sigma: float = 0.0      # reference per-bar σ (ratio = ref/σ)
+    vol_scaled_tte_exponent: float = 1.0       # k in (ref/σ)**k
+    vol_scaled_tte_ceiling_seconds: int = 0    # hard upper bound on the widened window
 
 
 class LateResolutionStrategy(Strategy):
@@ -645,9 +660,17 @@ class LateResolutionStrategy(Strategy):
         """
         diags: list[Diagnostic] = []
 
-        # 1) TTE
+        # 1) TTE. With the vol-scaled window enabled, the static upper bound is
+        # relaxed to the ceiling here; the σ-dependent cap is applied in 6a once
+        # vol is known. With the flag off (default) the fixed cap applies and
+        # this path is bit-identical to legacy.
         tte_s = (question.expiry_ns - now_ns) / 1e9
-        if not (self.cfg.tte_min_seconds <= tte_s <= self.cfg.tte_max_seconds):
+        tte_upper = (
+            float(self.cfg.vol_scaled_tte_ceiling_seconds)
+            if self.cfg.vol_scaled_tte_enabled
+            else float(self.cfg.tte_max_seconds)
+        )
+        if not (self.cfg.tte_min_seconds <= tte_s <= tte_upper):
             return Decision(action=Action.HOLD, diagnostics=(
                 Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tte_s:.0f}"),)),
             ))
@@ -741,6 +764,24 @@ class LateResolutionStrategy(Strategy):
             return Decision(action=Action.HOLD, diagnostics=(
                 Diagnostic("info", "vol_above_cap", (("vol", f"{vol:.4f}"),)),
             ))
+
+        # 6a) Vol-scaled (variable) TTE window. Now that σ is known, derive the
+        # effective entry horizon: low vol widens it (enter earlier), high vol
+        # narrows it (require closer to resolution). No-op when disabled.
+        if self.cfg.vol_scaled_tte_enabled:
+            sigma_eff = max(vol, 1e-9)
+            tte_max_eff = self.cfg.tte_max_seconds * (
+                self.cfg.vol_scaled_tte_ref_sigma / sigma_eff
+            ) ** self.cfg.vol_scaled_tte_exponent
+            tte_max_eff = min(tte_max_eff, float(self.cfg.vol_scaled_tte_ceiling_seconds))
+            if tte_s > tte_max_eff:
+                return Decision(action=Action.HOLD, diagnostics=(
+                    Diagnostic("info", "vol_scaled_tte_exceeded", (
+                        ("tte_s", f"{tte_s:.0f}"),
+                        ("tte_max_eff", f"{tte_max_eff:.0f}"),
+                        ("sigma", f"{vol:.5f}"),
+                    )),
+                ))
 
         # 6b) Joint safety gate: how many σ from the leg's winning region is BTC
         # given remaining time? For binary YES leg the region is (strike, +∞)
@@ -1014,5 +1055,9 @@ def build_v1_late_resolution(params: dict) -> LateResolutionStrategy:
         topup_min_notional_usd=float(params.get("topup_min_notional_usd", 11.0)),
         fee_model=str(params.get("fee_model", "flat")),
         fee_rate=float(params.get("fee_rate", 0.0)),
+        vol_scaled_tte_enabled=bool(params.get("vol_scaled_tte_enabled", False)),
+        vol_scaled_tte_ref_sigma=float(params.get("vol_scaled_tte_ref_sigma", 0.0)),
+        vol_scaled_tte_exponent=float(params.get("vol_scaled_tte_exponent", 1.0)),
+        vol_scaled_tte_ceiling_seconds=int(params.get("vol_scaled_tte_ceiling_seconds", 0)),
     )
     return LateResolutionStrategy(cfg)
