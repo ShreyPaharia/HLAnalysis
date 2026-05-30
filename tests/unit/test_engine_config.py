@@ -27,10 +27,15 @@ def test_load_strategy_yaml_from_repo():
     assert cfg.defaults.tte_max_seconds == 7200
     assert cfg.defaults.price_extreme_threshold == 0.85
     assert cfg.defaults.price_extreme_max == 0.999
-    assert cfg.defaults.min_safety_d == 1.0
+    # 2026-05-30 v1 cadence validation: HL v1 moved to Parkinson σ + dt=5
+    # sub-minute sampling (lockstep with v31) + gate retune (msd 1.0→3.0,
+    # λ 0.85→0.97). See summeries/v1_cadence_validation_2026_05_30.md.
+    assert cfg.defaults.min_safety_d == 3.0
     assert cfg.defaults.vol_lookback_seconds == 3600
     assert cfg.defaults.exit_safety_d == 1.0
-    assert cfg.defaults.vol_ewma_lambda == 0.85
+    assert cfg.defaults.vol_ewma_lambda == 0.97
+    assert cfg.defaults.vol_estimator == "parkinson"
+    assert cfg.defaults.vol_sampling_dt_seconds == 5
     assert cfg.defaults.stop_loss_pct is None  # disabled per tuning
     # Size-cap fields: tuned from the v1-size-cap-pm sweep (1y PM binary
     # walk-forward). pct=1.0 zeros size on near-strike low-ask entries,
@@ -44,10 +49,12 @@ def test_load_strategy_yaml_from_repo():
     # 2026-05-19 edge-and-tuning memo P2: tightened 0.999 → 0.99 (no PnL
     # contribution after [0,1] fill clamp; defensive against stale-high asks).
     assert btc_binary.price_extreme_max == 0.99
-    assert btc_binary.min_safety_d == 1.0
+    assert btc_binary.min_safety_d == 3.0
     assert btc_binary.vol_lookback_seconds == 3600
     assert btc_binary.exit_safety_d == 1.0
-    assert btc_binary.vol_ewma_lambda == 0.85
+    assert btc_binary.vol_ewma_lambda == 0.97
+    assert btc_binary.vol_estimator == "parkinson"
+    assert btc_binary.vol_sampling_dt_seconds == 5
     assert btc_binary.stop_loss_pct is None
     assert btc_binary.size_cap_near_strike_pct == 1.0
     assert btc_binary.size_cap_max_dist_pct == 1.5
@@ -61,7 +68,9 @@ def test_load_strategy_yaml_from_repo():
     # 2026-05-22: capped at 6h for live forward-test (was 86400/24h). See the
     # comment block in config/strategy.yaml for rationale.
     assert btc_bucket.tte_max_seconds == 21600
-    assert btc_bucket.vol_ewma_lambda == 0.85
+    assert btc_bucket.vol_ewma_lambda == 0.97
+    assert btc_bucket.vol_estimator == "parkinson"
+    assert btc_bucket.vol_sampling_dt_seconds == 5
     # Bucket entry's size-cap left disabled — PM bucket data (used to tune the
     # binary cap) uses an "above-X stack" layout incompatible with the
     # strategy's HL bucket interpretation, so we can't reuse the binary tune.

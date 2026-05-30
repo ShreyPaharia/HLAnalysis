@@ -63,12 +63,13 @@ def _theta_cfg(*, alias: str, reference_symbol: str, dt: int) -> StrategyConfig:
     )
 
 
-def _late_cfg(*, alias: str, reference_symbol: str) -> StrategyConfig:
+def _late_cfg(*, alias: str, reference_symbol: str, dt: int = 60) -> StrategyConfig:
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC"},
         max_position_usd=100, stop_loss_pct=None, tte_min_seconds=0,
         tte_max_seconds=7200, price_extreme_threshold=0.85,
         distance_from_strike_usd_min=0, vol_max=100, vol_lookback_seconds=3600,
+        vol_sampling_dt_seconds=dt,
     )
     return StrategyConfig(
         name="late_resolution", account_alias=alias, paper_mode=True,
@@ -120,6 +121,29 @@ def test_reference_sampling_dt_reads_theta_block():
     assert reference_vol_lookback_seconds(
         _theta_cfg(alias="v31", reference_symbol="BTC", dt=5)
     ) == 3600
+
+
+def test_reference_sampling_dt_reads_late_resolution_slot():
+    """v1 (late_resolution) cadence comes from its allowlist/defaults
+    vol_sampling_dt_seconds, mirroring how theta reads the theta block."""
+    assert reference_sampling_dt_seconds(
+        _late_cfg(alias="v1", reference_symbol="BTC", dt=5)
+    ) == 5
+
+
+def test_v1_late_and_v31_theta_lockstep_dt5_no_conflict(tmp_path):
+    """v1 (late) + v31 (theta) both reading BTC at dt=5 is satisfiable — they
+    agree, so registration succeeds and BTC buckets at 5s. This is the lockstep
+    path validated in summeries/v1_cadence_validation_2026_05_30.md."""
+    rt = _runtime(
+        [
+            _late_cfg(alias="v1", reference_symbol="BTC", dt=5),
+            _theta_cfg(alias="v31", reference_symbol="BTC", dt=5),
+        ],
+        tmp_path,
+    )
+    rt._register_reference_cadences(rt.slots)
+    assert rt.market_state.mark_bucket_ns_for("BTC") == 5 * _NS
 
 
 # ---- live wiring: no skew, default preserved, HL/PM independent ------------

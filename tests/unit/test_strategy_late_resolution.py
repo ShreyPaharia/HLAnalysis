@@ -1271,3 +1271,58 @@ def test_evaluate_restores_default_cfg_after_per_class_call():
     )
     assert s.cfg is default
 
+
+
+# --- Cadence awareness: vol_sampling_dt_seconds scales sigma_window / lookback ---
+
+
+def _alternating_returns(a: float, n: int) -> tuple[float, ...]:
+    """n returns alternating +a, -a (mean 0, sample std ~= a). Any contiguous
+    even-length slice stays balanced, so sigma is invariant to n_keep — this
+    isolates the sqrt(tte_s/dt) scaling from the lookback-window slicing."""
+    return tuple((a if i % 2 == 0 else -a) for i in range(n))
+
+
+def test_vol_sampling_dt_seconds_defaults_to_60():
+    # Backward-compat marker: legacy configs assume 60s bars.
+    assert _cfg().vol_sampling_dt_seconds == 60
+
+
+def test_entry_safety_gate_is_cadence_aware():
+    # Identical inputs; only vol_sampling_dt_seconds differs. At dt=60 the
+    # winning leg is ~0.48 sigma safe (>= min_safety_d=0.3) -> ENTER. At dt=5
+    # the SAME per-bar sigma must be scaled over tte_s/5 bars (not tte_s/60),
+    # making sigma_window ~sqrt(12) larger and safety_d ~sqrt(12) smaller
+    # (~0.14 < 0.3) -> HOLD. With the 60s-hardcoded math this distinction is
+    # invisible and dt=5 wrongly ENTERs.
+    now = 10_000_000_000_000
+    expiry = now + 3600 * 1_000_000_000  # 1h TTE
+    q = _q(strike=80_000.0, expiry_ns=expiry)
+    books = {
+        "@30": _ref_book("@30", ask=0.96, bid=0.95, ts_ns=now - 100),
+        "@31": _ref_book("@31", ask=0.06, bid=0.04, ts_ns=now - 100),
+    }
+    returns = _alternating_returns(0.001, 800)
+    common = dict(
+        tte_min_seconds=0,
+        tte_max_seconds=7200,
+        vol_max=100.0,
+        min_safety_d=0.3,
+        vol_lookback_seconds=3600,
+        vol_ewma_lambda=0.0,
+    )
+
+    s60 = LateResolutionStrategy(_cfg(vol_sampling_dt_seconds=60, **common))
+    d60 = s60.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=returns, recent_volume_usd=5_000.0, position=None, now_ns=now,
+    )
+    assert d60.action is Action.ENTER
+
+    s5 = LateResolutionStrategy(_cfg(vol_sampling_dt_seconds=5, **common))
+    d5 = s5.evaluate(
+        question=q, books=books, reference_price=80_300.0,
+        recent_returns=returns, recent_volume_usd=5_000.0, position=None, now_ns=now,
+    )
+    assert d5.action is Action.HOLD
+    assert any("safety_d_below_min" in dg.message for dg in d5.diagnostics)

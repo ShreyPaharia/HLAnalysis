@@ -165,9 +165,20 @@ class LateResolutionConfig:
     # deviations of "safety" before entering.
     min_safety_d: float = 0.0
     # Lookback for σ in the safety gate AND vol_max gate. Runner provides 24h of
-    # 1m returns; we slice to the last N (= vol_lookback_seconds // 60). Shorter =
-    # more reactive to current regime. Default 1800s (30min, 30 samples).
+    # reference bars; we slice to the last N (= vol_lookback_seconds //
+    # vol_sampling_dt_seconds). Shorter = more reactive to current regime.
+    # Default 1800s (30min, 30 samples at 60s cadence).
     vol_lookback_seconds: int = 1800
+    # Reference-bar cadence in seconds. The backtest loader buckets reference
+    # ticks into bars of this width (cli.py couples it to the loader's
+    # reference_resample_seconds), and recent_returns/recent_hl_bars are spaced
+    # accordingly. σ is a PER-BAR stdev, so both the lookback sample count
+    # (vol_lookback_seconds // dt) and the time-to-expiry horizon used to scale
+    # σ to the settlement window (sigma_window = σ·√(tte_s/dt); drift μ·tte_s/dt)
+    # are expressed in units of this cadence. Default 60 reproduces the legacy
+    # 1m-bar behaviour bit-for-bit. Mirrors theta_harvester's
+    # vol_sampling_dt_seconds so a cadence flip routes through both strategies.
+    vol_sampling_dt_seconds: int = 60
     # Mid-hold exit threshold. Re-evaluates safety_d every tick while position is
     # open; exits IOC at bid when safety_d drops below this. 0 = disabled. Should
     # be lower than min_safety_d to avoid thrashing on the entry boundary.
@@ -192,8 +203,9 @@ class LateResolutionConfig:
     # mid-hold. Layered ON TOP of exit_safety_d (σ_1h) — both gates active.
     # 0 = disabled. Should be ≤ exit_safety_d to trip earlier on fast spikes.
     exit_safety_d_5m: float = 0.0
-    # Lookback for the fast σ above. Runner provides 1m bars; we slice to last
-    # N = exit_vol_lookback_5m_seconds // 60 samples. Default 300s (5min, 5 bars).
+    # Lookback for the fast σ above. We slice to last
+    # N = exit_vol_lookback_5m_seconds // vol_sampling_dt_seconds samples.
+    # Default 300s (5min, 5 bars at 60s cadence).
     exit_vol_lookback_5m_seconds: int = 300
     # σ estimator selector for the safety_d (entry+exit) and vol_max gates.
     #   "stdev"     → sample std (ddof=1) of close-to-close log returns (legacy).
@@ -482,7 +494,8 @@ class LateResolutionStrategy(Strategy):
             ):
                 tte_s_now_5m = (question.expiry_ns - now_ns) / 1e9
                 if tte_s_now_5m > 0:
-                    n_keep_5m = max(2, self.cfg.exit_vol_lookback_5m_seconds // 60)
+                    dt = max(1, self.cfg.vol_sampling_dt_seconds)
+                    n_keep_5m = max(2, self.cfg.exit_vol_lookback_5m_seconds // dt)
                     rw_5m = (
                         recent_returns[-n_keep_5m:]
                         if len(recent_returns) > n_keep_5m
@@ -495,12 +508,12 @@ class LateResolutionStrategy(Strategy):
                     )
                     if len(rw_5m) >= 2:
                         vol_5m = self._sigma(rw_5m, hl_5m)
-                        sigma_window_5m = vol_5m * math.sqrt(max(tte_s_now_5m / 60.0, 1.0))
+                        sigma_window_5m = vol_5m * math.sqrt(max(tte_s_now_5m / dt, 1.0))
                         safety_d_5m = self._safety_d_for_leg(
                             question=question, leg_symbol=position.symbol,
                             ref_price=reference_price,
                             sigma_window=sigma_window_5m, returns_window=rw_5m,
-                            tte_min=tte_s_now_5m / 60.0,
+                            tte_min=tte_s_now_5m / dt,
                         )
                         if safety_d_5m is not None and safety_d_5m < self.cfg.exit_safety_d_5m:
                             intent = OrderIntent(
@@ -537,7 +550,8 @@ class LateResolutionStrategy(Strategy):
             ):
                 tte_s_now = (question.expiry_ns - now_ns) / 1e9
                 if tte_s_now > 0:
-                    n_keep = max(2, self.cfg.vol_lookback_seconds // 60)
+                    dt = max(1, self.cfg.vol_sampling_dt_seconds)
+                    n_keep = max(2, self.cfg.vol_lookback_seconds // dt)
                     rw = recent_returns[-n_keep:] if len(recent_returns) > n_keep else recent_returns
                     hl = (
                         recent_hl_bars[-n_keep:]
@@ -546,12 +560,12 @@ class LateResolutionStrategy(Strategy):
                     )
                     if len(rw) >= 2:
                         vol_now = self._sigma(rw, hl)
-                        sigma_window = vol_now * math.sqrt(max(tte_s_now / 60.0, 1.0))
+                        sigma_window = vol_now * math.sqrt(max(tte_s_now / dt, 1.0))
                         safety_d_now = self._safety_d_for_leg(
                             question=question, leg_symbol=position.symbol,
                             ref_price=reference_price,
                             sigma_window=sigma_window, returns_window=rw,
-                            tte_min=tte_s_now / 60.0,
+                            tte_min=tte_s_now / dt,
                         )
                         if safety_d_now is not None and safety_d_now < self.cfg.exit_safety_d:
                             intent = OrderIntent(
@@ -714,7 +728,8 @@ class LateResolutionStrategy(Strategy):
         # Slice recent_returns to last vol_lookback_seconds (runner provides 24h of 1m bars).
         if len(recent_returns) < 2:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "vol_insufficient_data"),))
-        n_keep = max(2, self.cfg.vol_lookback_seconds // 60)
+        dt = max(1, self.cfg.vol_sampling_dt_seconds)
+        n_keep = max(2, self.cfg.vol_lookback_seconds // dt)
         returns_window = recent_returns[-n_keep:] if len(recent_returns) > n_keep else recent_returns
         hl_window = (
             recent_hl_bars[-n_keep:] if len(recent_hl_bars) > n_keep else recent_hl_bars
@@ -736,7 +751,7 @@ class LateResolutionStrategy(Strategy):
         # Side effect: when computed, `safety_d_entry` is retained for size scaling.
         safety_d_entry: float | None = None
         if self.cfg.min_safety_d > 0.0 and reference_price > 0:
-            tte_min = max(tte_s / 60.0, 1.0)
+            tte_min = max(tte_s / dt, 1.0)
             sigma_window = vol * math.sqrt(tte_min)
             safety_d = self._safety_d_for_leg(
                 question=question, leg_symbol=win_symbol,
@@ -979,6 +994,7 @@ def build_v1_late_resolution(params: dict) -> LateResolutionStrategy:
         price_extreme_max=float(params.get("price_extreme_max", 1.0)),
         min_safety_d=float(params.get("min_safety_d", 0.0)),
         vol_lookback_seconds=int(params.get("vol_lookback_seconds", 1800)),
+        vol_sampling_dt_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
         exit_safety_d=float(params.get("exit_safety_d", 0.0)),
         exit_bid_floor=float(params.get("exit_bid_floor", 0.0)),
         drift_aware_d=bool(params.get("drift_aware_d", False)),
