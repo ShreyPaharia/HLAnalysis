@@ -25,6 +25,9 @@ from hlanalysis.backtest.data.polymarket import PolymarketDataSource
 _BOOK_SUBPATH = (
     "venue=polymarket/product_type=prediction_binary/mechanism=clob/event=book_snapshot"
 )
+_SETTLE_SUBPATH = (
+    "venue=polymarket/product_type=prediction_binary/mechanism=clob/event=settlement"
+)
 
 
 # ---- fixture helpers --------------------------------------------------------
@@ -73,6 +76,24 @@ def _write_recorded_book(
         "bid_sz": pa.array([[float(x) for x in r["bid_sz"]] for r in rows], pa.list_(pa.float64())),
         "ask_px": pa.array([[float(x) for x in r["ask_px"]] for r in rows], pa.list_(pa.float64())),
         "ask_sz": pa.array([[float(x) for x in r["ask_sz"]] for r in rows], pa.list_(pa.float64())),
+    })
+    pq.write_table(table, d / "data.parquet")
+
+
+def _write_settlement(
+    book_root: Path, token_id: str, *, settled_side_idx: int, settle_price: float,
+    settle_ts: int, date: str = "2026-05-28", hour: str = "16",
+) -> None:
+    """Write a recorder `settlement` parquet for one token leg."""
+    d = (
+        book_root / _SETTLE_SUBPATH / f"symbol={token_id}"
+        / f"date={date}" / f"hour={hour}"
+    )
+    d.mkdir(parents=True, exist_ok=True)
+    table = pa.table({
+        "settled_side_idx": pa.array([int(settled_side_idx)], pa.int64()),
+        "settle_price": pa.array([float(settle_price)], pa.float64()),
+        "settle_ts": pa.array([int(settle_ts)], pa.int64()),
     })
     pq.write_table(table, d / "data.parquet")
 
@@ -240,6 +261,70 @@ def test_missing_coverage_skips_cleanly(tmp_path: Path) -> None:
     # Trades + reference + settlement still present.
     kinds = {type(e).__name__ for e in evs}
     assert {"TradeEvent", "ReferenceEvent", "SettlementEvent"}.issubset(kinds)
+
+
+def test_settlement_event_determines_winner(tmp_path: Path) -> None:
+    """The recorder `settlement` event is authoritative for the winner and
+    OVERRIDES the manifest `resolved_outcome` when present."""
+    cache = tmp_path / "cache"
+    book_root = tmp_path / "bookroot"
+    # Manifest deliberately says "yes" — settlement must override to "no".
+    _write_manifest(cache, _binary_manifest(_COND, _YES, _NO, _START, _END, outcome="yes"))
+    _write_trades(cache, _COND, [
+        {"ts_ns": _START + 100, "token_id": _YES, "side": "buy", "price": 0.6, "size": 10.0},
+    ])
+    _write_klines(cache, [
+        {"ts_ns": _START + 50, "open": 80000.0, "high": 80100.0, "low": 79900.0, "close": 80050.0},
+    ])
+    # NO leg redeems at 1.0 (it won); winning side only is recorded.
+    _write_settlement(book_root, _NO, settled_side_idx=1, settle_price=1.0, settle_ts=_END + 100)
+    src = _src_recorded(cache, book_root)
+    d = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
+    assert src.resolved_outcome(d) == "no"
+
+
+def test_settlement_falls_back_to_manifest_when_absent(tmp_path: Path) -> None:
+    """With no recorder settlement coverage, the winner falls back to the
+    manifest `resolved_outcome` (bit-identical to prior behavior)."""
+    cache, book_root = _build_recorded_cache(tmp_path)  # outcome="yes", no settlement
+    src = _src_recorded(cache, book_root)
+    d = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
+    assert src.resolved_outcome(d) == "yes"
+
+
+def test_settlement_yes_winner(tmp_path: Path) -> None:
+    """settle_price=1.0 on the YES leg → outcome 'yes'."""
+    cache = tmp_path / "cache"
+    book_root = tmp_path / "bookroot"
+    _write_manifest(cache, _binary_manifest(_COND, _YES, _NO, _START, _END, outcome="no"))
+    _write_trades(cache, _COND, [
+        {"ts_ns": _START + 100, "token_id": _YES, "side": "buy", "price": 0.6, "size": 10.0},
+    ])
+    _write_klines(cache, [
+        {"ts_ns": _START + 50, "open": 80000.0, "high": 80100.0, "low": 79900.0, "close": 80050.0},
+    ])
+    _write_settlement(book_root, _YES, settled_side_idx=0, settle_price=1.0, settle_ts=_END + 100)
+    src = _src_recorded(cache, book_root)
+    d = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
+    assert src.resolved_outcome(d) == "yes"
+
+
+def test_settlement_used_even_in_synthetic_mode(tmp_path: Path) -> None:
+    """Settlement is authoritative regardless of book_source (it governs payoff,
+    not fills)."""
+    cache = tmp_path / "cache"
+    book_root = tmp_path / "bookroot"
+    _write_manifest(cache, _binary_manifest(_COND, _YES, _NO, _START, _END, outcome="yes"))
+    _write_trades(cache, _COND, [
+        {"ts_ns": _START + 100, "token_id": _YES, "side": "buy", "price": 0.6, "size": 10.0},
+    ])
+    _write_klines(cache, [
+        {"ts_ns": _START + 50, "open": 80000.0, "high": 80100.0, "low": 79900.0, "close": 80050.0},
+    ])
+    _write_settlement(book_root, _NO, settled_side_idx=1, settle_price=1.0, settle_ts=_END + 100)
+    src = PolymarketDataSource(cache_root=cache, pm_book_root=book_root)  # synthetic default
+    d = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
+    assert src.resolved_outcome(d) == "no"
 
 
 def test_synthetic_default_bit_identical(tmp_path: Path) -> None:

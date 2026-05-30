@@ -45,6 +45,27 @@ taker slippage-vs-mid is ~0.5¢ in both modes (synthetic by construction = the
 half-spread; recorded coincidentally similar at p≈0.88 where these markets
 trade). With n=2 this is illustrative only.
 
+## Winner calculation now driven by the recorder `settlement` event
+`PolymarketDataSource.resolved_outcome` (binary) is now sourced from the
+recorder's on-chain `event=settlement` parquet — the winning leg token redeems
+at `settle_price≈1.0`, and only the winning side is published, so the leg with
+the higher recorded settle price (≥0.5) is the winner. The manifest's
+Gamma-derived `resolved_outcome` is the **fallback** for markets with no
+recorder coverage (the whole pre-2026-05-27 corpus), so legacy backtests stay
+bit-identical. This is independent of `book_source` (it governs settlement
+payoff, not fills).
+
+Validated on the 2 book-covered markets (independent ground-truth cross-check):
+
+| market | recorder settlement | manifest | strike-implied | backtest payoff |
+|--------|--------------------|----------|----------------|-----------------|
+| 0xe09b (May 27) | `no` (no_px=1.0) | `no` | `no` (75,326 < 76,461) | NO→1.0 / YES→0.0 |
+| 0x602f (May 28) | `no` (no_px=1.0) | `no` | `no` (72,915 < 75,326) | NO→1.0 / YES→0.0 |
+
+All four independent sources agree; smoke PnL is unchanged ($76 synthetic /
+$26.44 recorded) because settlement == manifest for both markets today. The
+change makes the on-chain settlement authoritative going forward.
+
 ## Acceptance
 - `book_source="synthetic"` (default) event stream / fills / PnL bit-identical
   to `main` — asserted in `test_synthetic_default_bit_identical` plus the full

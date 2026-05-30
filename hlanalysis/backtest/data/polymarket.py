@@ -57,6 +57,11 @@ _BINANCE_PERP_DATA_SUBPATH = "venue=binance/product_type=perp/mechanism=clob"
 _PM_BOOK_DATA_SUBPATH = (
     "venue=polymarket/product_type=prediction_binary/mechanism=clob/event=book_snapshot"
 )
+# Recorded PM settlement (on-chain redemption): the winning leg token redeems
+# at settle_price≈1.0. Authoritative for the resolved outcome when present.
+_PM_SETTLEMENT_DATA_SUBPATH = (
+    "venue=polymarket/product_type=prediction_binary/mechanism=clob/event=settlement"
+)
 _BTC_BUCKET_SERIES_SLUG = "bitcoin-multi-strikes-hourly"
 _SERIES_PAGE_LIMIT = 100  # Gamma /events caps responses at 100 even when limit > 100;
 # requesting 500 silently truncates and we mistake the short response for "end of data".
@@ -427,12 +432,29 @@ class PolymarketDataSource:
         entry = manifest.get(q.question_id) or {}
         kind = entry.get("kind", "binary")
         if kind == "binary":
-            mk = entry.get("market") or {}
-            return mk.get("resolved_outcome", "unknown")  # type: ignore[return-value]
+            return self._binary_outcome(q, entry)
         # Bucket: outcome aggregates the per-leg resolutions; we report
         # "unknown" because there's no single bucket outcome. Per-leg outcomes
         # are emitted via `SettlementEvent.symbol` in events().
         return "unknown"
+
+    def _binary_outcome(
+        self, q: QuestionDescriptor, entry: dict,
+    ) -> Literal["yes", "no", "unknown"]:
+        """Resolved winner for a binary market.
+
+        The recorder's on-chain `settlement` event is authoritative when
+        present (the winning leg token redeems at settle_price≈1.0); we fall
+        back to the manifest's Gamma-derived ``resolved_outcome`` for markets
+        without recorder coverage (the whole pre-2026-05-27 corpus), so legacy
+        backtests stay bit-identical. Independent of ``book_source`` — this
+        governs settlement payoff, not fills.
+        """
+        rec = self._recorded_outcome(q)
+        if rec != "unknown":
+            return rec
+        mk = entry.get("market") or {}
+        return mk.get("resolved_outcome", "unknown")  # type: ignore[return-value]
 
     # -- discovery + cache population from the live API --------------------
 
@@ -586,7 +608,9 @@ class PolymarketDataSource:
         leg_pairs = ((yes_t, no_t),)
         leg_trades = {(yes_t, no_t): self._read_trades(cond_id)}
         klines = self._load_klines_window(q.start_ts_ns, q.end_ts_ns)
-        outcome = (entry.get("market") or {}).get("resolved_outcome", "unknown")
+        # Settlement payoff prefers the recorder's on-chain settlement event
+        # (authoritative); falls back to the manifest outcome when uncovered.
+        outcome = self._binary_outcome(q, entry)
         per_leg_outcomes: dict[str, Literal["yes", "no", "unknown"]] = {
             yes_t: outcome,
             no_t: _flip(outcome),
@@ -920,6 +944,58 @@ class PolymarketDataSource:
                 ts_ns=int(ts), symbol=token_id, bids=bids, asks=asks,
             ))
         return out
+
+    def _recorded_outcome(
+        self, q: QuestionDescriptor,
+    ) -> Literal["yes", "no", "unknown"]:
+        """Resolve a binary market's winner from the recorder `settlement`
+        event. The winning leg token redeems at ``settle_price≈1.0`` and only
+        the winning side is published, so the leg with the higher recorded
+        settle price (and ≥0.5) is the winner. Returns "unknown" when neither
+        leg has settlement coverage.
+        """
+        if len(q.leg_symbols) < 2:
+            return "unknown"
+        yes_t, no_t = q.leg_symbols[0], q.leg_symbols[1]
+        prices: dict[Literal["yes", "no"], float] = {}
+        yp = self._leg_settle_price(yes_t)
+        if yp is not None:
+            prices["yes"] = yp
+        np_ = self._leg_settle_price(no_t)
+        if np_ is not None:
+            prices["no"] = np_
+        if not prices:
+            return "unknown"
+        winner = max(prices, key=lambda k: prices[k])
+        return winner if prices[winner] >= 0.5 else "unknown"
+
+    def _leg_settle_price(self, token_id: str) -> float | None:
+        """Recorded on-chain settle price for one PM token leg, or None when
+        the token has no recorder settlement coverage. token_id is unique per
+        market leg, so no time window filter is needed.
+        """
+        import duckdb
+        glob = str(
+            self._pm_book_root / _PM_SETTLEMENT_DATA_SUBPATH
+            / f"symbol={token_id}" / "**" / "*.parquet"
+        )
+        from glob import glob as _glob
+        if not _glob(glob, recursive=True):
+            return None
+        con = duckdb.connect()
+        try:
+            row = con.sql(
+                f"""
+                SELECT settle_price
+                FROM read_parquet('{glob}', hive_partitioning=1)
+                WHERE settle_price IS NOT NULL
+                ORDER BY settle_ts DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        finally:
+            con.close()
+        return float(row[0]) if row and row[0] is not None else None
 
     # -- internals: live fetch (used by fetch_and_cache only) --------------
 
