@@ -333,6 +333,12 @@ strategies:
     # mark would lag Binance on macro moves and was the previous (buggy)
     # default.
     reference_symbol: BTCUSDT
+    # 2026-05-31: source σ/OHLC from the dense Binance perp BBO (bookTicker, sub-second)
+    # instead of the 3s mark poll. The engine ingests a dedicated BTCUSDT bbo reference
+    # feed (engine/main.py:binance_reference_subscription). cadence stays dt=60.
+    # Lockstep with v1_pm (shared BTCUSDT feed — conflict-guarded). This is the FIRST
+    # live σ reference PM has actually had (mark was never fed to the engine).
+    reference_sigma_source: bbo
 
     allowlist:
       - match:
@@ -436,6 +442,10 @@ strategies:
     # strike-ref ts, same as v31_pm. Use Binance perp mark as the σ + safety_d
     # reference so the live engine matches the backtester.
     reference_symbol: BTCUSDT
+    # 2026-05-31: σ/OHLC from dense Binance perp BBO (see v31_pm note). Lockstep with
+    # v31_pm on the shared BTCUSDT feed. cadence stays dt=60 (dt=5 deferred). v1_pm
+    # keeps vol_estimator=stdev (Parkinson needs the dt=5 retune, not done here).
+    reference_sigma_source: bbo
 
     allowlist:
       - match:
