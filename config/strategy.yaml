@@ -335,9 +335,9 @@ strategies:
     reference_symbol: BTCUSDT
     # 2026-05-31: source σ/OHLC from the dense Binance perp BBO (bookTicker, sub-second)
     # instead of the 3s mark poll. The engine ingests a dedicated BTCUSDT bbo reference
-    # feed (engine/main.py:binance_reference_subscription). cadence stays dt=60.
-    # Lockstep with v1_pm (shared BTCUSDT feed — conflict-guarded). This is the FIRST
-    # live σ reference PM has actually had (mark was never fed to the engine).
+    # feed (engine/main.py:binance_reference_subscription). dt=5 (see theta block).
+    # Lockstep with v1_pm (shared BTCUSDT feed — conflict-guarded; both dt=5/bbo).
+    # This is the FIRST live σ reference PM has had (mark was never fed to the engine).
     reference_sigma_source: bbo
 
     allowlist:
@@ -395,7 +395,7 @@ strategies:
 
     theta:
       vol_lookback_seconds: 3600
-      vol_sampling_dt_seconds: 60
+      vol_sampling_dt_seconds: 5            # dt=5 (was 60); LOCKSTEP with v1_pm on shared BTCUSDT bbo feed. theta σ=bipower (return-based, clean Pareto at dt=5: backtest $229 vs $195)
       vol_clip_min: 0.0
       vol_clip_max: 5.0
       edge_buffer: 0.02                     # aligned with HL v31 (was 0.03 PM-tuned) — 16h live shadow took 0 trades; relaxing to HL band per operator call 2026-05-26
@@ -443,8 +443,9 @@ strategies:
     # reference so the live engine matches the backtester.
     reference_symbol: BTCUSDT
     # 2026-05-31: σ/OHLC from dense Binance perp BBO (see v31_pm note). Lockstep with
-    # v31_pm on the shared BTCUSDT feed. cadence stays dt=60 (dt=5 deferred). v1_pm
-    # keeps vol_estimator=stdev (Parkinson needs the dt=5 retune, not done here).
+    # v31_pm on the shared BTCUSDT feed at dt=5. v1_pm uses the validated dt=5 config
+    # (parkinson / min_safety_d 3.0 / λ 0.97 — backtest $358 vs dt=60 $326). The bbo
+    # OHLC feeds the H/L bars Parkinson needs (engine recent_hl_bars).
     reference_sigma_source: bbo
 
     allowlist:
@@ -457,10 +458,12 @@ strategies:
         tte_max_seconds: 7200               # v1's near-resolution window (PM 24h markets, only enter inside last 2h)
         price_extreme_threshold: 0.85       # walk-forward winner under both fee models
         price_extreme_max: 0.99
-        min_safety_d: 1.0
+        min_safety_d: 3.0                   # dt=5 retune (was 1.0) — denser data affords selectivity
         vol_lookback_seconds: 3600
         exit_safety_d: 1.0                  # +$140 PnL / cuts DD from $228 to $101 vs disabled
-        vol_ewma_lambda: 0.85
+        vol_ewma_lambda: 0.97               # dt=5 retune (was 0.85) — 0.85 is jumpy on 5s bars
+        vol_estimator: parkinson            # range-based; robust to 5s bid-ask bounce (needs H/L, now fed via bbo OHLC)
+        vol_sampling_dt_seconds: 5          # LOCKSTEP with v31_pm on shared BTCUSDT bbo feed
         distance_from_strike_usd_min: 0
         vol_max: 100
         # Near-strike low-ask size cap — same trio v1 uses on HL. The
@@ -491,10 +494,12 @@ strategies:
       tte_max_seconds: 7200
       price_extreme_threshold: 0.85
       price_extreme_max: 0.99
-      min_safety_d: 1.0
+      min_safety_d: 3.0                     # dt=5 retune (was 1.0)
       vol_lookback_seconds: 3600
       exit_safety_d: 1.0
-      vol_ewma_lambda: 0.85
+      vol_ewma_lambda: 0.97                 # dt=5 retune (was 0.85)
+      vol_estimator: parkinson              # dt=5 retune (was stdev default)
+      vol_sampling_dt_seconds: 5            # LOCKSTEP with v31_pm
       distance_from_strike_usd_min: 0
       vol_max: 100
       size_cap_near_strike_pct: 1.0
