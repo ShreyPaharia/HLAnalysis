@@ -52,6 +52,11 @@ _DEFAULT_KLINES_SUBDIR = "btc_klines"
 # tick coverage right now.
 _BINANCE_PERP_REF_SYMBOL = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
 _BINANCE_PERP_DATA_SUBPATH = "venue=binance/product_type=perp/mechanism=clob"
+# Recorded PM L2 book partitions (native recorder; coverage starts 2026-05-27).
+# Symbol partition is the PM token_id, joining to manifest yes/no token ids.
+_PM_BOOK_DATA_SUBPATH = (
+    "venue=polymarket/product_type=prediction_binary/mechanism=clob/event=book_snapshot"
+)
 _BTC_BUCKET_SERIES_SLUG = "bitcoin-multi-strikes-hourly"
 _SERIES_PAGE_LIMIT = 100  # Gamma /events caps responses at 100 even when limit > 100;
 # requesting 500 silently truncates and we mistake the short response for "end of data".
@@ -310,6 +315,8 @@ class PolymarketDataSource:
         reference_source: Literal["klines", "binance_bbo"] = "klines",
         reference_resample_seconds: int = 60,
         binance_data_root: Path | str | None = None,
+        book_source: Literal["synthetic", "recorded"] = "synthetic",
+        pm_book_root: Path | str | None = None,
     ) -> None:
         self._cache_root = Path(cache_root)
         self._stream_cfg = _StreamCfg(half_spread=half_spread, depth=depth)
@@ -335,6 +342,22 @@ class PolymarketDataSource:
         # (`data/venue=binance/...` while PM cache lives in `data/sim/`).
         self._binance_data_root = (
             Path(binance_data_root) if binance_data_root is not None
+            else self._cache_root.parent
+        )
+        # Book-fill source.
+        # - "synthetic" (default): one flat 1-level book per PM trade print at
+        #   ±half_spread + within-pair `1−p` parity. Bit-identical to the
+        #   12-month-corpus tune.
+        # - "recorded": real multi-level L2 `book_snapshot` parquet per leg
+        #   (native recorder; coverage from 2026-05-27). Drops the synthetic
+        #   book + parity; the matching engine walks the real depth. HL parity.
+        if book_source not in ("synthetic", "recorded"):
+            raise ValueError(f"book_source must be 'synthetic' or 'recorded', got {book_source!r}")
+        self._book_source = book_source
+        # PM book partitions live next to the binance ticks under the same repo
+        # `data/` root by default (PM cache is `data/sim/`, so `.parent`).
+        self._pm_book_root = (
+            Path(pm_book_root) if pm_book_root is not None
             else self._cache_root.parent
         )
         # Lazy caches populated on first read. Significant for tuning workers
@@ -625,31 +648,49 @@ class PolymarketDataSource:
             pair_of[pair[0]] = pair
             pair_of[pair[1]] = pair
 
+        # In "recorded" mode the real multi-level book replaces the synthetic
+        # 1-level book + the `1−p` parity synthesis — we have the recorded book
+        # for BOTH legs. Real PM TradeEvents are still emitted in both modes.
+        recorded = self._book_source == "recorded"
         leg_events: list[MarketEvent] = []
         for pair, trades in trades_by_pair.items():
             for t in sorted(trades, key=lambda r: r.ts_ns):
-                snap = trade_to_l2(
-                    ts_ns=t.ts_ns, token_id=t.token_id, price=t.price,
-                    half_spread=cfg.half_spread, depth=cfg.depth,
-                )
-                leg_events.append(_book_from_l2(snap))
+                if not recorded:
+                    snap = trade_to_l2(
+                        ts_ns=t.ts_ns, token_id=t.token_id, price=t.price,
+                        half_spread=cfg.half_spread, depth=cfg.depth,
+                    )
+                    leg_events.append(_book_from_l2(snap))
                 leg_events.append(TradeEvent(
                     ts_ns=t.ts_ns, symbol=t.token_id,
                     side=t.side, price=t.price, size=t.size,
                 ))
-                # Within-pair parity: emit complementary BookSnapshot at 1−p.
-                pair_yes, pair_no = pair
-                other = pair_no if t.token_id == pair_yes else (
-                    pair_yes if t.token_id == pair_no else None
-                )
-                if other is not None:
-                    comp_price = max(_P_CLIP_LO, min(_P_CLIP_HI, 1.0 - t.price))
-                    comp_snap = trade_to_l2(
-                        ts_ns=t.ts_ns, token_id=other, price=comp_price,
-                        half_spread=cfg.half_spread, depth=cfg.depth,
+                if not recorded:
+                    # Within-pair parity: emit complementary BookSnapshot at 1−p.
+                    pair_yes, pair_no = pair
+                    other = pair_no if t.token_id == pair_yes else (
+                        pair_yes if t.token_id == pair_no else None
                     )
-                    leg_events.append(_book_from_l2(comp_snap))
+                    if other is not None:
+                        comp_price = max(_P_CLIP_LO, min(_P_CLIP_HI, 1.0 - t.price))
+                        comp_snap = trade_to_l2(
+                            ts_ns=t.ts_ns, token_id=other, price=comp_price,
+                            half_spread=cfg.half_spread, depth=cfg.depth,
+                        )
+                        leg_events.append(_book_from_l2(comp_snap))
         leg_event_streams.append(iter(leg_events))
+
+        # Recorded multi-level book stream (one read per leg token). Empty when
+        # a leg has no recorded coverage (logged) — the market degrades to
+        # trade/reference-only and the runner simply gets no fills there.
+        if recorded:
+            recorded_books: list[BookSnapshot] = []
+            for sym in q.leg_symbols:
+                recorded_books.extend(
+                    self._load_recorded_book(sym, q.start_ts_ns, q.end_ts_ns)
+                )
+            recorded_books.sort(key=lambda b: b.ts_ns)
+            leg_event_streams.append(iter(recorded_books))
 
         # Reference stream. Two sources:
         # - "klines": cached 1m Binance klines (legacy 12-month-corpus path).
@@ -835,6 +876,51 @@ class PolymarketDataSource:
         ))
         return out
 
+    def _load_recorded_book(
+        self, token_id: str, start_ns: int, end_ns: int,
+    ) -> list[BookSnapshot]:
+        """Read the recorded multi-level L2 `book_snapshot` parquet for one PM
+        token leg over ``[start_ns, end_ns)`` and emit ``BookSnapshot`` events.
+
+        Level ordering in the recorded arrays is NOT guaranteed best-first
+        (observed: ``bid_px`` ascending, ``ask_px`` descending). We normalize:
+        bids sorted px DESC (best = max), asks sorted px ASC (best = min), with
+        each level's size carried alongside its price. Returns an empty list
+        (logged) when the token has no recorded coverage — the caller then
+        proceeds with no book for that leg rather than crashing.
+
+        Mirrors the ``_load_binance_bbo_reference`` duckdb reader pattern.
+        """
+        import duckdb
+        glob = str(
+            self._pm_book_root / _PM_BOOK_DATA_SUBPATH
+            / f"symbol={token_id}" / "**" / "*.parquet"
+        )
+        from glob import glob as _glob
+        if not _glob(glob, recursive=True):
+            logger.info(f"recorded PM book: no coverage for token {token_id}")
+            return []
+        con = duckdb.connect()
+        try:
+            rows = con.sql(
+                f"""
+                SELECT exchange_ts, bid_px, bid_sz, ask_px, ask_sz
+                FROM read_parquet('{glob}', hive_partitioning=1)
+                WHERE exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
+                ORDER BY exchange_ts
+                """
+            ).fetchall()
+        finally:
+            con.close()
+        out: list[BookSnapshot] = []
+        for ts, bid_px, bid_sz, ask_px, ask_sz in rows:
+            bids = _normalize_levels(bid_px, bid_sz, descending=True)
+            asks = _normalize_levels(ask_px, ask_sz, descending=False)
+            out.append(BookSnapshot(
+                ts_ns=int(ts), symbol=token_id, bids=bids, asks=asks,
+            ))
+        return out
+
     # -- internals: live fetch (used by fetch_and_cache only) --------------
 
     def _fetch_and_cache_binary(
@@ -947,6 +1033,26 @@ def _parse_clob_trade(row: dict) -> _RawTrade | None:
         )
     except (KeyError, ValueError, TypeError):
         return None
+
+
+def _normalize_levels(
+    px: list[float] | None, sz: list[float] | None, *, descending: bool,
+) -> tuple[tuple[float, float], ...]:
+    """Pair recorded (px, sz) levels and sort by price.
+
+    ``descending=True`` for bids (best = max), ``False`` for asks (best = min).
+    Tolerates ``None``/empty/ragged arrays (one side may be empty in a recorded
+    snapshot). Sizes travel with their price level.
+    """
+    if not px:
+        return ()
+    sz = sz or []
+    levels = [
+        (float(px[i]), float(sz[i]) if i < len(sz) else 0.0)
+        for i in range(len(px))
+    ]
+    levels.sort(key=lambda lv: lv[0], reverse=descending)
+    return tuple(levels)
 
 
 def _book_from_l2(s: L2Snapshot) -> BookSnapshot:
