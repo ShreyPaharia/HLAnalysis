@@ -153,4 +153,56 @@ Notes:
 
 ## Tests
 
-`uv run pytest tests/unit -q` → **615 passed in 31.70s**.
+`uv run pytest tests/unit -q` → **615 passed in 31.70s** (v1). After adding v3.1
+(§6): **618 passed**.
+
+---
+
+# §6 — v3.1 (theta_harvester) re-run — OPPOSITE conclusion to v1
+
+Same experiment ported to v3.1. Two structural differences matter:
+- v3.1 entry is **edge-gated** (`favorite_threshold` + `edge_buffer`), not `min_safety_d`. σ
+  enters via the GBM `p_model` (annualized), so it already trades off time vs vol internally.
+- v3.1 prod is **already at tte_max=12h** (vs v1's 2h), and uses **`sample_std` σ** (Parkinson was
+  only ported to v1). Fees are config-driven (`fee_taker=0`, `exit_fee=0.0007`).
+
+Mechanism mirrored into `theta_harvester.py` (same flag names, off by default, bit-identical).
+Driver `scripts/run_variable_tte_v31_hl.py`; corpus HL HIP-4 2026-05-06..28, `kind=both`, 5bps
+slippage (the mid-hold-tte-stack methodology). Baseline (prod) reproduced: **$1,279.28 / Sharpe
+14.67 / DD $96.27 / 122 trades / hit 73.7%**.
+
+### Fixed-window control
+
+| tte_max | PnL | trades | hit | Sharpe | maxDD |
+| ------: | --: | -----: | --: | -----: | ----: |
+| 2h | $616.45 | 34 | 36.8% | 9.41 | $65.70 |
+| 4h | $837.55 | 52 | 55.3% | 12.24 | $65.70 |
+| **12h (PROD)** ✦ | **$1,279.28** | 122 | 73.7% | **14.67** | $96.27 |
+| 24h | $1,039.86 | 160 | 65.8% | 9.50 | $215.99 |
+
+### Vol-scaled window (base 12h, ceiling 24h)
+
+| ref_sigma | k | PnL | trades | hit | Sharpe | maxDD |
+| --------: | -: | --: | -----: | --: | -----: | ----: |
+| 0.3 | 1 | $987.72 | 156 | 68.4% | 8.76 | $215.99 |
+| 0.3 | 2 | $1,053.56 | 156 | 68.4% | 9.70 | $215.99 |
+| 0.5–1.2 | 1/2 | $1,039.86 | 160 | 65.8% | 9.50 | $215.99 |
+
+### Verdict (v3.1): vol-scaled TTE does **NOT** beat the fixed 12h cap
+
+- **Fixed 12h (prod) is a clean interior optimum** — strictly better than 4h, 24h, *and every
+  vol-scaled cell* on both PnL and Sharpe. **Prod is already correctly tuned.**
+- **Every vol-scaled cell loses** to prod: best is ref0.3/k2 = $1,053.56 (−$226 / −18% vs prod) at
+  **2.2× the DD** ($216 vs $96). For `ref ≥ 0.5` the mechanism degenerates exactly to fixed-24h
+  ($1,039.86 / 160 trades) — confirming the wiring (typical entry σ_ann ≈ 0.15–0.3, so eff hits the
+  24h ceiling unless ref is small).
+- **Why opposite to v1:** v1's `min_safety_d=3.0` is an external σ-distance filter that *wants* a
+  wide TTE window to have more candidates to screen — so widening / vol-scaling helps. v3.1's GBM
+  edge already prices the σ·√τ time-vs-vol tradeoff internally, so a fixed 12h cap (tuned post-σ-fix)
+  sits at the sweet spot and an *additional* vol-scaled window just pushes entries into the bad
+  12–24h zone.
+- **`hl_tte_cap_load_bearing` STILL HOLDS for v3.1:** 24h is strictly worse than 12h (−$239 PnL,
+  +124% DD). The cap is load-bearing for v3.1 (memory stays valid here); it is only *stale for v1*.
+
+**Recommendation (v3.1):** keep prod fixed `tte_max=12h`; do **not** ship vol-scaled TTE on v3.1.
+The `vol_scaled_tte_*` flag stays off-by-default. No live change.
