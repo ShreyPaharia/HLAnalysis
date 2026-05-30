@@ -370,6 +370,10 @@ class PolymarketDataSource:
         # market would re-parse the manifest + the (large) BTC klines JSON.
         self._manifest_cache: dict | None = None
         self._klines_cache: list[dict] | None = None
+        # Markets we've already warned about for settlement→manifest fallback,
+        # so the per-market warning fires once (resolved_outcome is queried
+        # several times per market across the runner + CLI + event stream).
+        self._settlement_fallback_warned: set[str] = set()
         # BBO ticks are window-scoped (per-question) so we don't pre-cache.
 
     # -- public API --------------------------------------------------------
@@ -454,7 +458,15 @@ class PolymarketDataSource:
         if rec != "unknown":
             return rec
         mk = entry.get("market") or {}
-        return mk.get("resolved_outcome", "unknown")  # type: ignore[return-value]
+        fallback = mk.get("resolved_outcome", "unknown")
+        if q.question_id not in self._settlement_fallback_warned:
+            self._settlement_fallback_warned.add(q.question_id)
+            logger.warning(
+                f"PM winner: no recorder settlement for {q.question_id}; falling "
+                f"back to manifest resolved_outcome={fallback!r} (Gamma-derived, "
+                f"less authoritative than on-chain settlement)"
+            )
+        return fallback  # type: ignore[return-value]
 
     # -- discovery + cache population from the live API --------------------
 

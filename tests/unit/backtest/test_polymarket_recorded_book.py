@@ -292,6 +292,48 @@ def test_settlement_falls_back_to_manifest_when_absent(tmp_path: Path) -> None:
     assert src.resolved_outcome(d) == "yes"
 
 
+def test_manifest_fallback_emits_warning(tmp_path: Path) -> None:
+    """Falling back to the manifest outcome (no recorder settlement) logs a
+    WARNING so silent reliance on the weaker source is visible."""
+    from loguru import logger
+
+    cache, book_root = _build_recorded_cache(tmp_path)  # no settlement coverage
+    src = _src_recorded(cache, book_root)
+    d = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
+    msgs: list[str] = []
+    sink_id = logger.add(lambda m: msgs.append(str(m)), level="WARNING")
+    try:
+        assert src.resolved_outcome(d) == "yes"
+    finally:
+        logger.remove(sink_id)
+    assert any("settlement" in m.lower() for m in msgs), msgs
+
+
+def test_settlement_present_does_not_warn(tmp_path: Path) -> None:
+    """When recorder settlement IS present, no fallback warning is emitted."""
+    from loguru import logger
+
+    cache = tmp_path / "cache"
+    book_root = tmp_path / "bookroot"
+    _write_manifest(cache, _binary_manifest(_COND, _YES, _NO, _START, _END, outcome="no"))
+    _write_trades(cache, _COND, [
+        {"ts_ns": _START + 100, "token_id": _YES, "side": "buy", "price": 0.6, "size": 10.0},
+    ])
+    _write_klines(cache, [
+        {"ts_ns": _START + 50, "open": 80000.0, "high": 80100.0, "low": 79900.0, "close": 80050.0},
+    ])
+    _write_settlement(book_root, _NO, settled_side_idx=1, settle_price=1.0, settle_ts=_END + 100)
+    src = _src_recorded(cache, book_root)
+    d = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
+    msgs: list[str] = []
+    sink_id = logger.add(lambda m: msgs.append(str(m)), level="WARNING")
+    try:
+        assert src.resolved_outcome(d) == "no"
+    finally:
+        logger.remove(sink_id)
+    assert not any("settlement" in m.lower() for m in msgs), msgs
+
+
 def test_settlement_yes_winner(tmp_path: Path) -> None:
     """settle_price=1.0 on the YES leg → outcome 'yes'."""
     cache = tmp_path / "cache"
