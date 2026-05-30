@@ -87,17 +87,29 @@ Status: **engine capability + tests only. No `config/strategy.yaml` change. No d
 - Safety gates untouched (`min_bid_notional`, `stop_loss`, `stale_data_halt`,
   depth-walk slippage).
 
-## ⚠️ Operator decisions left open (REAL MONEY — all human-gated)
-1. **Accept HL Parkinson activation.** The **HL v1** slot is already configured
-   `vol_estimator: parkinson` (+ `dt=5`, paper-gated). Deploying this engine code
-   **activates Parkinson on HL v1** (it was silently stdev). This is the intended
-   fix, but it is a live behaviour change — paper/shadow-validate before cutover,
-   OR… (v31 / v31_pm are theta and unaffected by this — they ignore H/L bars.)
-2. **…interim-revert HL v1 config to `stdev`** in `config/strategy.yaml` before
-   deploying the engine, if you want to deploy the capability without changing
-   HL σ behaviour yet. (Config-only, reversible.)
-3. **Enable PM bbo source (to unblock dt=5).** To get the dt=5 PM win
-   (`pm_bbo_dt5_verdict`: v1_pm $358, theta clean-Pareto $229), set
-   `reference_sigma_source: bbo` on **both** PM slots (v1_pm + v31_pm — they
-   share the BTCUSDT feed, so the engine conflict-guards a mismatch) and flip
-   their `vol_sampling_dt_seconds` to 5 in lockstep. Not done here.
+## Paper-validation (2026-05-31) — replay through the real engine path
+`scripts/paper_validate_v1_parkinson.py` replays the **recorded HL corpus**
+(perp BTC mark + HIP-4 leg bbo/trade) through `ReplayRunner` → the **live engine
+`MarketState`** (the code changed here) with the **exact live v1 config**
+(parkinson, dt=5, min_safety_d=3.0, λ=0.97, use_bid_gate), parkinson vs stdev.
+Across 7 settled BTC binaries (expiries 2026-05-24→05-30, ~250k ticks):
+- **Parkinson is genuinely active**: `σ_parkinson ≠ σ_stdev` every question
+  (ratio **0.52–0.59×**) — bit-identical under the old dormant bug, so this
+  confirms the fix flows live. dt=5 bars carry real range (~11 marks/5s; 720
+  bars = full 3600s lookback, deque grew → no train/serve truncation).
+- **Decisions diverge as expected**: lower Parkinson σ → larger safety_d → fewer
+  `safety_d_below_min` blocks → more entry-eligible ticks (consistent with the
+  backtest's higher trade count / +$48). No crashes end-to-end; full suite green.
+
+## Operator decision — RESOLVED 2026-05-31
+- **Merge to `main` + deploy LIVE, v1 kept on Parkinson** (operator: "the better
+  version"). No `config/strategy.yaml` change. v1 stays `paper_mode: false` +
+  `vol_estimator: parkinson` + `dt=5`; deploying this engine code is the live
+  Parkinson cutover for HL v1. (v31 / v31_pm are theta → ignore H/L bars →
+  unaffected. v1_pm is stdev → unaffected.)
+- **Still open (separate, human-gated): enable PM bbo source for dt=5.** To get
+  the dt=5 PM win (`pm_bbo_dt5_verdict`: v1_pm $358, theta clean-Pareto $229),
+  set `reference_sigma_source: bbo` on **both** PM slots (v1_pm + v31_pm — they
+  share the BTCUSDT feed, so the engine conflict-guards a mismatch) and flip
+  their `vol_sampling_dt_seconds` to 5 in lockstep. Code supports it; nothing
+  flipped here.
