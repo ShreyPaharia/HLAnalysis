@@ -63,7 +63,10 @@ def _theta_cfg(*, alias: str, reference_symbol: str, dt: int) -> StrategyConfig:
     )
 
 
-def _late_cfg(*, alias: str, reference_symbol: str, dt: int = 60) -> StrategyConfig:
+def _late_cfg(
+    *, alias: str, reference_symbol: str, dt: int = 60,
+    reference_sigma_source: str = "mark",
+) -> StrategyConfig:
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC"},
         max_position_usd=100, stop_loss_pct=None, tte_min_seconds=0,
@@ -74,6 +77,7 @@ def _late_cfg(*, alias: str, reference_symbol: str, dt: int = 60) -> StrategyCon
     return StrategyConfig(
         name="late_resolution", account_alias=alias, paper_mode=True,
         strategy_type="late_resolution", reference_symbol=reference_symbol,
+        reference_sigma_source=reference_sigma_source,
         allowlist=[entry], blocklist_question_idxs=[], defaults=entry,
         **{"global": _global()},
     )
@@ -205,4 +209,60 @@ def test_conflicting_cadence_same_symbol_raises(tmp_path):
         tmp_path,
     )
     with pytest.raises(ValueError, match="conflicting mark-bucket cadence"):
+        rt._register_reference_cadences(rt.slots)
+
+
+# ---- per-symbol σ source: mark | bbo (Part B) ------------------------------
+
+
+def test_reference_source_defaults_to_mark(tmp_path):
+    """No reference_sigma_source set → HL/PM symbols stay mark-sourced
+    (legacy behaviour, bit-identical)."""
+    rt = _runtime(
+        [
+            _late_cfg(alias="v1", reference_symbol="BTC"),
+            _theta_cfg(alias="v31_pm", reference_symbol="BTCUSDT", dt=60),
+        ],
+        tmp_path,
+    )
+    rt._register_reference_cadences(rt.slots)
+    assert rt.market_state.reference_source_for("BTC") == "mark"
+    assert rt.market_state.reference_source_for("BTCUSDT") == "mark"
+
+
+def test_pm_slot_can_opt_into_bbo_source_hl_stays_mark(tmp_path):
+    """A PM slot (BTCUSDT) opts σ into the dense BBO feed; the HL slot (BTC)
+    is independent and stays mark-sourced."""
+    rt = _runtime(
+        [
+            _late_cfg(alias="v1", reference_symbol="BTC"),
+            _late_cfg(
+                alias="v1_pm", reference_symbol="BTCUSDT",
+                reference_sigma_source="bbo",
+            ),
+        ],
+        tmp_path,
+    )
+    rt._register_reference_cadences(rt.slots)
+    assert rt.market_state.reference_source_for("BTC") == "mark"
+    assert rt.market_state.reference_source_for("BTCUSDT") == "bbo"
+
+
+def test_conflicting_reference_source_same_symbol_raises(tmp_path):
+    """Two slots reading the SAME reference symbol with different σ sources is
+    unsatisfiable (one shared OHLC history) — fail fast at startup."""
+    rt = _runtime(
+        [
+            _late_cfg(
+                alias="v1_pm", reference_symbol="BTCUSDT",
+                reference_sigma_source="bbo",
+            ),
+            _late_cfg(
+                alias="v31_pm", reference_symbol="BTCUSDT",
+                reference_sigma_source="mark",
+            ),
+        ],
+        tmp_path,
+    )
+    with pytest.raises(ValueError, match="conflicting reference source"):
         rt._register_reference_cadences(rt.slots)

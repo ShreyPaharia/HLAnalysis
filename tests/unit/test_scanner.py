@@ -483,3 +483,147 @@ def test_gate_log_snapshot_falls_back_to_first_leg_when_no_chosen_leg(tmp_path):
     row = json.loads(log_path.read_text().strip())
     assert row["ask_px"] == 0.96
     assert row["reason"] == "tte_out_of_window"
+
+
+# ---- recent_hl_bars threading + dormant-Parkinson activation ---------------
+
+
+class _RecordingStrategy(LateResolutionStrategy):
+    """Wraps a real strategy but records the recent_hl_bars kwarg it was
+    handed, so we can assert the Scanner actually threads it through (the
+    dormant-Parkinson bug was the Scanner NEVER passing recent_hl_bars)."""
+
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.seen_hl_bars = None
+        self.seen_returns = None
+
+    def evaluate(self, *, recent_hl_bars=(), recent_returns=(), **kw):
+        self.seen_hl_bars = recent_hl_bars
+        self.seen_returns = recent_returns
+        return super().evaluate(
+            recent_hl_bars=recent_hl_bars, recent_returns=recent_returns, **kw
+        )
+
+
+def _rcfg(**overrides):
+    base = dict(
+        tte_min_seconds=60, tte_max_seconds=1800,
+        price_extreme_threshold=0.95, distance_from_strike_usd_min=200.0,
+        vol_max=0.5, max_position_usd=100.0, stop_loss_pct=10.0,
+        max_strike_distance_pct=10.0, min_recent_volume_usd=0.0,
+        stale_data_halt_seconds=5,
+    )
+    base.update(overrides)
+    return LateResolutionConfig(**base)
+
+
+def _seed_market_with_range(now_ns: int) -> MarketState:
+    """Like _seed_market but each 60s bucket carries an intra-bucket H/L range
+    while the bucket CLOSES return to a flat level — so close-to-close stdev σ
+    is ~0 but Parkinson σ (range-based) is large."""
+    ms = MarketState()
+    from datetime import datetime, timezone
+    expiry_str = datetime.fromtimestamp(
+        (now_ns + 10 * 60 * 1_000_000_000) / 1e9, tz=timezone.utc
+    ).strftime('%Y%m%d-%H%M')
+    ms.apply(QuestionMetaEvent(
+        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB, symbol="qmeta",
+        exchange_ts=now_ns - 60_000_000_000, local_recv_ts=now_ns - 60_000_000_000,
+        question_idx=42, named_outcome_idxs=[3],
+        keys=["class", "underlying", "period", "expiry", "strike"],
+        values=["priceBinary", "BTC", "1h", expiry_str, "80000"],
+    ))
+    one_min = 60_000_000_000
+    # 8 buckets; each opens+closes at 80_300 (flat closes) but swings ±300 mid.
+    for i in range(8):
+        bucket_base = now_ns - (8 - i) * one_min
+        for off, px in ((0, 80_300.0), (1, 80_600.0), (2, 80_000.0), (3, 80_300.0)):
+            ms.apply(MarkEvent(
+                venue="hyperliquid", product_type=ProductType.PERP,
+                mechanism=Mechanism.CLOB, symbol="BTC",
+                exchange_ts=bucket_base + off, local_recv_ts=bucket_base + off,
+                mark_px=px,
+            ))
+    ms.apply(BboEvent(
+        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB, symbol="#30",
+        exchange_ts=now_ns, local_recv_ts=now_ns,
+        bid_px=0.95, bid_sz=10.0, ask_px=0.96, ask_sz=10.0,
+    ))
+    ms.apply(BboEvent(
+        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB, symbol="#31",
+        exchange_ts=now_ns, local_recv_ts=now_ns,
+        bid_px=0.04, bid_sz=10.0, ask_px=0.05, ask_sz=10.0,
+    ))
+    return ms
+
+
+def test_scanner_threads_recent_hl_bars_into_evaluate(tmp_path):
+    """Regression for the dormant-Parkinson bug: the Scanner must pass
+    recent_hl_bars to strategy.evaluate, matching MarketState.recent_hl_bars."""
+    now = 1_700_000_000_000_000_000
+    ms = _seed_market_with_range(now)
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    strat = _RecordingStrategy(_rcfg())
+    scanner = Scanner(
+        strategy=strat, cfg=_strategy_cfg(), market_state=ms, dal=dal,
+        kill_switch_path=tmp_path / "halt", last_reconcile_ns=now,
+    )
+    scanner.scan(now_ns=now)
+    assert strat.seen_hl_bars is not None
+    assert len(strat.seen_hl_bars) > 0
+    expected = ms.recent_hl_bars("BTC", n=scanner._recent_returns_n)
+    assert strat.seen_hl_bars == expected
+    # each bar carries a real range (high > low)
+    assert all(h > l for (h, l) in strat.seen_hl_bars)
+
+
+def test_parkinson_differs_from_stdev_on_live_scanner_path(tmp_path):
+    """With intra-bucket H/L range, a vol_estimator=parkinson slot must reach a
+    DIFFERENT decision than stdev on the live Scanner path. Here flat closes →
+    stdev σ≈0 (enters) while Parkinson σ from the range exceeds vol_max (holds).
+    """
+    now = 1_700_000_000_000_000_000
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    # vol_max sits between stdev σ (~0) and Parkinson σ (range-based, ~0.003).
+    vmax = 0.001
+
+    def run(estimator: str):
+        ms = _seed_market_with_range(now)
+        scanner = Scanner(
+            strategy=LateResolutionStrategy(
+                _rcfg(vol_max=vmax, vol_estimator=estimator)
+            ),
+            cfg=_strategy_cfg(), market_state=ms, dal=dal,
+            kill_switch_path=tmp_path / "halt", last_reconcile_ns=now,
+        )
+        return scanner.scan(now_ns=now)
+
+    stdev_dec = run("stdev")
+    park_dec = run("parkinson")
+    assert any(d.decision.action is Action.ENTER for d in stdev_dec)
+    assert not any(d.decision.action is Action.ENTER for d in park_dec)
+
+
+def test_parkinson_equals_stdev_on_flat_series(tmp_path):
+    """Sanity: with a flat series (H==L per bucket) Parkinson degenerates and
+    falls back to stdev, so the decision matches stdev — no spurious change."""
+    now = 1_700_000_000_000_000_000
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+
+    def run(estimator: str):
+        ms = _seed_market(now)  # flat marks, no intra-bucket range
+        scanner = Scanner(
+            strategy=LateResolutionStrategy(_rcfg(vol_estimator=estimator)),
+            cfg=_strategy_cfg(), market_state=ms, dal=dal,
+            kill_switch_path=tmp_path / "halt", last_reconcile_ns=now,
+        )
+        return [d.decision.action for d in scanner.scan(now_ns=now)]
+
+    assert run("stdev") == run("parkinson")

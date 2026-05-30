@@ -226,3 +226,196 @@ def test_recent_volume_usd_sums_recent_trades():
     assert math.isclose(ms.recent_volume_usd("#30", now=now + 5), (1 + 2 + 3) * 0.95)
     # Outside window → 0
     assert ms.recent_volume_usd("#30", now=now + 10**11) == 0.0
+
+
+# ---- per-bucket OHLC + recent_hl_bars (Part A: dormant-Parkinson fix) -------
+
+
+def test_recent_hl_bars_empty_when_no_marks():
+    ms = MarketState()
+    assert ms.recent_hl_bars("BTC", n=10) == ()
+
+
+def test_recent_hl_bars_mark_fed_tracks_bucket_extremes():
+    """Within one mark bucket, the bar's (high, low) is max/min of the marks
+    and the close is the last tick. recent_hl_bars returns (high, low)."""
+    ms = MarketState()
+    ms.set_reference_cadence("BTC", sampling_dt_seconds=5)
+    base = 100 * 1_000_000_000
+    # One 5s bucket: ticks swing 100 → 102 → 98 → 101 (close=101, H=102, L=98).
+    for i, px in enumerate([100.0, 102.0, 98.0, 101.0]):
+        ms.apply(_mark("BTC", px, ts=base + i))
+    hl = ms.recent_hl_bars("BTC", n=10)
+    assert hl == ((102.0, 98.0),)
+    # close (last tick) drives recent_returns, not the extremes.
+    assert ms.last_mark("BTC") == 101.0
+
+
+def test_recent_hl_bars_one_bar_per_bucket():
+    ms = MarketState()
+    ms.set_reference_cadence("BTC", sampling_dt_seconds=5)
+    s = 1_000_000_000
+    # Three distinct 5s buckets, each with its own H/L range.
+    for b, (lo, hi, close) in enumerate(
+        [(99.0, 101.0, 100.0), (100.0, 103.0, 102.0), (101.0, 104.0, 103.0)]
+    ):
+        base = (b + 1) * 5 * s
+        ms.apply(_mark("BTC", close, ts=base))      # open
+        ms.apply(_mark("BTC", hi, ts=base + 1))     # high
+        ms.apply(_mark("BTC", lo, ts=base + 2))     # low
+        ms.apply(_mark("BTC", close, ts=base + 3))  # close
+    hl = ms.recent_hl_bars("BTC", n=10)
+    assert hl == ((101.0, 99.0), (103.0, 100.0), (104.0, 101.0))
+    # n caps to the last n bars.
+    assert ms.recent_hl_bars("BTC", n=2) == ((103.0, 100.0), (104.0, 101.0))
+
+
+def test_recent_returns_still_close_to_close_after_ohlc():
+    """OHLC tracking must not change the close-to-close return series — the
+    legacy stdev path stays bit-identical."""
+    ms = MarketState()
+    one_minute_ns = 60 * 1_000_000_000
+    for i, px in enumerate([100.0, 100.1, 100.2, 100.05]):
+        ms.apply(_mark("BTC", px, ts=(i + 1) * one_minute_ns))
+    rets = ms.recent_returns("BTC", n=3)
+    assert len(rets) == 3
+    assert math.isclose(rets[0], math.log(100.1 / 100.0), rel_tol=1e-12)
+    assert math.isclose(rets[2], math.log(100.05 / 100.2), rel_tol=1e-12)
+
+
+# ---- per-symbol σ source: mark | bbo (Part B) ------------------------------
+
+
+def test_default_reference_source_is_mark_bbo_does_not_feed_ohlc():
+    """Without registration a symbol is mark-sourced: a BboEvent updates the
+    top-of-book but does NOT feed the σ/OHLC machinery or last_mark."""
+    ms = MarketState()
+    ms.apply(_bbo("BTCUSDT", 100.0, 102.0, ts=1_000_000_000))
+    assert ms.recent_hl_bars("BTCUSDT", n=10) == ()
+    assert ms.last_mark("BTCUSDT") is None
+    # book still tracked
+    assert ms.book("BTCUSDT") is not None
+
+
+def test_set_reference_source_bbo_feeds_ohlc_from_mid():
+    """source=bbo: BboEvents feed the per-bucket OHLC machinery using
+    mid=(bid+ask)/2; last_mark returns the latest mid."""
+    ms = MarketState()
+    ms.set_reference_cadence("BTCUSDT", sampling_dt_seconds=5)
+    ms.set_reference_source("BTCUSDT", "bbo")
+    base = 100 * 1_000_000_000
+    # mids: 100, 102, 98, 101 within one 5s bucket.
+    for i, (bid, ask) in enumerate(
+        [(99.0, 101.0), (101.0, 103.0), (97.0, 99.0), (100.0, 102.0)]
+    ):
+        ms.apply(_bbo("BTCUSDT", bid, ask, ts=base + i))
+    assert ms.recent_hl_bars("BTCUSDT", n=10) == ((102.0, 98.0),)
+    assert ms.last_mark("BTCUSDT") == 101.0  # last mid
+
+
+def test_bbo_sourced_symbol_ignores_mark_events():
+    """When a symbol is bbo-sourced, MarkEvents for it must NOT touch the
+    reference price or OHLC (the σ source is the dense BBO mid)."""
+    ms = MarketState()
+    ms.set_reference_cadence("BTCUSDT", sampling_dt_seconds=5)
+    ms.set_reference_source("BTCUSDT", "bbo")
+    base = 100 * 1_000_000_000
+    ms.apply(_bbo("BTCUSDT", 99.0, 101.0, ts=base))      # mid 100
+    ms.apply(_mark("BTCUSDT", 500.0, ts=base + 1))        # must be ignored
+    assert ms.last_mark("BTCUSDT") == 100.0
+    assert ms.recent_hl_bars("BTCUSDT", n=10) == ((100.0, 100.0),)
+
+
+def test_set_reference_source_conflict_raises():
+    """Two slots sharing a reference symbol must agree on the σ source — the
+    one shared OHLC history can only be fed one way."""
+    ms = MarketState()
+    ms.set_reference_source("BTCUSDT", "bbo")
+    ms.set_reference_source("BTCUSDT", "bbo")  # idempotent
+    with pytest.raises(ValueError, match="conflicting reference source"):
+        ms.set_reference_source("BTCUSDT", "mark")
+
+
+def test_set_reference_source_rejects_unknown():
+    ms = MarketState()
+    with pytest.raises(ValueError, match="reference source"):
+        ms.set_reference_source("BTCUSDT", "oracle")
+
+
+def test_reference_source_for_reports_default_and_override():
+    ms = MarketState()
+    assert ms.reference_source_for("BTC") == "mark"
+    ms.set_reference_source("BTCUSDT", "bbo")
+    assert ms.reference_source_for("BTCUSDT") == "bbo"
+    assert ms.reference_source_for("BTC") == "mark"
+
+
+def test_bbo_mid_ohlc_matches_load_binance_bbo_reference(tmp_path):
+    """Parity: BTCUSDT bbo-mid OHLC fed live must match the backtest
+    `_load_binance_bbo_reference` bar-for-bar on the same tick sequence."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from hlanalysis.backtest.data.polymarket import PolymarketDataSource
+
+    s = 1_000_000_000
+    start_ns = 100 * s
+    end_ns = 140 * s
+    # Build a tick sequence spanning several 5s buckets with intra-bucket range.
+    ticks: list[tuple[int, float, float]] = []
+    ts = start_ns
+    i = 0
+    while ts < end_ns:
+        bid = 80_000.0 + (i % 7) * 3.0
+        ask = bid + 2.0
+        ticks.append((ts, bid, ask))
+        ts += 1_300_000_000  # 1.3s spacing → multiple ticks per 5s bucket
+        i += 1
+
+    # Write the recorded binance perp BBO partition the loader reads.
+    from datetime import datetime, timezone
+
+    date_str = datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).date().isoformat()
+    part = (
+        tmp_path / "venue=binance" / "product_type=perp" / "mechanism=clob"
+        / "event=bbo" / "symbol=BTCUSDT" / f"date={date_str}"
+    )
+    part.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table({
+            "exchange_ts": [t[0] for t in ticks],
+            "bid_px": [t[1] for t in ticks],
+            "ask_px": [t[2] for t in ticks],
+        }),
+        part / "ticks.parquet",
+    )
+
+    ds = PolymarketDataSource(
+        cache_root=tmp_path / "sim",
+        reference_symbol="BTC",
+        reference_source="binance_bbo",
+        reference_resample_seconds=5,
+        binance_data_root=tmp_path,
+    )
+    ref_events = ds._load_binance_bbo_reference(start_ns, end_ns)
+    assert ref_events, "fixture produced no reference bars"
+    expected_hl = tuple((e.high, e.low) for e in ref_events)
+    expected_closes = [e.close for e in ref_events]
+
+    # Feed the SAME ticks through the live MarketState as a bbo-sourced symbol.
+    ms = MarketState()
+    ms.set_reference_cadence("BTCUSDT", sampling_dt_seconds=5)
+    ms.set_reference_source("BTCUSDT", "bbo")
+    for t, bid, ask in ticks:
+        ms.apply(_bbo("BTCUSDT", bid, ask, ts=t))
+
+    assert ms.recent_hl_bars("BTCUSDT", n=10_000) == expected_hl
+    # Returns are derived from bucket closes — compare to backtest closes.
+    live_rets = ms.recent_returns("BTCUSDT", n=10_000)
+    expected_rets = tuple(
+        math.log(expected_closes[i] / expected_closes[i - 1])
+        for i in range(1, len(expected_closes))
+    )
+    assert len(live_rets) == len(expected_rets)
+    for a, b in zip(live_rets, expected_rets, strict=True):
+        assert math.isclose(a, b, rel_tol=1e-12, abs_tol=1e-15)

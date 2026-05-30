@@ -192,6 +192,15 @@ class Scanner:
                 recent_returns=self.ms.recent_returns(
                     self.ref_symbol, n=self._recent_returns_n,
                 ),
+                # Per-bucket (high, low) bars for range-based σ estimators.
+                # Previously NEVER passed, so slots configured
+                # vol_estimator=parkinson silently fell back to stdev live (the
+                # backtest MarketState supplied this all along). Threading it
+                # activates Parkinson on the live path — see MarketState.
+                # recent_hl_bars and summeries/engine_bbo_sigma_source_2026_05_31.md.
+                recent_hl_bars=self.ms.recent_hl_bars(
+                    self.ref_symbol, n=self._recent_returns_n,
+                ),
                 recent_volume_usd=volume_total,
                 position=strat_pos,
                 now_ns=now_ns,

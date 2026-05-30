@@ -32,6 +32,7 @@ class ReplayRunner:
         reference_symbol: str = "BTC",
         position_lookup: dict[int, Position] | None = None,
         sampling_dt_seconds: int = 60,
+        reference_sigma_source: str = "mark",
     ) -> None:
         self._strategy = strategy
         self._ref = reference_symbol
@@ -44,6 +45,11 @@ class ReplayRunner:
         self._market.set_reference_cadence(
             reference_symbol, sampling_dt_seconds=self._sampling_dt_seconds,
         )
+        # σ/OHLC source for the reference symbol, mirroring the live engine.
+        # "mark" (default) preserves legacy replay; "bbo" sources σ from the
+        # dense BBO mid (parity with the live PM bbo path + the backtest
+        # `_load_binance_bbo_reference`).
+        self._market.set_reference_source(reference_symbol, reference_sigma_source)
         # Hold the same wall-clock σ window as the legacy 32×60s default,
         # scaled to the configured cadence (32 bars at 60s; 384 bars at 5s).
         self._recent_returns_n = max(32, (32 * 60) // self._sampling_dt_seconds)
@@ -72,6 +78,9 @@ class ReplayRunner:
                     books=books,
                     reference_price=ref,
                     recent_returns=self._market.recent_returns(
+                        self._ref, n=self._recent_returns_n,
+                    ),
+                    recent_hl_bars=self._market.recent_hl_bars(
                         self._ref, n=self._recent_returns_n,
                     ),
                     recent_volume_usd=self._market.recent_volume_usd(
