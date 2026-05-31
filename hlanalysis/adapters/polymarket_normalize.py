@@ -7,6 +7,7 @@ and are carried through verbatim as `symbol`.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -118,8 +119,15 @@ def _parse_strike_ref_ts_ns(description: str) -> int | None:
 
 
 def _question_idx_from_condition(condition_id: str) -> int:
-    """Stable 31-bit hash so the index fits in a SQLite int column."""
-    return hash(condition_id) & 0x7FFFFFFF
+    """Deterministic 31-bit id so the index fits in a SQLite int column.
+
+    Must be stable for a given condition_id across process restarts — it's the
+    primary key for PM rows (pm_strike, position, seen_question). Python's
+    built-in hash() is salted per-process (PYTHONHASHSEED), which would re-key
+    the same market on every engine restart, so use a fixed digest instead.
+    """
+    digest = hashlib.sha256(condition_id.encode()).digest()
+    return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
 
 
 def _parse_token_ids(market: dict) -> tuple[str, str] | None:

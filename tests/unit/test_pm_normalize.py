@@ -1,4 +1,9 @@
+import os
+import subprocess
+import sys
+
 from hlanalysis.adapters.polymarket_normalize import (
+    _question_idx_from_condition,
     parse_book_message,
     parse_gamma_market_to_question_meta,
     parse_gamma_market_to_settlement,
@@ -6,6 +11,34 @@ from hlanalysis.adapters.polymarket_normalize import (
     parse_trade_message,
 )
 from hlanalysis.events import BookSnapshotEvent, TradeEvent
+
+
+def _qid_in_subprocess(condition_id: str, *, hashseed: str) -> int:
+    code = (
+        "from hlanalysis.adapters.polymarket_normalize import "
+        "_question_idx_from_condition as f; print(f(%r))" % condition_id
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, check=True,
+        env={**os.environ, "PYTHONHASHSEED": hashseed},
+    )
+    return int(out.stdout.strip())
+
+
+def test_question_idx_is_stable_across_process_restarts():
+    # question_idx is the SQLite primary key for PM rows (pm_strike, position,
+    # seen_question). It MUST be deterministic for a given condition_id, not
+    # dependent on the per-process hash seed — otherwise the same market gets a
+    # new idx every engine restart, orphaning its persisted strike/position.
+    cid = "0x1c908f9bae95c801df44ce29f284800cd1330d81d1c17dd250fcb5e1f6cc9dd1"
+    a = _qid_in_subprocess(cid, hashseed="1")
+    b = _qid_in_subprocess(cid, hashseed="2")
+    assert a == b, f"question_idx not stable across hash seeds: {a} != {b}"
+    # And matches an in-process call, in range for a positive 31-bit int.
+    v = _question_idx_from_condition(cid)
+    assert v == a
+    assert 0 <= v <= 0x7FFFFFFF
 
 
 def test_parse_book_message_yields_book_snapshot_event():
