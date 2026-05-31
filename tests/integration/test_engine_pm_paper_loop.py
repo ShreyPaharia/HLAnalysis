@@ -49,14 +49,18 @@ class _PMStubAdapter(VenueAdapter):
             (now + 12 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
         ).strftime("%Y%m%d-%H%M")
 
+        # Real PM question: legs are the CLOB token ids (yes_token_id /
+        # no_token_id), which the PM book frames are keyed by too.
         yield QuestionMetaEvent(
             venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="pm-btc-daily",
+            mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
             exchange_ts=now - 90 * 60 * 1_000_000_000,
             local_recv_ts=now - 90 * 60 * 1_000_000_000,
-            question_idx=909001, named_outcome_idxs=[3],
-            keys=["class", "underlying", "period", "expiry", "strike"],
-            values=["priceBinary", "BTC", "1d", expiry_str, "70000"],
+            question_idx=909001, named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "period", "expiry", "strike",
+                  "yes_token_id", "no_token_id", "series_slug"],
+            values=["priceBinary", "BTC", "1d", expiry_str, "70000",
+                    "YES_TOKEN", "NO_TOKEN", "btc-up-or-down-daily"],
         )
 
         # 90 BTC marks at 60s cadence so theta_harvester's σ has enough data
@@ -72,18 +76,18 @@ class _PMStubAdapter(VenueAdapter):
                 mark_px=80_000.0 + (i % 5) * 0.5,
             )
 
-        # YES leg (#30) — favorite at 0.925 mid, deep enough bid_notional to
-        # pass the 10 USD floor. BTC at 80k vs strike 70k → p_yes ≈ 1.0, so
+        # YES leg — favorite at 0.925 mid, deep enough bid_notional to pass
+        # the 10 USD floor. BTC at 80k vs strike 70k → p_yes ≈ 1.0, so
         # edge ≈ 1 - 0.93 - 0.005 = 0.065 > edge_buffer 0.03 → ENTER.
         yield BboEvent(
             venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="#30",
+            mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
             exchange_ts=now, local_recv_ts=now,
             bid_px=0.92, bid_sz=200.0, ask_px=0.93, ask_sz=200.0,
         )
         yield BboEvent(
             venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="#31",
+            mechanism=Mechanism.CLOB, symbol="NO_TOKEN",
             exchange_ts=now, local_recv_ts=now,
             bid_px=0.06, bid_sz=200.0, ask_px=0.07, ask_sz=200.0,
         )

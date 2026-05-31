@@ -51,6 +51,48 @@ def test_question_registry_built_from_question_meta():
     assert q.no_symbol == "#31"
 
 
+def test_hl_question_records_venue():
+    # QuestionView must carry the originating venue so strategy slots can be
+    # scoped to one venue (HL slots must not match PM questions and vice versa).
+    ms = MarketState()
+    ms.apply(QuestionMetaEvent(
+        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB, symbol="qmeta",
+        exchange_ts=1, local_recv_ts=1,
+        question_idx=42, named_outcome_idxs=[3],
+        keys=["class", "underlying", "period", "expiry", "strike"],
+        values=["priceBinary", "BTC", "1h", "20260508-1200", "80000"],
+    ))
+    assert ms.question(42).venue == "hyperliquid"
+
+
+def test_pm_question_uses_clob_token_ids_as_leg_symbols():
+    # Polymarket questions carry the real ERC-1155 CLOB token ids in
+    # yes_token_id / no_token_id (the same ids the PM book/trade WS frames are
+    # keyed by). The engine must use those as the leg symbols so (a) books
+    # match the question's legs and (b) live orders submit a valid token id.
+    # The HL "#{10*o+s}" coin convention must NOT be applied to PM questions.
+    yes_t = "71321045679252212594626385532706912750332728571942532289631379312455583992563"
+    no_t = "52114319501245915516055106046884209969926127482827954674443846427813813222426"
+    ms = MarketState()
+    ms.apply(QuestionMetaEvent(
+        venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB, symbol=yes_t,
+        exchange_ts=1, local_recv_ts=1,
+        question_idx=1000126, named_outcome_idxs=[0, 1],
+        keys=["class", "underlying", "yes_token_id", "no_token_id",
+              "expiry", "series_slug"],
+        values=["priceBinary", "BTC", yes_t, no_t,
+                "20260601-1200", "btc-up-or-down-daily"],
+    ))
+    q = ms.question(1000126)
+    assert q is not None
+    assert q.venue == "polymarket"
+    assert q.yes_symbol == yes_t
+    assert q.no_symbol == no_t
+    assert q.leg_symbols == (yes_t, no_t)
+
+
 def test_mark_question_settled_by_idx():
     # Used by the reconciler when it detects a local position vanished from
     # the venue — we need to mark the question settled BEFORE the polled

@@ -299,14 +299,24 @@ class MarketState:
                 expiry_ns = int(kv.get("expiry_ns", "0") or 0)
             except ValueError:
                 expiry_ns = 0
-        # HL HIP-4 emits L2/trades keyed by f"#{10*outcome_idx + side_idx}" where
-        # side_idx=0 is YES and side_idx=1 is NO (see adapters/hyperliquid.py).
-        # priceBinary: 1 outcome × 2 sides → 2 legs ([yes, no]).
-        # priceBucket: N outcomes × 2 sides → 2N legs interleaved.
-        outcomes = sorted(ev.named_outcome_idxs)
-        leg_symbols = tuple(
-            f"#{10 * o + s}" for o in outcomes for s in (0, 1)
-        )
+        # Leg symbols must equal the symbols the venue's book/trade frames are
+        # keyed by, so the scanner's books.get(leg) and live orders use the
+        # right id.
+        #   - Polymarket: the ERC-1155 CLOB token ids (yes_token_id /
+        #     no_token_id), which is exactly what the PM WS frames carry as
+        #     asset_id and what create_order wants as token_id.
+        #   - Hyperliquid HIP-4: coins keyed f"#{10*outcome_idx + side_idx}"
+        #     where side_idx=0 is YES, 1 is NO (see adapters/hyperliquid.py).
+        #     priceBinary: 1 outcome × 2 sides → 2 legs; priceBucket: N×2 legs.
+        if ev.venue == "polymarket":
+            yes_t = kv.get("yes_token_id", "")
+            no_t = kv.get("no_token_id", "")
+            leg_symbols = tuple(t for t in (yes_t, no_t) if t)
+        else:
+            outcomes = sorted(ev.named_outcome_idxs)
+            leg_symbols = tuple(
+                f"#{10 * o + s}" for o in outcomes for s in (0, 1)
+            )
         yes_symbol = leg_symbols[0] if leg_symbols else ""
         no_symbol = leg_symbols[1] if len(leg_symbols) >= 2 else ""
         existing = self._questions.get(ev.question_idx)
@@ -341,6 +351,7 @@ class MarketState:
             leg_symbols=leg_symbols,
             name=question_name,
             kv=kv_pairs,
+            venue=ev.venue,
         )
 
     def mark_question_settled(self, question_idx: int) -> bool:

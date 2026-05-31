@@ -104,6 +104,11 @@ class QuestionView:
     # priceThresholds, targetPrice, expiry, etc.).
     name: str = ""
     kv: tuple[tuple[str, str], ...] = ()
+    # Originating venue ("hyperliquid" / "polymarket"). Lets strategy slots be
+    # scoped to a single venue so a PM slot never matches an HL question (and
+    # vice-versa) — both share class/underlying but resolve to different books
+    # and order token namespaces.
+    venue: str = ""
 
 
 __all__ = [

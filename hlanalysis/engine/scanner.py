@@ -163,7 +163,16 @@ class Scanner:
         kill = self.kill_switch_path.exists()
 
         for q in self.ms.all_questions():
-            fields = {"class": q.klass, "underlying": q.underlying, "period": q.period}
+            # `venue` + `series_slug` let a slot's allowlist scope to one venue
+            # (and, for PM, one Gamma series): PM and HL share class/underlying
+            # but resolve to different books/token namespaces, so without this
+            # a PM slot would match HL questions (and submit HL leg symbols as
+            # PM token ids — rejected by the CLOB as "Invalid token id").
+            series_slug = dict(q.kv).get("series_slug", "")
+            fields = {
+                "class": q.klass, "underlying": q.underlying, "period": q.period,
+                "venue": q.venue, "series_slug": series_slug,
+            }
             if match_question(self.cfg, question_idx=q.question_idx, fields=fields) is None:
                 continue
             # Multi-outcome support: feed every leg of the question to the

@@ -62,13 +62,17 @@ def test_replay_runs_strategy_and_emits_enter_decision_for_seeded_setup():
 def _bbo_sourced_events(now_ns: int):
     """A PM-style replay where σ is sourced from the BTCUSDT BBO mid rather
     than a MarkEvent."""
+    # A real PM question carries the ERC-1155 CLOB token ids; the engine uses
+    # those as the leg symbols (PM WS book frames are keyed by them too).
     yield QuestionMetaEvent(
         venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="qmeta",
+        mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
         exchange_ts=now_ns - 60_000_000_000, local_recv_ts=now_ns - 60_000_000_000,
-        question_idx=42, named_outcome_idxs=[3],
-        keys=["class", "underlying", "period", "expiry", "strike"],
-        values=["priceBinary", "BTC", "1h", "20231114-2223", "80000"],
+        question_idx=42, named_outcome_idxs=[0, 1],
+        keys=["class", "underlying", "period", "expiry", "strike",
+              "yes_token_id", "no_token_id"],
+        values=["priceBinary", "BTC", "1h", "20231114-2223", "80000",
+                "YES_TOKEN", "NO_TOKEN"],
     )
     # Reference σ feed: dense BTCUSDT BBO ticks (no MarkEvent).
     for i in range(40):
@@ -82,13 +86,13 @@ def _bbo_sourced_events(now_ns: int):
         )
     yield BboEvent(
         venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="#30",
+        mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
         exchange_ts=now_ns, local_recv_ts=now_ns,
         bid_px=0.95, bid_sz=10.0, ask_px=0.96, ask_sz=10.0,
     )
     yield BboEvent(
         venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="#31",
+        mechanism=Mechanism.CLOB, symbol="NO_TOKEN",
         exchange_ts=now_ns, local_recv_ts=now_ns,
         bid_px=0.04, bid_sz=10.0, ask_px=0.05, ask_sz=10.0,
     )

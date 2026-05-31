@@ -615,6 +615,11 @@ class EngineRuntime:
                             "class": qv.klass,
                             "underlying": qv.underlying,
                             "period": qv.period,
+                            # Mirror Scanner.scan so venue/series-scoped slots
+                            # (PM) correctly count as "tradeable" for the
+                            # new-question alert gate.
+                            "venue": qv.venue,
+                            "series_slug": dict(qv.kv).get("series_slug", ""),
                         }
                         any_unseen = False
                         any_tradeable = False

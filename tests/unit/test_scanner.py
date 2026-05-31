@@ -121,6 +121,58 @@ def test_scanner_skips_blocklisted_question(tmp_path):
     assert enters == []
 
 
+def _cfg_with_match(match: dict) -> StrategyConfig:
+    cfg = _strategy_cfg()
+    entry = cfg.allowlist[0].model_copy(update={"match": match})
+    return cfg.model_copy(update={"allowlist": [entry]})
+
+
+def _scanner_for(cfg: StrategyConfig, ms: MarketState, tmp_path, now: int) -> Scanner:
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    rcfg = LateResolutionConfig(
+        tte_min_seconds=60, tte_max_seconds=1800,
+        price_extreme_threshold=0.95, distance_from_strike_usd_min=200.0,
+        vol_max=0.5, max_position_usd=100.0, stop_loss_pct=10.0,
+        max_strike_distance_pct=10.0, min_recent_volume_usd=0.0,
+        stale_data_halt_seconds=5,
+    )
+    return Scanner(
+        strategy=LateResolutionStrategy(rcfg),
+        cfg=cfg, market_state=ms, dal=dal, kill_switch_path=tmp_path / "halt",
+        last_reconcile_ns=now,
+    )
+
+
+def test_scanner_matches_when_allowlist_scopes_to_question_venue(tmp_path):
+    # The seeded question is a hyperliquid one; an allowlist that pins
+    # venue=hyperliquid must still match it (venue is exposed to match_question).
+    now = 1_700_000_000_000_000_000
+    ms = _seed_market(now)
+    cfg = _cfg_with_match(
+        {"class": "priceBinary", "underlying": "BTC", "period": "1h",
+         "venue": "hyperliquid"},
+    )
+    scanner = _scanner_for(cfg, ms, tmp_path, now)
+    decisions = scanner.scan(now_ns=now)
+    assert any(d.decision.action is Action.ENTER for d in decisions)
+
+
+def test_scanner_skips_question_from_other_venue(tmp_path):
+    # A Polymarket-scoped allowlist (venue + series_slug) must NOT match the
+    # seeded hyperliquid question — this is the live prod bug where PM slots
+    # grabbed HL questions and shipped HL leg symbols as PM token ids.
+    now = 1_700_000_000_000_000_000
+    ms = _seed_market(now)
+    cfg = _cfg_with_match(
+        {"class": "priceBinary", "underlying": "BTC",
+         "venue": "polymarket", "series_slug": "btc-up-or-down-daily"},
+    )
+    scanner = _scanner_for(cfg, ms, tmp_path, now)
+    decisions = scanner.scan(now_ns=now)
+    assert all(d.decision.action is not Action.ENTER for d in decisions)
+
+
 # --- Daily PnL-window boundary (06:00 UTC for HL HIP-4) ---
 
 from hlanalysis.engine.scanner import Scanner as _Scanner
