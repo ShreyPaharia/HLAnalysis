@@ -173,6 +173,52 @@ def test_scanner_skips_question_from_other_venue(tmp_path):
     assert all(d.decision.action is not Action.ENTER for d in decisions)
 
 
+def _seed_pm_updown(now_ns: int, *, strike_ref_ts_ns: int) -> MarketState:
+    ms = MarketState()
+    ms.apply(MarkEvent(
+        venue="binance", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
+        symbol="BTC", exchange_ts=now_ns, local_recv_ts=now_ns, mark_px=74_000.0,
+    ))
+    ms.apply(QuestionMetaEvent(
+        venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
+        exchange_ts=now_ns, local_recv_ts=now_ns,
+        question_idx=909100, named_outcome_idxs=[0, 1],
+        keys=["class", "underlying", "series_slug",
+              "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+        values=["priceBinary", "BTC", "btc-up-or-down-daily",
+                "YES_TOKEN", "NO_TOKEN", str(strike_ref_ts_ns)],
+    ))
+    return ms
+
+
+def test_scanner_captures_and_persists_pm_strike_at_open(tmp_path):
+    # The capture must be RECURRING (per scan tick), because PM lists daily
+    # markets ~24h before their open — a one-shot capture at first-sight is
+    # always too early. Here the open is just behind `now`, so the tick fires.
+    import math
+    now = 1_700_000_000_000_000_000
+    ms = _seed_pm_updown(now, strike_ref_ts_ns=now - 2_000_000_000)  # opened 2s ago
+    cfg = _cfg_with_match({"class": "priceBinary", "underlying": "BTC"})
+    scanner = _scanner_for(cfg, ms, tmp_path, now)
+    scanner.scan(now_ns=now)
+    assert ms.question(909100).strike == 74_000.0
+    assert scanner.dal.get_pm_strike(909100) == 74_000.0
+
+
+def test_scanner_waits_to_capture_pm_strike_until_open(tmp_path):
+    # Market discovered well before its open (the real PM case): the scanner
+    # must NOT stamp a strike yet — it leaves it NaN and retries later.
+    import math
+    now = 1_700_000_000_000_000_000
+    ms = _seed_pm_updown(now, strike_ref_ts_ns=now + 3600 * 1_000_000_000)  # opens 1h later
+    cfg = _cfg_with_match({"class": "priceBinary", "underlying": "BTC"})
+    scanner = _scanner_for(cfg, ms, tmp_path, now)
+    scanner.scan(now_ns=now)
+    assert math.isnan(ms.question(909100).strike)
+    assert scanner.dal.get_pm_strike(909100) is None
+
+
 # --- Daily PnL-window boundary (06:00 UTC for HL HIP-4) ---
 
 from hlanalysis.engine.scanner import Scanner as _Scanner

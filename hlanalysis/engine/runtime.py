@@ -47,14 +47,6 @@ from ..strategy.theta_harvester import (
     ThetaHarvesterConfig, ThetaHarvesterStrategy,
 )
 
-# How close to a PM up/down market's reference candle (strike_ref_ts_ns) we
-# must be, at first sight, to stamp its strike from the live reference mark.
-# Daily markets list on Gamma at their open and the adapter polls every 60s,
-# so first sight is normally <~70s after the open; 5 min gives headroom while
-# rejecting markets whose open we missed (e.g. after an engine restart), which
-# are then skipped rather than priced off a stale "open".
-_PM_STRIKE_CAPTURE_TOLERANCE_NS = 300 * 1_000_000_000
-
 
 # PM unconfirmed-order watchdog: OrderUnconfirmed fires once a live PM order
 # has sat in flight (status=open/pending/partially_filled) past this threshold
@@ -631,7 +623,6 @@ class EngineRuntime:
                         }
                         any_unseen = False
                         any_tradeable = False
-                        pm_strike_captured = False
                         for slot in slots:
                             if not slot.dal.has_seen_question(qidx):
                                 slot.dal.mark_question_seen(qidx, now_ns=now_ns)
@@ -640,32 +631,11 @@ class EngineRuntime:
                                 slot.cfg, question_idx=qidx, fields=fields,
                             ) is not None:
                                 any_tradeable = True
-                                # PM up/down markets carry no static strike; the
-                                # QuestionView is shared, so one stamp serves
-                                # every slot trading it.
-                                if qv.venue == "polymarket" and not pm_strike_captured:
-                                    # Capture it from this slot's reference feed
-                                    # at the open and persist for restart reuse…
-                                    captured = self.market_state.capture_pm_open_strike(
-                                        qidx,
-                                        reference_symbol=slot.scanner.ref_symbol,
-                                        now_ns=now_ns,
-                                        tolerance_ns=_PM_STRIKE_CAPTURE_TOLERANCE_NS,
-                                    )
-                                    if captured is not None:
-                                        slot.dal.set_pm_strike(qidx, captured)
-                                        pm_strike_captured = True
-                                    else:
-                                        # …or, after a restart where we missed
-                                        # the open, reload a previously-captured
-                                        # strike rather than skip the market.
-                                        persisted = slot.dal.get_pm_strike(qidx)
-                                        if persisted is not None and (
-                                            self.market_state.set_question_strike(
-                                                qidx, persisted,
-                                            )
-                                        ):
-                                            pm_strike_captured = True
+                        # NB: PM up/down open-strike capture lives in the scan
+                        # loop (Scanner._resolve_pm_strike), not here — PM lists
+                        # markets ~24h before their reference open, so it must be
+                        # retried each tick until `now` reaches the open, not
+                        # done once at first-sight.
                         if any_unseen and any_tradeable:
                             await self.bus.publish(new_q_event)
         except asyncio.CancelledError:

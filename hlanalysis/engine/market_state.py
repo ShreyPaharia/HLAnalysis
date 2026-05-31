@@ -371,12 +371,14 @@ class MarketState:
         strategy's live ``reference_price`` comes from, so the perp/spot basis
         cancels in ``log(reference_price / strike)``).
 
-        Only fires when ``now_ns`` is within ``tolerance_ns`` of the question's
-        ``strike_ref_ts_ns`` — i.e. we actually observed the open. If the open
-        was missed (market listed long ago, or engine restarted past it) we
-        return None and leave the strike NaN so the slot skips the market
-        rather than trade on a guessed strike. Idempotent / no-op when the
-        strike is already set, the question is non-PM, or the mark is absent.
+        Only fires at/just-after the open: ``strike_ref_ts_ns <= now_ns <=
+        strike_ref_ts_ns + tolerance_ns``. BEFORE the open the current price
+        isn't the open yet (return None — the scan loop retries each tick and
+        fires once ``now`` reaches it). AFTER the window (market listed long
+        ago, or engine restarted past the open) we also return None and leave
+        the strike NaN so the slot skips rather than trade on a guessed strike.
+        Idempotent / no-op when the strike is already set, the question is
+        non-PM, or the mark is absent.
 
         Returns the captured strike, or None when nothing was stamped.
         """
@@ -393,7 +395,8 @@ class MarketState:
             ref_ts_ns = int(ref_ts_raw)
         except (TypeError, ValueError):
             return None
-        if abs(now_ns - ref_ts_ns) > tolerance_ns:
+        delta = now_ns - ref_ts_ns
+        if delta < 0 or delta > tolerance_ns:
             return None
         mark = self.last_mark(reference_symbol)
         if mark is None:
