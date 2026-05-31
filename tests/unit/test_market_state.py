@@ -93,6 +93,69 @@ def test_pm_question_uses_clob_token_ids_as_leg_symbols():
     assert q.leg_symbols == (yes_t, no_t)
 
 
+def _pm_updown_meta(qidx: int, strike_ref_ts_ns: int) -> QuestionMetaEvent:
+    return QuestionMetaEvent(
+        venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
+        exchange_ts=1, local_recv_ts=1,
+        question_idx=qidx, named_outcome_idxs=[0, 1],
+        # No "strike"/"targetPrice" — up/down markets resolve vs a reference
+        # candle, carried as strike_ref_ts_ns.
+        keys=["class", "underlying", "yes_token_id", "no_token_id",
+              "series_slug", "strike_ref_ts_ns"],
+        values=["priceBinary", "BTC", "YES_TOKEN", "NO_TOKEN",
+                "btc-up-or-down-daily", str(strike_ref_ts_ns)],
+    )
+
+
+def _mark(symbol: str, px: float, ts: int) -> MarkEvent:
+    return MarkEvent(
+        venue="binance", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
+        symbol=symbol, exchange_ts=ts, local_recv_ts=ts, mark_px=px,
+    )
+
+
+def test_pm_updown_question_has_nan_strike_until_captured():
+    # PM up/down markets carry no numeric strike; QuestionView.strike is NaN
+    # so the strategy can't price it until the open is captured.
+    ms = MarketState()
+    ms.apply(_pm_updown_meta(1000126, strike_ref_ts_ns=5_000_000_000))
+    assert math.isnan(ms.question(1000126).strike)
+
+
+def test_capture_pm_open_strike_stamps_reference_mid_at_open():
+    # At the market open (now ≈ strike_ref_ts) the engine stamps the strike
+    # from the live reference mark, so p_model and the live reference share
+    # the same (perp bbo) series.
+    ref_ts = 1_700_000_000_000_000_000
+    ms = MarketState()
+    ms.apply(_mark("BTCUSDT", 74_000.0, ts=ref_ts))
+    ms.apply(_pm_updown_meta(1000126, strike_ref_ts_ns=ref_ts))
+    captured = ms.capture_pm_open_strike(
+        1000126, reference_symbol="BTCUSDT",
+        now_ns=ref_ts + 2_000_000_000,  # 2s after open
+        tolerance_ns=120_000_000_000,   # 2 min
+    )
+    assert captured == 74_000.0
+    assert ms.question(1000126).strike == 74_000.0
+
+
+def test_capture_pm_open_strike_skips_when_open_missed():
+    # If the engine wasn't watching at the open (now far past strike_ref_ts —
+    # e.g. after a restart), it must NOT guess a strike from the current mark.
+    ref_ts = 1_700_000_000_000_000_000
+    ms = MarketState()
+    ms.apply(_mark("BTCUSDT", 74_000.0, ts=ref_ts + 6 * 3600 * 1_000_000_000))
+    ms.apply(_pm_updown_meta(1000126, strike_ref_ts_ns=ref_ts))
+    captured = ms.capture_pm_open_strike(
+        1000126, reference_symbol="BTCUSDT",
+        now_ns=ref_ts + 6 * 3600 * 1_000_000_000,  # 6h after open
+        tolerance_ns=120_000_000_000,
+    )
+    assert captured is None
+    assert math.isnan(ms.question(1000126).strike)
+
+
 def test_mark_question_settled_by_idx():
     # Used by the reconciler when it detects a local position vanished from
     # the venue — we need to mark the question settled BEFORE the polled

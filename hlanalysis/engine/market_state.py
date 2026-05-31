@@ -354,6 +354,53 @@ class MarketState:
             venue=ev.venue,
         )
 
+    def capture_pm_open_strike(
+        self,
+        question_idx: int,
+        *,
+        reference_symbol: str,
+        now_ns: int,
+        tolerance_ns: int,
+    ) -> float | None:
+        """Stamp the strike of a Polymarket up/down question from the live
+        reference mark, captured at the market open.
+
+        PM "BTC Up or Down" markets carry no numeric strike — they resolve
+        against a reference candle at ``strike_ref_ts_ns``. We stamp the strike
+        from the reference feed's current mark (the same perp-bbo series the
+        strategy's live ``reference_price`` comes from, so the perp/spot basis
+        cancels in ``log(reference_price / strike)``).
+
+        Only fires when ``now_ns`` is within ``tolerance_ns`` of the question's
+        ``strike_ref_ts_ns`` — i.e. we actually observed the open. If the open
+        was missed (market listed long ago, or engine restarted past it) we
+        return None and leave the strike NaN so the slot skips the market
+        rather than trade on a guessed strike. Idempotent / no-op when the
+        strike is already set, the question is non-PM, or the mark is absent.
+
+        Returns the captured strike, or None when nothing was stamped.
+        """
+        q = self._questions.get(question_idx)
+        if q is None or q.venue != "polymarket":
+            return None
+        if q.strike == q.strike:  # already a real (non-NaN) strike
+            return None
+        kv = dict(q.kv)
+        ref_ts_raw = kv.get("strike_ref_ts_ns")
+        if not ref_ts_raw:
+            return None
+        try:
+            ref_ts_ns = int(ref_ts_raw)
+        except (TypeError, ValueError):
+            return None
+        if abs(now_ns - ref_ts_ns) > tolerance_ns:
+            return None
+        mark = self.last_mark(reference_symbol)
+        if mark is None:
+            return None
+        self._questions[question_idx] = dataclasses.replace(q, strike=mark)
+        return mark
+
     def mark_question_settled(self, question_idx: int) -> bool:
         """Mark a question settled by its question_idx.
 

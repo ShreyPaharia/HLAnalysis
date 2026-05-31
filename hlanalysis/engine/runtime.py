@@ -47,6 +47,14 @@ from ..strategy.theta_harvester import (
     ThetaHarvesterConfig, ThetaHarvesterStrategy,
 )
 
+# How close to a PM up/down market's reference candle (strike_ref_ts_ns) we
+# must be, at first sight, to stamp its strike from the live reference mark.
+# Daily markets list on Gamma at their open and the adapter polls every 60s,
+# so first sight is normally <~70s after the open; 5 min gives headroom while
+# rejecting markets whose open we missed (e.g. after an engine restart), which
+# are then skipped rather than priced off a stale "open".
+_PM_STRIKE_CAPTURE_TOLERANCE_NS = 300 * 1_000_000_000
+
 
 # PM unconfirmed-order watchdog: OrderUnconfirmed fires once a live PM order
 # has sat in flight (status=open/pending/partially_filled) past this threshold
@@ -623,6 +631,7 @@ class EngineRuntime:
                         }
                         any_unseen = False
                         any_tradeable = False
+                        pm_strike_captured = False
                         for slot in slots:
                             if not slot.dal.has_seen_question(qidx):
                                 slot.dal.mark_question_seen(qidx, now_ns=now_ns)
@@ -631,6 +640,21 @@ class EngineRuntime:
                                 slot.cfg, question_idx=qidx, fields=fields,
                             ) is not None:
                                 any_tradeable = True
+                                # PM up/down markets carry no static strike;
+                                # stamp it from this slot's reference feed at
+                                # the open so the strategy can price the market.
+                                # No-op for non-PM / already-stamped / open
+                                # missed. The QuestionView is shared, so one
+                                # capture serves every slot trading it.
+                                if not pm_strike_captured and (
+                                    self.market_state.capture_pm_open_strike(
+                                        qidx,
+                                        reference_symbol=slot.scanner.ref_symbol,
+                                        now_ns=now_ns,
+                                        tolerance_ns=_PM_STRIKE_CAPTURE_TOLERANCE_NS,
+                                    ) is not None
+                                ):
+                                    pm_strike_captured = True
                         if any_unseen and any_tradeable:
                             await self.bus.publish(new_q_event)
         except asyncio.CancelledError:
