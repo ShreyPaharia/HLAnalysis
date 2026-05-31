@@ -640,21 +640,32 @@ class EngineRuntime:
                                 slot.cfg, question_idx=qidx, fields=fields,
                             ) is not None:
                                 any_tradeable = True
-                                # PM up/down markets carry no static strike;
-                                # stamp it from this slot's reference feed at
-                                # the open so the strategy can price the market.
-                                # No-op for non-PM / already-stamped / open
-                                # missed. The QuestionView is shared, so one
-                                # capture serves every slot trading it.
-                                if not pm_strike_captured and (
-                                    self.market_state.capture_pm_open_strike(
+                                # PM up/down markets carry no static strike; the
+                                # QuestionView is shared, so one stamp serves
+                                # every slot trading it.
+                                if qv.venue == "polymarket" and not pm_strike_captured:
+                                    # Capture it from this slot's reference feed
+                                    # at the open and persist for restart reuse…
+                                    captured = self.market_state.capture_pm_open_strike(
                                         qidx,
                                         reference_symbol=slot.scanner.ref_symbol,
                                         now_ns=now_ns,
                                         tolerance_ns=_PM_STRIKE_CAPTURE_TOLERANCE_NS,
-                                    ) is not None
-                                ):
-                                    pm_strike_captured = True
+                                    )
+                                    if captured is not None:
+                                        slot.dal.set_pm_strike(qidx, captured)
+                                        pm_strike_captured = True
+                                    else:
+                                        # …or, after a restart where we missed
+                                        # the open, reload a previously-captured
+                                        # strike rather than skip the market.
+                                        persisted = slot.dal.get_pm_strike(qidx)
+                                        if persisted is not None and (
+                                            self.market_state.set_question_strike(
+                                                qidx, persisted,
+                                            )
+                                        ):
+                                            pm_strike_captured = True
                         if any_unseen and any_tradeable:
                             await self.bus.publish(new_q_event)
         except asyncio.CancelledError:

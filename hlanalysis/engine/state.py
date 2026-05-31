@@ -63,6 +63,16 @@ class SeenQuestion(SQLModel, table=True):
     first_seen_ts_ns: int
 
 
+class PmStrike(SQLModel, table=True):
+    """Open-strike captured for a Polymarket up/down question. PM up/down
+    markets have no static strike; the engine stamps it from the live bbo
+    reference at the market open. Persisting it lets a restarted engine reuse
+    the strike instead of skipping markets whose open it can no longer see."""
+    __tablename__ = "pm_strike"
+    question_idx: int = Field(primary_key=True)
+    strike: float
+
+
 # Public alias for tests / external users.
 Session = Session_  # noqa: F811
 
@@ -191,6 +201,23 @@ class StateDAL:
             if s.get(SeenQuestion, question_idx) is None:
                 s.add(SeenQuestion(question_idx=question_idx, first_seen_ts_ns=now_ns))
                 s.commit()
+
+    # ---- PM open-strikes ----
+
+    def get_pm_strike(self, question_idx: int) -> float | None:
+        with _Session(self._engine) as s:
+            row = s.get(PmStrike, question_idx)
+            return None if row is None else row.strike
+
+    def set_pm_strike(self, question_idx: int, strike: float) -> None:
+        with _Session(self._engine) as s:
+            existing = s.get(PmStrike, question_idx)
+            if existing is None:
+                s.add(PmStrike(question_idx=question_idx, strike=strike))
+            else:
+                existing.strike = strike
+                s.add(existing)
+            s.commit()
 
     # ---- fills ----
 

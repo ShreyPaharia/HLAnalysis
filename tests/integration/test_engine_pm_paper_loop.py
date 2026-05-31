@@ -8,6 +8,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -128,6 +129,40 @@ class _PMUpDownStubAdapter(VenueAdapter):
                   "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
             values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
                     "YES_TOKEN", "NO_TOKEN", str(now)],
+        )
+        await asyncio.sleep(2.5)
+
+
+class _PMUpDownRestartStubAdapter(VenueAdapter):
+    """A PM up/down market whose open is in the past (strike_ref_ts ≪ now) —
+    simulates the post-restart case where the engine can no longer observe the
+    open and must reload a persisted strike."""
+
+    venue = "polymarket"
+
+    def supports(self, *_a, **_k) -> bool:
+        return True
+
+    async def stream(self, _subs) -> AsyncIterator:
+        now = time.time_ns()
+        past_open = now - 6 * 3600 * 1_000_000_000  # 6h ago → outside tolerance
+        expiry_str = datetime.fromtimestamp(
+            (now + 6 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+        ).strftime("%Y%m%d-%H%M")
+        yield MarkEvent(
+            venue="binance", product_type=ProductType.SPOT,
+            mechanism=Mechanism.CLOB, symbol="BTC",
+            exchange_ts=now, local_recv_ts=now, mark_px=80_000.0,
+        )
+        yield QuestionMetaEvent(
+            venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
+            exchange_ts=now, local_recv_ts=now,
+            question_idx=909003, named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "expiry", "series_slug",
+                  "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+            values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
+                    "YES_TOKEN", "NO_TOKEN", str(past_open)],
         )
         await asyncio.sleep(2.5)
 
@@ -269,3 +304,38 @@ async def test_pm_updown_strike_captured_from_reference_at_open(cfgs):
     assert q is not None
     # Strike stamped from the reference mark (73_500), not left NaN.
     assert q.strike == 73_500.0
+    # …and persisted for restart reuse.
+    [slot] = runtime.slots
+    assert slot.dal.get_pm_strike(909002) == 73_500.0
+
+
+@pytest.mark.asyncio
+async def test_pm_updown_strike_reloaded_from_db_after_restart(cfgs):
+    # Open was missed (strike_ref_ts 6h ago) so live capture can't fire; the
+    # engine must reload the previously-persisted strike instead of skipping.
+    from hlanalysis.engine.state import StateDAL
+
+    strategy_cfg, deploy_cfg = cfgs
+    # Pre-seed the slot's state DB as if a prior run had captured the open.
+    db_path = Path(deploy_cfg.state_db_path_for("v31_pm"))
+    seed = StateDAL(db_path)
+    seed.run_migrations()
+    seed.set_pm_strike(909003, 71_000.0)
+
+    runtime = EngineRuntime(
+        strategies=[strategy_cfg],
+        deploy_cfg=deploy_cfg,
+        adapter_factory=_PMUpDownRestartStubAdapter,
+        subscriptions=[],
+        exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
+        telegram_factory=lambda _http: _FakeTelegram(),
+    )
+    runtime_task = asyncio.create_task(runtime.run())
+    await asyncio.sleep(3.0)
+    runtime.stop_event.set()
+    await asyncio.wait_for(runtime_task, timeout=5.0)
+
+    q = runtime.market_state.question(909003)
+    assert q is not None
+    # Strike came from the persisted value, not the (stale) live mark of 80_000.
+    assert q.strike == 71_000.0

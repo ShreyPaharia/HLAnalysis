@@ -20,6 +20,18 @@ def test_migrations_creates_tables(dal):
     assert "0001_initial" in info
 
 
+def test_pm_strike_round_trip_and_upsert(dal):
+    # PM up/down open-strikes are captured live at the market open; persisting
+    # them lets the engine reload after a restart instead of skipping markets
+    # whose open it missed.
+    assert dal.get_pm_strike(1000126) is None
+    dal.set_pm_strike(1000126, 73_500.0)
+    assert dal.get_pm_strike(1000126) == 73_500.0
+    # Idempotent upsert (re-capture / re-stamp must not error or duplicate).
+    dal.set_pm_strike(1000126, 73_500.0)
+    assert dal.get_pm_strike(1000126) == 73_500.0
+
+
 def test_open_order_round_trip(dal):
     oo = OpenOrder(
         cloid="hla-1", venue_oid=None, question_idx=42, symbol="@30",

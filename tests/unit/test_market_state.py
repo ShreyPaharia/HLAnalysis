@@ -140,6 +140,21 @@ def test_capture_pm_open_strike_stamps_reference_mid_at_open():
     assert ms.question(1000126).strike == 74_000.0
 
 
+def test_set_question_strike_stamps_only_when_unset():
+    # Used to reload a persisted open-strike after a restart: stamp when the
+    # strike is still NaN, but never clobber a strike already known.
+    ref_ts = 1_700_000_000_000_000_000
+    ms = MarketState()
+    ms.apply(_pm_updown_meta(1000126, strike_ref_ts_ns=ref_ts))
+    assert ms.set_question_strike(1000126, 73_500.0) is True
+    assert ms.question(1000126).strike == 73_500.0
+    # No-op when a real strike is already set (returns False, keeps value).
+    assert ms.set_question_strike(1000126, 99_999.0) is False
+    assert ms.question(1000126).strike == 73_500.0
+    # Unknown question_idx — no-op.
+    assert ms.set_question_strike(424242, 1.0) is False
+
+
 def test_capture_pm_open_strike_skips_when_open_missed():
     # If the engine wasn't watching at the open (now far past strike_ref_ts —
     # e.g. after a restart), it must NOT guess a strike from the current mark.

@@ -401,6 +401,19 @@ class MarketState:
         self._questions[question_idx] = dataclasses.replace(q, strike=mark)
         return mark
 
+    def set_question_strike(self, question_idx: int, strike: float) -> bool:
+        """Stamp a question's strike, but only if it isn't already set.
+
+        Used to reload a persisted PM open-strike after a restart (see
+        ``capture_pm_open_strike`` and StateDAL.get_pm_strike). Never clobbers
+        a strike already known. Returns True iff the strike was stamped.
+        """
+        q = self._questions.get(question_idx)
+        if q is None or q.strike == q.strike:  # unknown, or already non-NaN
+            return False
+        self._questions[question_idx] = dataclasses.replace(q, strike=strike)
+        return True
+
     def mark_question_settled(self, question_idx: int) -> bool:
         """Mark a question settled by its question_idx.
 
