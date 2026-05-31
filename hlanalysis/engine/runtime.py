@@ -13,6 +13,7 @@ import aiohttp
 from loguru import logger
 
 from ..adapters.base import VenueAdapter
+from ..adapters.binance_klines import binance_1m_close_at
 from ..config import Subscription
 from ..events import NormalizedEvent
 from .config import (
@@ -345,6 +346,10 @@ class EngineRuntime:
     # account_cfg is the venue-typed AccountConfig (HyperliquidAccount | PolymarketAccount).
     exec_client_factory: Callable[[str, AccountConfig, bool], ExecutionClient] | None = None
     telegram_factory: Callable[[aiohttp.ClientSession], TelegramClient] | None = None
+    # Historical 1m-close lookup used to backfill the open-strike of a PM
+    # up/down market whose open the engine didn't observe live. Injectable so
+    # tests avoid network. Returns the close at the given epoch-ns, or None.
+    klines_fetcher: Callable[[int], float | None] = binance_1m_close_at
     market_state: MarketState = field(default_factory=MarketState)
     bus: EventBus = field(default_factory=EventBus)
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -631,17 +636,77 @@ class EngineRuntime:
                                 slot.cfg, question_idx=qidx, fields=fields,
                             ) is not None:
                                 any_tradeable = True
-                        # NB: PM up/down open-strike capture lives in the scan
-                        # loop (Scanner._resolve_pm_strike), not here — PM lists
-                        # markets ~24h before their reference open, so it must be
-                        # retried each tick until `now` reaches the open, not
-                        # done once at first-sight.
+                        # PM up/down open-strike, observed-open case, is captured
+                        # in the scan loop (Scanner._resolve_pm_strike), retried
+                        # each tick until `now` reaches the open (PM lists markets
+                        # ~24h early). Here we handle the MISSED-open case: a
+                        # market whose open already passed (engine started/restarted
+                        # after it) with no persisted strike — backfill it from the
+                        # historical Binance 1m close so it's tradeable, not skipped.
+                        if any_tradeable:
+                            await self._maybe_backfill_pm_strike(
+                                qv, slots, fields, now_ns=now_ns,
+                            )
                         if any_unseen and any_tradeable:
                             await self.bus.publish(new_q_event)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("adapter ingest crashed")
+
+    async def _maybe_backfill_pm_strike(
+        self, qv, slots: list[AccountSlot], fields: dict[str, str], *, now_ns: int,
+    ) -> None:
+        """Backfill a PM up/down strike whose open the engine missed.
+
+        Fires once, at first-sight, only when: the question is a polymarket
+        up/down market (has strike_ref_ts_ns), its strike is still unset, the
+        open is already past the live-capture window, and no slot has a
+        persisted strike (a restart after a prior capture reloads instead). The
+        scan loop handles the observed-open case; this covers markets that were
+        open before the engine started. Fetched off the event loop.
+        """
+        from .config import match_question
+        from .scanner import _PM_STRIKE_CAPTURE_TOLERANCE_NS
+
+        if qv is None or qv.venue != "polymarket":
+            return
+        if qv.strike == qv.strike:  # already has a (non-NaN) strike
+            return
+        raw = dict(qv.kv).get("strike_ref_ts_ns")
+        if not raw:
+            return
+        try:
+            ref_ts_ns = int(raw)
+        except (TypeError, ValueError):
+            return
+        if now_ns - ref_ts_ns <= _PM_STRIKE_CAPTURE_TOLERANCE_NS:
+            return  # open is upcoming or within the live-capture window
+        qidx = qv.question_idx
+        pm_slots = [
+            s for s in slots
+            if match_question(s.cfg, question_idx=qidx, fields=fields) is not None
+        ]
+        if any(s.dal.get_pm_strike(qidx) is not None for s in pm_slots):
+            return  # a prior run captured it; the scan loop will reload it
+        try:
+            strike = await asyncio.to_thread(self.klines_fetcher, ref_ts_ns)
+        except Exception:
+            logger.exception("pm strike backfill fetch crashed qidx={}", qidx)
+            return
+        if strike is None:
+            logger.warning(
+                "pm strike backfill failed qidx={} ref_ts_ns={} — market skipped",
+                qidx, ref_ts_ns,
+            )
+            return
+        self.market_state.set_question_strike(qidx, strike)
+        for s in pm_slots:
+            s.dal.set_pm_strike(qidx, strike)
+        logger.info(
+            "pm strike backfilled qidx={} strike={} (missed open, historical 1m close)",
+            qidx, strike,
+        )
 
     async def _scan_loop(self, slot: AccountSlot) -> None:
         while not self.stop_event.is_set():

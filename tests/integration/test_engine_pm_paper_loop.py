@@ -339,3 +339,32 @@ async def test_pm_updown_strike_reloaded_from_db_after_restart(cfgs):
     assert q is not None
     # Strike came from the persisted value, not the (stale) live mark of 80_000.
     assert q.strike == 71_000.0
+
+
+@pytest.mark.asyncio
+async def test_pm_updown_strike_backfilled_when_open_missed(cfgs):
+    # Open was missed AND nothing persisted (fresh engine that started after the
+    # market's open). The engine must backfill the strike from the historical
+    # Binance close so the market is tradeable instead of skipped.
+    strategy_cfg, deploy_cfg = cfgs
+
+    runtime = EngineRuntime(
+        strategies=[strategy_cfg],
+        deploy_cfg=deploy_cfg,
+        adapter_factory=_PMUpDownRestartStubAdapter,  # open 6h ago, qidx 909003
+        subscriptions=[],
+        exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
+        telegram_factory=lambda _http: _FakeTelegram(),
+        # Stub the historical fetch (no network); returns a known 1m close.
+        klines_fetcher=lambda _ts_ns: 70_500.0,
+    )
+    runtime_task = asyncio.create_task(runtime.run())
+    await asyncio.sleep(3.0)
+    runtime.stop_event.set()
+    await asyncio.wait_for(runtime_task, timeout=5.0)
+
+    q = runtime.market_state.question(909003)
+    assert q is not None
+    assert q.strike == 70_500.0
+    [slot] = runtime.slots
+    assert slot.dal.get_pm_strike(909003) == 70_500.0
