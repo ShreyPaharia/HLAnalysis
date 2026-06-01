@@ -737,6 +737,21 @@ class EngineRuntime:
                 "pm strike captured qidx={} strike={} (binance spot 1m close)",
                 qidx, strike,
             )
+            _MISMATCH_TOL_BPS = 10.0
+            mark = self.market_state.last_mark(_SPOT_REF_SYMBOL)
+            if mark:
+                bps = abs(strike - mark) / mark * 1e4
+                if bps > _MISMATCH_TOL_BPS:
+                    from .risk_events import PMStrikeMismatch
+                    await self.bus.publish(PMStrikeMismatch(
+                        ts_ns=now_ns, question_idx=qidx,
+                        captured_strike=strike, reference_mark=mark,
+                        divergence_bps=bps,
+                    ))
+                    logger.warning(
+                        "pm strike/mark divergence qidx={} strike={} mark={} bps={:.1f} "
+                        "(alert only)", qidx, strike, mark, bps,
+                    )
 
     async def _pm_strike_capture_loop(self, slots: list[AccountSlot]) -> None:
         """Retry PM up/down strike capture each second. First-sight capture in

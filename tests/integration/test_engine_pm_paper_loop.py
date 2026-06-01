@@ -134,6 +134,46 @@ class _PMUpDownStubAdapter(VenueAdapter):
         await asyncio.sleep(2.5)
 
 
+class _PMUpDownSpotMarkStubAdapter(VenueAdapter):
+    """Like _PMUpDownStubAdapter but also emits a Binance SPOT mark with
+    symbol='BTCUSDT' (remapped to BTCUSDT_SPOT by _remap_reference_symbol) so
+    market_state.last_mark('BTCUSDT_SPOT') returns 73_500.  The klines_fetcher
+    returns 73_644.92, giving ~19.5 bps divergence (above the 10 bps threshold)
+    — this exercises the PMStrikeMismatch alert path."""
+
+    venue = "polymarket"
+
+    def supports(self, *_a, **_k) -> bool:
+        return True
+
+    async def stream(self, _subs) -> AsyncIterator:
+        now = time.time_ns()
+        expiry_str = datetime.fromtimestamp(
+            (now + 12 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+        ).strftime("%Y%m%d-%H%M")
+        # Emit a spot BBO mark under symbol="BTCUSDT" — _remap_reference_symbol
+        # in _ingest_loop renames this to BTCUSDT_SPOT so last_mark("BTCUSDT_SPOT")
+        # returns 73_500.  (symbol="BTC" would not be remapped; "BTCUSDT" is the
+        # canonical Binance SPOT symbol the remap function expects.)
+        yield MarkEvent(
+            venue="binance", product_type=ProductType.SPOT,
+            mechanism=Mechanism.CLOB, symbol="BTCUSDT",
+            exchange_ts=now, local_recv_ts=now, mark_px=73_500.0,
+        )
+        # strike_ref_ts_ns is 90s in the past → candle already closed.
+        yield QuestionMetaEvent(
+            venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
+            exchange_ts=now, local_recv_ts=now,
+            question_idx=909005, named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "expiry", "series_slug",
+                  "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+            values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
+                    "YES_TOKEN", "NO_TOKEN", str(now - 90 * 1_000_000_000)],
+        )
+        await asyncio.sleep(2.5)
+
+
 class _PMUpDownRestartStubAdapter(VenueAdapter):
     """A PM up/down market whose strike_ref_ts is in the past (≪ now). Used by
     both the reload test (persisted strike reused) and the fresh-engine test
@@ -474,3 +514,45 @@ async def test_pm_strike_capture_loop_direct(cfgs):
     )
     [slot] = slots
     assert slot.dal.get_pm_strike(909004) == 88_888.0
+
+
+@pytest.mark.asyncio
+async def test_pm_strike_divergence_alerts_but_still_trades(cfgs):
+    """Strike/spot-mark divergence fires a PMStrikeMismatch Telegram alert
+    but the strike is still persisted (alert-only, no skip).
+
+    The stub adapter emits a Binance SPOT MarkEvent with symbol='BTCUSDT'
+    (remapped to BTCUSDT_SPOT by _remap_reference_symbol in _ingest_loop), so
+    market_state.last_mark('BTCUSDT_SPOT') returns 73_500.  klines_fetcher
+    returns 73_644.92 — that is ≈19.5 bps apart, above the 10 bps threshold —
+    so the mismatch alert must fire."""
+    strategy_cfg, deploy_cfg = cfgs
+    tg = _FakeTelegram()
+
+    runtime = EngineRuntime(
+        strategies=[strategy_cfg],
+        deploy_cfg=deploy_cfg,
+        adapter_factory=_PMUpDownSpotMarkStubAdapter,
+        subscriptions=[],
+        exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
+        telegram_factory=lambda _http: tg,
+        klines_fetcher=lambda _ts_ns: 73_644.92,
+    )
+    runtime_task = asyncio.create_task(runtime.run())
+    await asyncio.sleep(3.0)
+    runtime.stop_event.set()
+    await asyncio.wait_for(runtime_task, timeout=5.0)
+
+    # Strike must still be captured (alert-only — no skip).
+    q = runtime.market_state.question(909005)
+    assert q is not None, "question 909005 not found in market_state"
+    assert q.strike == 73_644.92, (
+        f"strike should be 73644.92 (klines value), got {q.strike}"
+    )
+    [slot] = runtime.slots
+    assert slot.dal.get_pm_strike(909005) == 73_644.92
+
+    # A PMStrikeMismatch Telegram alert must have fired.
+    assert any("divergence" in m.lower() for m in tg.messages), (
+        f"no divergence alert in tg.messages: {tg.messages}"
+    )

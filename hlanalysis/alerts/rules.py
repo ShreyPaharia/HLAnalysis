@@ -23,8 +23,8 @@ from loguru import logger
 from ..engine.event_bus import EventBus
 from ..engine.risk_events import (
     BusEvent, DailyLossHalt, Entry, Exit, KillSwitchActivated, NewQuestion,
-    OrderRejected, OrderUnconfirmed, ReconcileDrift, RedemptionTimeout,
-    RiskHalt, RiskVeto, StaleDataHalt, StopLossTriggered,
+    OrderRejected, OrderUnconfirmed, PMStrikeMismatch, ReconcileDrift,
+    RedemptionTimeout, RiskHalt, RiskVeto, StaleDataHalt, StopLossTriggered,
 )
 
 
@@ -211,5 +211,13 @@ class AlertRules:
                     lines.append(f"class={_e(ev.klass)}  legs={ev.leg_count}")
                 lines.append(f"<code>q={ev.question_idx}</code>")
                 return f"newq:{ev.question_idx}", "\n".join(lines)
+            case PMStrikeMismatch():
+                lines = [
+                    f"⚠️ PM strike vs spot-mark divergence q={ev.question_idx}",
+                    f"captured={ev.captured_strike:.2f}  mark={ev.reference_mark:.2f}  "
+                    f"Δ={ev.divergence_bps:.1f}bps",
+                    "(alert only — strike still trades)",
+                ]
+                return (ev.account_alias or None, "\n".join(lines))
             case _:
                 return None

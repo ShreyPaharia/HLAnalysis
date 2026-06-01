@@ -9,7 +9,8 @@ from hlanalysis.alerts.rules import AlertRules
 from hlanalysis.engine.event_bus import EventBus
 from hlanalysis.engine.risk_events import (
     DailyLossHalt, Entry, Exit, KillSwitchActivated, OrderRejected,
-    OrderUnconfirmed, ReconcileDrift, RedemptionTimeout, RiskVeto,
+    OrderUnconfirmed, PMStrikeMismatch, ReconcileDrift, RedemptionTimeout,
+    RiskVeto,
 )
 
 
@@ -292,3 +293,26 @@ async def test_reconcile_drift_dedupes_repeated_identical_events():
         pass
     drift_msgs = [m for m in tg.messages if "DRIFT" in m]
     assert len(drift_msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_pm_strike_mismatch_renders_to_telegram():
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    ev = PMStrikeMismatch(
+        ts_ns=1, account_alias="v31_pm", question_idx=909002,
+        captured_strike=73644.92, reference_mark=73501.0, divergence_bps=19.5,
+    )
+    rendered = rules._format(ev)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert rendered is not None
+    _alias, body = rendered
+    assert "strike" in body.lower()
+    assert "73644.92" in body and "73501" in body
