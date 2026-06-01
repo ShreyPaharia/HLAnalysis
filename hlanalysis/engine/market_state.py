@@ -354,61 +354,11 @@ class MarketState:
             venue=ev.venue,
         )
 
-    def capture_pm_open_strike(
-        self,
-        question_idx: int,
-        *,
-        reference_symbol: str,
-        now_ns: int,
-        tolerance_ns: int,
-    ) -> float | None:
-        """Stamp the strike of a Polymarket up/down question from the live
-        reference mark, captured at the market open.
-
-        PM "BTC Up or Down" markets carry no numeric strike — they resolve
-        against a reference candle at ``strike_ref_ts_ns``. We stamp the strike
-        from the reference feed's current mark (the same perp-bbo series the
-        strategy's live ``reference_price`` comes from, so the perp/spot basis
-        cancels in ``log(reference_price / strike)``).
-
-        Only fires at/just-after the open: ``strike_ref_ts_ns <= now_ns <=
-        strike_ref_ts_ns + tolerance_ns``. BEFORE the open the current price
-        isn't the open yet (return None — the scan loop retries each tick and
-        fires once ``now`` reaches it). AFTER the window (market listed long
-        ago, or engine restarted past the open) we also return None and leave
-        the strike NaN so the slot skips rather than trade on a guessed strike.
-        Idempotent / no-op when the strike is already set, the question is
-        non-PM, or the mark is absent.
-
-        Returns the captured strike, or None when nothing was stamped.
-        """
-        q = self._questions.get(question_idx)
-        if q is None or q.venue != "polymarket":
-            return None
-        if q.strike == q.strike:  # already a real (non-NaN) strike
-            return None
-        kv = dict(q.kv)
-        ref_ts_raw = kv.get("strike_ref_ts_ns")
-        if not ref_ts_raw:
-            return None
-        try:
-            ref_ts_ns = int(ref_ts_raw)
-        except (TypeError, ValueError):
-            return None
-        delta = now_ns - ref_ts_ns
-        if delta < 0 or delta > tolerance_ns:
-            return None
-        mark = self.last_mark(reference_symbol)
-        if mark is None:
-            return None
-        self._questions[question_idx] = dataclasses.replace(q, strike=mark)
-        return mark
-
     def set_question_strike(self, question_idx: int, strike: float) -> bool:
         """Stamp a question's strike, but only if it isn't already set.
 
         Used to reload a persisted PM open-strike after a restart (see
-        ``capture_pm_open_strike`` and StateDAL.get_pm_strike). Never clobbers
+        ``EngineRuntime._maybe_capture_pm_strike`` and StateDAL.get_pm_strike). Never clobbers
         a strike already known. Returns True iff the strike was stamped.
         """
         q = self._questions.get(question_idx)

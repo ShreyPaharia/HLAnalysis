@@ -98,8 +98,9 @@ class _PMStubAdapter(VenueAdapter):
 
 class _PMUpDownStubAdapter(VenueAdapter):
     """A PM 'BTC Up or Down' market: no static strike, just a reference
-    candle ts (strike_ref_ts_ns). The engine must stamp the strike from the
-    live reference mark at the open."""
+    candle ts (strike_ref_ts_ns). The reference minute is already closed
+    (strike_ref_ts_ns is 90s in the past) so the engine must fetch the
+    Binance spot 1m close rather than stamping the live mark."""
 
     venue = "polymarket"
 
@@ -111,15 +112,15 @@ class _PMUpDownStubAdapter(VenueAdapter):
         expiry_str = datetime.fromtimestamp(
             (now + 12 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
         ).strftime("%Y%m%d-%H%M")
-        # Reference mark first — in production the bbo reference feed runs
-        # continuously, so a mark is always present when a new market lists.
-        # This is the value the engine should capture as the strike.
+        # Live reference mark at 73_500 — this is the value the engine must
+        # NOT capture (the new path uses the spot 1m close, not the live mark).
         yield MarkEvent(
             venue="binance", product_type=ProductType.SPOT,
             mechanism=Mechanism.CLOB, symbol="BTC",
             exchange_ts=now, local_recv_ts=now, mark_px=73_500.0,
         )
-        # strike_ref_ts_ns ≈ now → within the engine's capture tolerance.
+        # strike_ref_ts_ns is 90s in the past → the reference candle has
+        # already closed (>60s), so the runtime's capture path should fire.
         yield QuestionMetaEvent(
             venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
             mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
@@ -128,7 +129,7 @@ class _PMUpDownStubAdapter(VenueAdapter):
             keys=["class", "underlying", "expiry", "series_slug",
                   "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
             values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
-                    "YES_TOKEN", "NO_TOKEN", str(now)],
+                    "YES_TOKEN", "NO_TOKEN", str(now - 90 * 1_000_000_000)],
         )
         await asyncio.sleep(2.5)
 
@@ -281,9 +282,11 @@ async def test_pm_paper_slot_emits_decision(cfgs):
 
 
 @pytest.mark.asyncio
-async def test_pm_updown_strike_captured_from_reference_at_open(cfgs):
-    # An up/down PM market carries no static strike. The engine must stamp it
-    # from the live reference mark at the open so the strategy can price it.
+async def test_pm_updown_strike_captured_from_spot_close(cfgs):
+    # An up/down PM market carries no static strike. The reference candle is
+    # already closed (strike_ref_ts_ns 90s in the past), so the engine must
+    # fetch the Binance spot 1m CLOSE via klines_fetcher — NOT use the live
+    # reference mark of 73_500.
     strategy_cfg, deploy_cfg = cfgs
     fake_tg = _FakeTelegram()
 
@@ -294,6 +297,7 @@ async def test_pm_updown_strike_captured_from_reference_at_open(cfgs):
         subscriptions=[],
         exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
         telegram_factory=lambda _http: fake_tg,
+        klines_fetcher=lambda _ts_ns: 73_644.92,
     )
     runtime_task = asyncio.create_task(runtime.run())
     await asyncio.sleep(3.0)
@@ -302,11 +306,9 @@ async def test_pm_updown_strike_captured_from_reference_at_open(cfgs):
 
     q = runtime.market_state.question(909002)
     assert q is not None
-    # Strike stamped from the reference mark (73_500), not left NaN.
-    assert q.strike == 73_500.0
-    # …and persisted for restart reuse.
+    assert q.strike == 73_644.92          # spot 1m CLOSE, NOT the live mark 73_500
     [slot] = runtime.slots
-    assert slot.dal.get_pm_strike(909002) == 73_500.0
+    assert slot.dal.get_pm_strike(909002) == 73_644.92
 
 
 @pytest.mark.asyncio
@@ -342,7 +344,7 @@ async def test_pm_updown_strike_reloaded_from_db_after_restart(cfgs):
 
 
 @pytest.mark.asyncio
-async def test_pm_updown_strike_backfilled_when_open_missed(cfgs):
+async def test_pm_updown_strike_captured_when_open_already_closed(cfgs):
     # Open was missed AND nothing persisted (fresh engine that started after the
     # market's open). The engine must backfill the strike from the historical
     # Binance close so the market is tradeable instead of skipped.
