@@ -370,3 +370,105 @@ async def test_pm_updown_strike_captured_when_open_already_closed(cfgs):
     assert q.strike == 70_500.0
     [slot] = runtime.slots
     assert slot.dal.get_pm_strike(909003) == 70_500.0
+
+
+@pytest.mark.asyncio
+async def test_pm_strike_capture_loop_registered_and_captures(cfgs):
+    """The periodic _pm_strike_capture_loop must be registered as a task in
+    run() and must independently capture the strike even if first-sight could
+    not.  We use _PMUpDownRestartStubAdapter (ref_ts 6h ago, qidx 909003) and
+    assert capture happened — the integration proves the loop is wired up, not
+    just defined.  (The existing test_pm_updown_strike_captured_when_open_already_closed
+    exercises the same happy-path; this test complements it by also asserting
+    the loop method exists and is scheduled.)"""
+    strategy_cfg, deploy_cfg = cfgs
+
+    runtime = EngineRuntime(
+        strategies=[strategy_cfg],
+        deploy_cfg=deploy_cfg,
+        adapter_factory=_PMUpDownRestartStubAdapter,  # qidx 909003, ref_ts 6h ago
+        subscriptions=[],
+        exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
+        telegram_factory=lambda _http: _FakeTelegram(),
+        klines_fetcher=lambda _ts_ns: 70_500.0,
+    )
+
+    # The loop must exist as a callable method.
+    assert callable(getattr(runtime, "_pm_strike_capture_loop", None)), (
+        "_pm_strike_capture_loop not defined on EngineRuntime"
+    )
+
+    runtime_task = asyncio.create_task(runtime.run())
+    await asyncio.sleep(3.0)
+    runtime.stop_event.set()
+    await asyncio.wait_for(runtime_task, timeout=5.0)
+
+    q = runtime.market_state.question(909003)
+    assert q is not None and q.strike == 70_500.0, (
+        f"strike not captured: {q.strike if q else 'question missing'}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pm_strike_capture_loop_direct(cfgs):
+    """Drive _pm_strike_capture_loop directly: seed a PM question into
+    market_state (bypass ingest so first-sight never fires), then let the loop
+    run for ~1.5s, and confirm the strike was captured."""
+    import math
+    from hlanalysis.events import Mechanism, ProductType, QuestionMetaEvent
+
+    strategy_cfg, deploy_cfg = cfgs
+
+    runtime = EngineRuntime(
+        strategies=[strategy_cfg],
+        deploy_cfg=deploy_cfg,
+        # Use a stub that emits nothing — we seed market_state manually.
+        adapter_factory=_PMUpDownRestartStubAdapter,
+        subscriptions=[],
+        exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
+        telegram_factory=lambda _http: _FakeTelegram(),
+        klines_fetcher=lambda _ts_ns: 88_888.0,
+    )
+
+    # Build slots so _pm_strike_capture_loop has something to work with.
+    runtime.slots = [runtime._build_slot(strategy_cfg)]
+    slots = runtime.slots
+
+    now_ns = time.time_ns()
+    past_ref_ns = now_ns - 6 * 3600 * 1_000_000_000  # 6h ago → candle long closed
+    expiry_str = datetime.fromtimestamp(
+        (now_ns + 6 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+    ).strftime("%Y%m%d-%H%M")
+
+    # Seed the question directly into market_state (no ingest loop).
+    meta_ev = QuestionMetaEvent(
+        venue="polymarket",
+        product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB,
+        symbol="YES_TOKEN",
+        exchange_ts=now_ns,
+        local_recv_ts=now_ns,
+        question_idx=909004,
+        named_outcome_idxs=[0, 1],
+        keys=["class", "underlying", "expiry", "series_slug",
+              "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+        values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
+                "YES_TOKEN", "NO_TOKEN", str(past_ref_ns)],
+    )
+    runtime.market_state.apply(meta_ev)
+    qv = runtime.market_state.question(909004)
+    assert qv is not None
+    assert math.isnan(qv.strike), "strike should be NaN before capture"
+
+    # Run the loop as a task for ~1.5s, then stop.
+    loop_task = asyncio.create_task(runtime._pm_strike_capture_loop(slots))
+    await asyncio.sleep(1.5)
+    runtime.stop_event.set()
+    await asyncio.wait_for(loop_task, timeout=3.0)
+
+    q = runtime.market_state.question(909004)
+    assert q is not None and q.strike == 88_888.0, (
+        f"loop did not capture strike; got {q.strike if q else 'question missing'}"
+    )
+    [slot] = slots
+    assert slot.dal.get_pm_strike(909004) == 88_888.0

@@ -378,6 +378,10 @@ class EngineRuntime:
     # Populated by run() so external observers (heartbeat consumers, tests)
     # can read live slot state without rebuilding clones.
     slots: list[AccountSlot] = field(default_factory=list)
+    # Per-question-idx asyncio.Lock so concurrent first-sight + periodic-loop
+    # callers can't double-fetch the same PM strike. Created lazily; bounded by
+    # the number of PM questions (no eviction needed).
+    _pm_strike_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
 
     # ---------- legacy single-strategy compatibility ----------
 
@@ -485,6 +489,7 @@ class EngineRuntime:
                 asyncio.create_task(self._ingest_loop(slots)),
                 asyncio.create_task(rules.run(alerts_sub)),
                 asyncio.create_task(self._heartbeat_loop(slots)),
+                asyncio.create_task(self._pm_strike_capture_loop(slots)),
             ]
             for slot in slots:
                 tasks.append(asyncio.create_task(self._reconcile_loop(slot)))
@@ -704,30 +709,62 @@ class EngineRuntime:
         if now_ns < ref_ts_ns + _ONE_MINUTE_NS:
             return  # reference 1m candle has not closed yet — retry next tick
         qidx = qv.question_idx
-        pm_slots = [
-            s for s in slots
-            if match_question(s.cfg, question_idx=qidx, fields=fields) is not None
-        ]
-        if any(s.dal.get_pm_strike(qidx) is not None for s in pm_slots):
-            return  # a prior run captured it; scanner reloads from DB
-        try:
-            strike = await asyncio.to_thread(self.klines_fetcher, ref_ts_ns)
-        except Exception:
-            logger.exception("pm strike capture fetch crashed qidx={}", qidx)
-            return
-        if strike is None:
-            logger.warning(
-                "pm strike capture failed qidx={} ref_ts_ns={} — market skipped",
-                qidx, ref_ts_ns,
+        # Per-question lock: prevents a concurrent first-sight call and a periodic
+        # loop tick from both entering the fetch path simultaneously. The second
+        # caller acquires the lock after the first has persisted the strike and
+        # bails on the get_pm_strike check inside.
+        lock = self._pm_strike_locks.setdefault(qidx, asyncio.Lock())
+        async with lock:
+            pm_slots = [
+                s for s in slots
+                if match_question(s.cfg, question_idx=qidx, fields=fields) is not None
+            ]
+            if any(s.dal.get_pm_strike(qidx) is not None for s in pm_slots):
+                return  # a prior run captured it; scanner reloads from DB
+            try:
+                strike = await asyncio.to_thread(self.klines_fetcher, ref_ts_ns)
+            except Exception:
+                logger.exception("pm strike capture fetch crashed qidx={}", qidx)
+                return
+            if strike is None:
+                logger.warning(
+                    "pm strike capture failed qidx={} ref_ts_ns={} — market skipped",
+                    qidx, ref_ts_ns,
+                )
+                return
+            self.market_state.set_question_strike(qidx, strike)
+            for s in pm_slots:
+                s.dal.set_pm_strike(qidx, strike)
+            logger.info(
+                "pm strike captured qidx={} strike={} (binance spot 1m close)",
+                qidx, strike,
             )
-            return
-        self.market_state.set_question_strike(qidx, strike)
-        for s in pm_slots:
-            s.dal.set_pm_strike(qidx, strike)
-        logger.info(
-            "pm strike captured qidx={} strike={} (binance spot 1m close)",
-            qidx, strike,
-        )
+
+    async def _pm_strike_capture_loop(self, slots: list[AccountSlot]) -> None:
+        """Retry PM up/down strike capture each second. First-sight capture in
+        _ingest_loop fires at discovery, but PM lists markets ~24h before open,
+        so the strike can only be fetched once the reference 1m candle closes.
+        This loop walks unresolved PM questions and retries until captured."""
+        from .config import match_question
+        while not self.stop_event.is_set():
+            try:
+                now_ns = self._now_ns()
+                for qv in self.market_state.all_questions():
+                    if qv.venue != "polymarket" or qv.strike == qv.strike:
+                        continue
+                    fields = {
+                        "class": qv.klass, "underlying": qv.underlying,
+                        "period": qv.period, "venue": qv.venue,
+                        "series_slug": dict(qv.kv).get("series_slug", ""),
+                    }
+                    if any(
+                        match_question(s.cfg, question_idx=qv.question_idx, fields=fields) is not None
+                        for s in slots
+                    ):
+                        await self._maybe_capture_pm_strike(qv, slots, fields, now_ns=now_ns)
+            except Exception:
+                logger.exception("pm strike capture loop tick crashed")
+            await self._sleep_or_stop(1.0)
 
     async def _scan_loop(self, slot: AccountSlot) -> None:
         while not self.stop_event.is_set():
