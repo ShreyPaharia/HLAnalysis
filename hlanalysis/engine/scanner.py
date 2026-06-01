@@ -202,6 +202,13 @@ class Scanner:
             # already persisted by that path (pure sync, no IO). May re-stamp
             # the shared QuestionView, so re-read q before using it.
             q = self._resolve_pm_strike(q)
+            # No strike → cannot price the market. PM up/down strikes are
+            # captured asynchronously (runtime spot 1m-close); until captured the
+            # strike is NaN. Skip rather than evaluate — a NaN strike makes
+            # safety_d NaN, which the strategy maps to None and would otherwise
+            # silently bypass the safety_d gate. "No strike → no trade."
+            if q.venue == "polymarket" and q.strike != q.strike:  # NaN check
+                continue
             # Multi-outcome support: feed every leg of the question to the
             # strategy so it can decide across all sides (priceBucket has 6 legs;
             # priceBinary has 2). Skip the question if no leg has a book yet.

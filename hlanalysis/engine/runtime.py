@@ -694,6 +694,7 @@ class EngineRuntime:
         strike (a restart reloads instead). Fetched off the event loop.
         """
         _ONE_MINUTE_NS = 60 * 1_000_000_000
+        _CANDLE_SETTLE_NS = 2 * 1_000_000_000  # let Binance finalize/publish the 1m close
         if qv is None or qv.venue != "polymarket":
             return
         if qv.strike == qv.strike:  # already non-NaN
@@ -705,8 +706,8 @@ class EngineRuntime:
             ref_ts_ns = int(raw)
         except (TypeError, ValueError):
             return
-        if now_ns < ref_ts_ns + _ONE_MINUTE_NS:
-            return  # reference 1m candle has not closed yet — retry next tick
+        if now_ns < ref_ts_ns + _ONE_MINUTE_NS + _CANDLE_SETTLE_NS:
+            return  # reference 1m candle not closed+published yet — retry next tick
         qidx = qv.question_idx
         # Per-question lock: prevents a concurrent first-sight call and a periodic
         # loop tick from both entering the fetch path simultaneously. The second

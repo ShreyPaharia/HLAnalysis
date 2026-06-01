@@ -516,6 +516,108 @@ async def test_pm_strike_capture_loop_direct(cfgs):
     assert slot.dal.get_pm_strike(909004) == 88_888.0
 
 
+class _PMUpDownFutureRefStubAdapter(VenueAdapter):
+    """A PM up/down market whose strike_ref_ts_ns is ~1h in the FUTURE so
+    the reference candle has NOT yet closed. The engine must NOT call the
+    klines_fetcher (the candle-close gate blocks it) and the strike must
+    remain NaN after the run."""
+
+    venue = "polymarket"
+
+    def supports(self, *_a, **_k) -> bool:
+        return True
+
+    async def stream(self, _subs) -> AsyncIterator:
+        now = time.time_ns()
+        future_ref_ts = now + 3600 * 1_000_000_000  # 1h from now — candle not closed
+        expiry_str = datetime.fromtimestamp(
+            (now + 12 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+        ).strftime("%Y%m%d-%H%M")
+        yield MarkEvent(
+            venue="binance", product_type=ProductType.SPOT,
+            mechanism=Mechanism.CLOB, symbol="BTC",
+            exchange_ts=now, local_recv_ts=now, mark_px=80_000.0,
+        )
+        yield QuestionMetaEvent(
+            venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
+            exchange_ts=now, local_recv_ts=now,
+            question_idx=909006, named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "expiry", "series_slug",
+                  "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+            values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
+                    "YES_TOKEN", "NO_TOKEN", str(future_ref_ts)],
+        )
+        await asyncio.sleep(2.5)
+
+
+@pytest.mark.asyncio
+async def test_pm_strike_capture_failure_leaves_nan_and_skips(cfgs):
+    """When klines_fetcher returns None (Binance fetch fails), the strike must
+    remain NaN and nothing must be persisted to the DAL. The market is
+    effectively skipped (Fix 1 guard) rather than evaluated with a NaN strike."""
+    import math
+    strategy_cfg, deploy_cfg = cfgs
+
+    runtime = EngineRuntime(
+        strategies=[strategy_cfg], deploy_cfg=deploy_cfg,
+        adapter_factory=_PMUpDownRestartStubAdapter,  # qidx 909003, ref_ts 6h ago
+        subscriptions=[],
+        exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
+        telegram_factory=lambda _http: _FakeTelegram(),
+        klines_fetcher=lambda _ts_ns: None,   # fetch fails
+    )
+    runtime_task = asyncio.create_task(runtime.run())
+    await asyncio.sleep(3.0)
+    runtime.stop_event.set()
+    await asyncio.wait_for(runtime_task, timeout=5.0)
+
+    q = runtime.market_state.question(909003)
+    assert q is not None and math.isnan(q.strike), (
+        f"strike should still be NaN after failed fetch, got {q.strike if q else 'missing'}"
+    )
+    [slot] = runtime.slots
+    assert slot.dal.get_pm_strike(909003) is None, (
+        "nothing should be persisted when klines_fetcher returns None"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pm_strike_not_captured_before_candle_closes(cfgs):
+    """When strike_ref_ts_ns is in the future (candle not yet closed+published),
+    the candle-close gate must block the fetch entirely. klines_fetcher must
+    NOT be called and the strike must remain NaN."""
+    import math
+    strategy_cfg, deploy_cfg = cfgs
+
+    calls = {"n": 0}
+
+    def fetcher(_ts_ns: int) -> float | None:
+        calls["n"] += 1
+        return 70_000.0
+
+    runtime = EngineRuntime(
+        strategies=[strategy_cfg], deploy_cfg=deploy_cfg,
+        adapter_factory=_PMUpDownFutureRefStubAdapter,  # qidx 909006, ref_ts 1h future
+        subscriptions=[],
+        exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
+        telegram_factory=lambda _http: _FakeTelegram(),
+        klines_fetcher=fetcher,
+    )
+    runtime_task = asyncio.create_task(runtime.run())
+    await asyncio.sleep(3.0)
+    runtime.stop_event.set()
+    await asyncio.wait_for(runtime_task, timeout=5.0)
+
+    q = runtime.market_state.question(909006)
+    assert q is not None and math.isnan(q.strike), (
+        f"strike should be NaN (candle not closed), got {q.strike if q else 'missing'}"
+    )
+    assert calls["n"] == 0, (
+        f"klines_fetcher should not be called before candle closes, called {calls['n']} times"
+    )
+
+
 @pytest.mark.asyncio
 async def test_pm_strike_divergence_alerts_but_still_trades(cfgs):
     """Strike/spot-mark divergence fires a PMStrikeMismatch Telegram alert
