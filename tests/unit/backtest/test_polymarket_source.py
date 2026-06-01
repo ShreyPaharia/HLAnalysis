@@ -409,3 +409,204 @@ def test_wti_reference_events_carry_wti_symbol(tmp_path):
     assert descs[0].underlying == "WTI"
     refs = [ev for ev in ds.events(descs[0]) if type(ev).__name__ == "ReferenceEvent"]
     assert refs and refs[0].symbol == "WTI"
+
+
+# ---- binance_bbo product_type=spot tests ------------------------------------
+
+
+def _write_bbo_parquet(
+    root: Path,
+    product_type: str,
+    symbol: str,
+    date_str: str,
+    ticks: list[tuple[int, int, float, float]],
+) -> Path:
+    """Write a tiny BBO parquet under hive partition for the given product_type.
+
+    `ticks` is a list of (exchange_ts, local_recv_ts, bid_px, ask_px).
+    Returns the directory containing the written parquet.
+    """
+    part = (
+        root / f"venue=binance" / f"product_type={product_type}" / "mechanism=clob"
+        / "event=bbo" / f"symbol={symbol}" / f"date={date_str}"
+    )
+    part.mkdir(parents=True, exist_ok=True)
+    table = pa.table({
+        "exchange_ts":   [t[0] for t in ticks],
+        "local_recv_ts": [t[1] for t in ticks],
+        "bid_px":        [t[2] for t in ticks],
+        "ask_px":        [t[3] for t in ticks],
+    })
+    pq.write_table(table, part / "ticks.parquet")
+    return part
+
+
+def test_binance_bbo_product_type_default_is_perp(tmp_path):
+    """Default (no binance_bbo_product_type) stores 'perp' in the instance."""
+    ds = PolymarketDataSource(
+        cache_root=tmp_path,
+        reference_source="binance_bbo",
+        binance_data_root=tmp_path,
+    )
+    assert ds._binance_bbo_product_type == "perp"
+
+
+def test_binance_bbo_product_type_spot_stored(tmp_path):
+    """Passing binance_bbo_product_type='spot' stores 'spot' in the instance."""
+    ds = PolymarketDataSource(
+        cache_root=tmp_path,
+        reference_source="binance_bbo",
+        binance_bbo_product_type="spot",
+        binance_data_root=tmp_path,
+    )
+    assert ds._binance_bbo_product_type == "spot"
+
+
+def test_binance_bbo_product_type_invalid_raises(tmp_path):
+    """Passing an invalid binance_bbo_product_type raises ValueError."""
+    with pytest.raises(ValueError, match="binance_bbo_product_type"):
+        PolymarketDataSource(
+            cache_root=tmp_path,
+            reference_source="binance_bbo",
+            binance_bbo_product_type="futures",  # type: ignore[arg-type]
+            binance_data_root=tmp_path,
+        )
+
+
+def test_binance_bbo_perp_path_reads_perp_partition(tmp_path):
+    """_load_binance_bbo_reference with product_type=perp reads
+    venue=binance/product_type=perp/... and returns ReferenceEvents using
+    exchange_ts for filtering/ordering."""
+    from datetime import datetime, timezone
+
+    s = 1_000_000_000  # 1ns/tick epoch multiplier
+    start_ns = 100 * s
+    end_ns = 110 * s
+    date_str = datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).date().isoformat()
+
+    # Perp ticks: exchange_ts is valid (non-zero).
+    ticks = [
+        (start_ns + i * s, start_ns + i * s + 1_000_000, 80000.0 + i, 80001.0 + i)
+        for i in range(5)
+    ]
+    _write_bbo_parquet(tmp_path, "perp", "BTCUSDT", date_str, ticks)
+
+    ds = PolymarketDataSource(
+        cache_root=tmp_path / "sim",
+        reference_source="binance_bbo",
+        binance_bbo_product_type="perp",
+        reference_resample_seconds=5,
+        binance_data_root=tmp_path,
+    )
+    refs = ds._load_binance_bbo_reference(start_ns, end_ns)
+    assert refs, "expected ReferenceEvents from perp partition"
+    assert all(isinstance(r, ReferenceEvent) for r in refs)
+    assert all(r.symbol == "BTC" for r in refs)
+    # Spot partition must NOT have been read (it does not exist in tmp_path).
+    spot_root = tmp_path / "venue=binance" / "product_type=spot"
+    assert not spot_root.exists()
+
+
+def test_binance_bbo_spot_path_reads_spot_partition(tmp_path):
+    """_load_binance_bbo_reference with product_type=spot reads
+    venue=binance/product_type=spot/... and uses local_recv_ts (since
+    spot exchange_ts=0) for filtering and ordering."""
+    from datetime import datetime, timezone
+
+    s = 1_000_000_000
+    start_ns = 100 * s
+    end_ns = 110 * s
+    date_str = datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).date().isoformat()
+
+    # Spot ticks: exchange_ts=0 (Binance spot doesn't provide it); local_recv_ts valid.
+    ticks = [
+        (0, start_ns + i * s, 80000.0 + i, 80001.0 + i)
+        for i in range(5)
+    ]
+    _write_bbo_parquet(tmp_path, "spot", "BTCUSDT", date_str, ticks)
+
+    ds = PolymarketDataSource(
+        cache_root=tmp_path / "sim",
+        reference_source="binance_bbo",
+        binance_bbo_product_type="spot",
+        reference_resample_seconds=5,
+        binance_data_root=tmp_path,
+    )
+    refs = ds._load_binance_bbo_reference(start_ns, end_ns)
+    assert refs, "expected ReferenceEvents from spot partition"
+    assert all(isinstance(r, ReferenceEvent) for r in refs)
+    assert all(r.symbol == "BTC" for r in refs)
+    # Perp partition must NOT have been read.
+    perp_root = tmp_path / "venue=binance" / "product_type=perp"
+    assert not perp_root.exists()
+
+
+def test_binance_bbo_spot_ts_uses_local_recv(tmp_path):
+    """With spot, exchange_ts=0 rows are NOT filtered out — local_recv_ts is
+    used for window filtering. Verify ts_ns on the emitted bar equals
+    local_recv_ts (not 0)."""
+    from datetime import datetime, timezone
+
+    s = 1_000_000_000
+    start_ns = 200 * s
+    end_ns = 210 * s
+    date_str = datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).date().isoformat()
+
+    local_ts = start_ns + 3 * s  # one tick inside window
+    ticks = [(0, local_ts, 90000.0, 90002.0)]
+    _write_bbo_parquet(tmp_path, "spot", "BTCUSDT", date_str, ticks)
+
+    ds = PolymarketDataSource(
+        cache_root=tmp_path / "sim",
+        reference_source="binance_bbo",
+        binance_bbo_product_type="spot",
+        reference_resample_seconds=5,
+        binance_data_root=tmp_path,
+    )
+    refs = ds._load_binance_bbo_reference(start_ns, end_ns)
+    assert len(refs) == 1
+    # ts_ns must reflect local_recv_ts, not 0.
+    assert refs[0].ts_ns == local_ts
+    assert refs[0].close == 90001.0  # mid of 90000/90002
+
+
+def test_binance_bbo_perp_bit_identical_after_spot_added(tmp_path):
+    """Adding binance_bbo_product_type doesn't change perp output (bit-identical
+    to the baseline perp path in test_market_state.py)."""
+    from datetime import datetime, timezone
+
+    s = 1_000_000_000
+    start_ns = 100 * s
+    end_ns = 130 * s
+    date_str = datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).date().isoformat()
+
+    ticks = [
+        (start_ns + i * 1_300_000_000, start_ns + i * 1_300_000_000 + 500_000, 80000.0 + i, 80002.0 + i)
+        for i in range(10)
+    ]
+    _write_bbo_parquet(tmp_path, "perp", "BTCUSDT", date_str, ticks)
+
+    # Original path (no explicit binance_bbo_product_type → default perp).
+    ds_default = PolymarketDataSource(
+        cache_root=tmp_path / "sim",
+        reference_source="binance_bbo",
+        reference_resample_seconds=5,
+        binance_data_root=tmp_path,
+    )
+    # Explicit perp.
+    ds_perp = PolymarketDataSource(
+        cache_root=tmp_path / "sim",
+        reference_source="binance_bbo",
+        binance_bbo_product_type="perp",
+        reference_resample_seconds=5,
+        binance_data_root=tmp_path,
+    )
+    refs_default = ds_default._load_binance_bbo_reference(start_ns, end_ns)
+    refs_perp = ds_perp._load_binance_bbo_reference(start_ns, end_ns)
+    assert len(refs_default) == len(refs_perp)
+    for a, b in zip(refs_default, refs_perp):
+        assert a.ts_ns == b.ts_ns
+        assert a.high == b.high
+        assert a.low == b.low
+        assert a.close == b.close
+        assert a.open == b.open

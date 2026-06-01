@@ -320,6 +320,7 @@ class PolymarketDataSource:
         reference_source: Literal["klines", "binance_bbo"] = "klines",
         reference_resample_seconds: int = 60,
         binance_data_root: Path | str | None = None,
+        binance_bbo_product_type: Literal["perp", "spot"] = "perp",
         book_source: Literal["synthetic", "recorded"] = "synthetic",
         pm_book_root: Path | str | None = None,
     ) -> None:
@@ -331,18 +332,26 @@ class PolymarketDataSource:
         # Reference-feed mode.
         # - "klines" (default): emit cached 1m Binance klines as ReferenceEvents.
         #   This is the 12-month-corpus path used by the v3.1/v3.5/v3.6 tune.
-        # - "binance_bbo": read recorded Binance perp BBO ticks from
-        #   `<binance_data_root>/venue=binance/product_type=perp/...` and
+        # - "binance_bbo": read recorded Binance BBO ticks from
+        #   `<binance_data_root>/venue=binance/product_type=<perp|spot>/...` and
         #   bucket to `reference_resample_seconds` OHLC. Lets us probe
         #   sub-minute cadence on the BBO-tick overlap window; symmetrical to
         #   the HL HIP-4 cadence-parameterization story.
+        #   Use `binance_bbo_product_type="spot"` to match PM's settlement
+        #   instrument (Binance SPOT 1m close); default is "perp" for
+        #   backward-compatibility with existing BBO cadence sweeps.
         if reference_source not in ("klines", "binance_bbo"):
             raise ValueError(f"reference_source must be 'klines' or 'binance_bbo', got {reference_source!r}")
         if reference_resample_seconds <= 0:
             raise ValueError(f"reference_resample_seconds must be positive, got {reference_resample_seconds}")
+        if binance_bbo_product_type not in ("perp", "spot"):
+            raise ValueError(
+                f"binance_bbo_product_type must be 'perp' or 'spot', got {binance_bbo_product_type!r}"
+            )
         self._reference_source = reference_source
         self._reference_resample_seconds = int(reference_resample_seconds)
         self._reference_resample_ns = int(reference_resample_seconds) * 1_000_000_000
+        self._binance_bbo_product_type = binance_bbo_product_type
         # Binance tick partitions live next to PM cache root by default
         # (`data/venue=binance/...` while PM cache lives in `data/sim/`).
         self._binance_data_root = (
@@ -829,8 +838,19 @@ class PolymarketDataSource:
     def _load_binance_bbo_reference(
         self, start_ns: int, end_ns: int,
     ) -> list[ReferenceEvent]:
-        """Read recorded Binance perp BBO ticks for [start_ns, end_ns) and
+        """Read recorded Binance BBO ticks for [start_ns, end_ns) and
         bucket to ``reference_resample_seconds`` OHLC ReferenceEvents.
+
+        The product_type (perp or spot) is controlled by
+        ``self._binance_bbo_product_type``:
+
+        - ``"perp"`` (default): reads ``product_type=perp`` partitions. Binance
+          PERP BBO ticks carry a valid ``exchange_ts`` (nanoseconds); filtering
+          and ordering use ``exchange_ts`` directly.
+        - ``"spot"``: reads ``product_type=spot`` partitions. Binance SPOT
+          bookTicker does NOT provide an exchange timestamp — the adapter records
+          ``exchange_ts=0`` for every tick. Filtering and ordering use
+          ``local_recv_ts`` instead, which is always valid.
 
         Mirrors the HL HIP-4 `_resample_reference` contract: each bar's high/low
         track bucket extremes, close is the bucket's last tick, ts is the
@@ -855,9 +875,12 @@ class PolymarketDataSource:
         while d <= end_d + timedelta(days=1):
             date_list.append(d.isoformat())
             d += timedelta(days=1)
+        product_subpath = (
+            f"venue=binance/product_type={self._binance_bbo_product_type}/mechanism=clob"
+        )
         glob = str(
             self._binance_data_root
-            / _BINANCE_PERP_DATA_SUBPATH
+            / product_subpath
             / "event=bbo" / f"symbol={sym}"
             / "**" / "*.parquet"
         )
@@ -866,14 +889,18 @@ class PolymarketDataSource:
             logger.warning(f"binance_bbo: no parquet at {glob}")
             return []
         con = duckdb.connect()
+        # Spot exchange_ts is always 0 — use local_recv_ts for filter + order.
+        # Perp exchange_ts is a valid nanosecond timestamp — use it directly.
+        is_spot = self._binance_bbo_product_type == "spot"
+        ts_col = "local_recv_ts" if is_spot else "exchange_ts"
         try:
             rows = con.sql(
                 f"""
-                SELECT exchange_ts, bid_px, ask_px
+                SELECT {ts_col} AS ts, bid_px, ask_px
                 FROM read_parquet('{glob}', hive_partitioning=1)
                 WHERE date IN ({','.join(repr(d) for d in date_list)})
-                  AND exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
-                ORDER BY exchange_ts
+                  AND {ts_col} >= {start_ns} AND {ts_col} < {end_ns}
+                ORDER BY {ts_col}
                 """
             ).fetchall()
         finally:
