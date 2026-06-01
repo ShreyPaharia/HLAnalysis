@@ -50,18 +50,39 @@ def binance_reference_subscription() -> Subscription:
     )
 
 
+def binance_spot_reference_subscription() -> Subscription:
+    """The engine's dedicated Binance SPOT BTCUSDT `bbo` reference feed.
+
+    This is the price/σ/strike reference for the PM up/down slots: PM resolves
+    against the Binance spot BTC/USDT 1m candle close, so the live price and the
+    captured strike must both be spot (no perp/spot basis in the edge). Remapped
+    on ingest to internal symbol ``BTCUSDT_SPOT`` (see runtime._ingest_loop) so
+    it never collides with the perp ``BTCUSDT`` book key. spot bookTicker is not
+    geo-blocked from the EC2/Tokyo IP.
+    """
+    return Subscription(
+        venue="binance",
+        product_type=ProductType.SPOT,
+        mechanism=Mechanism.CLOB,
+        symbol="BTCUSDT",
+        channels=("bbo",),
+    )
+
+
 def build_engine_subscriptions(sym_cfg: RecorderConfig) -> list[Subscription]:
     """Subscriptions feeding the engine's MarketState: the HL + PM entries from
-    symbols.yaml verbatim, plus the one dedicated binance bbo reference feed.
+    symbols.yaml verbatim, plus dedicated binance bbo reference feeds (perp and
+    spot).
 
     Binance entries in symbols.yaml are skipped (recorder-only); the reference
-    feed is appended explicitly so it's obvious this is the engine's lean,
-    bbo-only reference — not the recorder's full binance ingest."""
+    feeds are appended explicitly so it's obvious these are the engine's lean,
+    bbo-only references — not the recorder's full binance ingest."""
     subs = [
         s for s in sym_cfg.subscriptions
         if s.venue in _ENGINE_VENUES_FROM_SYMBOLS
     ]
     subs.append(binance_reference_subscription())
+    subs.append(binance_spot_reference_subscription())   # NEW: spot for PM slots
     return subs
 
 

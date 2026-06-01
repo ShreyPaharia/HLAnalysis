@@ -28,6 +28,7 @@ from hlanalysis.adapters.composite import CompositeAdapter
 from hlanalysis.config import Subscription, load_config
 from hlanalysis.engine.main import (
     binance_reference_subscription,
+    binance_spot_reference_subscription,
     build_engine_adapter,
     build_engine_subscriptions,
 )
@@ -53,11 +54,29 @@ def test_build_engine_subscriptions_appends_exactly_one_binance_bbo_ref():
     subs = build_engine_subscriptions(sym_cfg)
 
     binance_subs = [s for s in subs if s.venue == "binance"]
-    assert len(binance_subs) == 1
-    bsub = binance_subs[0]
+    assert len(binance_subs) == 2  # perp + spot
+    perp_subs = [s for s in binance_subs if s.product_type == ProductType.PERP]
+    assert len(perp_subs) == 1
+    bsub = perp_subs[0]
     assert bsub.symbol == "BTCUSDT"
-    assert bsub.product_type == ProductType.PERP
     assert bsub.channels == ("bbo",)
+
+
+def test_engine_subscribes_binance_spot_reference():
+    sub = binance_spot_reference_subscription()
+    assert sub.venue == "binance"
+    assert sub.product_type == ProductType.SPOT
+    assert sub.symbol == "BTCUSDT"
+    assert sub.channels == ("bbo",)
+
+
+def test_build_engine_subscriptions_includes_both_perp_and_spot_reference():
+    from hlanalysis.config import RecorderConfig
+    cfg = RecorderConfig(subscriptions=[])
+    subs = build_engine_subscriptions(cfg)
+    binance = [(s.product_type, s.symbol) for s in subs if s.venue == "binance"]
+    assert (ProductType.PERP, "BTCUSDT") in binance   # existing σ-bbo feed
+    assert (ProductType.SPOT, "BTCUSDT") in binance    # new spot reference
 
 
 def test_build_engine_subscriptions_preserves_hl_and_pm_unchanged():

@@ -15,7 +15,7 @@ from loguru import logger
 from ..adapters.base import VenueAdapter
 from ..adapters.binance_klines import binance_1m_close_at
 from ..config import Subscription
-from ..events import NormalizedEvent
+from ..events import NormalizedEvent, ProductType
 from .config import (
     AccountConfig,
     DeployConfig,
@@ -47,6 +47,25 @@ from ..strategy.late_resolution import (
 from ..strategy.theta_harvester import (
     ThetaHarvesterConfig, ThetaHarvesterStrategy,
 )
+
+
+# Internal symbol used for Binance SPOT BTCUSDT after ingest remapping.
+# The perp feed and the spot feed both emit symbol="BTCUSDT"; MarketState keys
+# books by bare symbol, so without a remap they silently overwrite each other.
+# The spot event is renamed to BTCUSDT_SPOT on arrival so both can coexist.
+_SPOT_REF_SYMBOL = "BTCUSDT_SPOT"
+
+
+def _remap_reference_symbol(ev: NormalizedEvent) -> NormalizedEvent:
+    """Rename Binance SPOT BTCUSDT events to BTCUSDT_SPOT so they don't collide
+    with the perp BTCUSDT book key in MarketState. No-op for every other event."""
+    if (
+        getattr(ev, "venue", None) == "binance"
+        and getattr(ev, "product_type", None) in (ProductType.SPOT, ProductType.SPOT.value)
+        and getattr(ev, "symbol", None) == "BTCUSDT"
+    ):
+        return ev.model_copy(update={"symbol": _SPOT_REF_SYMBOL})
+    return ev
 
 
 # PM unconfirmed-order watchdog: OrderUnconfirmed fires once a live PM order
@@ -588,6 +607,7 @@ class EngineRuntime:
             async for ev in adapter.stream(self.subscriptions):
                 if self.stop_event.is_set():
                     return
+                ev = _remap_reference_symbol(ev)
                 self.market_state.apply(ev)
                 self.events_ingested += 1
                 if isinstance(ev, QuestionMetaEvent):
