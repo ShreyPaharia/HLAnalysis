@@ -1,0 +1,1034 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HLAnalysis — Codebase Review &amp; Action Plan</title>
+<style>
+  :root {
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c232d; --border:#2a313c;
+    --text:#e6edf3; --muted:#8b949e; --accent:#58a6ff;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  .wrap { max-width:1080px; margin:0 auto; padding:32px 22px 80px; }
+  header.top { border-bottom:1px solid var(--border); padding-bottom:20px; margin-bottom:24px; }
+  h1 { font-size:26px; margin:0 0 4px; letter-spacing:-.4px; }
+  .sub { color:var(--muted); font-size:13.5px; }
+  .summary {
+    background:linear-gradient(180deg,var(--panel2),var(--panel));
+    border:1px solid var(--border); border-left:3px solid var(--accent);
+    border-radius:10px; padding:18px 20px; margin:22px 0; font-size:14.5px;
+  }
+  .summary strong { color:#fff; }
+  .stats { display:flex; gap:12px; flex-wrap:wrap; margin:18px 0 8px; }
+  .stat {
+    flex:1; min-width:120px; background:var(--panel); border:1px solid var(--border);
+    border-top:3px solid; border-radius:8px; padding:12px 14px; text-align:center;
+  }
+  .stat-n { font-size:30px; font-weight:700; line-height:1; }
+  .stat-l { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.5px; margin-top:4px; }
+  .stat.total { border-top-color:var(--accent); }
+  .stat.total .stat-n { color:var(--accent); }
+  .meta-line { color:var(--muted); font-size:12.5px; margin-top:6px; }
+  h2 { font-size:19px; margin:0; }
+  .controls {
+    position:sticky; top:0; z-index:5; background:rgba(13,17,23,.92);
+    backdrop-filter:blur(6px); padding:12px 0; margin:18px 0 6px;
+    border-bottom:1px solid var(--border); display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+  }
+  .controls .lbl { color:var(--muted); font-size:12.5px; margin-right:2px; }
+  .fbtn {
+    background:var(--panel); color:var(--text); border:1px solid var(--border);
+    border-radius:999px; padding:5px 13px; font-size:12.5px; cursor:pointer; transition:.12s;
+  }
+  .fbtn:hover { border-color:var(--accent); }
+  .fbtn.active { background:var(--accent); color:#06101f; border-color:var(--accent); font-weight:600; }
+  table.top { width:100%; border-collapse:collapse; margin:8px 0 10px; font-size:13.5px; }
+  table.top th { text-align:left; color:var(--muted); font-weight:500; font-size:11.5px;
+    text-transform:uppercase; letter-spacing:.5px; padding:6px 8px; border-bottom:1px solid var(--border); }
+  table.top td { padding:7px 8px; border-bottom:1px solid var(--border); vertical-align:top; }
+  table.top td.r { color:var(--muted); white-space:nowrap; }
+  table.top td.loc-cell { font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--muted); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  details.topwrap { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:6px 16px; margin:10px 0 26px; }
+  details.topwrap summary { cursor:pointer; font-weight:600; padding:8px 0; font-size:14px; }
+  section.group { margin:30px 0; }
+  .group-head { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;
+    border-bottom:1px solid var(--border); padding-bottom:8px; margin-bottom:6px; }
+  .group-chips { display:flex; gap:10px; }
+  .mini { font-size:12px; font-weight:600; }
+  .rationale { color:var(--muted); font-size:13.5px; margin:6px 0 16px; }
+  .card {
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:15px 17px; margin:11px 0; transition:.12s;
+  }
+  .card:hover { border-color:#3d4654; }
+  .card-head { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+  .card-head h3 { font-size:15.5px; margin:0; flex-basis:100%; order:5; line-height:1.4; }
+  .rank { color:var(--muted); font-weight:700; font-size:13px; font-variant-numeric:tabular-nums; }
+  .badge { font-size:10.5px; font-weight:700; letter-spacing:.5px; padding:2px 8px;
+    border-radius:5px; border:1px solid; }
+  .eff, .conf { font-size:11.5px; color:var(--muted); background:var(--panel2);
+    border:1px solid var(--border); border-radius:5px; padding:2px 7px; }
+  .locs { margin:10px 0 9px; display:flex; flex-wrap:wrap; gap:6px; }
+  code.loc { font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--accent);
+    background:rgba(88,166,255,.08); border:1px solid rgba(88,166,255,.18);
+    border-radius:5px; padding:1px 7px; }
+  .prob { margin:8px 0; font-size:13.8px; }
+  .rec { margin:8px 0 2px; font-size:13.8px; color:#cfe7d4; }
+  .prob strong { color:#ffb4b4; }
+  .rec strong { color:#8ee0a0; }
+  .hidden { display:none !important; }
+  footer { color:var(--muted); font-size:12px; margin-top:40px; border-top:1px solid var(--border); padding-top:16px; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>HLAnalysis — Codebase Review &amp; Prioritized Action Plan</h1>
+    <div class="sub">Live HL HIP-4 / BTC + Polymarket market-making &amp; hedging engine · multi-agent audit · 2026-05-31</div>
+  </header>
+
+  <div class="summary"><strong>Executive summary.</strong> This is a sophisticated, well-instrumented system, but it is currently running real money with several critical gaps between what the operator believes is happening and what the code actually does. The dominant theme is silent divergence: the live engine silently runs a different strategy than the backtest validated (theta knobs dropped), the backtest silently fabricates or overstates PnL (frozen PM strike, no-op slippage, zero HL fees, unsettled hedge legs), and the most dangerous live failures are silent (dead feed with no reconnect/alert, stop-loss that can flip a closing trade into a naked short, no dead-man&#x27;s-switch). The top risks, in order: (1) blocking REST calls on the single event loop can freeze WS ingest and the stop-loss enforcer exactly when the venue is congested; (2) the stop-loss re-fires a full-size IOC every second with no in-flight guard and no reduce-only on HIP-4, which can oversell a hedged position into a naked short; (3) the ingest loop and recorder die silently with no reconnect and no alert, leaving open positions managed against a frozen feed; (4) the backtest freezes the PM strike when the kline cache is stale and leaves hedge legs unsettled, so the entire calibration corpus may rest on fabricated edge; (5) on the 1GB box a recorder disk-full re-buffer loop OOM-kills the protected live engine. Secondary but material: the daily-loss cap is blind to HIP-4 settlement payouts and fails open on any HL error, no Binance reference-feed staleness watchdog exists (the documented geo-block produces a silently-empty stream), and there is no live hedge-execution path at all despite the system being operated as hedged. Architecturally, money-touching code (leg geometry, exit/topup builders, MarketState, PM loaders) is forked and already drifting, and the live theta config can&#x27;t even set the bipower/exit-gate knobs the deployment was justified on. Fix the loop-blocking, stop-loss oversell, silent-feed-death, daily-loss-blindness, and backtest-fabrication items before any further tuning or capital increase; most are S/M effort with high confidence.</div>
+
+  <div class="stats">
+    <div class="stat total"><div class="stat-n">61</div><div class="stat-l">findings</div></div>
+    <div class="stat" style="border-color:#e5484d">
+      <div class="stat-n" style="color:#e5484d">8</div>
+      <div class="stat-l">critical</div></div><div class="stat" style="border-color:#f76808">
+      <div class="stat-n" style="color:#f76808">21</div>
+      <div class="stat-l">high</div></div><div class="stat" style="border-color:#ffb224">
+      <div class="stat-n" style="color:#ffb224">20</div>
+      <div class="stat-l">medium</div></div><div class="stat" style="border-color:#3e9b4f">
+      <div class="stat-n" style="color:#3e9b4f">12</div>
+      <div class="stat-l">low</div></div>
+  </div>
+  <div class="meta-line">Effort split — S (&lt;2h): 23 · M (~½ day): 34 · L (multi-day): 4 &nbsp;|&nbsp; 9 specialist reviewers across engine safety, hedge/risk, strategy math, sim performance, sim-vs-live parity, adapter robustness, duplication, testing, data/ops.</div>
+
+  <details class="topwrap" open>
+    <summary>Top 10 — fix before any further tuning or capital increase</summary>
+    <table class="top">
+      <thead><tr><th>#</th><th>Sev</th><th>Finding</th><th>Eff</th><th>First location</th></tr></thead>
+      <tbody><tr data-sev="critical">
+      <td class="r">#1</td>
+      <td><span class="dot" style="background:#e5484d"></span>critical</td>
+      <td>Blocking REST calls run inside the async event loop, freezing all strategies, stop-losses, and WS ingest</td>
+      <td>M</td>
+      <td class="loc-cell">hlanalysis/engine/router.py:193</td>
+    </tr><tr data-sev="critical">
+      <td class="r">#2</td>
+      <td><span class="dot" style="background:#e5484d"></span>critical</td>
+      <td>Ingest loop crash is silent and terminal — no reconnect, no alert, trading continues on frozen data</td>
+      <td>M</td>
+      <td class="loc-cell">hlanalysis/engine/runtime.py:587-655</td>
+    </tr><tr data-sev="critical">
+      <td class="r">#3</td>
+      <td><span class="dot" style="background:#e5484d"></span>critical</td>
+      <td>No dead-man&#x27;s-switch / liveness alert — engine silence is indistinguishable from healthy</td>
+      <td>M</td>
+      <td class="loc-cell">hlanalysis/engine/runtime.py:727-760</td>
+    </tr><tr data-sev="critical">
+      <td class="r">#4</td>
+      <td><span class="dot" style="background:#e5484d"></span>critical</td>
+      <td>Stop-loss re-sends a full-size IOC every second with no in-flight guard — can oversell into a naked short</td>
+      <td>M</td>
+      <td class="loc-cell">hlanalysis/engine/runtime.py:850-901</td>
+    </tr><tr data-sev="critical">
+      <td class="r">#5</td>
+      <td><span class="dot" style="background:#e5484d"></span>critical</td>
+      <td>PM strike silently FREEZES (returns last cached close) when the kline cache ends before the strike timestamp</td>
+      <td>S</td>
+      <td class="loc-cell">hlanalysis/backtest/data/polymarket.py:581-589</td>
+    </tr><tr data-sev="critical">
+      <td class="r">#6</td>
+      <td><span class="dot" style="background:#e5484d"></span>critical</td>
+      <td>Open hedge (BTC perp) positions are never settled or marked-to-market at end of data</td>
+      <td>M</td>
+      <td class="loc-cell">hlanalysis/backtest/runner/hftbt_runner.py:724-743</td>
+    </tr><tr data-sev="high">
+      <td class="r">#7</td>
+      <td><span class="dot" style="background:#f76808"></span>high</td>
+      <td>MarketState._questions and per-tick scan grow unbounded — OOM on t4g.micro and O(N) scan cost</td>
+      <td>M</td>
+      <td class="loc-cell">hlanalysis/engine/market_state.py:52</td>
+    </tr><tr data-sev="high">
+      <td class="r">#8</td>
+      <td><span class="dot" style="background:#f76808"></span>high</td>
+      <td>No reject/error circuit-breaker — a rejection storm hammers the venue every tick</td>
+      <td>M</td>
+      <td class="loc-cell">hlanalysis/engine/router.py:206-221</td>
+    </tr><tr data-sev="high">
+      <td class="r">#9</td>
+      <td><span class="dot" style="background:#f76808"></span>high</td>
+      <td>Stop/exit IOC is single-shot at top-of-book and walks the book down on a falling market</td>
+      <td>M</td>
+      <td class="loc-cell">hlanalysis/engine/runtime.py:865-901</td>
+    </tr><tr data-sev="high">
+      <td class="r">#10</td>
+      <td><span class="dot" style="background:#f76808"></span>high</td>
+      <td>Daily-loss gate depends entirely on HL fills, omits settlement PnL, and falls back to a structurally-zero local PnL on any HL error</td>
+      <td>M</td>
+      <td class="loc-cell">hlanalysis/engine/runtime.py:918-931</td>
+    </tr></tbody>
+    </table>
+  </details>
+
+  <div class="controls">
+    <span class="lbl">Severity:</span>
+    <button class="fbtn active" data-f="sev" data-v="all">all</button>
+    <button class="fbtn" data-f="sev" data-v="critical">critical</button>
+    <button class="fbtn" data-f="sev" data-v="high">high</button>
+    <button class="fbtn" data-f="sev" data-v="medium">medium</button>
+    <button class="fbtn" data-f="sev" data-v="low">low</button>
+    <span class="lbl" style="margin-left:14px">Effort:</span>
+    <button class="fbtn active" data-f="eff" data-v="all">all</button>
+    <button class="fbtn" data-f="eff" data-v="S">S</button>
+    <button class="fbtn" data-f="eff" data-v="M">M</button>
+    <button class="fbtn" data-f="eff" data-v="L">L</button>
+  </div>
+
+  
+    <section class="group" data-group="0">
+      <div class="group-head">
+        <h2>Live engine safety &amp; crash prevention</h2>
+        <div class="group-chips"><span class="mini" style="color:#e5484d">3 critical</span> <span class="mini" style="color:#f76808">3 high</span> <span class="mini" style="color:#ffb224">1 medium</span> <span class="mini" style="color:#3e9b4f">1 low</span></div>
+      </div>
+      <p class="rationale">These are the failure modes that crash the process, freeze the loop, or let the engine keep trading on dead data — each is a direct path to an unhedged/unmanaged live position.</p>
+      
+    <div class="card" data-sev="critical" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#1</span>
+        <span class="badge" style="background:rgba(229,72,77,.12);color:#e5484d;border-color:#e5484d">CRITICAL</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Blocking REST calls run inside the async event loop, freezing all strategies, stop-losses, and WS ingest</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/router.py:193</code><code class="loc">hlanalysis/engine/hl_client.py:202-256</code><code class="loc">hlanalysis/engine/runtime.py:719-721</code><code class="loc">hlanalysis/engine/runtime.py:777-781</code><code class="loc">hlanalysis/engine/runtime.py:919</code></div>
+      <p class="prob"><strong>Problem.</strong> Every ExecutionClient call (place, open_orders, clearinghouse_state, user_fills, realized_pnl_since) is a synchronous blocking HTTP/SDK call invoked directly from async coroutines with no asyncio.to_thread. _live_place additionally wraps placement in tenacity with up to 3 attempts and several seconds of exponential backoff. On a single-event-loop engine, one slow/flaky HL or PM REST call parks the shared _ingest_loop (WS market data), the heartbeat, the stop-loss enforcer, and every other slot — exactly when the venue is congested and you most need to react.</p>
+      <p class="rec"><strong>Fix.</strong> Wrap every blocking ExecutionClient call in await asyncio.to_thread(...) (or give clients true async methods); at minimum offload place, open_orders, clearinghouse_state, user_fills/realized_pnl_since. Bound the tenacity total time so a single placement can&#x27;t park the loop for seconds.</p>
+    </div>
+    <div class="card" data-sev="critical" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#2</span>
+        <span class="badge" style="background:rgba(229,72,77,.12);color:#e5484d;border-color:#e5484d">CRITICAL</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Ingest loop crash is silent and terminal — no reconnect, no alert, trading continues on frozen data</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/runtime.py:587-655</code><code class="loc">hlanalysis/engine/runtime.py:652-655</code><code class="loc">hlanalysis/engine/runtime.py:711-725</code><code class="loc">hlanalysis/recorder/runner.py:35-43</code></div>
+      <p class="prob"><strong>Problem.</strong> _ingest_loop catches all exceptions, logs &#x27;adapter ingest crashed&#x27;, and returns — the only market-data task dies with no reconnect and no signal. Scan loops, the stop-loss enforcer, and reconcile keep running on increasingly stale MarketState. New entries are eventually vetoed by stale_data, but the stop-loss enforcer reads breached_stops against books frozen at the last-seen value, so a real adverse move after the feed dies never triggers the stop and held positions sit unhedged. This maps directly to the live HL Tokyo POP outage pattern. The recorder has the analogous bug: an exception escaping stream() permanently completes that venue&#x27;s task while the process stays alive (systemd never restarts).</p>
+      <p class="rec"><strong>Fix.</strong> Wrap stream consumption in a reconnect loop with bounded backoff; publish a FeedDown alert on disconnect and FeedRecovered on resubscribe (mirror the recorder watchdog). On prolonged disconnect, latch all slots halted so nothing trades on frozen state. For the recorder, add_done_callback / asyncio.wait(FIRST_COMPLETED) so a dying adapter trips a clean exit and a HealthEvent.</p>
+    </div>
+    <div class="card" data-sev="critical" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#3</span>
+        <span class="badge" style="background:rgba(229,72,77,.12);color:#e5484d;border-color:#e5484d">CRITICAL</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>No dead-man&#x27;s-switch / liveness alert — engine silence is indistinguishable from healthy</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/runtime.py:727-760</code><code class="loc">hlanalysis/engine/runtime.py:579-655</code><code class="loc">hlanalysis/alerts/rules.py:98-215</code></div>
+      <p class="prob"><strong>Problem.</strong> The heartbeat loop computes d_events per 30s but only writes it to loguru — it never publishes a bus event or Telegram when d_events==0. There is NO alert kind for &#x27;no events ingested&#x27;, &#x27;heartbeat missing&#x27;, or &#x27;process down&#x27;. A total feed death produces no StaleDataHalt (which only fires when held positions exist AND a book is received-but-stale). If the feed dies, the ingest task crashes, or the t4g.micro OOMs, the operator gets zero signal while the engine may hold open binary positions against a frozen feed.</p>
+      <p class="rec"><strong>Fix.</strong> Publish an EngineHeartbeat bus event every interval AND add a server-side dead-man&#x27;s-switch (systemd timer touchfile or external uptime monitor) alerting when no heartbeat in N intervals. Publish a FeedStale/IngestDown alert when d_events==0 while subscriptions are active.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#7</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>MarketState._questions and per-tick scan grow unbounded — OOM on t4g.micro and O(N) scan cost</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/market_state.py:52</code><code class="loc">hlanalysis/engine/market_state.py:420-439</code><code class="loc">hlanalysis/engine/scanner.py:212-223</code><code class="loc">hlanalysis/engine/runtime.py:585</code><code class="loc">hlanalysis/engine/runtime.py:739</code></div>
+      <p class="prob"><strong>Problem.</strong> _questions is a dict only ever inserted into; mark_question_settled flips settled=True but never deletes. The engine subscribes to many PM series (ETH/NVDA/NBA/...) for recorder ingest, so the universe grows continuously. Scanner.scan iterates all_questions() every 1Hz tick and runs match_question on each; ingest&#x27;s seen_questions grows too. On a 1G-swap box this is the flagged unbounded-_questions OOM (2026-05-31 live eval), and per-tick O(N) work degrades scan latency. Several side maps grow forever too: slot.pm_settlements, slot.pm_alerted_redemption_qidxs, Scanner._last_logged_state, Scanner._pm_strike_seen, Router._last_exit_ts.</p>
+      <p class="rec"><strong>Fix.</strong> Evict questions once settled AND past expiry + grace; skip settled questions at the top of the scan loop. Periodically prune the per-slot/per-scanner maps keyed by question_idx on the same horizon. Add a test asserting _questions count drops after settlement+grace and cap total retained questions defensively.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#8</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>No reject/error circuit-breaker — a rejection storm hammers the venue every tick</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/router.py:206-221</code><code class="loc">hlanalysis/engine/runtime.py:711-725</code><code class="loc">hlanalysis/engine/risk.py:45-192</code></div>
+      <p class="prob"><strong>Problem.</strong> On venue rejects (insufficient margin, invalid token id, invalid size) the router logs and publishes OrderRejected but takes no throttling action. The scanner re-fires the same entry on the next 1Hz tick, so a structural rejection (the HYPE-short-eats-margin / HIP-4 buy storm in the code comments) produces unbounded repeated REST calls. There is no per-(question,error-class) reject counter that backs off or halts. This risks rate-limiting/ban and, combined with the blocking-call issue, can wedge the loop while the operator gets no automatic protection.</p>
+      <p class="rec"><strong>Fix.</strong> Count consecutive rejects per (question_idx, error-class); after a threshold, veto entries on that question for a cooldown (or latch the slot halted on repeated margin/auth rejects) and alert. Reset on a successful fill.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#11</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Order ACK can be lost between persist and DB update, orphaning an in-flight/filled order with no recovery</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/router.py:185-200</code><code class="loc">hlanalysis/engine/state.py:146-158</code></div>
+      <p class="prob"><strong>Problem.</strong> _place writes a pending OpenOrder row, calls exec_client.place(), then updates the row from the ACK. An OOM-kill (explicitly in scope) between place() returning a fill and update_order_status leaves the order pending in the DB while it actually filled on the venue, with the Position/Entry never booked — the real position is unhedged/untracked for the whole window. There is no idempotency key beyond cloid, so a retried place after a lost ACK could double-send.</p>
+      <p class="rec"><strong>Fix.</strong> Make restart reconciliation authoritative for pending rows: resolve each via user_fills/open_orders before scanning, and book the Position from user_fills when a pending order vanished (extend the local-ghost branch to create the Position, not just mark filled). Confirm cloid-based idempotency causes live HL/PM to reject duplicate cloids rather than place twice.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#19</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>EventBus has no unsubscribe; halted-slot watchdog stops draining and drops settlement Exits</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/event_bus.py:24-49</code><code class="loc">hlanalysis/engine/runtime.py:832</code><code class="loc">hlanalysis/engine/runtime.py:939-953</code></div>
+      <p class="prob"><strong>Problem.</strong> EventBus.subscribe appends a Queue with no unsubscribe; each PM slot&#x27;s _continuous_checks_loop subscription lives for the process lifetime. When a slot is halted (if slot.halted: continue) its loop stops draining pm_bus_sub while events keep being published; the queue fills to maxsize=1024 and drop_when_full silently discards settlement Exits, so the RedemptionTimeout watchdog can miss settlements. Without drop_when_full a full non-draining queue would block publish entirely.</p>
+      <p class="rec"><strong>Fix.</strong> Add unsubscribe/close and call it when a task exits. Drain pm_bus_sub even while halted (or move settlement capture out of the halt-gated path). Confirm drop_when_full is always set for these subscriptions and add a metric/alert when drops occur.</p>
+    </div>
+    <div class="card" data-sev="low" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#38</span>
+        <span class="badge" style="background:rgba(62,155,79,.12);color:#3e9b4f;border-color:#3e9b4f">LOW</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>exit_cooldowns.json write is fsync-less and the cooldown map grows unbounded</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/router.py:86-95</code><code class="loc">hlanalysis/engine/router.py:69</code></div>
+      <p class="prob"><strong>Problem.</strong> _save_cooldowns uses tmp+os.replace (atomic) but never fsyncs, and _last_exit_ts is never pruned (one entry per question_idx ever traded, persisted and reloaded each restart). A partially-flushed tmp under power loss yields truncated JSON the loader discards entirely, silently dropping all cooldowns and allowing immediate re-entry churn after restart.</p>
+      <p class="rec"><strong>Fix.</strong> Prune _last_exit_ts to entries within the cooldown horizon before persisting; fsync the tmp before os.replace; alert (not silently reset) on load failure.</p>
+    </div>
+    </section>
+    <section class="group" data-group="1">
+      <div class="group-head">
+        <h2>Hedge &amp; risk correctness</h2>
+        <div class="group-chips"><span class="mini" style="color:#e5484d">1 critical</span> <span class="mini" style="color:#f76808">6 high</span> <span class="mini" style="color:#ffb224">4 medium</span> <span class="mini" style="color:#3e9b4f">1 low</span></div>
+      </div>
+      <p class="rationale">The whole point of the system is hedging and not flipping naked. These items either flip a closing action into new directional risk, defeat the loss cap, or run the live strategy without its risk gates.</p>
+      
+    <div class="card" data-sev="critical" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#4</span>
+        <span class="badge" style="background:rgba(229,72,77,.12);color:#e5484d;border-color:#e5484d">CRITICAL</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Stop-loss re-sends a full-size IOC every second with no in-flight guard — can oversell into a naked short</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/runtime.py:850-901</code><code class="loc">hlanalysis/engine/risk.py:60-61</code><code class="loc">hlanalysis/engine/hl_client.py:216</code></div>
+      <p class="prob"><strong>Problem.</strong> _continuous_checks_loop calls breached_stops every ~1s and submits a fresh IOC sell for abs(sp.qty) at the current bid. The DB position only updates on fill ACK; if the IOC partial-fills, the ACK is delayed, or the loop ticks again before resolution, the next tick re-fires another full-size IOC. The risk gate short-circuits exits (is_exit returns approved immediately) so there is NO size-vs-held check, and on HIP-4 the client strips reduce_only entirely (hl_client.py:216), so HL receives plain sells. This can oversell a closing position into a naked short on the outcome leg — the worst outcome for a hedging book.</p>
+      <p class="rec"><strong>Fix.</strong> Track in-flight stop-loss orders per question_idx and suppress re-fire until the prior resolves (filled/cancelled). Re-read held qty and clamp sell size before each resubmit. Enforce an explicit reduce-only semantic for HIP-4 by verifying held qty in the router before submitting a sell.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#9</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Stop/exit IOC is single-shot at top-of-book and walks the book down on a falling market</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/runtime.py:865-901</code><code class="loc">hlanalysis/engine/router.py:226-246</code><code class="loc">hlanalysis/engine/risk.py:196-212</code><code class="loc">hlanalysis/strategy/theta_harvester.py:931</code></div>
+      <p class="prob"><strong>Problem.</strong> Stop-loss exits place one IOC at the current bid_px for full size; for HL max_slippage_pct defaults to 0 so only the top level is lifted. On a thin HIP-4/PM book the IOC partial-fills (or misses), leaving residual. Closure depends on the 1Hz loop re-detecting the breach and re-firing at the then-current (lower) bid — the &#x27;IOC stop walking down the book&#x27; live bug from the 2026-05-31 eval. There is no escalation to sweep within a slippage budget, and in legacy exit mode (v3.1 prod default) the only adverse-move exit is edge_held = held_p - bid - fee, which fires late because held_p and bid fall together while the position bleeds toward zero.</p>
+      <p class="rec"><strong>Fix.</strong> After a partial/missed stop IOC, retry within a bounded slippage budget that crosses enough levels to clear the residual, with an in-flight guard so only one exit is live. Verify position reaches zero before clearing breach state. For live slots, ensure exit_safety_d&gt;0 (theta) is configured and add a defaulted stop_loss_pct / absolute mark-to-bid drawdown stop for nba_wp (its only adverse exit is the late edge_held gate).</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#10</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Daily-loss gate depends entirely on HL fills, omits settlement PnL, and falls back to a structurally-zero local PnL on any HL error</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/runtime.py:918-931</code><code class="loc">hlanalysis/engine/scanner.py:199-209</code><code class="loc">hlanalysis/engine/hl_client.py:401-419</code></div>
+      <p class="prob"><strong>Problem.</strong> Both daily-loss checks call realized_pnl_since and, on any exception, fall back to dal.realized_pnl_since — documented as a structural under-estimate (closed positions deleted, settlement PnL not in fills). The fallback is &#x27;continue trading&#x27; on a network blip. HIP-4 settlement payouts are not HL fills at all, so the cap never sees the dominant PnL component of the binary strategy. The result: a loss cap defeatable by a transient HL outage flipping to the near-zero DAL value, or by losses realized via settlement. The 10s pnl cache also makes the cap react up to 10s late.</p>
+      <p class="rec"><strong>Fix.</strong> Incorporate persisted settlement realized PnL into the daily-loss computation. On HL error, fail-safe (latch/halt) rather than trade on a known-understated PnL, or require N consecutive successful reads before re-enabling entries after an outage.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#12</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>v5 delta_hedged inherits the stale, unprotected v3 baseline — none of the v3.1-final risk gates plumbed through</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/strategy/delta_hedged.py:174-200</code><code class="loc">hlanalysis/strategy/delta_hedged.py:159</code><code class="loc">hlanalysis/strategy/theta_harvester.py:1091-1147</code></div>
+      <p class="prob"><strong>Problem.</strong> build_v5_delta_hedged constructs ThetaHarvesterConfig from only original v3 fields and omits every safety knob added since: favorite_threshold, edge_max, min_distance_pct, min_bid_notional_usd, gamma_lambda, exit_safety_d, vol_estimator, lm_threshold, topup_*, fee_model/fee_rate, momentum_mr_*. The hedged variant runs the unprotected v3 baseline (the one that lost -$569 on extreme-edge entries before edge_max). The binary leg can enter trades unhedged v3.1 would veto, and binary_delta then leverages the bad entry into a 2-legged position. binary_delta also uses question.strike directly, which is NaN/0 for PM up/down and bucket markets, silently producing a garbage hedge.</p>
+      <p class="rec"><strong>Fix.</strong> Route v5&#x27;s binary config through the same builder as build_v3_theta_harvester so all current gates are inherited by construction. Guard binary_delta against non-finite/zero strike and non-binary klass (return 0 + diagnostic).</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#13</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Hedge ledger marks itself fully hedged the instant the IOC intent is emitted, before any fill</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/strategy/delta_hedged.py:111-121</code><code class="loc">hlanalysis/strategy/delta_hedged.py:100</code></div>
+      <p class="prob"><strong>Problem.</strong> _HedgeState.hedge_qty_btc is set to the full target_delta the moment the hedge IOC intent is emitted, before any fill confirmation. If the hedge IOC partial-fills or fails, the ledger believes it is fully hedged and won&#x27;t re-fire next tick (gap~=0), leaving silent naked exposure. The strategy never sees realized hedge fills, so there is no feedback loop to correct an under-filled hedge — the same fire-and-forget bug as the primary leg, applied to the hedge.</p>
+      <p class="rec"><strong>Fix.</strong> Update hedge_qty_btc from confirmed hedge fills via a fill-feedback channel, not from the intended target; treat any hedge IOC shortfall as residual exposure that must re-fire next tick.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="L">
+      <div class="card-head">
+        <span class="rank">#14</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">L · multi-day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>No live hedge-execution path exists, yet the system is operated as hedged</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/runtime.py:504-575</code><code class="loc">hlanalysis/strategy/delta_hedged.py</code><code class="loc">tests/integration/test_hedge_runner.py:114-211</code></div>
+      <p class="prob"><strong>Problem.</strong> Hedging exists ONLY in the backtest runner and the delta_hedged strategy; no Binance execution client is wired into EngineRuntime._build_slot (only HLClient and PMClient). The single hedge test drives the backtest runner with synthetic klines, not the live async runtime. There is no live hedge code, no live test, and NO alert for &#x27;hedge order failed&#x27;, &#x27;hedge leg unfilled&#x27;, or &#x27;binary filled but hedge rejected&#x27;. If/when a hedge leg is added, a binary fill whose paired Binance hedge is rejected leaves a naked directional position with zero observability.</p>
+      <p class="rec"><strong>Fix.</strong> If hedging is in-scope for live, add the Binance exec client + per-fill hedge intent path with HedgeFailed/HedgeUnfilled alerts and a naked-drift check (binary qty vs hedge qty beyond tolerance -&gt; alert + halt). If not yet live, document it explicitly and ensure no config implies it. Either way add an integration test for the binary-filled-hedge-rejected case.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="L">
+      <div class="card-head">
+        <span class="rank">#15</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">L · multi-day</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Settlement PnL is computed for alerts but never persisted; two close paths can double-book or lose it</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/runtime.py:795-815</code><code class="loc">hlanalysis/engine/router.py:391-416</code><code class="loc">hlanalysis/engine/reconcile.py:163-179</code><code class="loc">hlanalysis/engine/runtime.py:918-923</code></div>
+      <p class="prob"><strong>Problem.</strong> Two independent paths close a settled position — the reconcile loop (vanished_positions deletes the Position and publishes a settlement Exit) and the scanner/strategy EXIT -&gt; router._close_settled (re-reads, deletes, publishes its own Exit) — keyed by qidx with no single owner, producing two settlement Exit events with potentially different realized_pnl. Worse, realized settlement PnL is only emitted on the bus/alert, never written to a durable settled-PnL table, so it is lost on restart (the 2026-05-31 eval: fill-table -$122 vs settlement-inclusive +$120 true). The daily-loss cap therefore relies entirely on HL fills which exclude HIP-4 payouts.</p>
+      <p class="rec"><strong>Fix.</strong> Make settlement close idempotent on a single owner (reconciler OR router) keyed by qidx, and persist a durable settlement record (qidx, ts, realized_pnl) before deleting the Position so true PnL survives restart, feeds the daily-loss gate, and reconciles against venue balance. Add a daily PnL-summary alert and a test asserting durable recording.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#26</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>No halt/escalation on material position-qty drift; engine silently adopts venue qty and keeps trading</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/runtime.py:430-454</code><code class="loc">hlanalysis/engine/restart_drift.py:83-93</code><code class="loc">hlanalysis/engine/reconcile.py:180-197</code></div>
+      <p class="prob"><strong>Problem.</strong> The qty-mismatch case silently adopts HL&#x27;s qty and fires a DRIFT alert with no severity escalation or halt when local vs venue qty diverges materially. For a hedging book a silent adoption shifts the strategy&#x27;s have_position branch and risk caps under the operator without forced acknowledgement; a large adoption (an un-booked fill) should arguably halt. There is also no rate/threshold alert for drift count spiking.</p>
+      <p class="rec"><strong>Fix.</strong> Add a configurable position-drift USD threshold: |hl_qty - db_qty| * avg_entry &gt; X -&gt; escalate to a halt-class alert (optionally latch the slot halted pending operator clear). Surface a periodic &#x27;drift count in last hour&#x27; metric.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#27</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Global inventory cap double-counts in-flight orders and ignores cross-venue exposure</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/risk.py:79-84</code><code class="loc">hlanalysis/engine/scanner.py:185-191</code></div>
+      <p class="prob"><strong>Problem.</strong> max_total_inventory = live_orders_notional + new_notional + sum(|qty|*avg_entry). live_orders can include pending orders already (partially) reflected as positions once filled, and positions are read per-slot/per-venue only. Aggregate exposure is bounded per-account-slot but NOT across slots/venues, so a supposedly-hedged multi-account book has no true portfolio-level exposure bound and the in-flight term can over- or under-count by fill timing.</p>
+      <p class="rec"><strong>Fix.</strong> Define inventory from confirmed positions plus genuinely-unacked order notional (exclude orders already booked as positions); add a cross-slot/global exposure aggregate if accounts share capital or net risk.</p>
+    </div>
+    <div class="card" data-sev="low" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#28</span>
+        <span class="badge" style="background:rgba(62,155,79,.12);color:#3e9b4f;border-color:#3e9b4f">LOW</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Concurrent-positions / inventory caps evaluated against a stale pre-fill snapshot within a scan tick</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/risk.py:86-90</code><code class="loc">hlanalysis/engine/scanner.py:185-191</code></div>
+      <p class="prob"><strong>Problem.</strong> positions and live_orders_total_notional are snapshotted once per scan tick and reused across every intent emitted that tick, with no provisional increment between intents. Multiple new entries in a single tick are all checked against the same pre-fill snapshot, so the engine can approve several entries that jointly exceed the concurrent-positions or global-inventory cap.</p>
+      <p class="rec"><strong>Fix.</strong> Accumulate provisional notional/position-count across intents within a single scan tick (or re-snapshot after each placement) so caps reflect same-tick approvals already routed.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#29</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Reconcile loop keeps mutating positions/orders even when the slot is restart-blocked</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/runtime.py:470-474</code><code class="loc">hlanalysis/engine/runtime.py:762-822</code></div>
+      <p class="prob"><strong>Problem.</strong> slot.blocked (from the restart-drift gate) only suppresses the scan loop; _reconcile_loop still adopts/overwrites positions, cancels orphan orders, and publishes settlement Exits while the operator is supposedly holding the slot for inspection. Automatic DB/venue mutation races the operator and can erase the very drift evidence the block was meant to preserve.</p>
+      <p class="rec"><strong>Fix.</strong> When slot.blocked, run reconcile in detect-only mode (emit drift events, no DB mutation, no cancels) until the operator clears the block.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#30</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Stale-reconcile pre-trade gate fails open when no reconcile has ever succeeded</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/risk.py:119-124</code><code class="loc">hlanalysis/engine/runtime.py:430-431</code></div>
+      <p class="prob"><strong>Problem.</strong> check_pre_trade only enforces the stale-reconcile guard when last_reconcile_ns &gt; 0, but last_reconcile_ns is optimistically seeded to startup time regardless of whether a reconcile actually succeeded. If the startup reconcile errored (or the periodic loop keeps crashing), the engine still trades for the first intervals on the false assumption that startup == a clean reconcile.</p>
+      <p class="rec"><strong>Fix.</strong> Only set last_reconcile_ns after a reconcile completes successfully (including the startup drift run); treat last_reconcile_ns==0 as stale (veto) rather than skip-the-check.</p>
+    </div>
+    </section>
+    <section class="group" data-group="2">
+      <div class="group-head">
+        <h2>Backtest fidelity (sim-vs-live)</h2>
+        <div class="group-chips"><span class="mini" style="color:#e5484d">2 critical</span> <span class="mini" style="color:#f76808">3 high</span> <span class="mini" style="color:#ffb224">2 medium</span> <span class="mini" style="color:#3e9b4f">2 low</span></div>
+      </div>
+      <p class="rationale">These fabricate or overstate backtest PnL, meaning every tuning decision in MEMORY may rest on numbers that won&#x27;t survive live — the most insidious class for a calibration-driven strategy.</p>
+      
+    <div class="card" data-sev="critical" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#5</span>
+        <span class="badge" style="background:rgba(229,72,77,.12);color:#e5484d;border-color:#e5484d">CRITICAL</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>PM strike silently FREEZES (returns last cached close) when the kline cache ends before the strike timestamp</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/backtest/data/polymarket.py:581-589</code><code class="loc">hlanalysis/backtest/data/polymarket.py:556-589</code></div>
+      <p class="prob"><strong>Problem.</strong> _binary_strike resolves the PM Up/Down strike via bisect_right(ts_list, strike_ts_ns)-1 then returns klines[idx][&#x27;close&#x27;] with NO coverage check. If the cache ends before strike_ts_ns (the documented stale-cache: ended 05-09 at $80,198), bisect returns the final index and the function returns the LAST candle&#x27;s close as the strike — a frozen, arbitrarily-wrong strike, not 0.0 and not an error. The strike defines the entire binary&#x27;s winning side, so a frozen strike fabricates edge/PnL for every market past the cache horizon, manufacturing profitable-looking entries that would lose live.</p>
+      <p class="rec"><strong>Fix.</strong> After the bisect, validate coverage and reject/skip the market when strike_ts_ns exceeds the last kline ts (within one bar-width tolerance). Add a cache-coverage assertion at discover() time so a stale cache fails loudly instead of producing fake PnL.</p>
+    </div>
+    <div class="card" data-sev="critical" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#6</span>
+        <span class="badge" style="background:rgba(229,72,77,.12);color:#e5484d;border-color:#e5484d">CRITICAL</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Open hedge (BTC perp) positions are never settled or marked-to-market at end of data</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/backtest/runner/hftbt_runner.py:724-743</code><code class="loc">hlanalysis/backtest/runner/hftbt_runner.py:879-920</code></div>
+      <p class="prob"><strong>Problem.</strong> hedge_positions is written on a hedge fill but NEVER read again — the end-of-data settlement block settles only the binary pos, and realized PnL sums result.fills only. A v5_delta_hedged run that holds any hedge residual to expiry records only the OPENING leg of the hedge (~$100k notional) with no offsetting close or mark-to-market, so hedged PnL is wrong by the full unrealized hedge value (hundreds to thousands per market). The backtest literally cannot tell whether the hedge protects or destroys PnL — the entire point of v5. The top-up at line 741 also sets avg_entry=h_fill.price instead of a qty-weighted average.</p>
+      <p class="rec"><strong>Fix.</strong> At end-of-data, close each open hedge_positions entry against the hedge leg&#x27;s last book/mark and append a closing Fill, mirroring binary settlement. Fix the top-up avg_entry to a qty-weighted average. Add a test asserting a held-to-expiry hedge produces two fills.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#16</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Configured slippage_bps is a silent no-op on fill price in the hftbacktest path — overstates edge</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/backtest/runner/hftbt_runner.py:295-308</code><code class="loc">hlanalysis/backtest/runner/hftbt_runner.py:757-778</code><code class="loc">hlanalysis/backtest/runner/hftbt_runner.py:462-465</code></div>
+      <p class="prob"><strong>Problem.</strong> For ENTER/EXIT the runner computes slipped = ask*(1+slippage_bps/1e4) and submits it as the IOC LIMIT price, then records the fill from order.exec_price. hftbacktest fills the IOC against the real book at the touch, so exec_price = best ask regardless of slippage_bps; the term only makes the limit MORE aggressive (can only increase fill probability). So the --slippage-bps knob is inert on execution cost in the main path (it bites only the stop-loss fallback Fill). Live IOC against a thin HL/PM book walks levels and pays spread+impact, so the sim systematically overstates edge for a near-resolution taker strategy.</p>
+      <p class="rec"><strong>Fix.</strong> Apply slippage as an explicit cost on the recorded exec price (exec_px_effective = exec_px*(1+slippage_bps/1e4) for buys), or rely on real multi-level recorded book depth so hftbacktest walks levels. Add a test that raising slippage_bps strictly reduces PnL.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#17</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>HL HIP-4 backtests model zero taker fee by default (fee_model=flat, fee_taker=0.0)</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/backtest/runner/hftbt_runner.py:104-113</code><code class="loc">hlanalysis/backtest/cli.py:567-575</code></div>
+      <p class="prob"><strong>Problem.</strong> RunConfig and the CLI both default fee_taker=0.0 with fee_model=&#x27;flat&#x27;, and _binary_fee returns px*qty*0.0 = 0. Unless an operator explicitly passes --fee-taker, every HL HIP-4 backtest charges ZERO trading fee on entries, exits, and stop-loss fills, paid twice on a round-trip live. Zero-fee backtests bias all HL parameter tuning toward more-frequent trading and tighter edges than survive live fees. (The pm_binary curve is correctly gated; only HL&#x27;s flat default leaves the most-traded venue fee-free.)</p>
+      <p class="rec"><strong>Fix.</strong> Set the HL flat fee_taker default to the real HL HIP-4 taker rate (or require it and fail if unset for HL runs). Re-validate HL tunings under the real fee, verified against the live router&#x27;s fee schedule.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#18</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>PM/NBA backtest question_idx uses process-salted hash() — non-deterministic and diverges from the live SHA-256 fix</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/backtest/data/polymarket.py:290-291</code><code class="loc">hlanalysis/backtest/data/pm_nba.py:137-138</code><code class="loc">hlanalysis/adapters/polymarket_normalize.py:121-129</code></div>
+      <p class="prob"><strong>Problem.</strong> Commit 29c42a3 fixed a live money-losing bug by replacing hash() (salted per-process via unset PYTHONHASHSEED) with SHA-256 in the adapter, but the backtest loaders still use hash(question_id) &amp; 0x7FFFFFFF. So (1) backtest question_idx is non-deterministic across runs and across parallel tuning workers, and (2) it no longer matches the live engine for the same condition_id. question_idx is the join key on every Fill/diagnostic/Position, so cross-worker and baseline-vs-candidate joins silently mis-join, and paper-replay-vs-live settlement reconciliation cannot key on it.</p>
+      <p class="rec"><strong>Fix.</strong> Extract the deterministic SHA-256-first-4-bytes-31-bit helper into one shared module and import it in both backtest loaders, deleting the local hash() copies. Add a test that backtest and live qid agree for a known condition_id.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#23</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Fill size assumed fully available at touch with no queue/partial — overstates fillable size on thin books</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/backtest/runner/hftbt_runner.py:241-253</code><code class="loc">hlanalysis/backtest/runner/hftbt_runner.py:466-468</code><code class="loc">hlanalysis/backtest/data/_synthetic_l2.py:26-43</code></div>
+      <p class="prob"><strong>Problem.</strong> Assets use no_partial_fill_exchange() + risk_adverse_queue_model() with zero latency, and the synthetic PM book is a single flat level of depth=10,000 at +/-half_spread per trade. exec_qty is capped to min(intent, 10,000), so any intent up to 10k fills in full at the touch in one tick with no queue and no walking through depth. On real thin HL/PM books an IOC for the same size would partial-fill or pay multiple levels, inflating achievable size and understating cost exactly where the strategy trades.</p>
+      <p class="rec"><strong>Fix.</strong> Default tuning/eval to book_source=recorded where coverage exists; for synthetic, set book_depth_assumption to a realistic per-trade displayed size (not 10k) and prefer multi-level synthetic depth so hftbacktest walks the book. Document synthetic-book PnL as an upper bound.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#31</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Sim stale-data gate trap: MarketState.apply_l2 stamps now_ns, masking real L2 age</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/backtest/runner/hftbt_runner.py:544-574</code><code class="loc">hlanalysis/backtest/runner/market_state.py:41-56</code><code class="loc">hlanalysis/strategy/late_resolution.py:715</code></div>
+      <p class="prob"><strong>Problem.</strong> The stale_data_halt gate compares now_ns - book.last_l2_ts_ns. The runner builds the strategy&#x27;s books dict with correct real snapshot age, but state.apply_l2 stamps the MarketState copy with ts_ns=now_ns unconditionally, so MarketState.book(sym).last_l2_ts_ns is always &#x27;fresh as of now&#x27;. Today the strategy reads books (correct), but any future refactor sourcing the book from MarketState would silently disable the stale-data halt — a defensive gate MEMORY says must not be weakened.</p>
+      <p class="rec"><strong>Fix.</strong> Pass the real snapshot ts (last_l2_ts, not now_ns) into MarketState.apply_l2 so both views agree. Add a test that a book older than stale_data_halt_seconds is gated regardless of which view the strategy reads.</p>
+    </div>
+    <div class="card" data-sev="low" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#40</span>
+        <span class="badge" style="background:rgba(62,155,79,.12);color:#3e9b4f;border-color:#3e9b4f">LOW</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Engine cannot act at t=start; first decision only after one full scan interval</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/backtest/runner/hftbt_runner.py:530-538</code></div>
+      <p class="prob"><strong>Problem.</strong> The scan loop calls hbt.elapse(scan_interval_ns) BEFORE the first evaluate, so the first decision occurs at start+scan_interval (default 60s), never at start_ts_ns. For short questions or near-resolution windows aligned to the open this drops the opening interval; live, the engine may scan immediately at startup/open — a systematic sim-vs-live cadence offset.</p>
+      <p class="rec"><strong>Fix.</strong> Evaluate once at start_ts_ns (drain references then evaluate before the first elapse) to match the engine&#x27;s first-scan behavior. Confirm against the live scan scheduling.</p>
+    </div>
+    <div class="card" data-sev="low" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#41</span>
+        <span class="badge" style="background:rgba(62,155,79,.12);color:#3e9b4f;border-color:#3e9b4f">LOW</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Settlement read at end-of-data has no settlement-time gate; one off-by-one from leaking the winner</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/backtest/runner/hftbt_runner.py:878-903</code><code class="loc">hlanalysis/backtest/data/polymarket.py:960-1010</code></div>
+      <p class="prob"><strong>Problem.</strong> Settlement reads resolved_outcome / leg_payoff (PM recorder settlement ordered settle_ts DESC, no upper time bound). It is only invoked at end-of-data so not a current decision-time leak, but nothing asserts settlement occurred at/after q.end_ts_ns, and build_question_view marks settled = now_ns &gt; end_ts_ns. The loop break at now_ns&gt;=end_ts_ns currently prevents leakage, but it is one off-by-one from a strategy seeing the outcome on the tick after expiry.</p>
+      <p class="rec"><strong>Fix.</strong> Assert settlement ts &gt;= end_ts_ns when present (skip/log otherwise). Add a regression test that no decision is evaluated with settled=True / non-None settled_side, locking the loop-break invariant.</p>
+    </div>
+    </section>
+    <section class="group" data-group="3">
+      <div class="group-head">
+        <h2>Strategy &amp; model correctness</h2>
+        <div class="group-chips"><span class="mini" style="color:#f76808">1 high</span> <span class="mini" style="color:#ffb224">1 medium</span> <span class="mini" style="color:#3e9b4f">3 low</span></div>
+      </div>
+      <p class="rationale">Math/gate bugs that either skip a protection the operator believes is active or push NaN into the order-sizing path.</p>
+      
+    <div class="card" data-sev="high" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#20</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Strike-distance entry gates parsed from YAML but never enforced in v1</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/strategy/late_resolution.py:151</code><code class="loc">hlanalysis/strategy/late_resolution.py:155</code><code class="loc">hlanalysis/strategy/late_resolution.py:747</code><code class="loc">hlanalysis/strategy/late_resolution.py:1028</code><code class="loc">hlanalysis/strategy/late_resolution.py:1032</code></div>
+      <p class="prob"><strong>Problem.</strong> LateResolutionConfig declares distance_from_strike_usd_min (required) and max_strike_distance_pct (default 50.0), both parsed from YAML but NEVER referenced in _evaluate_entry — the only mention is a comment at line 747 stating the gate was skipped for multi-outcome compatibility. An operator setting max_strike_distance_pct=2.0 gets zero protection; v1 will enter a binary whose strike is 50% from spot if the ask passes price_extreme_threshold. For a near-resolution arb relying on a near-certain-winner leg, a silently-dead distance gate lets the strategy size legs the operator believes are filtered out. min_safety_d only partially overlaps (vol-scaled, disabled by default).</p>
+      <p class="rec"><strong>Fix.</strong> Re-implement the binary strike-distance gate in _evaluate_entry (reject when |strike-ref|/ref &gt; max_strike_distance_pct/100 or &lt; distance_from_strike_usd_min), guarded by klass==&#x27;priceBinary&#x27;; OR remove the fields and fail loudly if YAML still sets them so config can&#x27;t claim a protection that doesn&#x27;t exist.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#24</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>p_model/phi GBM kernel has no sigma*sqrt(tau) zero-guard — NaN edge can be selected and sized into a real order</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/strategy/theta_harvester.py:125</code><code class="loc">hlanalysis/strategy/theta_harvester.py:129</code><code class="loc">hlanalysis/strategy/model_edge.py:126</code></div>
+      <p class="prob"><strong>Problem.</strong> _p_leg_win_prob_and_phi (theta) and the inline d-stat (model_edge) divide ln(S/K) by sigma*sqrt(tau_yr) with no internal guard, unlike _safety_d_for_region which returns None when sigma&lt;=0. Today this is shielded by _sigma() returning None for sigma&lt;=0 and vol_clip_min=0.05. But vol_clip_min=0.0 + a flat window yields sigma==0, or a sub-nanosecond tau underflow yields tau_yr=0, giving d=inf/nan -&gt; norm.cdf(nan)=nan -&gt; p_win=nan -&gt; edge=nan. The edge_buffer comparison nan &lt;= buffer is False, so a nan-edge leg can be selected by max(per_leg, key=...) and sized — the classic NaN-into-order-sizing path.</p>
+      <p class="rec"><strong>Fix.</strong> Guard at the top of _p_leg_win_prob_and_phi: if sigma&lt;=0 or tau_yr&lt;=0 return (0.0,0.0), mirroring _safety_d_for_region. Independently assert math.isfinite(edge) per per_leg entry and drop non-finite legs before selection.</p>
+    </div>
+    <div class="card" data-sev="low" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#36</span>
+        <span class="badge" style="background:rgba(62,155,79,.12);color:#3e9b4f;border-color:#3e9b4f">LOW</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>drift_aware safety_d silently ignores drift on two-sided (bucket-middle) regions</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/strategy/_numba/safety.py:32</code><code class="loc">hlanalysis/strategy/_numba/safety.py:36</code></div>
+      <p class="prob"><strong>Problem.</strong> safety_d_for_region_core applies the mu*tte_min drift correction only in the single-sided branches; when both bounds are known (a middle bucket region) the drift term is dropped even with drift_aware=True, computing the signed distance under the symmetric measure. For HL HIP-4 bucket markets with a trending underlying this understates how fast BTC approaches the adverse boundary, so exit_safety_d/min_safety_d can fail to fire on a leg drift says is about to flip.</p>
+      <p class="rec"><strong>Fix.</strong> In the two-sided branch apply drift to each boundary distance before the min (d_lo += mu*tte_min, d_hi -= mu*tte_min, then take min). Add a unit test on a two-sided region with non-zero mu asserting the drift-aware result differs from symmetric.</p>
+    </div>
+    <div class="card" data-sev="low" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#37</span>
+        <span class="badge" style="background:rgba(62,155,79,.12);color:#3e9b4f;border-color:#3e9b4f">LOW</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: low</span>
+        <h3>momentum_mr indicators have no finite-check backstop before scaling edge_buffer</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/strategy/momentum_mr.py:91</code><code class="loc">hlanalysis/strategy/momentum_mr.py:196</code><code class="loc">hlanalysis/strategy/theta_harvester.py:727</code></div>
+      <p class="prob"><strong>Problem.</strong> _z_ret/_sdr divide by sigma*sqrt(n) guarded only by sigma&gt;0 and _ou_z uses polyfit residual std; in tilt mode effective_edge_buffer = edge_buffer*(1 - alpha*score). A non-finite score makes the buffer nan and the gate effective_edge &lt;= nan is False, so entry passes unintentionally. Today np.clip bounds all scores to [-1,1] so this is latent, but the gate has no finite backstop on a money path.</p>
+      <p class="rec"><strong>Fix.</strong> After computing mm_score in both gate and tilt branches, sanitize: if not math.isfinite(mm_score): mm_score = 0.0. Removes reliance on every indicator remembering to clip.</p>
+    </div>
+    <div class="card" data-sev="low" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#42</span>
+        <span class="badge" style="background:rgba(62,155,79,.12);color:#3e9b4f;border-color:#3e9b4f">LOW</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>bipover &#x27;bv_per_sample&#x27; is actually sigma — misnaming risks a future &#x27;fix&#x27; that breaks the calibrated LM threshold</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/strategy/theta_harvester.py:780</code><code class="loc">hlanalysis/strategy/theta_harvester.py:785</code><code class="loc">hlanalysis/strategy/_numba/vol.py:74</code></div>
+      <p class="prob"><strong>Problem.</strong> _nb_bipower returns math.sqrt(var) i.e. a per-sample STDEV, stored as bv_per_sample, while the docstring describes |r_last|/sqrt(BV). lm_stat = |r_last|/bv_per_sample is the intended Lee-Mykland standardized return, so the 4.0 threshold behaves correctly. The risk is purely nomenclature: a future reader &#x27;fixing&#x27; the apparent missing sqrt would silently change the gate scale and break the calibrated threshold.</p>
+      <p class="rec"><strong>Fix.</strong> Rename bv_per_sample -&gt; sigma_bv and update docstrings to &#x27;|r_last|/sigma_BV&#x27; so the absence of a sqrt at the call site is obviously correct. No math change.</p>
+    </div>
+    </section>
+    <section class="group" data-group="4">
+      <div class="group-head">
+        <h2>Adapter / feed robustness</h2>
+        <div class="group-chips"><span class="mini" style="color:#e5484d">1 critical</span> <span class="mini" style="color:#f76808">2 high</span> <span class="mini" style="color:#ffb224">2 medium</span> <span class="mini" style="color:#3e9b4f">1 low</span></div>
+      </div>
+      <p class="rationale">The hedge and reference price flow through these adapters; a silently-dead or corrupted feed flips edge signs and fires wrong-direction trades while the system believes it is hedged.</p>
+      
+    <div class="card" data-sev="critical" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#21</span>
+        <span class="badge" style="background:rgba(229,72,77,.12);color:#e5484d;border-color:#e5484d">CRITICAL</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Binance reference/hedge feed has no staleness watchdog and the engine stale gate doesn&#x27;t cover it</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/adapters/binance.py:120-142</code><code class="loc">hlanalysis/adapters/binance.py:38-42</code><code class="loc">hlanalysis/adapters/binance.py:126-137</code><code class="loc">hlanalysis/engine/risk.py:116-118</code></div>
+      <p class="prob"><strong>Problem.</strong> The Binance WS receive loop (async for raw in ws) has no per-stream staleness detection; ping_interval/timeout only catch TCP/ping failure. A half-open or silently-idle stream — the documented geo-quirk where perp aggTrade/markPrice/bookTicker deliver NOTHING from a non-allowlisted IP — keeps the socket open and async for blocks forever with zero exceptions and zero reconnects. _run_one even emits connected/subscribed health events on socket open, since Binance only ACKs the subscribe id and never errors on a silently-blocked stream. The engine&#x27;s only stale gate keys on the HL/PM trading book, NOT the Binance reference feed, so a dead reference freezes the hedge leg&#x27;s price source while the strategy keeps computing edge and firing entries/hedges on stale data.</p>
+      <p class="rec"><strong>Fix.</strong> Add a per-connection last-message timestamp updated on every frame and a watchdog that force-closes the ws (triggering reconnect) if no frame in 2-3x expected cadence, emitting a HealthEvent(&#x27;feed_stale&#x27;) the engine treats as a halt for any slot referencing that feed. Add a per-stream first-data deadline so &#x27;subscribed but silent&#x27; is detected and alerted. Extend the engine stale gate to cover reference feeds.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#22</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>No sequence-gap / out-of-order or zero/crossed-price validation on Binance/HL/PM feeds</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/adapters/binance.py:178</code><code class="loc">hlanalysis/adapters/binance.py:204</code><code class="loc">hlanalysis/adapters/binance.py:247-257</code><code class="loc">hlanalysis/adapters/hyperliquid.py:505-523</code><code class="loc">hlanalysis/adapters/polymarket_normalize.py:32-46</code></div>
+      <p class="prob"><strong>Problem.</strong> Binance carries update id u/lastUpdateId on bbo/depth but nothing validates monotonicity; after a reconnect or reordering a stale older frame (lower u) overwrites a newer one undetected, regressing the reference quote and potentially flipping an edge sign into a wrong-direction trade. Separately, no adapter validates that prices are positive or bid&lt;ask: Binance and HL bbo blindly float() wire values, and transient 0/one-sided books (common on thin HL HIP-4 around settlement) propagate into reference price and book state — a zero ask makes any buy look infinitely cheap and can pass edge checks into a real order.</p>
+      <p class="rec"><strong>Fix.</strong> Track last-seen seq per (symbol,channel) and drop frames with seq&lt;=last (counter/health event); on reconnect log the gap and emit a health event. In each parser, reject (with a counter) frames where bid_px&lt;=0, ask_px&lt;=0, or bid_px&gt;=ask_px on a two-sided quote, and filter non-positive book levels.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#25</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>PM price_change deltas are normalized as full book snapshots, corrupting the recorded/engine book</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/adapters/polymarket_normalize.py:66-90</code><code class="loc">hlanalysis/adapters/polymarket.py:201-204</code></div>
+      <p class="prob"><strong>Problem.</strong> parse_price_change_message packages a PM price_change event (only the changed levels) into a BookSnapshotEvent with just those levels as the entire bid/ask arrays. Any consumer treating a snapshot as a full replace discards all unchanged levels and sees a near-empty book after every delta, so top-of-book and depth-walk slippage are computed off a 1-2 level phantom book between full book frames — mis-pricing PM hedges/entries and polluting recorded depth.</p>
+      <p class="rec"><strong>Fix.</strong> Emit a distinct delta event type that consumers apply incrementally, or merge against the last full book before emitting a true snapshot. At minimum verify and document that the engine&#x27;s apply semantics treat this as a delta, not a replace.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#32</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Single bad frame or stalled consumer tears down or freezes the whole Binance feed</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/adapters/binance.py:228-233</code><code class="loc">hlanalysis/adapters/binance.py:137</code><code class="loc">hlanalysis/adapters/binance.py:90-91</code><code class="loc">hlanalysis/adapters/polymarket.py:200</code></div>
+      <p class="prob"><strong>Problem.</strong> Spot trade handling hard-subscripts int(msg[&#x27;T&#x27;])/float(msg[&#x27;p&#x27;])/float(msg[&#x27;q&#x27;]); a malformed/partial frame raises KeyError/ValueError inside _handle (only json.JSONDecodeError is caught at parse), propagates to the outer except, and reconnects the entire WS — dropping all symbols on that socket over one bad frame (PM wraps per-frame parsing). Separately, _run_one does await queue.put(ev) on a bounded queue: a stalled consumer (slow parquet flush) fills it, the receive loop blocks on put and stops draining the socket, and Binance drops the connection — coupling consumer slowness to feed liveness with no visibility. PM&#x27;s put_nowait instead raises uncaught QueueFull, crashing the receive loop on overflow.</p>
+      <p class="rec"><strong>Fix.</strong> Wrap per-message _handle dispatch in try/except that logs and drops a single bad frame (as PM does). Choose one overflow policy: drop-oldest-with-counter + health event, or document backpressure-to-disconnect; wrap PM&#x27;s put_nowait to catch QueueFull.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#33</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Mark/funding and settlement pollers swallow all errors with no health signal or backoff</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/adapters/binance.py:299-346</code><code class="loc">hlanalysis/adapters/polymarket.py:121-127</code><code class="loc">hlanalysis/adapters/polymarket_gamma.py:23-58</code><code class="loc">hlanalysis/adapters/hyperliquid.py:286-362</code></div>
+      <p class="prob"><strong>Problem.</strong> _poll_perp_premium swallows every error (non-200 continue, exception warn+continue) and loops every 3s with no 429/Retry-After handling, so a geo-block or rate-limit freezes the mark/funding view at the last good value with no staleness signal while hammering every 3s. PM resolution is observed ONLY by a 60s Gamma poll (_real_http_get single 30s timeout, no retry); a degraded Gamma window around resolution delays or skips the SettlementEvent so a held position isn&#x27;t redeemed on time. HL _expand_wildcard / settle-diff fetches do a single 5s requests.post and on failure return []/None (keep prior state), so during Tokyo POP outages new outcomes and polled settlements aren&#x27;t detected with no escalation beyond a WARNING.</p>
+      <p class="rec"><strong>Fix.</strong> Add bounded retry/backoff and honor 429 Retry-After; emit a health event after K consecutive failures and stamp emitted Mark/Funding/settlement staleness so the engine can gate on it. For PM, add a CLOB-side resolution cross-check; for HL, cache last-good payload with an age and alert when the active-outcome set hasn&#x27;t refreshed within an expected window.</p>
+    </div>
+    <div class="card" data-sev="low" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#39</span>
+        <span class="badge" style="background:rgba(62,155,79,.12);color:#3e9b4f;border-color:#3e9b4f">LOW</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>HL/Binance adapters emit duplicate trades on reconnect with no de-dup — inflates the volume risk gate</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/adapters/hyperliquid.py:162-169</code><code class="loc">hlanalysis/adapters/binance.py:130-137</code></div>
+      <p class="prob"><strong>Problem.</strong> On reconnect HL re-subscribes and replays batched trades after block finalization, and PM re-sends a full book snapshot per asset, with no dedup by trade_id / (block_time,coin,tid) at the adapter boundary. A reconnect storm (the circuit-breaker exists because 478 reconnects happened in 30min) double-records trades and double-counts volume; recent_volume_usd is a risk gate input (risk.py:109), so inflated volume can wrongly satisfy the min-volume gate and admit entries into illiquid markets.</p>
+      <p class="rec"><strong>Fix.</strong> De-dup trades by stable id at the adapter/ingest boundary (HL: (block_ts,coin,tid); Binance: trade id) at least within a short reconnect window, before they reach volume/edge computation.</p>
+    </div>
+    </section>
+    <section class="group" data-group="5">
+      <div class="group-head">
+        <h2>Data integrity &amp; ops (deploy/recorder/box)</h2>
+        <div class="group-chips"><span class="mini" style="color:#f76808">2 high</span> <span class="mini" style="color:#ffb224">3 medium</span> <span class="mini" style="color:#3e9b4f">2 low</span></div>
+      </div>
+      <p class="rationale">On a 1GB t4g.micro the recorder can OOM-kill the live engine, and deploy/migration/clock gaps can corrupt live state or silently flip caps.</p>
+      
+    <div class="card" data-sev="high" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#34</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Recorder re-buffers unbounded on persistent write failure (disk-full) and OOM-kills the protected engine</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/recorder/writer.py:71-95</code><code class="loc">hlanalysis/recorder/writer.py:42-60</code><code class="loc">deploy/cdk/stack.go:201-203</code><code class="loc">scripts/install-engine-systemd.sh:71-73</code></div>
+      <p class="prob"><strong>Problem.</strong> _flush_key catches any write exception and re-buffers all rows back into _buffers[key], with only a per-key 5000-row cap and no global cap. On a persistent failure (10GB EBS filling at RETENTION_DAYS=3, EBS detach, permissions) every flush fails identically and buffered rows grow without bound. The recorder runs OOMScoreAdjust=-500 (protected) and the engine +500 (sacrificed first), so a recorder memory blow-up from a disk-full re-buffer loop causes the kernel to OOM-kill the LIVE ENGINE — killing trading because the recorder filled the disk. pq.write_table also doesn&#x27;t fsync, so settlement/meta rows in page cache are lost on power/kernel failure.</p>
+      <p class="rec"><strong>Fix.</strong> Add a global buffered-row cap; when exceeded drop oldest with a counter (recorder data is replaceable, an OOM cascade is not) and emit a HealthEvent. Distinguish ENOSPC and stop re-buffering on it; add a disk-free watchdog and a MemoryHigh soft limit so the recorder is throttled before it forces an engine kill. fsync critical event types after write.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#35</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Recorder loses up to ~60s of buffered events on hard crash (time-based flush, no fsync, no SIGKILL path)</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/recorder/runner.py:46-49</code><code class="loc">hlanalysis/recorder/runner.py:61</code><code class="loc">hlanalysis/recorder/writer.py:62-69</code><code class="loc">hlanalysis/recorder/writer.py:89-91</code></div>
+      <p class="prob"><strong>Problem.</strong> ParquetWriter flushes only on a 5000-row cap or 60s timer, and pq.write_table doesn&#x27;t fsync. Low-volume high-value keys (PM book/trade, settlements, strike-capture, question meta, mark/funding, health) can sit in RAM up to 60s; on OOM-kill (SIGKILL) or power loss all un-flushed rows vanish, and even &#x27;flushed&#x27; files may be in page cache. Settlement and strike-capture events — exactly what drives restart-safety position resolution and contested-fill reference reconstruction — are the most likely to be lost.</p>
+      <p class="rec"><strong>Fix.</strong> Lower flush_interval for low-volume keys or flush settlement/meta keys immediately; fsync the file (or directory) after write for critical types; consider an append-only WAL/jsonl tail for settlement/meta so a SIGKILL is recoverable. Monitor the gap in the data-quality check.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#43</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Compaction and S3-sync timers run uncapped duckdb in-memory alongside the live engine on a 1GB box</h3>
+      </div>
+      <div class="locs"><code class="loc">scripts/compact-data.sh:70-72</code><code class="loc">scripts/cleanup-ebs.sh:27-29</code><code class="loc">deploy/cdk/stack.go:139-143</code><code class="loc">scripts/install-engine-systemd.sh:71-73</code></div>
+      <p class="prob"><strong>Problem.</strong> hl-recorder-sync.timer (hourly) runs compact-data.sh, whose duckdb COPY(SELECT * FROM read_parquet(&#x27;*.parquet&#x27;)) materializes a whole hour-partition in memory, and cleanup-ebs.sh runs a full aws s3 sync daily. Both run as systemd services with NO MemoryMax and NO OOMScoreAdjust, competing with the engine (384M) and recorder (512M) on a 1GB+1GB-swap box. A large partition during a HIP-4 settlement burst pushes the box into heavy swap, starving the latency-sensitive stop-loss/exit path or tipping the kernel into OOM-killing the engine.</p>
+      <p class="rec"><strong>Fix.</strong> Add MemoryMax (~256M) + OOMScoreAdjust=+500 to the sync/cleanup/compact services so they are sacrificed first, and bound the compaction working set (one partition at a time with PRAGMA memory_limit).</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#44</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>DB migrations are forward-only with no checksum, no transactional wrap, and a non-idempotent ALTER</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/state.py:102-121</code><code class="loc">hlanalysis/engine/migrations/0003_fill_closed_pnl.sql:10</code></div>
+      <p class="prob"><strong>Problem.</strong> run_migrations applies any *.sql not yet recorded, in filename order, with no checksum and no transaction wrapping executescript + the schema_migrations INSERT. 0003 does a bare ALTER TABLE fill ADD COLUMN closed_pnl — not idempotent: a crash between executescript and the INSERT means the next boot re-runs it and ALTER throws &#x27;duplicate column&#x27;, failing engine startup. Without checksums, silently editing an applied migration is a no-op (schema drift), and nothing asserts SQLModel classes match the applied DDL.</p>
+      <p class="rec"><strong>Fix.</strong> Wrap each migration&#x27;s executescript + schema_migrations INSERT in one transaction; make column-adding migrations idempotent (PRAGMA table_info guard); store a content hash to detect edited migrations; add a startup assertion that SQLModel metadata matches applied schema.</p>
+    </div>
+    <div class="card" data-sev="low" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#45</span>
+        <span class="badge" style="background:rgba(62,155,79,.12);color:#3e9b4f;border-color:#3e9b4f">LOW</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>deploy.sh resets --hard to a remote branch with no config-diff guard, silently overwriting live risk caps</h3>
+      </div>
+      <div class="locs"><code class="loc">scripts/deploy.sh:122-128</code><code class="loc">Makefile:79-87</code><code class="loc">scripts/install-engine-systemd.sh:62-66</code></div>
+      <p class="prob"><strong>Problem.</strong> deploy.sh runs git reset --hard origin/$BRANCH on /opt/hl-recorder and restarts the engine. config/strategy.yaml (paper_mode flags AND all live caps: max_position_usd, daily_loss_cap_usd, tte windows) is tracked in-repo, so a deploy silently overwrites the box&#x27;s version. There is no diff/confirmation of risk-relevant changes before a hard reset on a live-money engine, and install-engine-on-ec2 deploys the CURRENT local branch, not main — a stray deploy from a feature branch can flip paper_mode or change caps on real accounts.</p>
+      <p class="rec"><strong>Fix.</strong> Before the hard reset, diff config/strategy.yaml and config/deploy.yaml against the deployed version and require explicit confirmation when paper_mode, any *_cap, or position limits change. Refuse to deploy a non-main branch to prod without --force.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#46</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>No NTP/chrony assertion in deploy; TTE gates and staleness trust unverified wall-clock</h3>
+      </div>
+      <div class="locs"><code class="loc">deploy/cdk/stack.go:110-212</code><code class="loc">hlanalysis/adapters/binance.py:320-321</code><code class="loc">config/strategy.yaml:34-36</code></div>
+      <p class="prob"><strong>Problem.</strong> The user-data bootstrap never installs/verifies chrony or asserts clock sync, yet the system relies on time.time_ns() for exchange-vs-local latency staleness tags and for TTE gates (tte_min/tte_max drive every entry; v1 only trades the last 2h). AL2023 usually has chrony enabled, but if it&#x27;s disabled or NTP step-corrects during a settlement window, TTE math and stale_data_halt thresholds silently mis-fire — a few seconds of drift changes which markets pass the TTE window for a near-resolution arb.</p>
+      <p class="rec"><strong>Fix.</strong> Add systemctl enable --now chronyd and a boot-time assertion (chronyc tracking / timedatectl NTPSynchronized) that alerts via Telegram if not synced; optionally add a periodic clock-skew check to the heartbeat.</p>
+    </div>
+    <div class="card" data-sev="low" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#47</span>
+        <span class="badge" style="background:rgba(62,155,79,.12);color:#3e9b4f;border-color:#3e9b4f">LOW</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Session.halt_reason is written but absent from the SQLModel class — lost halt audit trail when wired in</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/state.py:51-55</code><code class="loc">hlanalysis/engine/state.py:243-250</code><code class="loc">hlanalysis/engine/migrations/0001_initial.sql:45-50</code></div>
+      <p class="prob"><strong>Problem.</strong> The session table has a halt_reason column but Session_ declares only session_id/started_ts_ns/ended_ts_ns. end_session() sets row.halt_reason on a class with no such mapped attribute. Dormant today (end_session has no callers), but when wired in to record WHY a slot halted (daily-loss, kill-switch, drift) it will drop the value or raise, losing the post-mortem audit trail.</p>
+      <p class="rec"><strong>Fix.</strong> Add halt_reason: str | None = None to Session_, call end_session() from the runtime halt/shutdown paths, and add a round-trip test.</p>
+    </div>
+    </section>
+    <section class="group" data-group="6">
+      <div class="group-head">
+        <h2>Code duplication &amp; architecture (train/serve skew)</h2>
+        <div class="group-chips"><span class="mini" style="color:#e5484d">1 critical</span> <span class="mini" style="color:#f76808">1 high</span> <span class="mini" style="color:#ffb224">5 medium</span> <span class="mini" style="color:#3e9b4f">1 low</span></div>
+      </div>
+      <p class="rationale">Forked copies of money-touching code have already drifted; the most dangerous is the live theta config silently dropping the very knobs the backtest validated.</p>
+      
+    <div class="card" data-sev="critical" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#48</span>
+        <span class="badge" style="background:rgba(229,72,77,.12);color:#e5484d;border-color:#e5484d">CRITICAL</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Live theta config silently drops promoted knobs (vol_estimator, exit_safety_d, lm_threshold, momentum_mr) — direct train/serve skew</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/config.py:143-186</code><code class="loc">hlanalysis/engine/runtime.py:218-245</code><code class="loc">hlanalysis/strategy/theta_harvester.py:296-365</code></div>
+      <p class="prob"><strong>Problem.</strong> ThetaHarvesterConfig has ~20 tuned knobs but the live ThetaParams pydantic model and build_theta_harvester_config only declare/forward a subset; every omitted knob falls back to the dataclass default. Per MEMORY the v31_pm slot was tuned/deployed with theta &#x27;bipower&#x27; sigma and exit gates, but the live path cannot set vol_estimator at all — so live runs sample_std sigma and no exit_safety_d while the validating backtest ran bipower. The live engine is NOT running the strategy the backtest justified, and a YAML author setting theta: {vol_estimator: bipower} gets it silently ignored.</p>
+      <p class="rec"><strong>Fix.</strong> Make ThetaHarvesterConfig the single source of truth: generate ThetaParams from the dataclass OR add every field and forward it, with a test asserting set(ThetaParams) superseteq set(ThetaHarvesterConfig non-derived fields). Add a load-time guard rejecting unknown keys in the theta: YAML block so a typo&#x27;d/unsupported knob fails fast.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="L">
+      <div class="card-head">
+        <span class="rank">#49</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">L · multi-day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Two MarketState implementations diverge on windowing and bucketing — primary sim/live sigma parity risk</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/market_state.py:249-279</code><code class="loc">hlanalysis/engine/market_state.py:517-548</code><code class="loc">hlanalysis/backtest/runner/market_state.py:77-107</code><code class="loc">hlanalysis/engine/scanner.py:253-264</code><code class="loc">hlanalysis/strategy/_numba/returns_buffer.py:89-126</code></div>
+      <p class="prob"><strong>Problem.</strong> Engine and backtest MarketState are independent reimplementations with two structural differences that change sigma/p_model/safety_d. (1) Windowing: live requests recent_returns by COUNT (slices [-(n+1):]) while backtest slices by TIME (slice_window(lookback_seconds)); on feed gaps (HL Tokyo POP outages) the count-based live window reaches further back in wall-clock, feeding a different return set -&gt; different sigma. (2) Bucketing: the engine buckets in-place by ts//mark_bucket_ns and may hold a stale half-filled bucket on a gap, while the backtest builds bars from a separate resampler; the bar series aren&#x27;t guaranteed identical. So the live sigma driving binary_delta and the entry/exit gates is not the sigma the backtest validated.</p>
+      <p class="rec"><strong>Fix.</strong> Unify on one windowing semantic — have the engine expose time-windowed recent_returns(symbol, lookback_seconds) backed by the same ring buffer as the backtest and delete the count path. At minimum, add a parity test replaying an identical reference tick stream (with a gap) through both MarketStates asserting identical recent_returns/recent_hl_bars.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#50</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Backtest PM loaders duplicate trade parsing, synthetic-L2 parity, manifest IO, fetcher, and question_idx</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/backtest/data/polymarket.py:788-803</code><code class="loc">hlanalysis/backtest/data/polymarket.py:1112-1160</code><code class="loc">hlanalysis/backtest/data/pm_nba.py:137-161</code><code class="loc">hlanalysis/backtest/data/pm_nba.py:337-345</code><code class="loc">hlanalysis/backtest/data/pm_nba.py:418-446</code></div>
+      <p class="prob"><strong>Problem.</strong> _RawTrade, _question_idx, _book_from_l2, _ts_ns_in_iso_window, _read_trades, _load_manifest, the 1-p parity snapshot synthesis, and the paginated PM /trades fetcher are independently re-implemented in polymarket.py and pm_nba.py, and the HTTP retry handling already differs (polymarket handles only 400; pm_nba also 408/429/503). Both feed the same settlement-payoff and fill machinery, so a parity fix in one (e.g. asks-sorted-descending normalization) won&#x27;t reach the other — the hash()-qid divergence is one concrete instance.</p>
+      <p class="rec"><strong>Fix.</strong> Extract a shared pm_common.py (_RawTrade, the SHA-256 _question_idx, _book_from_l2, window helper, parse/write trades parquet, manifest IO, paginated fetcher with one canonical retry policy) imported by both PM sources.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#51</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Duplicated leg-geometry / GBM / safety_d helpers across v1, v3, and delta_hedged — already drifting</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/strategy/theta_harvester.py:32-204</code><code class="loc">hlanalysis/strategy/late_resolution.py:37-143</code><code class="loc">hlanalysis/strategy/delta_hedged.py:23-30</code></div>
+      <p class="prob"><strong>Problem.</strong> _kv_get, _winning_region (bucket/binary leg geometry), and the d-statistic/safety_d math are copy-pasted between theta_harvester and late_resolution with an explicit &#x27;intentionally duplicated&#x27; comment, and have already diverged (the Ito −½σ²τ correction lives in theta._d but not in v1&#x27;s _nb_safety_d core unless drift_aware is set); binary_delta re-derives d a third time. The _winning_region bucket-threshold parsing is identical and settlement-critical: a fix to leg mapping applied to one file silently leaves the other mispricing which leg wins — a settlement-misattribution risk.</p>
+      <p class="rec"><strong>Fix.</strong> Extract _kv_get, _winning_region, and one Ito-corrected d/safety_d helper into shared _leg_geometry.py + _gbm.py imported by v1, v3, and delta_hedged.binary_delta. If divergence is wanted, gate it behind a parameter, not a forked file. Add a property test that v1 and v3 _winning_region agree for binary and all bucket leg indices.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#52</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Duplicated _evaluate_topup and exit-intent builders copy-pasted across three strategies</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/strategy/theta_harvester.py:948-1084</code><code class="loc">hlanalysis/strategy/late_resolution.py:908-1016</code><code class="loc">hlanalysis/strategy/binary_statarb.py:154-168</code></div>
+      <p class="prob"><strong>Problem.</strong> _evaluate_topup (shortfall calc, re-run gates, leg_changed/below-min-notional checks, identical loguru lines) is duplicated nearly line-for-line between theta and late_resolution, and the exit-intent builder (sell-if-qty&gt;0, reduce_only, IOC at bid, uuid cloid) is duplicated across all three strategies plus delta_hedged — the part that moves real money. A fix to topup sizing or the reduce_only flag must land in N places; missing one leaks position or double-sizes. The two topup copies already differ subtly.</p>
+      <p class="rec"><strong>Fix.</strong> Pull a shared TopupMixin/helper and a make_exit_intent(question, position, book, reason) factory into strategy/base.py (or _orders.py); each strategy supplies only _evaluate_entry. Centralizes the reduce_only/IOC invariants.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#53</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>v4/v5 registered as deployable but unrunnable live; binary_statarb holds per-question state unsafe in the live engine</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/config.py:16</code><code class="loc">hlanalysis/engine/runtime.py:279-289</code><code class="loc">hlanalysis/strategy/binary_statarb.py:31-46</code><code class="loc">hlanalysis/strategy/delta_hedged.py:173</code></div>
+      <p class="prob"><strong>Problem.</strong> StrategyType is Literal[&#x27;late_resolution&#x27;,&#x27;theta_harvester&#x27;] and _build_strategy_for_slot raises on anything else, yet binary_statarb (v4) and delta_hedged (v5) are @register&#x27;d as if deployable. v5 is the only hedging strategy and cannot be instantiated live (hedge ledger exists only in backtest). binary_statarb keeps mutable per-question EWMA state in a single _State on the instance, valid only because the backtest rebuilds per question — but the live engine reuses one strategy instance across all questions, so v4 surfaced live would cross-contaminate EWMA state between markets.</p>
+      <p class="rec"><strong>Fix.</strong> Either mark v4/v5 backtest-only (move out of the live registry or add backtest_only=True the engine refuses) or finish them (per-question reset keyed on question_idx as delta_hedged does, plus a real hedge strategy_type). At minimum document that v5 hedging is not live.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#54</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>No config-vs-strategy schema validation; misspelled tuning keys silently run the default</h3>
+      </div>
+      <div class="locs"><code class="loc">config/ (33 tuning.*.yaml)</code><code class="loc">hlanalysis/strategy/theta_harvester.py:1091-1147</code><code class="loc">hlanalysis/strategy/late_resolution.py:1023-1063</code></div>
+      <p class="prob"><strong>Problem.</strong> Tuning configs flow into strategies via build_*(params) using params.get(key, default) with no schema, so a misspelled key (exit_saftey_d, vol_estmator) is silently ignored and the default runs — a backtest can appear to validate a knob never applied. With 33 nearly-identical tuning YAMLs this is high-probability, and unlike the pydantic engine path the backtest has zero key validation, so MEMORY tuning decisions may rest on configs where a key never took effect. There is also clear sweep-file sprawl superseded by *-final.yaml.</p>
+      <p class="rec"><strong>Fix.</strong> Add strict param validation in each build_* (or shared validate_params(params, allowed_keys)) that raises on unknown keys so a typo fails the backtest immediately. Archive superseded sweep YAMLs under config/tuning/archive/.</p>
+    </div>
+    <div class="card" data-sev="low" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#55</span>
+        <span class="badge" style="background:rgba(62,155,79,.12);color:#3e9b4f;border-color:#3e9b4f">LOW</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Engine reference-bar bucketing double-counts a boundary when history is momentarily empty mid-bucket</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/engine/market_state.py:273-279</code></div>
+      <p class="prob"><strong>Problem.</strong> _ingest_reference_price appends a new (price,price,price) bar when &#x27;last_bucket is None or bucket != last_bucket or not hist&#x27;. The &#x27;not hist&#x27; clause means after a deque eviction empties history (or a fresh symbol whose first tick lands in an already-recorded bucket id) a new bar starts even when the bucket id matches — double-counting a bucket boundary. At dt=5 (the deployed PM cadence) the deque maxlen is small and eviction frequent, so this is reachable in production and perturbs sigma at exactly the cadence being validated.</p>
+      <p class="rec"><strong>Fix.</strong> Drop the &#x27;or not hist&#x27; condition (the &#x27;last_bucket is None&#x27; check already covers genuinely-empty history) or reset _last_mark_bucket[symbol] to None on eviction. Add a unit test feeding two same-bucket ticks across an eviction boundary.</p>
+    </div>
+    </section>
+    <section class="group" data-group="7">
+      <div class="group-head">
+        <h2>Testing &amp; observability</h2>
+        <div class="group-chips"><span class="mini" style="color:#f76808">1 high</span> <span class="mini" style="color:#ffb224">1 medium</span></div>
+      </div>
+      <p class="rationale">The runtime&#x27;s most money-losing paths (rejects, stop-loss IOC, restart drift, reconnect) are covered only by pure-sync unit tests of helpers, and recurring criticals can be silenced by dedupe.</p>
+      
+    <div class="card" data-sev="high" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#56</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Most dangerous live paths untested: router-reject linkage, stop-loss IOC chain, restart-drift, reconnect</h3>
+      </div>
+      <div class="locs"><code class="loc">tests/integration/test_engine_paper_loop.py:32-78</code><code class="loc">hlanalysis/engine/router.py:193-221</code><code class="loc">hlanalysis/engine/runtime.py:865-901</code><code class="loc">hlanalysis/engine/restart_drift.py:83-93</code></div>
+      <p class="prob"><strong>Problem.</strong> The only end-to-end runtime test feeds a fixed finite stream and asserts an ENTRY+EXIT alert; it never exercises a feed disconnect/reconnect, a reconcile finding venue drift, a restart with pre-existing DB+venue state, an order rejection, or a stop-loss trigger (reconcile_interval=60s never even ticks in the 4s window). The PM &#x27;Invalid token id&#x27; silent-no-fill bug is exactly a rejected-ack path: the router publishes OrderRejected on ack.status==&#x27;rejected&#x27; but no test drives router.handle() with a rejecting exec client to assert DB status, the bus event, and absence of a Position. The stop-loss IOC-&gt;router-&gt;placement chain is entirely untested, so the book-walking residual bug has no regression guard.</p>
+      <p class="rec"><strong>Fix.</strong> Add integration tests: (1) restart with DB+venue mismatch asserts restart-block + alert; (2) a fake exec client returning OrderAck(status=&#x27;rejected&#x27;,&#x27;Invalid token id&#x27;) asserts DB rejected, OrderRejected on the bus/Telegram, no Position; (3) hold a position, feed stale-then-recovered book; (4) trigger a stop via continuous_checks on a thin book and assert the IOC places and the residual isn&#x27;t re-walked into worse prices.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#57</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Sustained critical conditions are alerted once then deduped silent; alert queue drops on storm</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/alerts/rules.py:84-96</code><code class="loc">hlanalysis/alerts/rules.py:100-134</code><code class="loc">hlanalysis/engine/event_bus.py:43-48</code></div>
+      <p class="prob"><strong>Problem.</strong> Dedupe is a fixed 60s window per (alias,key) with no re-notify or &#x27;cleared&#x27; alert, so a StaleDataHalt or ReconcileDrift persisting for an hour fires once then is silent for the whole money-at-risk window — &#x27;I got one alert 40 minutes ago&#x27; reads as resolved. The single shared alerts_sub queue uses drop_when_full: under an alert storm events are silently dropped with only a warn log, so a dropped DailyLossHalt is a missed money-stop signal.</p>
+      <p class="rec"><strong>Fix.</strong> Re-notify sustained critical states every M minutes while StaleDataHalt/DailyLossHalt remain active, and emit a &#x27;condition cleared&#x27; alert. Bump the alerts queue size or make critical kinds bypass drop_when_full. Add a test asserting a sustained stale condition re-alerts.</p>
+    </div>
+    </section>
+    <section class="group" data-group="8">
+      <div class="group-head">
+        <h2>Simulation performance</h2>
+        <div class="group-chips"><span class="mini" style="color:#f76808">2 high</span> <span class="mini" style="color:#ffb224">1 medium</span> <span class="mini" style="color:#3e9b4f">1 low</span></div>
+      </div>
+      <p class="rationale">Slow sims aren&#x27;t a money-loss risk but they throttle the iteration loop the whole strategy is calibrated on; the PM Arrow fast-path and per-cell discover() are the big levers.</p>
+      
+    <div class="card" data-sev="high" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#58</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Tuning workers re-run full-corpus discover() and linear-scan per cell</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/backtest/tuning.py:209</code><code class="loc">hlanalysis/backtest/tuning.py:210-216</code><code class="loc">hlanalysis/backtest/tuning.py:267-285</code></div>
+      <p class="prob"><strong>Problem.</strong> _run_one_cell calls discover(start=&#x27;1970-01-01&#x27;, end=&#x27;2999-12-31&#x27;) once per work item (per param-combo × split) then does a linear next(d for d in all_descs if d.question_id==q_id) over the whole corpus per test question — O(G·S·T·N) scans plus G·S discover() calls. PolymarketDataSource.discover re-parses the manifest and builds descriptors for every cached question; HLHip4DataSource.discover does a DuckDB scan + pandas iterrows. A 100-cell × 6-split sweep redoes that hundreds of times with no cross-cell amortization.</p>
+      <p class="rec"><strong>Fix.</strong> Ship the resolved descriptor (start/end ts, leg_symbols, klass) inside the work tuple so the worker never calls discover(); if discover is still wanted, memoize at worker-process scope and build a {question_id: descriptor} dict once, replacing the O(N) inner scan with O(1) lookup.</p>
+    </div>
+    <div class="card" data-sev="high" data-eff="L">
+      <div class="card-head">
+        <span class="rank">#59</span>
+        <span class="badge" style="background:rgba(247,104,8,.12);color:#f76808;border-color:#f76808">HIGH</span>
+        <span class="eff" title="effort">L · multi-day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Polymarket/NBA backtest path is fully Python dataclass-based with no Arrow fast path</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/backtest/data/polymarket.py:666-803</code><code class="loc">hlanalysis/backtest/runner/hftbt_runner.py:344-375</code><code class="loc">hlanalysis/backtest/runner/hftbt_runner.py:142-220</code></div>
+      <p class="prob"><strong>Problem.</strong> HL HIP-4 has events_arrays() (Arrow-&gt;numpy, ~4x faster) but PolymarketDataSource and PolymarketNBADataSource only implement events(), so the runner falls back to the legacy Python loop. _build_stream allocates a BookSnapshot + TradeEvent (+ parity BookSnapshot) per trade, re-sorts each leg&#x27;s already-sorted trades, and _read_trades does table.to_pylist() + per-row _RawTrade. For the 12-month PM tune the strategy is actually calibrated on, this dataclass round-trip dominates wall time.</p>
+      <p class="rec"><strong>Fix.</strong> Add events_arrays() to PolymarketDataSource mirroring the HL fast path: read pm_trades parquet to numpy columns, build the synthetic ±half_spread + 1-p parity arrays vectorised (np.repeat over trade ts), return a FastPathBundle. Single biggest backtest-time lever for the PM corpus.</p>
+    </div>
+    <div class="card" data-sev="medium" data-eff="M">
+      <div class="card-head">
+        <span class="rank">#60</span>
+        <span class="badge" style="background:rgba(255,178,36,.12);color:#ffb224;border-color:#ffb224">MEDIUM</span>
+        <span class="eff" title="effort">M · ~½ day</span>
+        <span class="conf" title="reviewer confidence">conf: high</span>
+        <h3>Per-call DuckDB connections and redundant scans in HL/PM settlement and kline-window paths</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/backtest/data/hl_hip4.py:216-228</code><code class="loc">hlanalysis/backtest/data/hl_hip4.py:568-705</code><code class="loc">hlanalysis/backtest/data/polymarket.py:445-469</code><code class="loc">hlanalysis/backtest/data/polymarket.py:805-827</code><code class="loc">hlanalysis/backtest/data/polymarket.py:960-1010</code></div>
+      <p class="prob"><strong>Problem.</strong> HLHip4DataSource.discover uses pandas iterrows + row.to_dict per question_meta row (thousands of rows, called per CLI/tune invocation). resolved_outcome/leg_payoff each duckdb.connect() per call with per-leg settlement scans, _last_btc_ref_at_or_before opens another connection + 2-day partition scan, and _winning_pos_from_books opens a NEW connection per named bucket leg — many setups per question with no caching. _binary_outcome always calls _recorded_outcome first (two glob+connect+query round-trips) even for the pre-2026-05-27 corpus with no recorder coverage. _load_klines_window filters all ~500k kline rows with a Python comprehension per events() call, and _binary_strike rebuilds ts_list each call.</p>
+      <p class="rec"><strong>Fix.</strong> Memoize resolved_outcome / winning-pos per question_id (immutable post-settlement) and reuse one connection across the leg loop; cache _last_btc_ref_at_or_before. Short-circuit _recorded_outcome when end_ts predates recorder coverage. Replace iterrows with fetchall/Arrow or push first-row-per-symbol into SQL (QUALIFY ROW_NUMBER). Cache a parallel numpy int64 kline-ts array and use np.searchsorted in both window slice and _binary_strike.</p>
+    </div>
+    <div class="card" data-sev="low" data-eff="S">
+      <div class="card-head">
+        <span class="rank">#61</span>
+        <span class="badge" style="background:rgba(62,155,79,.12);color:#3e9b4f;border-color:#3e9b4f">LOW</span>
+        <span class="eff" title="effort">S · <2h</span>
+        <span class="conf" title="reviewer confidence">conf: medium</span>
+        <h3>Hot-loop and post-run allocation churn (BookSnapshot per scan tick, over-allocated clears, full-table concat)</h3>
+      </div>
+      <div class="locs"><code class="loc">hlanalysis/backtest/runner/hftbt_runner.py:556-574</code><code class="loc">hlanalysis/backtest/data/_hl_hip4_fastpath.py:47-89</code><code class="loc">hlanalysis/backtest/cli.py:524-539</code></div>
+      <p class="prob"><strong>Problem.</strong> The scan loop allocates a fresh BookSnapshot dataclass (nested tuples) per leg per scan tick just to feed state.apply_l2, even though top-of-book scalars are already extracted — 1440 ticks × n_legs per 24h market, 12x at dt=5. _diff_clears pre-allocates out_ts/out_px to total-levels-across-all-snapshots capacity (millions of elements per side per leg) almost entirely unused, inflating peak RSS on the constrained box. Post-run, _concat_parquets reads every per-question diagnostics/fills parquet fully into memory and concatenates before writing, which on the 1G-swap box could blow memory on a large corpus.</p>
+      <p class="rec"><strong>Fix.</strong> Expose MarketState.apply_top_of_book(symbol, ts, bid/ask scalars) to avoid the per-tick BookSnapshot allocation. Bound _diff_clears capacity to a realistic per-snapshot level count (or typed.List). Stream _concat_parquets via pyarrow.parquet.ParquetWriter, releasing each table after write.</p>
+    </div>
+    </section>
+
+  <footer>
+    Generated by a multi-agent review workflow (9 parallel specialist reviewers + synthesis).
+    Severity / priority / effort / confidence reflect reviewer judgment over a static read of the
+    code as of 2026-05-31; verify each finding against current <code>main</code> before acting.
+    Locations are <code>file:line</code> at review time and may shift.
+  </footer>
+</div>
+
+<script>
+  const state = { sev:'all', eff:'all' };
+  function apply() {
+    document.querySelectorAll('.card').forEach(c => {
+      const okS = state.sev==='all' || c.dataset.sev===state.sev;
+      const okE = state.eff==='all' || c.dataset.eff===state.eff;
+      c.classList.toggle('hidden', !(okS && okE));
+    });
+    document.querySelectorAll('section.group').forEach(g => {
+      const any = g.querySelectorAll('.card:not(.hidden)').length;
+      g.classList.toggle('hidden', any===0);
+    });
+    document.querySelectorAll('table.top tbody tr').forEach(r => {
+      const okS = state.sev==='all' || r.dataset.sev===state.sev;
+      r.classList.toggle('hidden', !okS);
+    });
+  }
+  document.querySelectorAll('.fbtn').forEach(b => b.addEventListener('click', () => {
+    const f=b.dataset.f, v=b.dataset.v;
+    state[f]=v;
+    document.querySelectorAll('.fbtn[data-f="'+f+'"]').forEach(x=>x.classList.toggle('active', x===b));
+    apply();
+  }));
+</script>
+</body>
+</html>
