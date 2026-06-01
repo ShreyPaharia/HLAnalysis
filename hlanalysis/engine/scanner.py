@@ -133,7 +133,7 @@ class Scanner:
         bars = (secs + dt - 1) // dt
         return max(32, bars)
 
-    def _resolve_pm_strike(self, q: QuestionView, *, now_ns: int) -> QuestionView:
+    def _resolve_pm_strike(self, q: QuestionView) -> QuestionView:
         """Reload a PM up/down strike that the runtime's async capture path
         (EngineRuntime._maybe_capture_pm_strike) already persisted. The scanner
         is pure/sync, so it only reloads an already-known strike here — capture
@@ -201,7 +201,7 @@ class Scanner:
             # the reference candle has closed. Here we only reload a strike
             # already persisted by that path (pure sync, no IO). May re-stamp
             # the shared QuestionView, so re-read q before using it.
-            q = self._resolve_pm_strike(q, now_ns=now_ns)
+            q = self._resolve_pm_strike(q)
             # Multi-outcome support: feed every leg of the question to the
             # strategy so it can decide across all sides (priceBucket has 6 legs;
             # priceBinary has 2). Skip the question if no leg has a book yet.

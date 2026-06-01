@@ -135,9 +135,9 @@ class _PMUpDownStubAdapter(VenueAdapter):
 
 
 class _PMUpDownRestartStubAdapter(VenueAdapter):
-    """A PM up/down market whose open is in the past (strike_ref_ts ≪ now) —
-    simulates the post-restart case where the engine can no longer observe the
-    open and must reload a persisted strike."""
+    """A PM up/down market whose strike_ref_ts is in the past (≪ now). Used by
+    both the reload test (persisted strike reused) and the fresh-engine test
+    (strike captured from klines when no persisted value exists)."""
 
     venue = "polymarket"
 
@@ -146,7 +146,7 @@ class _PMUpDownRestartStubAdapter(VenueAdapter):
 
     async def stream(self, _subs) -> AsyncIterator:
         now = time.time_ns()
-        past_open = now - 6 * 3600 * 1_000_000_000  # 6h ago → outside tolerance
+        past_open = now - 6 * 3600 * 1_000_000_000  # 6h ago → well past the 60s candle-close gate
         expiry_str = datetime.fromtimestamp(
             (now + 6 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
         ).strftime("%Y%m%d-%H%M")
@@ -346,8 +346,8 @@ async def test_pm_updown_strike_reloaded_from_db_after_restart(cfgs):
 @pytest.mark.asyncio
 async def test_pm_updown_strike_captured_when_open_already_closed(cfgs):
     # Open was missed AND nothing persisted (fresh engine that started after the
-    # market's open). The engine must backfill the strike from the historical
-    # Binance close so the market is tradeable instead of skipped.
+    # market's open). The engine must capture the strike from the Binance spot
+    # 1m close (open already past) so the market is tradeable instead of skipped.
     strategy_cfg, deploy_cfg = cfgs
 
     runtime = EngineRuntime(

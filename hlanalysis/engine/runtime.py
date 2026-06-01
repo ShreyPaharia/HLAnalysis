@@ -365,9 +365,9 @@ class EngineRuntime:
     # account_cfg is the venue-typed AccountConfig (HyperliquidAccount | PolymarketAccount).
     exec_client_factory: Callable[[str, AccountConfig, bool], ExecutionClient] | None = None
     telegram_factory: Callable[[aiohttp.ClientSession], TelegramClient] | None = None
-    # Historical 1m-close lookup used to backfill the open-strike of a PM
-    # up/down market whose open the engine didn't observe live. Injectable so
-    # tests avoid network. Returns the close at the given epoch-ns, or None.
+    # Binance SPOT 1m candle close lookup for PM up/down strike capture (covers
+    # both observed-open and missed-open — it's the single capture source).
+    # Injectable so tests avoid network. Returns the close at the given epoch-ns, or None.
     klines_fetcher: Callable[[int], float | None] = binance_1m_close_at
     market_state: MarketState = field(default_factory=MarketState)
     bus: EventBus = field(default_factory=EventBus)
