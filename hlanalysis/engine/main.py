@@ -19,35 +19,9 @@ from .runtime import EngineRuntime
 
 # Venues whose symbols.yaml subscriptions the engine consumes wholesale. Binance
 # is deliberately excluded here: the engine ingests only a single dedicated,
-# code-constructed bbo reference feed (see `binance_reference_subscription`), NOT
-# the heavier recorder-side binance entries (trades/book/mark/funding).
+# code-constructed bbo reference feed (see `binance_spot_reference_subscription`),
+# NOT the heavier recorder-side binance entries (trades/book/mark/funding).
 _ENGINE_VENUES_FROM_SYMBOLS = ("hyperliquid", "polymarket")
-
-
-def binance_reference_subscription() -> Subscription:
-    """The engine's dedicated, reference-ONLY Binance feed: BTCUSDT perp `bbo`
-    (bookTicker) and nothing else.
-
-    This is the live σ reference price/return series for the PM slots
-    (`reference_symbol: BTCUSDT`). It is intentionally minimal for the t4g.micro:
-      - `bbo` only ⇒ the adapter subscribes the `bookTicker` WS and spawns NO
-        REST premium poll (that task is for mark/funding only). bookTicker is
-        not geo-blocked from the EC2/Tokyo IP (only `markPrice` WS is).
-      - NOT the recorder's binance entry in symbols.yaml (trades/book/mark/
-        funding), which stays recorder-only and untouched.
-
-    Adding this feed is inert for existing slots' trading: MarketState routes the
-    BTCUSDT BboEvent into `book("BTCUSDT")` only; whether a slot reads it for σ
-    is governed by `StrategyConfig.reference_sigma_source` (default "mark"). A PM
-    slot consumes it for σ once it sets `reference_sigma_source: bbo`.
-    """
-    return Subscription(
-        venue="binance",
-        product_type=ProductType.PERP,
-        mechanism=Mechanism.CLOB,
-        symbol="BTCUSDT",
-        channels=("bbo",),
-    )
 
 
 def binance_spot_reference_subscription() -> Subscription:
@@ -71,17 +45,18 @@ def binance_spot_reference_subscription() -> Subscription:
 
 def build_engine_subscriptions(sym_cfg: RecorderConfig) -> list[Subscription]:
     """Subscriptions feeding the engine's MarketState: the HL + PM entries from
-    symbols.yaml verbatim, plus dedicated binance bbo reference feeds (perp and
-    spot).
+    symbols.yaml verbatim, plus the dedicated Binance SPOT bbo reference feed.
 
-    Binance entries in symbols.yaml are skipped (recorder-only); the reference
-    feeds are appended explicitly so it's obvious these are the engine's lean,
-    bbo-only references — not the recorder's full binance ingest."""
+    Binance entries in symbols.yaml are skipped (recorder-only); the spot
+    reference feed is appended explicitly so it's obvious this is the engine's
+    lean, bbo-only reference — not the recorder's full binance ingest.
+
+    PM slots use ``reference_symbol: BTCUSDT_SPOT`` (no perp/spot basis in
+    price, σ, or strike). The perp BTCUSDT feed was removed 2026-06-01."""
     subs = [
         s for s in sym_cfg.subscriptions
         if s.venue in _ENGINE_VENUES_FROM_SYMBOLS
     ]
-    subs.append(binance_reference_subscription())
     subs.append(binance_spot_reference_subscription())
     return subs
 
@@ -117,7 +92,7 @@ def main() -> None:
     p.add_argument("--deploy-config", type=Path, default=Path("config/deploy.yaml"))
     p.add_argument(
         "--symbols-config", type=Path, default=Path("config/symbols.yaml"),
-        help="Subscriptions feeding MarketState (HIP-4 binaries + BTC perp).",
+        help="Subscriptions feeding MarketState (HIP-4 binaries + BTC spot bbo reference).",
     )
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args()
@@ -134,8 +109,8 @@ def main() -> None:
     sym_cfg = load_config(args.symbols_config)
 
     # Engine consumes HL + PM subscriptions plus a dedicated, lean Binance
-    # BTCUSDT perp bbo reference feed (the PM slots' σ reference). The heavier
-    # binance entries in symbols.yaml stay recorder-only.
+    # BTCUSDT SPOT bbo reference feed (the PM slots' price/σ/strike reference).
+    # The heavier binance entries in symbols.yaml stay recorder-only.
     engine_subs = build_engine_subscriptions(sym_cfg)
 
     runtime = EngineRuntime(

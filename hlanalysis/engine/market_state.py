@@ -73,7 +73,7 @@ class MarketState:
         # formula (which assumes returns spaced ``vol_sampling_dt_seconds``
         # apart) sees a series bucketed at exactly that cadence. A single
         # MarketState is shared across all slots, but each slot reads its own
-        # ``reference_symbol`` (HL=BTC, PM=BTCUSDT), so per-symbol bucketing
+        # ``reference_symbol`` (HL=BTC, PM=BTCUSDT_SPOT), so per-symbol bucketing
         # gives HL/PM independence. Symbols with no override fall back to
         # ``_mark_bucket_ns`` (60s), preserving legacy behaviour. See
         # `engine_sigma_sampling_bug_2026_05_21.md` and the v3.7 cadence port.
@@ -88,7 +88,7 @@ class MarketState:
         #   "mark" (default) — the venue MarkEvent (HL perp mark; Binance perp
         #     mark REST-poll). Legacy behaviour, unchanged.
         #   "bbo"            — the dense BBO mid = (bid_px+ask_px)/2. Used to
-        #     give PM (BTCUSDT) a sub-second reference so dt=5 bars don't
+        #     give PM (BTCUSDT_SPOT) a sub-second reference so dt=5 bars don't
         #     degenerate (the 3s mark poll yields ~1.6 pts/5s bar). The chosen
         #     feed drives BOTH the OHLC bars and ``last_mark`` so the strategy's
         #     reference price S is consistent with its σ source. A symbol can be

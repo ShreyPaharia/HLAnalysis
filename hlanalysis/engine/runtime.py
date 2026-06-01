@@ -58,8 +58,9 @@ _SPOT_REF_SYMBOL = "BTCUSDT_SPOT"
 
 
 def _remap_reference_symbol(ev: NormalizedEvent) -> NormalizedEvent:
-    """Rename Binance SPOT BTCUSDT events to BTCUSDT_SPOT so they don't collide
-    with the perp BTCUSDT book key. No-op for every other event."""
+    """Rename Binance SPOT BTCUSDT events to BTCUSDT_SPOT so the PM slots'
+    ``reference_symbol: BTCUSDT_SPOT`` resolves to the spot feed (not any
+    future perp entry). No-op for every other event."""
     if (
         ev.venue == "binance"
         and ev.product_type == ProductType.SPOT
