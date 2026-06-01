@@ -10,6 +10,7 @@ from hlanalysis.engine.config import (
     DeployConfig,
     StrategyConfig,
     load_deploy_config,
+    load_strategies_config,
     load_strategy_config,
     match_question,
 )
@@ -223,3 +224,13 @@ deploy:
     assert isinstance(cfg.accounts["v1"], HyperliquidAccount)
     assert isinstance(cfg.accounts["v31_pm"], PolymarketAccount)
     assert cfg.accounts["v31_pm"].chain_id == 137
+
+
+def test_pm_slots_reference_binance_spot():
+    """Both PM slots must reference BTCUSDT_SPOT (not the perp BTCUSDT feed)
+    so that live price, σ, and strike are all spot-based (no perp/spot basis)."""
+    strategies = load_strategies_config(Path("config/strategy.yaml"))
+    pm = {s.account_alias: s for s in strategies.strategies if s.account_alias.endswith("_pm")}
+    assert pm["v31_pm"].reference_symbol == "BTCUSDT_SPOT"
+    assert pm["v1_pm"].reference_symbol == "BTCUSDT_SPOT"
+    assert pm["v31_pm"].reference_sigma_source == "bbo"   # σ source stays bbo (now spot bbo)

@@ -205,15 +205,15 @@ class StrategyConfig(BaseModel):
     theta: ThetaParams | None = None
     # Symbol whose MarkEvent feeds σ + p_model. Default "BTC" = HL perp mark
     # (HL adapter emits MarkEvent with symbol="BTC"). For PM markets that
-    # resolve on Binance, set "BTCUSDT" so the Scanner reads Binance perp mark
-    # (Binance adapter emits with symbol="BTCUSDT").
+    # resolve on Binance SPOT, set "BTCUSDT_SPOT" so the Scanner reads the
+    # Binance SPOT bbo reference (remapped from "BTCUSDT" on ingest).
     reference_symbol: str = "BTC"
     # Which feed sources the σ/OHLC reference for ``reference_symbol``.
     #   "mark" (default) — the venue MarkEvent. HL perp mark is sub-second; the
     #     Binance perp mark is a 3s REST poll, which is too sparse for dt=5
     #     bars (High≈Low≈Close → degenerate σ).
-    #   "bbo" — the dense BBO mid = (bid_px+ask_px)/2. For PM (BTCUSDT) this is
-    #     the sub-second bookTicker stream the engine already subscribes to, so
+    #   "bbo" — the dense BBO mid = (bid_px+ask_px)/2. For PM (BTCUSDT_SPOT)
+    #     this is the sub-second bookTicker stream the engine subscribes to, so
     #     dt=5 bars carry real intra-bar range. Mirrors the backtest
     #     `_load_binance_bbo_reference`. Two slots sharing a reference_symbol
     #     must agree on the source (shared OHLC history). Keep "mark" for HL.

@@ -16,13 +16,6 @@ from ..strategy.types import (
     Action, BookState, Decision, Position, QuestionView,
 )
 
-# How long after a PM up/down market's reference candle (strike_ref_ts_ns) the
-# scanner will still capture the open from the live reference mark. The capture
-# is retried every scan tick, so in steady state it fires within one tick of
-# the open; the window only needs slack for brief scan gaps. Past it, the open
-# is treated as missed (rely on a persisted strike, else skip the market).
-_PM_STRIKE_CAPTURE_TOLERANCE_NS = 300 * 1_000_000_000
-
 
 def _binary_favorite_sym(
     question: QuestionView, books: dict[str, BookState],
@@ -140,42 +133,23 @@ class Scanner:
         bars = (secs + dt - 1) // dt
         return max(32, bars)
 
-    def _resolve_pm_strike(self, q: QuestionView, *, now_ns: int) -> QuestionView:
-        """Ensure a PM up/down question has its open-strike, then return the
-        (possibly re-stamped) QuestionView.
-
-        PM "BTC Up or Down" markets carry no static strike — they resolve vs a
-        Binance reference candle at strike_ref_ts_ns. We stamp the strike from
-        this slot's live reference mark at the open (capture fires only once
-        ``now`` reaches it) and persist it so a restart can reload it instead of
-        skipping. Runs every scan tick until resolved; a no-op for non-PM
-        questions and once this slot has resolved the strike.
-        """
+    def _resolve_pm_strike(self, q: QuestionView) -> QuestionView:
+        """Reload a PM up/down strike that the runtime's async capture path
+        (EngineRuntime._maybe_capture_pm_strike) already persisted. The scanner
+        is pure/sync, so it only reloads an already-known strike here — capture
+        (Binance spot 1m close) happens off the scan path."""
         if q.venue != "polymarket" or q.question_idx in self._pm_strike_seen:
             return q
-        strike: float | None = None
-        if q.strike != q.strike:  # NaN — not yet resolved
-            strike = self.ms.capture_pm_open_strike(
-                q.question_idx, reference_symbol=self.ref_symbol,
-                now_ns=now_ns, tolerance_ns=_PM_STRIKE_CAPTURE_TOLERANCE_NS,
-            )
-            if strike is None:
-                # Open not reached yet, or missed → try a strike persisted by a
-                # prior run; if absent we leave it NaN and retry next tick.
-                persisted = self.dal.get_pm_strike(q.question_idx)
-                if persisted is not None and self.ms.set_question_strike(
-                    q.question_idx, persisted,
-                ):
-                    strike = persisted
-        else:
-            # Already stamped (e.g. by another slot sharing this question).
-            strike = q.strike
-        if strike is None:
+        if q.strike == q.strike:  # already stamped in-memory
+            self._pm_strike_seen.add(q.question_idx)
             return q
-        # Persist to THIS slot's DB so each slot is independently restart-safe.
-        self.dal.set_pm_strike(q.question_idx, strike)
-        self._pm_strike_seen.add(q.question_idx)
-        return self.ms.question(q.question_idx) or q
+        persisted = self.dal.get_pm_strike(q.question_idx)
+        if persisted is not None and self.ms.set_question_strike(
+            q.question_idx, persisted,
+        ):
+            self._pm_strike_seen.add(q.question_idx)
+            return self.ms.question(q.question_idx) or q
+        return q
 
     def scan(self, *, now_ns: int) -> list[ScannedDecision]:
         out: list[ScannedDecision] = []
@@ -222,11 +196,19 @@ class Scanner:
             }
             if match_question(self.cfg, question_idx=q.question_idx, fields=fields) is None:
                 continue
-            # PM up/down markets carry no static strike; resolve it from the
-            # live reference at the open (retried each tick — PM lists markets
-            # ~24h early, so a one-shot capture would always be too soon). May
-            # re-stamp the shared QuestionView, so re-read q before using it.
-            q = self._resolve_pm_strike(q, now_ns=now_ns)
+            # PM up/down markets carry no static strike. The runtime's async
+            # _maybe_capture_pm_strike fetches the Binance spot 1m close once
+            # the reference candle has closed. Here we only reload a strike
+            # already persisted by that path (pure sync, no IO). May re-stamp
+            # the shared QuestionView, so re-read q before using it.
+            q = self._resolve_pm_strike(q)
+            # No strike → cannot price the market. PM up/down strikes are
+            # captured asynchronously (runtime spot 1m-close); until captured the
+            # strike is NaN. Skip rather than evaluate — a NaN strike makes
+            # safety_d NaN, which the strategy maps to None and would otherwise
+            # silently bypass the safety_d gate. "No strike → no trade."
+            if q.venue == "polymarket" and q.strike != q.strike:  # NaN check
+                continue
             # Multi-outcome support: feed every leg of the question to the
             # strategy so it can decide across all sides (priceBucket has 6 legs;
             # priceBinary has 2). Skip the question if no leg has a book yet.

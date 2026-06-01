@@ -143,11 +143,23 @@ class RedemptionTimeout(_Base):
     expected_payout_usd: float
 
 
+class PMStrikeMismatch(_Base):
+    """PM-specific: fired after strike capture when the fetched Binance spot
+    1m close diverges materially from the live BTCUSDT_SPOT BBO mark. This is
+    a cross-check between two independent data paths (REST klines vs. live feed).
+    Alert-only — the strike is still persisted and the market still trades."""
+    kind: Literal["pm_strike_mismatch"] = "pm_strike_mismatch"
+    question_idx: int
+    captured_strike: float
+    reference_mark: float
+    divergence_bps: float
+
+
 BusEvent = Annotated[
     Union[
         RiskVeto, RiskHalt, StopLossTriggered, DailyLossHalt, StaleDataHalt,
         KillSwitchActivated, ReconcileDrift, Entry, Exit, NewQuestion,
-        OrderRejected, OrderUnconfirmed, RedemptionTimeout,
+        OrderRejected, OrderUnconfirmed, RedemptionTimeout, PMStrikeMismatch,
     ],
     Field(discriminator="kind"),
 ]

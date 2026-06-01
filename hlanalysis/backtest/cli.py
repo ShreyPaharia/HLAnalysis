@@ -69,6 +69,7 @@ def _resolve_data_source(
     pm_reference_source: str | None = None,
     pm_reference_resample_seconds: int | None = None,
     pm_book_source: str | None = None,
+    pm_binance_bbo_product_type: str | None = None,
 ) -> DataSource:
     """Map a CLI data-source name to a concrete DataSource instance.
 
@@ -99,11 +100,13 @@ def _resolve_data_source(
         prs = pm_reference_source or "klines"
         prrs = int(pm_reference_resample_seconds) if pm_reference_resample_seconds else 60
         pbs = pm_book_source or "synthetic"
+        pbpt = pm_binance_bbo_product_type or "perp"
         return PolymarketDataSource(
             cache_root=Path(root),
             reference_source=prs,  # type: ignore[arg-type]
             reference_resample_seconds=prrs,
             book_source=pbs,  # type: ignore[arg-type]
+            binance_bbo_product_type=pbpt,  # type: ignore[arg-type]
             **_PM_FLAVORS[flavor],
         )
     if name == "hl_hip4":
@@ -252,6 +255,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         pm_reference_source=getattr(args, "pm_reference_source", None),
         pm_reference_resample_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
         pm_book_source=getattr(args, "pm_book_source", None),
+        pm_binance_bbo_product_type=getattr(args, "pm_binance_bbo_product_type", None),
     )
     start = args.start or ""
     end = args.end or ""
@@ -625,8 +629,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="klines",
         help="(polymarket only) Reference-feed source. `klines` (default) reads "
         "cached 1m Binance klines (12-month corpus). `binance_bbo` reads "
-        "recorded Binance perp BBO ticks and buckets to vol_sampling_dt_seconds "
+        "recorded Binance BBO ticks and buckets to vol_sampling_dt_seconds "
         "(BBO-overlap window only).",
+    )
+    pr.add_argument(
+        "--pm-binance-bbo-product-type",
+        choices=["perp", "spot"],
+        default="perp",
+        dest="pm_binance_bbo_product_type",
+        help="(polymarket binance_bbo only) Binance product type for the BBO "
+        "reference feed. `perp` (default) reads Binance PERP BBO ticks. `spot` "
+        "reads Binance SPOT BBO ticks, matching PM's settlement instrument "
+        "(Binance SPOT 1m close). Spot ticks use local_recv_ts since Binance "
+        "SPOT bookTicker does not provide exchange_ts.",
     )
     pr.add_argument(
         "--pm-book-source",

@@ -192,31 +192,17 @@ def _seed_pm_updown(now_ns: int, *, strike_ref_ts_ns: int) -> MarketState:
     return ms
 
 
-def test_scanner_captures_and_persists_pm_strike_at_open(tmp_path):
-    # The capture must be RECURRING (per scan tick), because PM lists daily
-    # markets ~24h before their open — a one-shot capture at first-sight is
-    # always too early. Here the open is just behind `now`, so the tick fires.
-    import math
+def test_scanner_reloads_persisted_pm_strike(tmp_path):
+    # The scanner is pure/sync and must not capture the strike itself. Once
+    # EngineRuntime._maybe_capture_pm_strike has persisted the strike to the
+    # DAL, the next scan tick must reload it into the shared MarketState.
     now = 1_700_000_000_000_000_000
-    ms = _seed_pm_updown(now, strike_ref_ts_ns=now - 2_000_000_000)  # opened 2s ago
+    ms = _seed_pm_updown(now, strike_ref_ts_ns=now - 120_000_000_000)
     cfg = _cfg_with_match({"class": "priceBinary", "underlying": "BTC"})
     scanner = _scanner_for(cfg, ms, tmp_path, now)
+    scanner.dal.set_pm_strike(909100, 73_644.92)   # as if the runtime captured it
     scanner.scan(now_ns=now)
-    assert ms.question(909100).strike == 74_000.0
-    assert scanner.dal.get_pm_strike(909100) == 74_000.0
-
-
-def test_scanner_waits_to_capture_pm_strike_until_open(tmp_path):
-    # Market discovered well before its open (the real PM case): the scanner
-    # must NOT stamp a strike yet — it leaves it NaN and retries later.
-    import math
-    now = 1_700_000_000_000_000_000
-    ms = _seed_pm_updown(now, strike_ref_ts_ns=now + 3600 * 1_000_000_000)  # opens 1h later
-    cfg = _cfg_with_match({"class": "priceBinary", "underlying": "BTC"})
-    scanner = _scanner_for(cfg, ms, tmp_path, now)
-    scanner.scan(now_ns=now)
-    assert math.isnan(ms.question(909100).strike)
-    assert scanner.dal.get_pm_strike(909100) is None
+    assert ms.question(909100).strike == 73_644.92
 
 
 # --- Daily PnL-window boundary (06:00 UTC for HL HIP-4) ---
@@ -725,3 +711,85 @@ def test_parkinson_equals_stdev_on_flat_series(tmp_path):
         return [d.decision.action for d in scanner.scan(now_ns=now)]
 
     assert run("stdev") == run("parkinson")
+
+
+# ---- NaN-strike PM guard ---------------------------------------------------
+
+
+def _seed_pm_updown_with_books(now_ns: int, *, strike_ref_ts_ns: int) -> MarketState:
+    """Like _seed_pm_updown but also seeds:
+    - multiple BTC marks (so recent_returns has ≥2 entries),
+    - an expiry within the TTE window (600s from now),
+    - BBO books for YES_TOKEN / NO_TOKEN at prices that pass the
+      price_extreme_threshold=0.95 gate.
+
+    With this setup the LateResolutionStrategy WOULD evaluate the question
+    and reach ENTER — unless the scanner guard skips it due to NaN strike.
+    The strike is intentionally NOT set (no `set_question_strike` call) so
+    it stays NaN.
+    """
+    from datetime import datetime, timezone
+
+    ms = MarketState()
+    # Enough 60s-spaced BTC marks for recent_returns to have >2 entries.
+    for i in range(10):
+        ts = now_ns - (10 - i) * 60_000_000_000
+        ms.apply(MarkEvent(
+            venue="binance", product_type=ProductType.PERP,
+            mechanism=Mechanism.CLOB, symbol="BTC",
+            exchange_ts=ts, local_recv_ts=ts,
+            mark_px=74_000.0 + i * 0.5,
+        ))
+    expiry_str = datetime.fromtimestamp(
+        (now_ns + 600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+    ).strftime("%Y%m%d-%H%M")
+    ms.apply(QuestionMetaEvent(
+        venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
+        exchange_ts=now_ns, local_recv_ts=now_ns,
+        question_idx=909100, named_outcome_idxs=[0, 1],
+        keys=["class", "underlying", "series_slug", "expiry",
+              "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+        values=["priceBinary", "BTC", "btc-up-or-down-daily", expiry_str,
+                "YES_TOKEN", "NO_TOKEN", str(strike_ref_ts_ns)],
+    ))
+    # YES leg is the favourite at 0.96 ask — passes price_extreme_threshold=0.95.
+    # Deep-enough bid so bid_notional gate (disabled at 0) is irrelevant.
+    ms.apply(BboEvent(
+        venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
+        exchange_ts=now_ns, local_recv_ts=now_ns,
+        bid_px=0.95, bid_sz=200.0, ask_px=0.96, ask_sz=200.0,
+    ))
+    ms.apply(BboEvent(
+        venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB, symbol="NO_TOKEN",
+        exchange_ts=now_ns, local_recv_ts=now_ns,
+        bid_px=0.03, bid_sz=200.0, ask_px=0.04, ask_sz=200.0,
+    ))
+    return ms
+
+
+def test_scanner_skips_pm_question_with_unresolved_strike(tmp_path):
+    """A PM question whose strike is still NaN (capture not yet fired) must
+    produce NO ENTER decision. Without the guard the strategy evaluates the
+    market, safety_d is NaN → skipped, and ENTER is emitted.
+
+    TDD: write before Fix 1 → the test FAILS (ENTER emitted without guard).
+    After adding the guard in Scanner.scan() → the test PASSES (question is
+    skipped before strategy.evaluate is called).
+    """
+    import math
+    now = 1_700_000_000_000_000_000
+    ms = _seed_pm_updown_with_books(now, strike_ref_ts_ns=now - 120_000_000_000)
+    cfg = _cfg_with_match({"class": "priceBinary", "underlying": "BTC"})
+    scanner = _scanner_for(cfg, ms, tmp_path, now)
+    # Precondition: strike must still be NaN (no capture/persist).
+    assert math.isnan(ms.question(909100).strike), (
+        "precondition failed: expected NaN strike before guard test"
+    )
+    decisions = scanner.scan(now_ns=now)
+    assert all(d.decision.action is not Action.ENTER for d in decisions), (
+        "scanner produced ENTER for a PM question with NaN strike — "
+        "NaN-strike guard is missing"
+    )

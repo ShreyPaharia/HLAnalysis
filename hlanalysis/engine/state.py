@@ -65,9 +65,9 @@ class SeenQuestion(SQLModel, table=True):
 
 class PmStrike(SQLModel, table=True):
     """Open-strike captured for a Polymarket up/down question. PM up/down
-    markets have no static strike; the engine stamps it from the live bbo
-    reference at the market open. Persisting it lets a restarted engine reuse
-    the strike instead of skipping markets whose open it can no longer see."""
+    markets have no static strike; the engine stamps it from the Binance SPOT
+    1m candle close at strike_ref_ts_ns. Persisting it lets a restarted engine
+    reuse the strike instead of skipping markets whose open it can no longer see."""
     __tablename__ = "pm_strike"
     question_idx: int = Field(primary_key=True)
     strike: float

@@ -98,8 +98,9 @@ class _PMStubAdapter(VenueAdapter):
 
 class _PMUpDownStubAdapter(VenueAdapter):
     """A PM 'BTC Up or Down' market: no static strike, just a reference
-    candle ts (strike_ref_ts_ns). The engine must stamp the strike from the
-    live reference mark at the open."""
+    candle ts (strike_ref_ts_ns). The reference minute is already closed
+    (strike_ref_ts_ns is 90s in the past) so the engine must fetch the
+    Binance spot 1m close rather than stamping the live mark."""
 
     venue = "polymarket"
 
@@ -111,15 +112,15 @@ class _PMUpDownStubAdapter(VenueAdapter):
         expiry_str = datetime.fromtimestamp(
             (now + 12 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
         ).strftime("%Y%m%d-%H%M")
-        # Reference mark first — in production the bbo reference feed runs
-        # continuously, so a mark is always present when a new market lists.
-        # This is the value the engine should capture as the strike.
+        # Live reference mark at 73_500 — this is the value the engine must
+        # NOT capture (the new path uses the spot 1m close, not the live mark).
         yield MarkEvent(
             venue="binance", product_type=ProductType.SPOT,
             mechanism=Mechanism.CLOB, symbol="BTC",
             exchange_ts=now, local_recv_ts=now, mark_px=73_500.0,
         )
-        # strike_ref_ts_ns ≈ now → within the engine's capture tolerance.
+        # strike_ref_ts_ns is 90s in the past → the reference candle has
+        # already closed (>60s), so the runtime's capture path should fire.
         yield QuestionMetaEvent(
             venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
             mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
@@ -128,15 +129,17 @@ class _PMUpDownStubAdapter(VenueAdapter):
             keys=["class", "underlying", "expiry", "series_slug",
                   "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
             values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
-                    "YES_TOKEN", "NO_TOKEN", str(now)],
+                    "YES_TOKEN", "NO_TOKEN", str(now - 90 * 1_000_000_000)],
         )
         await asyncio.sleep(2.5)
 
 
-class _PMUpDownRestartStubAdapter(VenueAdapter):
-    """A PM up/down market whose open is in the past (strike_ref_ts ≪ now) —
-    simulates the post-restart case where the engine can no longer observe the
-    open and must reload a persisted strike."""
+class _PMUpDownSpotMarkStubAdapter(VenueAdapter):
+    """Like _PMUpDownStubAdapter but also emits a Binance SPOT mark with
+    symbol='BTCUSDT' (remapped to BTCUSDT_SPOT by _remap_reference_symbol) so
+    market_state.last_mark('BTCUSDT_SPOT') returns 73_500.  The klines_fetcher
+    returns 73_644.92, giving ~19.5 bps divergence (above the 10 bps threshold)
+    — this exercises the PMStrikeMismatch alert path."""
 
     venue = "polymarket"
 
@@ -145,7 +148,45 @@ class _PMUpDownRestartStubAdapter(VenueAdapter):
 
     async def stream(self, _subs) -> AsyncIterator:
         now = time.time_ns()
-        past_open = now - 6 * 3600 * 1_000_000_000  # 6h ago → outside tolerance
+        expiry_str = datetime.fromtimestamp(
+            (now + 12 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+        ).strftime("%Y%m%d-%H%M")
+        # Emit a spot BBO mark under symbol="BTCUSDT" — _remap_reference_symbol
+        # in _ingest_loop renames this to BTCUSDT_SPOT so last_mark("BTCUSDT_SPOT")
+        # returns 73_500.  (symbol="BTC" would not be remapped; "BTCUSDT" is the
+        # canonical Binance SPOT symbol the remap function expects.)
+        yield MarkEvent(
+            venue="binance", product_type=ProductType.SPOT,
+            mechanism=Mechanism.CLOB, symbol="BTCUSDT",
+            exchange_ts=now, local_recv_ts=now, mark_px=73_500.0,
+        )
+        # strike_ref_ts_ns is 90s in the past → candle already closed.
+        yield QuestionMetaEvent(
+            venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
+            exchange_ts=now, local_recv_ts=now,
+            question_idx=909005, named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "expiry", "series_slug",
+                  "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+            values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
+                    "YES_TOKEN", "NO_TOKEN", str(now - 90 * 1_000_000_000)],
+        )
+        await asyncio.sleep(2.5)
+
+
+class _PMUpDownRestartStubAdapter(VenueAdapter):
+    """A PM up/down market whose strike_ref_ts is in the past (≪ now). Used by
+    both the reload test (persisted strike reused) and the fresh-engine test
+    (strike captured from klines when no persisted value exists)."""
+
+    venue = "polymarket"
+
+    def supports(self, *_a, **_k) -> bool:
+        return True
+
+    async def stream(self, _subs) -> AsyncIterator:
+        now = time.time_ns()
+        past_open = now - 6 * 3600 * 1_000_000_000  # 6h ago → well past the 60s candle-close gate
         expiry_str = datetime.fromtimestamp(
             (now + 6 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
         ).strftime("%Y%m%d-%H%M")
@@ -281,9 +322,11 @@ async def test_pm_paper_slot_emits_decision(cfgs):
 
 
 @pytest.mark.asyncio
-async def test_pm_updown_strike_captured_from_reference_at_open(cfgs):
-    # An up/down PM market carries no static strike. The engine must stamp it
-    # from the live reference mark at the open so the strategy can price it.
+async def test_pm_updown_strike_captured_from_spot_close(cfgs):
+    # An up/down PM market carries no static strike. The reference candle is
+    # already closed (strike_ref_ts_ns 90s in the past), so the engine must
+    # fetch the Binance spot 1m CLOSE via klines_fetcher — NOT use the live
+    # reference mark of 73_500.
     strategy_cfg, deploy_cfg = cfgs
     fake_tg = _FakeTelegram()
 
@@ -294,6 +337,7 @@ async def test_pm_updown_strike_captured_from_reference_at_open(cfgs):
         subscriptions=[],
         exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
         telegram_factory=lambda _http: fake_tg,
+        klines_fetcher=lambda _ts_ns: 73_644.92,
     )
     runtime_task = asyncio.create_task(runtime.run())
     await asyncio.sleep(3.0)
@@ -302,11 +346,9 @@ async def test_pm_updown_strike_captured_from_reference_at_open(cfgs):
 
     q = runtime.market_state.question(909002)
     assert q is not None
-    # Strike stamped from the reference mark (73_500), not left NaN.
-    assert q.strike == 73_500.0
-    # …and persisted for restart reuse.
+    assert q.strike == 73_644.92          # spot 1m CLOSE, NOT the live mark 73_500
     [slot] = runtime.slots
-    assert slot.dal.get_pm_strike(909002) == 73_500.0
+    assert slot.dal.get_pm_strike(909002) == 73_644.92
 
 
 @pytest.mark.asyncio
@@ -342,10 +384,10 @@ async def test_pm_updown_strike_reloaded_from_db_after_restart(cfgs):
 
 
 @pytest.mark.asyncio
-async def test_pm_updown_strike_backfilled_when_open_missed(cfgs):
+async def test_pm_updown_strike_captured_when_open_already_closed(cfgs):
     # Open was missed AND nothing persisted (fresh engine that started after the
-    # market's open). The engine must backfill the strike from the historical
-    # Binance close so the market is tradeable instead of skipped.
+    # market's open). The engine must capture the strike from the Binance spot
+    # 1m close (open already past) so the market is tradeable instead of skipped.
     strategy_cfg, deploy_cfg = cfgs
 
     runtime = EngineRuntime(
@@ -368,3 +410,251 @@ async def test_pm_updown_strike_backfilled_when_open_missed(cfgs):
     assert q.strike == 70_500.0
     [slot] = runtime.slots
     assert slot.dal.get_pm_strike(909003) == 70_500.0
+
+
+@pytest.mark.asyncio
+async def test_pm_strike_capture_loop_registered_and_captures(cfgs):
+    """The periodic _pm_strike_capture_loop must be registered as a task in
+    run() and must independently capture the strike even if first-sight could
+    not.  We use _PMUpDownRestartStubAdapter (ref_ts 6h ago, qidx 909003) and
+    assert capture happened — the integration proves the loop is wired up, not
+    just defined.  (The existing test_pm_updown_strike_captured_when_open_already_closed
+    exercises the same happy-path; this test complements it by also asserting
+    the loop method exists and is scheduled.)"""
+    strategy_cfg, deploy_cfg = cfgs
+
+    runtime = EngineRuntime(
+        strategies=[strategy_cfg],
+        deploy_cfg=deploy_cfg,
+        adapter_factory=_PMUpDownRestartStubAdapter,  # qidx 909003, ref_ts 6h ago
+        subscriptions=[],
+        exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
+        telegram_factory=lambda _http: _FakeTelegram(),
+        klines_fetcher=lambda _ts_ns: 70_500.0,
+    )
+
+    # The loop must exist as a callable method.
+    assert callable(getattr(runtime, "_pm_strike_capture_loop", None)), (
+        "_pm_strike_capture_loop not defined on EngineRuntime"
+    )
+
+    runtime_task = asyncio.create_task(runtime.run())
+    await asyncio.sleep(3.0)
+    runtime.stop_event.set()
+    await asyncio.wait_for(runtime_task, timeout=5.0)
+
+    q = runtime.market_state.question(909003)
+    assert q is not None and q.strike == 70_500.0, (
+        f"strike not captured: {q.strike if q else 'question missing'}"
+    )
+    [slot] = runtime.slots
+    assert slot.dal.get_pm_strike(909003) == 70_500.0
+
+
+@pytest.mark.asyncio
+async def test_pm_strike_capture_loop_direct(cfgs):
+    """Drive _pm_strike_capture_loop directly: seed a PM question into
+    market_state (bypass ingest so first-sight never fires), then let the loop
+    run for ~1.5s, and confirm the strike was captured."""
+    import math
+    from hlanalysis.events import Mechanism, ProductType, QuestionMetaEvent
+
+    strategy_cfg, deploy_cfg = cfgs
+
+    runtime = EngineRuntime(
+        strategies=[strategy_cfg],
+        deploy_cfg=deploy_cfg,
+        # Use a stub that emits nothing — we seed market_state manually.
+        adapter_factory=_PMUpDownRestartStubAdapter,
+        subscriptions=[],
+        exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
+        telegram_factory=lambda _http: _FakeTelegram(),
+        klines_fetcher=lambda _ts_ns: 88_888.0,
+    )
+
+    # Build slots so _pm_strike_capture_loop has something to work with.
+    runtime.slots = [runtime._build_slot(strategy_cfg)]
+    slots = runtime.slots
+
+    now_ns = time.time_ns()
+    past_ref_ns = now_ns - 6 * 3600 * 1_000_000_000  # 6h ago → candle long closed
+    expiry_str = datetime.fromtimestamp(
+        (now_ns + 6 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+    ).strftime("%Y%m%d-%H%M")
+
+    # Seed the question directly into market_state (no ingest loop).
+    meta_ev = QuestionMetaEvent(
+        venue="polymarket",
+        product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB,
+        symbol="YES_TOKEN",
+        exchange_ts=now_ns,
+        local_recv_ts=now_ns,
+        question_idx=909004,
+        named_outcome_idxs=[0, 1],
+        keys=["class", "underlying", "expiry", "series_slug",
+              "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+        values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
+                "YES_TOKEN", "NO_TOKEN", str(past_ref_ns)],
+    )
+    runtime.market_state.apply(meta_ev)
+    qv = runtime.market_state.question(909004)
+    assert qv is not None
+    assert math.isnan(qv.strike), "strike should be NaN before capture"
+
+    # Run the loop as a task for ~2.5s, then stop.
+    loop_task = asyncio.create_task(runtime._pm_strike_capture_loop(slots))
+    await asyncio.sleep(2.5)
+    runtime.stop_event.set()
+    await asyncio.wait_for(loop_task, timeout=3.0)
+
+    q = runtime.market_state.question(909004)
+    assert q is not None and q.strike == 88_888.0, (
+        f"loop did not capture strike; got {q.strike if q else 'question missing'}"
+    )
+    [slot] = slots
+    assert slot.dal.get_pm_strike(909004) == 88_888.0
+
+
+class _PMUpDownFutureRefStubAdapter(VenueAdapter):
+    """A PM up/down market whose strike_ref_ts_ns is ~1h in the FUTURE so
+    the reference candle has NOT yet closed. The engine must NOT call the
+    klines_fetcher (the candle-close gate blocks it) and the strike must
+    remain NaN after the run."""
+
+    venue = "polymarket"
+
+    def supports(self, *_a, **_k) -> bool:
+        return True
+
+    async def stream(self, _subs) -> AsyncIterator:
+        now = time.time_ns()
+        future_ref_ts = now + 3600 * 1_000_000_000  # 1h from now — candle not closed
+        expiry_str = datetime.fromtimestamp(
+            (now + 12 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+        ).strftime("%Y%m%d-%H%M")
+        yield MarkEvent(
+            venue="binance", product_type=ProductType.SPOT,
+            mechanism=Mechanism.CLOB, symbol="BTC",
+            exchange_ts=now, local_recv_ts=now, mark_px=80_000.0,
+        )
+        yield QuestionMetaEvent(
+            venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
+            exchange_ts=now, local_recv_ts=now,
+            question_idx=909006, named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "expiry", "series_slug",
+                  "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+            values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
+                    "YES_TOKEN", "NO_TOKEN", str(future_ref_ts)],
+        )
+        await asyncio.sleep(2.5)
+
+
+@pytest.mark.asyncio
+async def test_pm_strike_capture_failure_leaves_nan_and_skips(cfgs):
+    """When klines_fetcher returns None (Binance fetch fails), the strike must
+    remain NaN and nothing must be persisted to the DAL. The market is
+    effectively skipped (Fix 1 guard) rather than evaluated with a NaN strike."""
+    import math
+    strategy_cfg, deploy_cfg = cfgs
+
+    runtime = EngineRuntime(
+        strategies=[strategy_cfg], deploy_cfg=deploy_cfg,
+        adapter_factory=_PMUpDownRestartStubAdapter,  # qidx 909003, ref_ts 6h ago
+        subscriptions=[],
+        exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
+        telegram_factory=lambda _http: _FakeTelegram(),
+        klines_fetcher=lambda _ts_ns: None,   # fetch fails
+    )
+    runtime_task = asyncio.create_task(runtime.run())
+    await asyncio.sleep(3.0)
+    runtime.stop_event.set()
+    await asyncio.wait_for(runtime_task, timeout=5.0)
+
+    q = runtime.market_state.question(909003)
+    assert q is not None and math.isnan(q.strike), (
+        f"strike should still be NaN after failed fetch, got {q.strike if q else 'missing'}"
+    )
+    [slot] = runtime.slots
+    assert slot.dal.get_pm_strike(909003) is None, (
+        "nothing should be persisted when klines_fetcher returns None"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pm_strike_not_captured_before_candle_closes(cfgs):
+    """When strike_ref_ts_ns is in the future (candle not yet closed+published),
+    the candle-close gate must block the fetch entirely. klines_fetcher must
+    NOT be called and the strike must remain NaN."""
+    import math
+    strategy_cfg, deploy_cfg = cfgs
+
+    calls = {"n": 0}
+
+    def fetcher(_ts_ns: int) -> float | None:
+        calls["n"] += 1
+        return 70_000.0
+
+    runtime = EngineRuntime(
+        strategies=[strategy_cfg], deploy_cfg=deploy_cfg,
+        adapter_factory=_PMUpDownFutureRefStubAdapter,  # qidx 909006, ref_ts 1h future
+        subscriptions=[],
+        exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
+        telegram_factory=lambda _http: _FakeTelegram(),
+        klines_fetcher=fetcher,
+    )
+    runtime_task = asyncio.create_task(runtime.run())
+    await asyncio.sleep(3.0)
+    runtime.stop_event.set()
+    await asyncio.wait_for(runtime_task, timeout=5.0)
+
+    q = runtime.market_state.question(909006)
+    assert q is not None and math.isnan(q.strike), (
+        f"strike should be NaN (candle not closed), got {q.strike if q else 'missing'}"
+    )
+    assert calls["n"] == 0, (
+        f"klines_fetcher should not be called before candle closes, called {calls['n']} times"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pm_strike_divergence_alerts_but_still_trades(cfgs):
+    """Strike/spot-mark divergence fires a PMStrikeMismatch Telegram alert
+    but the strike is still persisted (alert-only, no skip).
+
+    The stub adapter emits a Binance SPOT MarkEvent with symbol='BTCUSDT'
+    (remapped to BTCUSDT_SPOT by _remap_reference_symbol in _ingest_loop), so
+    market_state.last_mark('BTCUSDT_SPOT') returns 73_500.  klines_fetcher
+    returns 73_644.92 — that is ≈19.5 bps apart, above the 10 bps threshold —
+    so the mismatch alert must fire."""
+    strategy_cfg, deploy_cfg = cfgs
+    tg = _FakeTelegram()
+
+    runtime = EngineRuntime(
+        strategies=[strategy_cfg],
+        deploy_cfg=deploy_cfg,
+        adapter_factory=_PMUpDownSpotMarkStubAdapter,
+        subscriptions=[],
+        exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
+        telegram_factory=lambda _http: tg,
+        klines_fetcher=lambda _ts_ns: 73_644.92,
+    )
+    runtime_task = asyncio.create_task(runtime.run())
+    await asyncio.sleep(3.0)
+    runtime.stop_event.set()
+    await asyncio.wait_for(runtime_task, timeout=5.0)
+
+    # Strike must still be captured (alert-only — no skip).
+    q = runtime.market_state.question(909005)
+    assert q is not None, "question 909005 not found in market_state"
+    assert q.strike == 73_644.92, (
+        f"strike should be 73644.92 (klines value), got {q.strike}"
+    )
+    [slot] = runtime.slots
+    assert slot.dal.get_pm_strike(909005) == 73_644.92
+
+    # A PMStrikeMismatch Telegram alert must have fired.
+    assert any("divergence" in m.lower() for m in tg.messages), (
+        f"no divergence alert in tg.messages: {tg.messages}"
+    )

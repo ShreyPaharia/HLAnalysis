@@ -1,14 +1,16 @@
-"""Binance 1-minute kline close lookup — used to backfill the open-strike of a
-Polymarket up/down market whose open the engine did not observe live (e.g. the
-market was listed before the engine started, or the engine restarted past the
-open). PM "BTC Up or Down" markets resolve against the Binance 1m candle close
-at a reference time; this fetches that exact value.
+"""Binance 1-minute kline close lookup — the canonical source of a Polymarket
+up/down market's open-strike. PM "BTC Up or Down" markets resolve against the
+Binance *spot* BTC/USDT 1m candle close at a reference time; this fetches that
+exact value.
 
-Perp (fapi) is tried first so the backfilled strike shares the perp series of
-the engine's live bbo reference feed — the perp/spot basis then cancels in the
-strategy's log(reference_price / strike). Spot (api) is the fallback (it is
-PM's literal resolution source; the residual basis vs the perp live reference
-is a few bps — immaterial for favourite-threshold entries).
+Spot (api.binance.com) ONLY. This must be the same instrument PM settles on —
+the verbatim rule on each market is "the Close price for the Binance 1 minute
+candle for BTC/USDT … according to Binance BTC/USDT", and the displayed strike
+matches the spot close exactly (e.g. 2026-05-31 16:00 UTC → 73644.92 spot vs
+73609.30 perp). The perp/spot basis is tens of dollars — a few bps of price —
+which is enough to flip the favourite near a coin-flip strike, so we never use
+the perp (fapi) value. If spot can't be fetched we return None and the slot
+skips the market rather than trade on a basis-biased strike.
 """
 from __future__ import annotations
 
@@ -17,7 +19,6 @@ from typing import Any
 
 import requests
 
-_PERP_URL = "https://fapi.binance.com/fapi/v1/klines"
 _SPOT_URL = "https://api.binance.com/api/v3/klines"
 
 
@@ -48,8 +49,9 @@ def binance_1m_close_at(
     *,
     http_get: Callable[[str, dict[str, Any]], Any] = _real_http_get,
 ) -> float | None:
-    """Return the Binance BTCUSDT 1m candle close at the minute containing
-    ``ts_ns``, or None if it can't be fetched. Tries perp then spot."""
+    """Return the Binance *spot* BTCUSDT 1m candle close at the minute
+    containing ``ts_ns``, or None if it can't be fetched. Spot only — never
+    falls back to the perp (see module docstring)."""
     minute_start_ms = (ts_ns // 1_000_000_000) // 60 * 60 * 1000
     params = {
         "symbol": "BTCUSDT",
@@ -57,12 +59,8 @@ def binance_1m_close_at(
         "startTime": minute_start_ms,
         "limit": 1,
     }
-    for url in (_PERP_URL, _SPOT_URL):
-        try:
-            data = http_get(url, params)
-        except Exception:
-            continue
-        close = _close_from_klines(data, minute_start_ms=minute_start_ms)
-        if close is not None:
-            return close
-    return None
+    try:
+        data = http_get(_SPOT_URL, params)
+    except Exception:
+        return None
+    return _close_from_klines(data, minute_start_ms=minute_start_ms)
