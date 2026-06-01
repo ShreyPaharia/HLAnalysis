@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>HL Engine — trade-eval issues (Trading Engine project) — 2026-06-01</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --border: #2d333b;
+    --text: #e6edf3; --muted: #8d96a0;
+    --green: #3fb950; --red: #f85149; --amber: #d29922; --blue: #58a6ff; --purple: #bc8cff;
+    --hl: #1f6feb22;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text);
+    margin: 0; padding: 32px 8%; line-height: 1.55; font-size: 14.5px;
+  }
+  h1 { font-size: 26px; margin: 0 0 6px 0; }
+  h2 { font-size: 18px; margin: 30px 0 12px 0; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  .subtitle { color: var(--muted); margin-bottom: 20px; font-size: 14px; }
+  .hero {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; margin: 14px 0 24px 0;
+  }
+  .hero strong { color: var(--green); }
+  .issue {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; margin: 14px 0;
+  }
+  .issue h3 { font-size: 16px; margin: 0 0 8px 0; }
+  .id { color: var(--muted); font-family: "SF Mono", Menlo, monospace; font-size: 12.5px; }
+  .badges { margin: 6px 0 12px 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .badge {
+    display: inline-block; font-size: 11.5px; font-weight: 600; padding: 2px 9px;
+    border-radius: 11px; border: 1px solid var(--border); letter-spacing: 0.2px;
+  }
+  .prio { color: #fff; }
+  .p-urgent { background: #da3633; border-color: #f85149; }
+  .p-high   { background: #9e6a03; border-color: #d29922; }
+  .p-medium { background: #1f6feb; border-color: #58a6ff; }
+  .p-low    { background: #30363d; border-color: #484f58; color: var(--muted); }
+  .lbl-bug      { color: var(--red);   border-color: #6e2b28; background: #2a1615; }
+  .lbl-strategy { color: var(--purple);border-color: #4b3470; background: #20172e; }
+  .lbl-risk     { color: var(--amber); border-color: #5c4410; background: #241c0c; }
+  .lbl-eng      { color: var(--blue);  border-color: #1b3a5e; background: #0f1d2e; }
+  .lbl-obs      { color: var(--green); border-color: #1c4a25; background: #0f2014; }
+  .lbl-invest   { color: #8d96a0; border-color: #3a3f46; background: #1b1f24; }
+  .field { margin: 8px 0; }
+  .field .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; background: #0a0d12; padding: 1px 5px; border-radius: 3px; border: 1px solid var(--border); }
+  pre { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; background: #0a0d12; border: 1px solid var(--border); border-radius: 4px; padding: 9px 12px; overflow-x: auto; margin: 6px 0; }
+  ul, ol { padding-left: 22px; margin: 6px 0; }
+  li { margin: 3px 0; }
+  .callout { border-left: 3px solid var(--blue); background: #1c2128; padding: 10px 14px; margin: 10px 0; border-radius: 0 4px 4px 0; }
+  .callout.success { border-left-color: var(--green); }
+  .callout.warn { border-left-color: var(--amber); }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; font-size: 13px; }
+  th, td { padding: 7px 11px; text-align: left; border-top: 1px solid var(--border); }
+  th { background: #1c2128; color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; }
+  .small { color: var(--muted); font-size: 12px; }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+</style>
+</head>
+<body>
+
+<h1>HL Engine — Trade-Evaluation Issues</h1>
+<div class="subtitle">
+  Project: <strong>Trading Engine</strong> · Source: live v1 + v31 trade eval (HL HIP-4 binary + bucket) · window 2026-05-19 → 05-31 · verified against deployed commit <code>29c42a3</code> · 2026-06-01
+</div>
+
+<div class="hero">
+  <strong>Context.</strong> Fill-table PnL reads negative (v1 −$121.84, v31 −$87.17) but settlement-inclusive
+  <strong>true PnL is positive</strong> (v1 +$120, v31 +$291) on a <strong>23/23 settlement win rate</strong>.
+  "Buy the favorite, hold to settlement" works; the visible losses are intraday exits, several of which fired on
+  positions that <em>won</em> at settlement. All issues below were re-confirmed against the live deployed code —
+  items already handled in <code>29c42a3</code> (intraday-fill persistence, orphan adoption, stale-data gate) are
+  excluded. <code>size_zero</code>-on-binary was reclassified as the by-design near-strike size cap, not a bug.
+</div>
+
+<h2>Priority order</h2>
+<table>
+  <tr><th>#</th><th>Issue</th><th>Priority</th><th>Type</th><th>Why this rank</th></tr>
+  <tr><td>TE-1</td><td>Intraday IOC stop/exit stops out eventual settlement winners</td><td>Urgent</td><td>Strategy / Bug</td><td>Only thing actively burning money now</td></tr>
+  <tr><td>TE-2</td><td>Persist settlement PnL; fix daily-loss DAL fallback</td><td>High</td><td>Bug / Risk</td><td>Latent spurious-halt of a profitable book</td></tr>
+  <tr><td>TE-3</td><td>Evict settled questions to bound memory (OOM)</td><td>High</td><td>Bug / Reliability</td><td>Already OOM-killed once (05-29)</td></tr>
+  <tr><td>TE-4</td><td>Per-market order-reject circuit breaker</td><td>Medium</td><td>Improvement</td><td>605-reject storm; rate-limit risk, no PnL impact</td></tr>
+  <tr><td>TE-5</td><td>Telegram alert delivery reliability</td><td>Low</td><td>Observability</td><td>Operational blind spot, no trading impact</td></tr>
+  <tr><td>TE-6</td><td>Confirm 6 unverifiable early settlements via HL userFills</td><td>Medium</td><td>Investigation</td><td>Largest residual PnL uncertainty (±$590)</td></tr>
+</table>
+
+<!-- ================= TE-1 ================= -->
+<div class="issue">
+  <h3>TE-1 · Intraday IOC stop/exit stops out positions that win at settlement</h3>
+  <div class="badges">
+    <span class="badge prio p-urgent">Urgent</span>
+    <span class="badge lbl-bug">bug</span>
+    <span class="badge lbl-strategy">strategy</span>
+    <span class="badge lbl-eng">area:engine</span>
+    <span class="badge lbl-risk">pnl-impact</span>
+  </div>
+
+  <div class="field"><span class="k">Problem</span>
+    <p>Exits (<code>exit_safety_d</code>, <code>exit_stop_loss</code> in v1; <code>exit_edge</code> / <code>exit_safety_d</code> in v31)
+    fire as <code>IOC reduce_only</code> with <code>limit_price = held_book.bid_px</code>. In a fast move the bid
+    evaporates between scan and send, the IOC is rejected ("could not immediately match"), and the next scan re-fires
+    at the new, lower bid — the stop <em>walks down a collapsing book</em>. Worse, the strategy thesis is hold-to-settlement
+    (23/23 settled positions won), so these stops are realizing losses on positions whose terminal payoff was positive.</p>
+  </div>
+
+  <div class="field"><span class="k">Evidence</span>
+    <ul>
+      <li>v1 <code>#1211</code> (q 1000121): stop walked to a <span class="neg">0.615 fill vs ~0.90 entry → −$95.27 in one fill</span>; the market then <strong>settled as a win</strong> (residual +$32.91).</li>
+      <li>v31 <code>#1080</code> (q 20): churned <span class="neg">−$110.65</span> intraday across 56 fills while v1 held the identical market flat to a <span class="pos">+$26.08 settlement win</span>.</li>
+      <li>v31 priceBucket intraday = <span class="neg">−$287.50</span>, almost entirely #1080 (−$111) + #1140 (−$161).</li>
+    </ul>
+  </div>
+
+  <div class="field"><span class="k">Code</span>
+    <pre>late_resolution.py:585-625   # exit_safety_d + exit_stop_loss: time_in_force="ioc", limit_price=held_book.bid_px
+theta_harvester.py:850-938   # exit_safety_d + exit_edge, same IOC pattern</pre>
+  </div>
+
+  <div class="field"><span class="k">Proposed direction</span>
+    <ol>
+      <li>Make the exit marketable with a bounded slippage budget (limit a few ticks through the bid, or IOC-to-depth with a max-slip cap) instead of a naked IOC pinned to a vanishing top-of-book bid.</li>
+      <li>Gate the intraday stop behind a <em>settlement-direction</em> check: if the held leg is still the favored outcome by the model, widen/suppress the stop rather than dumping into a transient air-pocket.</li>
+      <li>Materially widen <code>exit_safety_d</code> or add a re-entry lockout so a single whipsaw can't round-trip 5×.</li>
+    </ol>
+    <span class="small">Needs a design pass + backtest, not a one-line fix — pairs with the mid-hold work in <code>mid_hold_tte_stack_2026_05_21</code>.</span>
+  </div>
+
+  <div class="field"><span class="k">Acceptance</span>
+    <ul><li>Backtest over the 05-19→05-31 corpus shows reduced intraday exit losses without degrading the 23/23 settlement-win capture.</li>
+    <li>No exit fill more than <em>N</em> ticks through the bid at send time (slippage cap enforced).</li></ul>
+  </div>
+</div>
+
+<!-- ================= TE-2 ================= -->
+<div class="issue">
+  <h3>TE-2 · Settlement PnL is never persisted → daily-loss halt can fire on a profitable book</h3>
+  <div class="badges">
+    <span class="badge prio p-high">High</span>
+    <span class="badge lbl-bug">bug</span>
+    <span class="badge lbl-risk">risk</span>
+    <span class="badge lbl-eng">area:engine</span>
+  </div>
+
+  <div class="field"><span class="k">Problem</span>
+    <p><code>_close_settled</code> deletes the position and <em>publishes</em> an <code>Exit</code> carrying the settlement
+    realized PnL, but never writes a Fill/position row, so the local DB never records settlement gains. The daily-loss
+    gate reads HL's API first (correct) but <strong>falls back to the local DAL on any HL-API failure</strong> — and that
+    fallback sees only intraday losses, never settlement wins. A transient HL outage during a down intraday window can
+    therefore <strong>spuriously halt a strategy that is net-positive after settlement</strong>. (HL's
+    <code>realized_pnl_since</code> was in fact failing continuously during the 05-30 08:35 outage.)</p>
+  </div>
+
+  <div class="field"><span class="k">Code</span>
+    <pre>router.py:391-416    # _close_settled: delete_position + publish Exit(realized) — NO append_fill
+state.py:254-274     # realized_pnl_since = sum(fill.closed_pnl) + sum(open position.realized_pnl) → excludes settled
+runtime.py:919-922   # primary HLClient.realized_pnl_since; except: fall back to slot.dal.realized_pnl_since</pre>
+  </div>
+
+  <div class="field"><span class="k">Proposed direction</span>
+    <ul>
+      <li>In <code>_close_settled</code>, persist the settlement realized PnL (a synthetic Fill row, or a settlement ledger row) so <code>StateDAL.realized_pnl_since</code> is complete.</li>
+      <li>Make the daily-loss fallback <em>fail-open</em> (skip the cap when the authoritative venue number is unavailable) rather than fail-halt on an under-counted local number.</li>
+    </ul>
+  </div>
+
+  <div class="field"><span class="k">Acceptance</span>
+    <ul><li>After a settlement, <code>dal.realized_pnl_since(window_start)</code> matches the published Exit PnL.</li>
+    <li>Simulated HL-API failure with intraday loss &gt; cap but positive net does <em>not</em> trigger <code>DailyLossHalt</code>.</li></ul>
+  </div>
+</div>
+
+<!-- ================= TE-3 ================= -->
+<div class="issue">
+  <h3>TE-3 · Settled questions are never evicted from memory → OOM</h3>
+  <div class="badges">
+    <span class="badge prio p-high">High</span>
+    <span class="badge lbl-bug">bug</span>
+    <span class="badge lbl-eng">area:engine</span>
+    <span class="badge lbl-risk">reliability</span>
+  </div>
+
+  <div class="field"><span class="k">Problem</span>
+    <p><code>MarketState._questions</code> marks markets <code>settled=True</code> on settlement but <strong>never removes them</strong>;
+    the scanner walks the full dict every tick. The universe grows monotonically (heartbeat <code>questions</code> 4 → 201+ over the window;
+    <code>seen_question</code> table at 3160 rows). On the t4g.micro (384 MB cgroup) this already produced one
+    <strong>OOM-kill on 2026-05-29 15:46</strong>, and will recur.</p>
+  </div>
+
+  <div class="field"><span class="k">Code</span>
+    <pre>market_state.py:442-460   # _mark_settled: dataclasses.replace(q, settled=True) — kept forever
+market_state.py:281-284   # only _evict_old_trades prunes; questions never pruned
+scanner.py:212            # for q in self.ms.all_questions(): — iterates settled ones too</pre>
+    <span class="small">Confirmed: grep for any deletion/prune of <code>_questions</code> across <code>engine/</code> returns nothing.</span>
+  </div>
+
+  <div class="field"><span class="k">Proposed direction</span>
+    <ul>
+      <li>Evict questions a bounded time after settlement (e.g. drop once settled &amp; no open position &amp; past a short grace window), or cap <code>_questions</code> with LRU on settled entries.</li>
+      <li>Have the scanner skip settled questions explicitly so eviction lag never re-trades them.</li>
+      <li>Optionally prune/rotate the <code>seen_question</code> table.</li>
+    </ul>
+  </div>
+
+  <div class="field"><span class="k">Acceptance</span>
+    <ul><li>RSS stays bounded over a multi-day run (no monotonic growth in <code>questions</code> count).</li>
+    <li>No settled question re-enters the scan loop after eviction.</li></ul>
+  </div>
+</div>
+
+<!-- ================= TE-4 ================= -->
+<div class="issue">
+  <h3>TE-4 · No per-market circuit breaker on consecutive order rejects</h3>
+  <div class="badges">
+    <span class="badge prio p-medium">Medium</span>
+    <span class="badge lbl-eng">area:engine</span>
+    <span class="badge lbl-risk">reliability</span>
+    <span class="badge lbl-invest">improvement</span>
+  </div>
+
+  <div class="field"><span class="k">Problem</span>
+    <p>The router logs/publishes a reject and moves on; the only cooldown is a <em>post-exit entry</em> cooldown, nothing
+    keyed on rejects. <code>hl_client</code> retries only on <code>ConnectionError</code>. So a market that keeps rejecting
+    (post-only-style "could not immediately match") gets hammered every scan with no backoff.</p>
+  </div>
+
+  <div class="field"><span class="k">Evidence</span>
+    <ul><li>v31 <code>#850</code> (q 1000085): <strong>605 rejected orders, ~1 every 1.8 s for 87 min</strong>, zero fills until the book moved.</li>
+    <li>v31 overall reject rate <strong>75% (655 / 877)</strong>. Wasted API budget + rate-limit exposure.</li></ul>
+  </div>
+
+  <div class="field"><span class="k">Code</span>
+    <pre>router.py:180-221   # _place: logs OrderRejected, no breaker/backoff
+hl_client.py:202-207 # @retry only on ConnectionError (not venue rejects)</pre>
+  </div>
+
+  <div class="field"><span class="k">Proposed direction</span>
+    <p>After <em>N</em> rejects on the same (question_idx, side) within <em>T</em> seconds, apply a short per-market backoff
+    before re-quoting. Emit a metric/alert when the breaker trips.</p>
+  </div>
+
+  <div class="field"><span class="k">Acceptance</span>
+    <ul><li>A repeatedly-rejecting market is capped at ≤ <em>N</em> attempts per window instead of unbounded.</li></ul>
+  </div>
+</div>
+
+<!-- ================= TE-5 ================= -->
+<div class="issue">
+  <h3>TE-5 · Telegram alert delivery failing</h3>
+  <div class="badges">
+    <span class="badge prio p-low">Low</span>
+    <span class="badge lbl-obs">observability</span>
+    <span class="badge lbl-eng">area:engine</span>
+  </div>
+  <div class="field"><span class="k">Problem</span>
+    <p>Three consecutive Telegram send attempts failed around 2026-05-31 00:00 (<code>telegram error attempt=1/2/3</code>),
+    so the reconcile-drift / reject-burst alerts of that window were never delivered — an operator blind spot, no trading impact.</p>
+  </div>
+  <div class="field"><span class="k">Proposed direction</span>
+    <p>Add retry-with-backoff + a fallback delivery path (or a heartbeat "alerts healthy" check), and log undelivered alert bodies locally so nothing is lost.</p>
+  </div>
+  <div class="field"><span class="k">Acceptance</span><ul><li>Alerts survive a transient Telegram failure (delivered on retry or persisted for replay).</li></ul></div>
+</div>
+
+<!-- ================= TE-6 ================= -->
+<div class="issue">
+  <h3>TE-6 · Confirm 6 early settlements that predate log/parquet retention</h3>
+  <div class="badges">
+    <span class="badge prio p-medium">Medium</span>
+    <span class="badge lbl-invest">investigation</span>
+    <span class="badge lbl-risk">data</span>
+  </div>
+  <div class="field"><span class="k">Problem</span>
+    <p>Six early held-to-settlement markets (q 12/13/14, 1000065/1000070/1000075) settled before journald/parquet
+    retention, so win/loss is unconfirmed. They were bought at 0.87–0.999, so the asymmetry is stark:
+    <span class="pos">≤ +$57 combined if all won</span> vs <span class="neg">≈ −$590 combined if all lost</span>.
+    Given the 23/23 confirmed rate they almost certainly won, but it is unproven — this is the single largest residual
+    PnL uncertainty in the eval.</p>
+  </div>
+  <div class="field"><span class="k">Proposed direction</span>
+    <p>Pull HL <code>userFills</code> / account fill history for the account(s) directly (recorder retention doesn't reach
+    these dates) and reconcile the 6 outcomes. Fold the result into the true-PnL number.</p>
+  </div>
+  <div class="field"><span class="k">Acceptance</span><ul><li>Win/loss known for all 6 markets; true-PnL updated and the uncertainty band closed.</li></ul></div>
+</div>
+
+<div class="callout success">
+  <strong>Already handled in <code>29c42a3</code> (not filed):</strong> intraday reduce/exit fills <em>are</em> persisted
+  (0003 migration); venue-orphan <em>adoption</em> exists (<code>reconcile.py:223</code>, held-to-settlement, stop disabled) —
+  the repeating <code>#1290 venue_orphan_unattributed</code> is a self-resolving restart race; the engine stale-data
+  trade-block gate exists (<code>risk.py:116-118</code>). <code>size_zero</code>-on-binary is the by-design near-strike
+  size cap, not a bug.
+</div>
+
+<p class="small">Generated 2026-06-01 from the live trade evaluation. Priorities reflect PnL/risk impact: TE-1 is the only item
+actively losing money; TE-2 is the most dangerous latent bug; TE-3 already caused an availability incident.</p>
+
+</body>
+</html>
