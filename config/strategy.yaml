@@ -234,7 +234,11 @@ strategies:
       entry_cooldown_seconds: 60          # router reads from defaults
 
     global:
-      max_total_inventory_usd: 1000
+      # 2026-06-02: 1000→1100. v31 saturated at 2 filled positions ($1001.90)
+      # which is $1.90 over the old $1000 cap → every 3rd-leg/top-up entry was
+      # vetoed with max_total_inventory every tick. With per-position cap $500,
+      # 1100 leaves headroom for a 3rd position's first partial fill.
+      max_total_inventory_usd: 1100
       max_concurrent_positions: 5
       daily_loss_cap_usd: 100             # tightened in lockstep with per-position cap
       max_strike_distance_pct: 50
