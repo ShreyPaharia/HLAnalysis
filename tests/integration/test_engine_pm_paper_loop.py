@@ -407,6 +407,8 @@ async def test_pm_strike_capture_loop_registered_and_captures(cfgs):
     assert q is not None and q.strike == 70_500.0, (
         f"strike not captured: {q.strike if q else 'question missing'}"
     )
+    [slot] = runtime.slots
+    assert slot.dal.get_pm_strike(909003) == 70_500.0
 
 
 @pytest.mark.asyncio
@@ -460,9 +462,9 @@ async def test_pm_strike_capture_loop_direct(cfgs):
     assert qv is not None
     assert math.isnan(qv.strike), "strike should be NaN before capture"
 
-    # Run the loop as a task for ~1.5s, then stop.
+    # Run the loop as a task for ~2.5s, then stop.
     loop_task = asyncio.create_task(runtime._pm_strike_capture_loop(slots))
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(2.5)
     runtime.stop_event.set()
     await asyncio.wait_for(loop_task, timeout=3.0)
 

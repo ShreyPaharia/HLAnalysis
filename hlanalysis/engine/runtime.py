@@ -23,6 +23,7 @@ from .config import (
     HyperliquidAccount,
     PolymarketAccount,
     StrategyConfig,
+    match_question,
 )
 from .event_bus import EventBus
 from .exec_client import ExecutionClient
@@ -640,7 +641,6 @@ class EngineRuntime:
                         # and none of those have a corresponding strategy slot;
                         # alerting on them would spam Telegram with markets no
                         # strategy will ever trade.
-                        from .config import match_question
                         fields = {
                             "class": qv.klass,
                             "underlying": qv.underlying,
@@ -692,8 +692,6 @@ class EngineRuntime:
         the reference minute has closed, and no slot already has a persisted
         strike (a restart reloads instead). Fetched off the event loop.
         """
-        from .config import match_question
-
         _ONE_MINUTE_NS = 60 * 1_000_000_000
         if qv is None or qv.venue != "polymarket":
             return
@@ -745,11 +743,12 @@ class EngineRuntime:
         _ingest_loop fires at discovery, but PM lists markets ~24h before open,
         so the strike can only be fetched once the reference 1m candle closes.
         This loop walks unresolved PM questions and retries until captured."""
-        from .config import match_question
         while not self.stop_event.is_set():
             try:
                 now_ns = self._now_ns()
                 for qv in self.market_state.all_questions():
+                    # skip non-PM and already-captured (strike==strike is True
+                    # for a real float, False for NaN = still unresolved)
                     if qv.venue != "polymarket" or qv.strike == qv.strike:
                         continue
                     fields = {
