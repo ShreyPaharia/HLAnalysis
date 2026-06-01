@@ -49,20 +49,20 @@ from ..strategy.theta_harvester import (
 )
 
 
-# Internal symbol used for Binance SPOT BTCUSDT after ingest remapping.
-# The perp feed and the spot feed both emit symbol="BTCUSDT"; MarketState keys
-# books by bare symbol, so without a remap they silently overwrite each other.
-# The spot event is renamed to BTCUSDT_SPOT on arrival so both can coexist.
+# Internal symbol the Binance SPOT reference feed is remapped to (see
+# _remap_reference_symbol). PM strategy slots reference this via
+# `reference_symbol: BTCUSDT_SPOT` in config/strategy.yaml — that YAML string
+# MUST match this constant exactly, or the slot reads an empty book.
 _SPOT_REF_SYMBOL = "BTCUSDT_SPOT"
 
 
 def _remap_reference_symbol(ev: NormalizedEvent) -> NormalizedEvent:
     """Rename Binance SPOT BTCUSDT events to BTCUSDT_SPOT so they don't collide
-    with the perp BTCUSDT book key in MarketState. No-op for every other event."""
+    with the perp BTCUSDT book key. No-op for every other event."""
     if (
-        getattr(ev, "venue", None) == "binance"
-        and getattr(ev, "product_type", None) in (ProductType.SPOT, ProductType.SPOT.value)
-        and getattr(ev, "symbol", None) == "BTCUSDT"
+        ev.venue == "binance"
+        and ev.product_type == ProductType.SPOT
+        and ev.symbol == "BTCUSDT"
     ):
         return ev.model_copy(update={"symbol": _SPOT_REF_SYMBOL})
     return ev

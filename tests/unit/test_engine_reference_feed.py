@@ -1,12 +1,13 @@
-"""The engine ingests a dedicated, minimal Binance BTCUSDT perp `bbo`
-(bookTicker) reference feed so a BTCUSDT reference price/return series exists
+"""The engine ingests dedicated, minimal Binance BTCUSDT perp and spot `bbo`
+(bookTicker) reference feeds so a BTCUSDT reference price/return series exists
 for the PM σ source. This is the FEED side; whether a slot *reads* it for σ is
 governed by `StrategyConfig.reference_sigma_source` (default "mark", so adding
 the feed is inert for existing slots).
 
 These tests pin:
-  - the engine's subscription set contains exactly one binance sub: BTCUSDT
-    perp `bbo`-only, with HL + PM subs preserved unchanged;
+  - the engine's subscription set contains both perp and spot binance bbo
+    reference feeds (BTCUSDT perp `bbo`-only and BTCUSDT spot `bbo`-only),
+    with HL + PM subs preserved unchanged;
   - the engine's adapter routes binance subs to a BinanceAdapter;
   - a `bbo`-only perp sub takes the pure-WS path (NO REST premium poll);
   - a BTCUSDT BboEvent reaches MarketState's `book("BTCUSDT")` with staleness
@@ -49,7 +50,7 @@ def test_binance_reference_subscription_is_btcusdt_perp_bbo_only():
     assert sub.channels == ("bbo",)
 
 
-def test_build_engine_subscriptions_appends_exactly_one_binance_bbo_ref():
+def test_build_engine_subscriptions_appends_perp_binance_bbo_ref():
     sym_cfg = load_config(Path("config/symbols.yaml"))
     subs = build_engine_subscriptions(sym_cfg)
 

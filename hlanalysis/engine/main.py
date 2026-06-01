@@ -56,7 +56,7 @@ def binance_spot_reference_subscription() -> Subscription:
     This is the price/σ/strike reference for the PM up/down slots: PM resolves
     against the Binance spot BTC/USDT 1m candle close, so the live price and the
     captured strike must both be spot (no perp/spot basis in the edge). Remapped
-    on ingest to internal symbol ``BTCUSDT_SPOT`` (see runtime._ingest_loop) so
+    on ingest to internal symbol ``BTCUSDT_SPOT`` (see EngineRuntime._ingest_loop) so
     it never collides with the perp ``BTCUSDT`` book key. spot bookTicker is not
     geo-blocked from the EC2/Tokyo IP.
     """
@@ -82,7 +82,7 @@ def build_engine_subscriptions(sym_cfg: RecorderConfig) -> list[Subscription]:
         if s.venue in _ENGINE_VENUES_FROM_SYMBOLS
     ]
     subs.append(binance_reference_subscription())
-    subs.append(binance_spot_reference_subscription())   # NEW: spot for PM slots
+    subs.append(binance_spot_reference_subscription())
     return subs
 
 
