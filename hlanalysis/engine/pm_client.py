@@ -8,6 +8,7 @@ on first live call so paper-only tests don't need the dep installed.
 """
 from __future__ import annotations
 
+import math
 import time
 import uuid
 
@@ -19,6 +20,12 @@ from .exec_types import (
     UserFillRow,
     VenuePosition,
 )
+
+
+def _round_down_2(x: float) -> float:
+    """Floor to 2 decimal places (cents). PM caps a market BUY's USDC (maker)
+    amount at 2 decimals; rounding *down* never spends more than intended."""
+    return math.floor(x * 100.0) / 100.0
 
 
 class PMClient:
@@ -173,25 +180,53 @@ class PMClient:
 
     def _live_place(self, req: PlaceRequest) -> OrderAck:
         from py_clob_client_v2 import (
+            MarketOrderArgs,
             OrderArgs,
             OrderType,
             PartialCreateOrderOptions,
             Side,
         )
         side = Side.BUY if req.side == "buy" else Side.SELL
-        order_type = OrderType.FAK if req.time_in_force == "ioc" else OrderType.GTC
+        opts = PartialCreateOrderOptions(tick_size="0.01")
         try:
             sdk = self._ensure_sdk()
-            resp = sdk.create_and_post_order(
-                order_args=OrderArgs(
-                    token_id=req.symbol,
-                    price=req.price,
-                    side=side,
-                    size=req.size,
-                ),
-                options=PartialCreateOrderOptions(tick_size="0.01"),
-                order_type=order_type,
-            )
+            if req.time_in_force == "ioc":
+                # Marketable (FAK) orders must go through PM's market-order
+                # endpoint, which enforces market-order precision: the USDC
+                # (maker) amount of a BUY is capped at 2 decimals and the share
+                # (taker) amount at 4. The limit path (create_and_post_order)
+                # rounds the USDC amount to 4 decimals (tick-0.01 amount=4), so
+                # PM rejected every buy with "invalid amounts ... max accuracy
+                # of 2 decimals". For a BUY the market `amount` is the USDC to
+                # spend (price·size); for a SELL it is the share count. Round
+                # down to 2 dp so the maker amount is always within PM's cap.
+                amount = (
+                    _round_down_2(req.price * req.size)
+                    if req.side == "buy"
+                    else _round_down_2(req.size)
+                )
+                resp = sdk.create_and_post_market_order(
+                    order_args=MarketOrderArgs(
+                        token_id=req.symbol,
+                        amount=amount,
+                        side=side,
+                        price=req.price,
+                        order_type=OrderType.FAK,
+                    ),
+                    options=opts,
+                    order_type=OrderType.FAK,
+                )
+            else:
+                resp = sdk.create_and_post_order(
+                    order_args=OrderArgs(
+                        token_id=req.symbol,
+                        price=req.price,
+                        side=side,
+                        size=req.size,
+                    ),
+                    options=opts,
+                    order_type=OrderType.GTC,
+                )
         except Exception as e:
             return OrderAck(
                 cloid=req.cloid, venue_oid="", status="rejected",

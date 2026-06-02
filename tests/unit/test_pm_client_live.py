@@ -21,6 +21,7 @@ class _FakeClob:
         trades: list[dict] | None = None,
     ) -> None:
         self.placed: list[dict] = []
+        self.market_placed: list[dict] = []
         self.canceled: list[str] = []
         self._place_resp = place_resp
         self._cancel_resp = cancel_resp or {"canceled": []}
@@ -52,6 +53,35 @@ class _FakeClob:
             "takingAmount": str(shares if is_buy else usdc),
         }
 
+    def create_and_post_market_order(
+        self, *, order_args, options, order_type, defer_exec=False,
+    ):
+        self.market_placed.append({
+            "token_id": order_args.token_id,
+            "amount": order_args.amount,
+            "price": order_args.price,
+            "side": str(order_args.side),
+            "order_type": str(order_type),
+        })
+        if self._place_resp is not None:
+            return self._place_resp
+        # Market BUY: `amount` is USDC paid → making=USDC, taking=shares.
+        # Market SELL: `amount` is shares sold → making=shares, taking=USDC.
+        is_buy = str(order_args.side).endswith("BUY") or str(order_args.side) == "0"
+        if is_buy:
+            making = order_args.amount
+            taking = order_args.amount / order_args.price if order_args.price else 0.0
+        else:
+            making = order_args.amount
+            taking = order_args.amount * order_args.price
+        return {
+            "success": True,
+            "orderID": "0xfakeid",
+            "status": "matched",
+            "makingAmount": str(making),
+            "takingAmount": str(taking),
+        }
+
     def cancel_order(self, payload):
         oid = getattr(payload, "orderID", None) or payload.get("orderID")  # type: ignore[attr-defined]
         self.canceled.append(oid)
@@ -75,7 +105,10 @@ def _client() -> PMClient:
     )
 
 
-def test_live_place_translates_request_to_FAK_order():
+def test_live_place_translates_request_to_FAK_market_order():
+    # IOC orders are marketable → routed through PM's market-order endpoint
+    # (create_and_post_market_order), not the limit path. For a BUY the market
+    # `amount` is the USDC to spend (price·size).
     fake = _FakeClob()
     c = _client()
     c._sdk = fake  # inject fake
@@ -84,11 +117,12 @@ def test_live_place_translates_request_to_FAK_order():
         side="buy", size=100, price=0.92,
         reduce_only=False, time_in_force="ioc",
     ))
-    assert fake.placed, "create_and_post_order was not invoked"
-    placed = fake.placed[0]
+    assert not fake.placed, "ioc must not use the limit (create_and_post_order) path"
+    assert fake.market_placed, "create_and_post_market_order was not invoked"
+    placed = fake.market_placed[0]
     assert placed["token_id"] == "71321...992563"
     assert placed["price"] == 0.92
-    assert placed["size"] == 100
+    assert placed["amount"] == 92.0  # USDC = 0.92 * 100
     assert placed["order_type"].endswith("FAK")
     assert "BUY" in placed["side"] or placed["side"].endswith("0")
     assert ack.status == "filled"
@@ -96,6 +130,39 @@ def test_live_place_translates_request_to_FAK_order():
     assert ack.fill_price == 0.92
     # cloid → orderID mapping is populated for subsequent cancel.
     assert c._cloid_to_oid["hla-v31_pm-1"] == "0xfakeid"
+
+
+def test_live_place_ioc_buy_rounds_usdc_amount_to_2_decimals():
+    # Regression: PM rejects market-buy orders whose USDC (maker) amount has
+    # >2 decimals ("invalid amounts ... max accuracy of 2 decimals"). With the
+    # old limit path, 0.94 * 53.19 = 49.9986 was sent at 4 decimals and PM
+    # rejected every order. Must round the USDC amount down to cents.
+    fake = _FakeClob()
+    c = _client()
+    c._sdk = fake
+    ack = c.place(PlaceRequest(
+        cloid="m1", symbol="tok", side="buy", size=53.19, price=0.94,
+        reduce_only=False, time_in_force="ioc",
+    ))
+    assert fake.market_placed, "create_and_post_market_order was not invoked"
+    amount = fake.market_placed[0]["amount"]
+    assert amount == 49.99  # round_down(0.94 * 53.19, 2)
+    # USDC maker amount must carry at most 2 decimal places.
+    assert round(amount, 2) == amount
+    assert ack.status == "filled"
+
+
+def test_live_place_ioc_sell_amount_is_share_count():
+    # Market SELL: `amount` is the share count (maker = shares), not USDC.
+    fake = _FakeClob()
+    c = _client()
+    c._sdk = fake
+    c.place(PlaceRequest(
+        cloid="s1", symbol="tok", side="sell", size=40.0, price=0.94,
+        reduce_only=False, time_in_force="ioc",
+    ))
+    assert fake.market_placed[0]["amount"] == 40.0
+    assert fake.market_placed[0]["order_type"].endswith("FAK")
 
 
 def test_live_place_gtc_maps_to_GTC_order_type():
