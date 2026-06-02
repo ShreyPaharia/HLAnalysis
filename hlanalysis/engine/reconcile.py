@@ -203,6 +203,15 @@ class Reconciler:
             qty_diff = abs(vp.qty - lp.qty) > 1e-9
             avg_diff = abs(vp.avg_entry - lp.avg_entry) > 1e-9
             if qty_diff or avg_diff:
+                # Indexing-lag guard (same rationale as the vanish branch): the
+                # PM data-api lags our own fills by seconds, so right after a
+                # fill the venue still reports the PRE-fill qty. Overwriting our
+                # fresh local qty with that stale value reverts the fill — which
+                # made the strategy re-fire the exit it had just completed
+                # (2026-06-02 double-exit). Within the grace window, trust the
+                # local fill over the (likely stale) venue.
+                if (now_ns - lp.last_update_ts_ns) < self.vanish_grace_ns:
+                    continue
                 # avg_entry is display-only (the daily-loss gate reads PnL from
                 # HL directly), so we silently adopt HL's value without firing
                 # an alert. qty is load-bearing — it gates risk caps and the

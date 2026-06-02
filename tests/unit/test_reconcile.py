@@ -191,6 +191,39 @@ def test_vanish_grace_defers_then_allows_vanish(dal):
     assert len(res2.vanished_positions) == 1
 
 
+def test_qty_drift_within_grace_keeps_fresh_local_qty(dal):
+    # PM data-api lags our own fills: right after a SELL reduces the local
+    # position to dust, the venue still reports the PRE-sell qty. Within the
+    # grace window the reconciler must NOT overwrite the fresh local qty with
+    # that stale venue value — doing so reverted the fill and made the strategy
+    # re-fire the exit (2026-06-02 double-exit). Past grace, venue wins again.
+    grace = 100_000_000_000  # 100s
+    entry_ns = 1_000_000_000
+    dal.upsert_position(Position(
+        question_idx=42, symbol="tok", qty=0.006, avg_entry=0.97,
+        realized_pnl=0.0, last_update_ts_ns=entry_ns, stop_loss_price=-1.0,
+    ))
+    venue = ClearinghouseState(
+        positions=(VenuePosition(
+            symbol="tok", qty=51.536, avg_entry=0.97, unrealized_pnl=0.0),),
+        account_value_usd=0,
+    )
+    # within grace → local dust kept, not reverted to the stale 51.536
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 42},
+        vanish_grace_ns=grace,
+    ).run(venue_open=[], venue_state=venue, now_ns=entry_ns + 50_000_000_000)
+    assert dal.get_position(42).qty == 0.006
+    assert not any(d.case == "position_mismatch" for d in res.drift_events)
+    # past grace → venue wins (normal drift-adopt resumes)
+    res2 = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 42},
+        vanish_grace_ns=grace,
+    ).run(venue_open=[], venue_state=venue, now_ns=entry_ns + 150_000_000_000)
+    assert dal.get_position(42).qty == 51.536
+    assert any(d.case == "position_mismatch" for d in res2.drift_events)
+
+
 def test_position_disappearance_drops_local_position(dal):
     # A local position with no matching venue position is overwhelmingly a
     # HIP-4 settlement auto-close on HL. The reconciler surfaces it on

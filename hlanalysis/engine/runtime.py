@@ -356,6 +356,13 @@ class AccountSlot:
     # RedemptionTimeout — prevents per-tick spam after the 6h threshold trips.
     pm_settlements: dict[int, tuple[int, str, float, float]] = field(default_factory=dict)
     pm_alerted_redemption_qidxs: set[int] = field(default_factory=set)
+    # Symbols that have already fired a StaleDataHalt alert this stale episode.
+    # The continuous-checks loop runs every ~1s; without this a held position
+    # whose leg book goes quiet (PM books update in bursts, esp. near
+    # resolution) would re-publish the same StaleDataHalt every second. Evicted
+    # when the book recovers so a fresh episode re-alerts. Alert-only — the
+    # per-trade stale veto in risk/scanner is unaffected.
+    stale_alerted_symbols: set[str] = field(default_factory=set)
 
     @property
     def alias(self) -> str:
@@ -1064,7 +1071,13 @@ class EngineRuntime:
                     }
                     books_only_held = {sym: self.market_state.book(sym) for sym in held_symbols}
                     books_only_held = {s: b for s, b in books_only_held.items() if b is not None}
-                    for sym in slot.risk.stale_books(books_only_held, now_ns=now):
+                    stale_now = set(slot.risk.stale_books(books_only_held, now_ns=now))
+                    # Evict recovered symbols so a future stale episode re-alerts.
+                    slot.stale_alerted_symbols &= stale_now
+                    for sym in stale_now:
+                        if sym in slot.stale_alerted_symbols:
+                            continue  # already alerted this episode — don't spam every 1s
+                        slot.stale_alerted_symbols.add(sym)
                         b = books_only_held[sym]
                         await self.bus.publish(StaleDataHalt(
                             ts_ns=now, account_alias=slot.alias, symbol=sym,
