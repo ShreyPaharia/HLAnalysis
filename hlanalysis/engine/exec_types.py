@@ -42,6 +42,11 @@ class VenuePosition:
 class ClearinghouseState:
     positions: tuple[VenuePosition, ...]
     account_value_usd: float
+    # False when the venue position set could NOT be fetched (e.g. PM data-api
+    # error). The reconciler must then SKIP position reconciliation rather than
+    # treat the empty set as truth and vanish-delete every live position.
+    # Always True for HL (its clearinghouse fetch either succeeds or raises).
+    positions_known: bool = True
 
 
 @dataclass(frozen=True, slots=True)

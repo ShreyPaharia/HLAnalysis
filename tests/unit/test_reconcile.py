@@ -144,6 +144,53 @@ def test_position_both_qty_and_avg_diff_emits_single_qty_drift(dal):
     assert pos_drift[0].detail.get("db_qty") == "10.0"
 
 
+def test_positions_unknown_skips_position_reconciliation(dal):
+    # When the venue position set couldn't be fetched (PM data-api error →
+    # positions_known=False), the reconciler must NOT treat the empty set as
+    # truth. Otherwise it would vanish-delete every live position on a transient
+    # API blip.
+    dal.upsert_position(Position(
+        question_idx=42, symbol="@30", qty=10.0, avg_entry=0.95,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=0.855,
+    ))
+    res = Reconciler(dal, fills_lookup=lambda _: [], symbol_to_question={"@30": 42}).run(
+        venue_open=[],
+        venue_state=ClearinghouseState(
+            positions=(), account_value_usd=0, positions_known=False,
+        ),
+        now_ns=2,
+    )
+    assert dal.get_position(42) is not None  # not vanished
+    assert res.vanished_positions == []
+
+
+def test_vanish_grace_defers_then_allows_vanish(dal):
+    # PM data-api lags a fresh fill; a position younger than the grace window
+    # must not be mistaken for a settlement when absent from venue. Once it
+    # ages past the grace, absence is a real vanish.
+    grace = 100_000_000_000  # 100s
+    entry_ns = 1_000_000_000
+    dal.upsert_position(Position(
+        question_idx=42, symbol="tok", qty=10.0, avg_entry=0.95,
+        realized_pnl=0.0, last_update_ts_ns=entry_ns, stop_loss_price=-1.0,
+    ))
+    flat = ClearinghouseState(positions=(), account_value_usd=0)
+    # within grace (Δ=50s < 100s) → graced, not vanished
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 42},
+        vanish_grace_ns=grace,
+    ).run(venue_open=[], venue_state=flat, now_ns=entry_ns + 50_000_000_000)
+    assert dal.get_position(42) is not None
+    assert res.vanished_positions == []
+    # past grace (Δ=150s > 100s) → vanished
+    res2 = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 42},
+        vanish_grace_ns=grace,
+    ).run(venue_open=[], venue_state=flat, now_ns=entry_ns + 150_000_000_000)
+    assert dal.get_position(42) is None
+    assert len(res2.vanished_positions) == 1
+
+
 def test_position_disappearance_drops_local_position(dal):
     # A local position with no matching venue position is overwhelmingly a
     # HIP-4 settlement auto-close on HL. The reconciler surfaces it on

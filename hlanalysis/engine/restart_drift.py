@@ -36,11 +36,13 @@ class RestartDriftGate:
         block_path: Path,
         auto_clear_on_clean: bool = False,
         account_alias: str = "",
+        vanish_grace_ns: int = 0,
     ) -> None:
         self.dal = dal
         self.block_path = block_path
         self.auto_clear = auto_clear_on_clean
         self.account_alias = account_alias
+        self.vanish_grace_ns = vanish_grace_ns
 
     def run(
         self,
@@ -53,6 +55,7 @@ class RestartDriftGate:
         rec = Reconciler(
             self.dal, fills_lookup=fills_lookup,
             account_alias=self.account_alias,
+            vanish_grace_ns=self.vanish_grace_ns,
         )
         res = rec.run(venue_open=venue_open, venue_state=venue_state, now_ns=now_ns)
 

@@ -11,6 +11,9 @@ from __future__ import annotations
 import math
 import time
 import uuid
+from collections.abc import Callable
+
+import requests
 
 from .exec_types import (
     ClearinghouseState,
@@ -20,6 +23,16 @@ from .exec_types import (
     UserFillRow,
     VenuePosition,
 )
+
+
+_PM_DATA_API = "https://data-api.polymarket.com"
+
+
+def _real_data_api_get(url: str) -> list[dict]:
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    return data if isinstance(data, list) else []
 
 
 def _round_down_2(x: float) -> float:
@@ -73,6 +86,11 @@ class PMClient:
         # Tests inject a fake by setting `self._sdk` directly before any call.
         self._sdk = None
         self._cloid_to_oid: dict[str, str] = {}
+        # PM has no positions endpoint in py-clob-client; holdings live on-chain
+        # as conditional-token balances, surfaced by the public data-api. The
+        # reconciler needs these as venue truth (adopt/keep/vanish PM positions).
+        # Injectable so tests don't hit the network.
+        self._data_api_get: "Callable[[str], list[dict]]" = _real_data_api_get
 
     def place(self, req: PlaceRequest) -> OrderAck:
         if self.paper_mode:
@@ -337,11 +355,61 @@ class PMClient:
         except (TypeError, ValueError):
             bal_raw = 0.0
         account_value_usd = bal_raw / 1_000_000.0
-        # PM doesn't expose positions through balance-allowance; positions
-        # are tracked on-chain via conditional-token balances. The engine
-        # reconstructs them from its DAL + open_orders, so leaving the
-        # tuple empty here keeps the reconciler well-behaved.
-        return ClearinghouseState(positions=(), account_value_usd=account_value_usd)
+        # Positions: PM holdings are on-chain conditional-token balances, not in
+        # balance-allowance. The public data-api exposes them. We MUST surface
+        # them so the reconciler can adopt/keep/vanish PM positions against venue
+        # truth; returning an empty set unconditionally (the old behaviour) made
+        # the reconciler treat every live PM position as vanished and delete it.
+        positions, positions_known = self._fetch_pm_positions()
+        return ClearinghouseState(
+            positions=positions,
+            account_value_usd=account_value_usd,
+            positions_known=positions_known,
+        )
+
+    def _fetch_pm_positions(self) -> tuple[tuple[VenuePosition, ...], bool]:
+        """Return (positions, positions_known) from the PM data-api.
+
+        positions_known=False signals the fetch FAILED — the reconciler then
+        skips position reconciliation rather than vanishing every position.
+        A successful fetch that returns no rows is positions_known=True with an
+        empty tuple (genuinely flat).
+        """
+        funder = self._cfg.get("funder_address")
+        if not funder:
+            # Direct-EOA deploys have no proxy wallet to query by. We can't
+            # establish venue truth, so report "unknown" to keep the reconciler
+            # from vanishing positions. (Our PM slots all set a funder.)
+            return (), False
+        url = (
+            f"{_PM_DATA_API}/positions?user={funder}"
+            "&sizeThreshold=0.01&limit=500"
+        )
+        try:
+            rows = self._data_api_get(url)
+        except Exception:
+            return (), False
+        out: list[VenuePosition] = []
+        for p in rows or []:
+            try:
+                qty = float(p.get("size") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if abs(qty) < 1e-9:
+                continue
+            try:
+                avg = float(p.get("avgPrice") or 0.0)
+            except (TypeError, ValueError):
+                avg = 0.0
+            try:
+                upnl = float(p.get("cashPnl") or 0.0)
+            except (TypeError, ValueError):
+                upnl = 0.0
+            out.append(VenuePosition(
+                symbol=str(p.get("asset") or ""), qty=qty,
+                avg_entry=avg, unrealized_pnl=upnl,
+            ))
+        return tuple(out), True
 
     def _live_user_fills(self, *, since_ts_ns: int = 0) -> list[UserFillRow]:
         from py_clob_client_v2 import TradeParams

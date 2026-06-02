@@ -75,6 +75,14 @@ def _remap_reference_symbol(ev: NormalizedEvent) -> NormalizedEvent:
 # without a status change. 30s gives PM CLOB plenty of room under heavy chain
 # load while still surfacing stuck orders before the next scan tick would
 # top up on top of stale state.
+# PM venue positions come from the data-api, which lags a fresh fill by a few
+# seconds. The reconciler must not treat a just-opened PM position as
+# "vanished/settled" during that window — grace it for 120s (8 reconcile
+# cycles at the 15s interval). HL stays at 0 (a settled HIP-4 row disappears
+# instantly and must be detected before stale_data_halt).
+PM_VANISH_GRACE_NS: int = 120 * 1_000_000_000
+
+
 PM_UNCONFIRMED_THRESHOLD_S: float = 30.0
 
 # PM redemption watchdog: RedemptionTimeout fires this long after the
@@ -458,6 +466,7 @@ class EngineRuntime:
                     dal=slot.dal,
                     block_path=slot.kill_switch_path.parent / "restart_blocked",
                     account_alias=slot.alias,
+                    vanish_grace_ns=self._vanish_grace_ns_for(slot),
                 )
                 drift_res = gate.run(
                     venue_open=slot.exec_client.open_orders(),
@@ -503,6 +512,13 @@ class EngineRuntime:
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _vanish_grace_ns_for(self, slot: "AccountSlot") -> int:
+        """PM slots grace position-vanish detection (data-api indexing lag);
+        HL stays at 0. Keyed off the account's venue discriminator."""
+        acct = self.deploy_cfg.accounts.get(slot.alias)
+        venue = getattr(acct, "venue", "") if acct is not None else ""
+        return PM_VANISH_GRACE_NS if venue == "polymarket" else 0
 
     # ---------- cadence registration ----------
 
@@ -847,6 +863,7 @@ class EngineRuntime:
                     symbol_to_question=self.market_state.symbol_to_question_map(),
                     cloid_prefix=slot.cloid_prefix,
                     account_alias=slot.alias,
+                    vanish_grace_ns=self._vanish_grace_ns_for(slot),
                 )
                 res = rec.run(
                     venue_open=slot.exec_client.open_orders(),

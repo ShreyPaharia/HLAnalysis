@@ -259,6 +259,65 @@ def test_live_clearinghouse_state_reflects_usdc_balance():
     assert state.account_value_usd == 1500.0
 
 
+def _client_with_funder() -> PMClient:
+    return PMClient(
+        paper_mode=False, clob_host="x", chain_id=137, private_key="0x0",
+        clob_api_key="k", clob_api_secret="s", clob_api_passphrase="p",
+        funder_address="0xFUNDER",
+    )
+
+
+def test_live_clearinghouse_state_reports_data_api_positions():
+    # The reconciler relies on this to adopt/keep PM positions as venue truth.
+    fake = _FakeClob(balance_allowance={"balance": "1000000"})  # 1 USDC
+    c = _client_with_funder()
+    c._sdk = fake
+    captured = {}
+
+    def fake_get(url):
+        captured["url"] = url
+        return [
+            {"asset": "tok-down", "size": 51.536, "avgPrice": 0.9699, "cashPnl": -0.77},
+            {"asset": "tok-zero", "size": 0, "avgPrice": 0.5},  # filtered: flat
+        ]
+
+    c._data_api_get = fake_get
+    state = c.clearinghouse_state()
+    assert state.positions_known is True
+    assert "0xFUNDER" in captured["url"]
+    syms = {p.symbol: p for p in state.positions}
+    assert "tok-zero" not in syms  # zero-size dropped
+    assert syms["tok-down"].qty == 51.536
+    assert syms["tok-down"].avg_entry == 0.9699
+
+
+def test_live_clearinghouse_state_positions_unknown_on_data_api_failure():
+    # A fetch failure must report positions_known=False (NOT an empty set) so
+    # the reconciler skips position reconciliation instead of vanish-deleting
+    # every live position.
+    fake = _FakeClob(balance_allowance={"balance": "1000000"})
+    c = _client_with_funder()
+    c._sdk = fake
+
+    def boom(url):
+        raise RuntimeError("data-api 503")
+
+    c._data_api_get = boom
+    state = c.clearinghouse_state()
+    assert state.positions == ()
+    assert state.positions_known is False
+    assert state.account_value_usd == 1.0  # balance still read
+
+
+def test_live_clearinghouse_state_positions_unknown_without_funder():
+    fake = _FakeClob(balance_allowance={"balance": "0"})
+    c = _client()  # no funder configured
+    c._sdk = fake
+    state = c.clearinghouse_state()
+    assert state.positions == ()
+    assert state.positions_known is False
+
+
 def test_live_user_fills_maps_trades_to_UserFillRow():
     fake = _FakeClob(trades=[
         {

@@ -56,11 +56,19 @@ class Reconciler:
         symbol_to_question: dict[str, int] | None = None,
         cloid_prefix: str = CLOID_PREFIX,
         account_alias: str = "",
+        vanish_grace_ns: int = 0,
     ) -> None:
         self.dal = dal
         self.fills_lookup = fills_lookup
         self.symbol_to_question = symbol_to_question or {}
         self.cloid_prefix = cloid_prefix
+        # Minimum age a local position must reach before "absent from venue" is
+        # treated as vanished/settled. 0 for HL (a settled HIP-4 row disappears
+        # instantly and must be detected fast, before stale_data_halt). >0 for
+        # PM, whose venue position set comes from the data-api and lags a fresh
+        # fill by seconds — without grace the next reconcile would vanish-delete
+        # a just-opened position before the data-api has indexed it.
+        self.vanish_grace_ns = vanish_grace_ns
         # Stamped onto every ReconcileDrift this Reconciler emits so alerts
         # carry the account that detected the drift.
         self.account_alias = account_alias
@@ -157,12 +165,27 @@ class Reconciler:
                 ))
 
         # --- positions ---
+        # When the venue position set couldn't be fetched (PM data-api error),
+        # we have no truth to reconcile against. Skipping is critical: treating
+        # an unknown set as empty would vanish-delete every live position.
+        if not venue_state.positions_known:
+            return ReconcileResult(
+                drift_events=drift,
+                orphans_to_cancel=orphans,
+                vanished_positions=vanished,
+            )
+
         venue_by_symbol = {p.symbol: p for p in venue_state.positions}
         local_by_qidx = {p.question_idx: p for p in self.dal.all_positions()}
 
         for qidx, lp in local_by_qidx.items():
             vp = venue_by_symbol.get(lp.symbol)
             if vp is None or abs(vp.qty) < 1e-9:
+                # Indexing-lag guard: a freshly-opened position not yet visible
+                # on the venue (PM data-api lag) must not be mistaken for a
+                # settlement. Only vanish once it's older than the grace window.
+                if (now_ns - lp.last_update_ts_ns) < self.vanish_grace_ns:
+                    continue
                 # Position vanished from venue, OR present at exactly qty=0.
                 # On HL HIP-4 the row disappears entirely at settlement; on
                 # Polymarket the venue position stays at qty=0 until redemption
