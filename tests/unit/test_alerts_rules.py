@@ -8,9 +8,9 @@ import pytest
 from hlanalysis.alerts.rules import AlertRules
 from hlanalysis.engine.event_bus import EventBus
 from hlanalysis.engine.risk_events import (
-    DailyLossHalt, Entry, Exit, KillSwitchActivated, OrderRejected,
-    OrderUnconfirmed, PMStrikeMismatch, ReconcileDrift, RedemptionTimeout,
-    RiskVeto,
+    DailyLossHalt, EngineHeartbeat, Entry, Exit, FeedStale, KillSwitchActivated,
+    OrderRejected, OrderUnconfirmed, PMStrikeMismatch, ReconcileDrift,
+    RedemptionTimeout, RiskVeto,
 )
 
 
@@ -38,6 +38,28 @@ async def test_kill_switch_alerts_immediately():
     except asyncio.CancelledError:
         pass
     assert any("KILL SWITCH" in m for m in tg.messages)
+
+
+@pytest.mark.asyncio
+async def test_feed_stale_alerts_and_heartbeat_is_silent():
+    """FeedStale must reach Telegram (the feed is dead); EngineHeartbeat must
+    NOT (it fires every interval — alerting on it would be constant spam)."""
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    await bus.publish(EngineHeartbeat(ts_ns=1, events_ingested=10,
+                                      d_events=0, n_questions=2))
+    await bus.publish(FeedStale(ts_ns=2, d_events=0, interval_seconds=30.0))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert any("FEED STALE" in m for m in tg.messages)
+    assert not any("heartbeat" in m.lower() for m in tg.messages)
 
 
 @pytest.mark.asyncio

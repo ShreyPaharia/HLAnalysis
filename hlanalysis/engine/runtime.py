@@ -34,8 +34,9 @@ from .reconcile import Reconciler
 from .restart_drift import RestartDriftGate
 from .risk import RiskGate
 from .risk_events import (
-    DailyLossHalt, Exit, KillSwitchActivated, NewQuestion, OrderUnconfirmed,
-    RedemptionTimeout, StaleDataHalt, StopLossTriggered,
+    DailyLossHalt, EngineHeartbeat, Exit, FeedStale, KillSwitchActivated,
+    NewQuestion, OrderUnconfirmed, RedemptionTimeout, StaleDataHalt,
+    StopLossTriggered,
 )
 from .router import Router
 from .scanner import Scanner
@@ -855,8 +856,44 @@ class EngineRuntime:
                         n_questions, n_positions, n_live,
                         " HALTED" if slot.halted else "",
                     )
+                await self._publish_heartbeat(
+                    d_events=d_events, n_questions=n_questions,
+                )
             except Exception:
                 logger.exception("heartbeat crashed")
+
+    # ---- liveness / dead-man's-switch (SHR-43) -----------------------------
+
+    def _heartbeat_file_path(self) -> Path:
+        return Path(self.deploy_cfg.state_db_path).parent / "engine_heartbeat"
+
+    def _touch_heartbeat_file(self, now_ns: int) -> None:
+        """Server-side dead-man's-switch primitive: rewrite a file every
+        interval so an external systemd timer / uptime monitor can alert on the
+        ABSENCE of updates. The engine cannot alert on its own death (crash,
+        OOM, hung loop), so liveness has to be observable from outside."""
+        try:
+            self._heartbeat_file_path().write_text(str(now_ns))
+        except Exception:
+            logger.warning("failed to write heartbeat file")
+
+    async def _publish_heartbeat(self, *, d_events: int, n_questions: int) -> None:
+        """Emit the per-interval liveness pulse and, when the feed has gone
+        silent, a FeedStale alert (SHR-43). A live feed delivers a steady stream
+        of mark/book updates, so zero ingested events over a full interval with
+        active subscriptions means the feed/ingest is dead — not a calm market.
+        EngineHeartbeat is alert-silent; FeedStale drives a Telegram alert."""
+        now = self._now_ns()
+        await self.bus.publish(EngineHeartbeat(
+            ts_ns=now, events_ingested=self.events_ingested,
+            d_events=d_events, n_questions=n_questions,
+        ))
+        self._touch_heartbeat_file(now)
+        if d_events == 0 and self.subscriptions:
+            await self.bus.publish(FeedStale(
+                ts_ns=now, d_events=d_events,
+                interval_seconds=self.heartbeat_interval_s,
+            ))
 
     # ---- venue IO offload (SHR-41) -----------------------------------------
     # Every ExecutionClient method is a synchronous, requests-backed SDK call

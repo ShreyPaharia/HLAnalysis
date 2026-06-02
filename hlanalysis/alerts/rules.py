@@ -22,9 +22,10 @@ from loguru import logger
 
 from ..engine.event_bus import EventBus
 from ..engine.risk_events import (
-    BusEvent, DailyLossHalt, Entry, Exit, KillSwitchActivated, NewQuestion,
-    OrderRejected, OrderUnconfirmed, PMStrikeMismatch, ReconcileDrift,
-    RedemptionTimeout, RiskHalt, RiskVeto, StaleDataHalt, StopLossTriggered,
+    BusEvent, DailyLossHalt, Entry, Exit, FeedStale, KillSwitchActivated,
+    NewQuestion, OrderRejected, OrderUnconfirmed, PMStrikeMismatch,
+    ReconcileDrift, RedemptionTimeout, RiskHalt, RiskVeto, StaleDataHalt,
+    StopLossTriggered,
 )
 
 
@@ -103,6 +104,12 @@ class AlertRules:
                 return None, (
                     f"<b>DAILY LOSS HALT</b>\n"
                     f"Realized: ${ev.realized_pnl:.2f} / Cap: ${ev.cap:.2f}"
+                )
+            case FeedStale():
+                return "feed_stale", (
+                    f"🛑 <b>FEED STALE</b> — 0 market-data events in "
+                    f"{ev.interval_seconds:.0f}s. Feed/ingest may be dead; "
+                    f"open positions are unmanaged against a frozen feed."
                 )
             case StaleDataHalt():
                 return f"stale:{ev.symbol}", (

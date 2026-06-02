@@ -155,11 +155,32 @@ class PMStrikeMismatch(_Base):
     divergence_bps: float
 
 
+class EngineHeartbeat(_Base):
+    """Liveness pulse published once per heartbeat interval. Alert-silent by
+    design (no Telegram) — its purpose is to give in-process sinks and any
+    external uptime monitor a positive signal so the ABSENCE of heartbeats can
+    be alerted on (SHR-43)."""
+    kind: Literal["engine_heartbeat"] = "engine_heartbeat"
+    events_ingested: int
+    d_events: int
+    n_questions: int
+
+
+class FeedStale(_Base):
+    """Published when zero market-data events were ingested over a full
+    heartbeat interval while subscriptions are active — the feed/ingest is dead,
+    not a calm market. Drives a Telegram alert (SHR-43)."""
+    kind: Literal["feed_stale"] = "feed_stale"
+    d_events: int
+    interval_seconds: float
+
+
 BusEvent = Annotated[
     Union[
         RiskVeto, RiskHalt, StopLossTriggered, DailyLossHalt, StaleDataHalt,
         KillSwitchActivated, ReconcileDrift, Entry, Exit, NewQuestion,
         OrderRejected, OrderUnconfirmed, RedemptionTimeout, PMStrikeMismatch,
+        EngineHeartbeat, FeedStale,
     ],
     Field(discriminator="kind"),
 ]
