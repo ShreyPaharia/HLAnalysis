@@ -175,12 +175,25 @@ class FeedStale(_Base):
     interval_seconds: float
 
 
+class FeedDown(_Base):
+    """The market-data stream disconnected (raised or ended); the ingest loop is
+    reconnecting with backoff (SHR-42). Published once per outage."""
+    kind: Literal["feed_down"] = "feed_down"
+    consecutive_failures: int
+
+
+class FeedRecovered(_Base):
+    """The market-data stream reconnected and delivered an event after a
+    FeedDown (SHR-42)."""
+    kind: Literal["feed_recovered"] = "feed_recovered"
+
+
 BusEvent = Annotated[
     Union[
         RiskVeto, RiskHalt, StopLossTriggered, DailyLossHalt, StaleDataHalt,
         KillSwitchActivated, ReconcileDrift, Entry, Exit, NewQuestion,
         OrderRejected, OrderUnconfirmed, RedemptionTimeout, PMStrikeMismatch,
-        EngineHeartbeat, FeedStale,
+        EngineHeartbeat, FeedStale, FeedDown, FeedRecovered,
     ],
     Field(discriminator="kind"),
 ]

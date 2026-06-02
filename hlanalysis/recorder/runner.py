@@ -49,6 +49,34 @@ async def _flusher(writer: ParquetWriter, stop: asyncio.Event) -> None:
         writer.maybe_flush()
 
 
+async def _supervise(
+    stop: asyncio.Event, adapter_tasks: list[asyncio.Task]
+) -> None:
+    """Return when the operator signals stop OR any adapter task ends (SHR-42).
+
+    `_run_adapter` swallows exceptions and returns, so a crashed venue task just
+    completes — adapters are meant to stream forever, so a completed adapter
+    task means that venue is silently no longer recording. Waiting only on
+    `stop` would leave the process alive with a dead feed and systemd would
+    never restart it. We wait on stop OR the first adapter to finish, then latch
+    stop so `run()` falls through to a clean shutdown + restart."""
+    stop_waiter = asyncio.ensure_future(stop.wait())
+    try:
+        await asyncio.wait(
+            {stop_waiter, *adapter_tasks},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        stop_waiter.cancel()
+    if not stop.is_set():
+        n_dead = sum(1 for t in adapter_tasks if t.done())
+        log.error(
+            "recorder adapter task exited unexpectedly (%d done); shutting down "
+            "for supervisor restart", n_dead,
+        )
+        stop.set()
+
+
 async def run(config_path: Path, data_root: Path) -> None:
     config = load_config(config_path)
     # 60s time-trigger; per-key row cap stays at the writer default (5000).
@@ -75,6 +103,7 @@ async def run(config_path: Path, data_root: Path) -> None:
         loop.add_signal_handler(sig, _signal_handler)
 
     tasks: list[asyncio.Task] = []
+    adapter_tasks: list[asyncio.Task] = []
     for venue, subs in by_venue.items():
         adapter_cls = ADAPTERS.get(venue)
         if adapter_cls is None:
@@ -95,12 +124,14 @@ async def run(config_path: Path, data_root: Path) -> None:
         if not ok_subs:
             continue
         log.info("starting %s with %d subscriptions", venue, len(ok_subs))
-        tasks.append(asyncio.create_task(_run_adapter(adapter, ok_subs, writer, stop)))
+        atask = asyncio.create_task(_run_adapter(adapter, ok_subs, writer, stop))
+        adapter_tasks.append(atask)
+        tasks.append(atask)
 
     tasks.append(asyncio.create_task(_flusher(writer, stop)))
 
     try:
-        await stop.wait()
+        await _supervise(stop, adapter_tasks)
     finally:
         for t in tasks:
             t.cancel()

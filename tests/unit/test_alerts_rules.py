@@ -8,7 +8,8 @@ import pytest
 from hlanalysis.alerts.rules import AlertRules
 from hlanalysis.engine.event_bus import EventBus
 from hlanalysis.engine.risk_events import (
-    DailyLossHalt, EngineHeartbeat, Entry, Exit, FeedStale, KillSwitchActivated,
+    DailyLossHalt, EngineHeartbeat, Entry, Exit, FeedDown, FeedRecovered,
+    FeedStale, KillSwitchActivated,
     OrderRejected, OrderUnconfirmed, PMStrikeMismatch, ReconcileDrift,
     RedemptionTimeout, RiskVeto,
 )
@@ -60,6 +61,25 @@ async def test_feed_stale_alerts_and_heartbeat_is_silent():
         pass
     assert any("FEED STALE" in m for m in tg.messages)
     assert not any("heartbeat" in m.lower() for m in tg.messages)
+
+
+@pytest.mark.asyncio
+async def test_feed_down_and_recovered_alert():
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    await bus.publish(FeedDown(ts_ns=1, consecutive_failures=1))
+    await bus.publish(FeedRecovered(ts_ns=2))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert any("FEED DOWN" in m for m in tg.messages)
+    assert any("FEED RECOVERED" in m for m in tg.messages)
 
 
 @pytest.mark.asyncio

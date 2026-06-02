@@ -34,9 +34,9 @@ from .reconcile import Reconciler
 from .restart_drift import RestartDriftGate
 from .risk import RiskGate
 from .risk_events import (
-    DailyLossHalt, EngineHeartbeat, Exit, FeedStale, KillSwitchActivated,
-    NewQuestion, OrderUnconfirmed, RedemptionTimeout, StaleDataHalt,
-    StopLossTriggered,
+    DailyLossHalt, EngineHeartbeat, Exit, FeedDown, FeedRecovered, FeedStale,
+    KillSwitchActivated, NewQuestion, OrderUnconfirmed, RedemptionTimeout,
+    StaleDataHalt, StopLossTriggered,
 )
 from .router import Router
 from .scanner import Scanner
@@ -392,6 +392,14 @@ class EngineRuntime:
     bus: EventBus = field(default_factory=EventBus)
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
     heartbeat_interval_s: float = 30.0
+    # Ingest reconnect/backoff (SHR-42). On a feed drop the loop reconnects with
+    # exponential backoff between base and max; after this many consecutive
+    # failed reconnects it latches all slots halted and stops the engine (a
+    # prolonged dead feed means positions are unmanaged — fail safe, let the
+    # supervisor restart).
+    ingest_reconnect_base_s: float = 1.0
+    ingest_reconnect_max_s: float = 30.0
+    ingest_halt_after_failures: int = 5
     # Process-wide counter for events ingested (one WS feed, shared).
     events_ingested: int = 0
     # Populated by run() so external observers (heartbeat consumers, tests)
@@ -626,83 +634,123 @@ class EngineRuntime:
     # ---------- task bodies ----------
 
     async def _ingest_loop(self, slots: list[AccountSlot]) -> None:
-        """Single shared WS subscription feeding MarketState. The
-        SeenQuestion-dedup table is replicated across slots (one row per slot),
-        which is fine — each slot's DB is independent and the in-process cache
-        below short-circuits the DB hit after the first emit per question."""
-        adapter = self.adapter_factory()
+        """Single shared WS subscription feeding MarketState, wrapped in a
+        bounded-backoff reconnect loop (SHR-42). Previously a single exception
+        killed the only market-data task with no reconnect and no signal, while
+        scan/stop-loss/reconcile kept running on a frozen MarketState. Now a
+        drop reconnects with backoff, alerts FeedDown/FeedRecovered, and a
+        prolonged outage latches all slots halted (positions are unmanageable
+        without a feed — fail safe and let the supervisor restart).
+
+        The SeenQuestion-dedup table is replicated across slots (one row per
+        slot), which is fine — each slot's DB is independent and the in-process
+        cache short-circuits the DB hit after the first emit per question."""
         seen_questions: set[int] = set()
+        backoff = self.ingest_reconnect_base_s
+        consecutive_failures = 0
+        feed_down = False
+        while not self.stop_event.is_set():
+            adapter = self.adapter_factory()
+            try:
+                async for ev in adapter.stream(self.subscriptions):
+                    if self.stop_event.is_set():
+                        return
+                    if feed_down:
+                        # First event after a reconnect — the feed is back.
+                        feed_down = False
+                        consecutive_failures = 0
+                        backoff = self.ingest_reconnect_base_s
+                        await self.bus.publish(FeedRecovered(ts_ns=self._now_ns()))
+                    await self._handle_ingest_event(ev, slots, seen_questions)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("adapter ingest crashed; reconnecting")
+            # Reached here = the stream raised or ended → the feed is gone.
+            if self.stop_event.is_set():
+                return
+            consecutive_failures += 1
+            if not feed_down:
+                feed_down = True
+                await self.bus.publish(FeedDown(
+                    ts_ns=self._now_ns(),
+                    consecutive_failures=consecutive_failures,
+                ))
+            if consecutive_failures >= self.ingest_halt_after_failures:
+                logger.error(
+                    "feed down for {} consecutive reconnects; latching all "
+                    "slots halted and stopping", consecutive_failures,
+                )
+                for slot in slots:
+                    slot.halted = True
+                self.stop_event.set()
+                return
+            await self._sleep_or_stop(backoff)
+            backoff = min(backoff * 2, self.ingest_reconnect_max_s)
+
+    async def _handle_ingest_event(
+        self, ev, slots: list[AccountSlot], seen_questions: set[int],
+    ) -> None:
         from ..events import QuestionMetaEvent
-        try:
-            async for ev in adapter.stream(self.subscriptions):
-                if self.stop_event.is_set():
-                    return
-                ev = _remap_reference_symbol(ev)
-                self.market_state.apply(ev)
-                self.events_ingested += 1
-                if isinstance(ev, QuestionMetaEvent):
-                    qidx = ev.question_idx
-                    if qidx not in seen_questions:
-                        seen_questions.add(qidx)
-                        qv = self.market_state.question(qidx)
-                        if qv is None:
-                            continue
-                        from ..strategy.render import question_description
-                        now_ns = self._now_ns()
-                        new_q_event = NewQuestion(
-                            ts_ns=now_ns,
-                            question_idx=qidx,
-                            klass=qv.klass,
-                            description=question_description(qv),
-                            expiry_ns=qv.expiry_ns,
-                            leg_count=len(qv.leg_symbols),
-                        )
-                        # Mark seen in EVERY slot's DB so the alert doesn't
-                        # re-fire after restart, then emit one alert globally —
-                        # but only if at least one slot's allowlist matches the
-                        # question. symbols.yaml now subscribes to many PM series
-                        # (ETH/NVDA/NBA/...) for recorder-side data ingestion,
-                        # and none of those have a corresponding strategy slot;
-                        # alerting on them would spam Telegram with markets no
-                        # strategy will ever trade.
-                        fields = {
-                            "class": qv.klass,
-                            "underlying": qv.underlying,
-                            "period": qv.period,
-                            # Mirror Scanner.scan so venue/series-scoped slots
-                            # (PM) correctly count as "tradeable" for the
-                            # new-question alert gate.
-                            "venue": qv.venue,
-                            "series_slug": dict(qv.kv).get("series_slug", ""),
-                        }
-                        any_unseen = False
-                        any_tradeable = False
-                        for slot in slots:
-                            if not slot.dal.has_seen_question(qidx):
-                                slot.dal.mark_question_seen(qidx, now_ns=now_ns)
-                                any_unseen = True
-                            if match_question(
-                                slot.cfg, question_idx=qidx, fields=fields,
-                            ) is not None:
-                                any_tradeable = True
-                        # PM up/down open-strike: single capture path. Fires once
-                        # the reference 1m candle has closed (now >= ref_ts + 60s)
-                        # by fetching the Binance spot 1m close. Covers both the
-                        # observed-open case (market listed just now with ref_ts
-                        # already ≥60s past) and the missed-open case (engine
-                        # restarted after the open). The scan loop no longer
-                        # captures via the live mark — it only reloads a
-                        # persisted strike.
-                        if any_tradeable:
-                            await self._maybe_capture_pm_strike(
-                                qv, slots, fields, now_ns=now_ns,
-                            )
-                        if any_unseen and any_tradeable:
-                            await self.bus.publish(new_q_event)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("adapter ingest crashed")
+        ev = _remap_reference_symbol(ev)
+        self.market_state.apply(ev)
+        self.events_ingested += 1
+        if not isinstance(ev, QuestionMetaEvent):
+            return
+        qidx = ev.question_idx
+        if qidx in seen_questions:
+            return
+        seen_questions.add(qidx)
+        qv = self.market_state.question(qidx)
+        if qv is None:
+            return
+        from ..strategy.render import question_description
+        now_ns = self._now_ns()
+        new_q_event = NewQuestion(
+            ts_ns=now_ns,
+            question_idx=qidx,
+            klass=qv.klass,
+            description=question_description(qv),
+            expiry_ns=qv.expiry_ns,
+            leg_count=len(qv.leg_symbols),
+        )
+        # Mark seen in EVERY slot's DB so the alert doesn't re-fire after
+        # restart, then emit one alert globally — but only if at least one
+        # slot's allowlist matches the question. symbols.yaml now subscribes to
+        # many PM series (ETH/NVDA/NBA/...) for recorder-side data ingestion,
+        # and none of those have a corresponding strategy slot; alerting on them
+        # would spam Telegram with markets no strategy will ever trade.
+        fields = {
+            "class": qv.klass,
+            "underlying": qv.underlying,
+            "period": qv.period,
+            # Mirror Scanner.scan so venue/series-scoped slots (PM) correctly
+            # count as "tradeable" for the new-question alert gate.
+            "venue": qv.venue,
+            "series_slug": dict(qv.kv).get("series_slug", ""),
+        }
+        any_unseen = False
+        any_tradeable = False
+        for slot in slots:
+            if not slot.dal.has_seen_question(qidx):
+                slot.dal.mark_question_seen(qidx, now_ns=now_ns)
+                any_unseen = True
+            if match_question(
+                slot.cfg, question_idx=qidx, fields=fields,
+            ) is not None:
+                any_tradeable = True
+        # PM up/down open-strike: single capture path. Fires once the reference
+        # 1m candle has closed (now >= ref_ts + 60s) by fetching the Binance
+        # spot 1m close. Covers both the observed-open case (market listed just
+        # now with ref_ts already ≥60s past) and the missed-open case (engine
+        # restarted after the open). The scan loop no longer captures via the
+        # live mark — it only reloads a persisted strike.
+        if any_tradeable:
+            await self._maybe_capture_pm_strike(
+                qv, slots, fields, now_ns=now_ns,
+            )
+        if any_unseen and any_tradeable:
+            await self.bus.publish(new_q_event)
 
     async def _maybe_capture_pm_strike(
         self, qv, slots: list[AccountSlot], fields: dict[str, str], *, now_ns: int,
