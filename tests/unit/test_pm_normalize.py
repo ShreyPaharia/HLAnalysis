@@ -63,6 +63,56 @@ def test_parse_book_message_yields_book_snapshot_event():
     assert ev.local_recv_ts == 1716545000200_000_000
 
 
+def test_parse_book_message_orders_levels_best_first():
+    # PM CLOB `book` frames list levels WORST-first: bids ascending
+    # (0.01 → 0.49) and asks descending (0.99 → 0.51). The consumer
+    # (MarketState.apply) reads index [0] as top-of-book, so the normalizer
+    # MUST re-order to best-first (highest bid first, lowest ask first) or the
+    # engine reads the penny/99c extremes — mid pinned at 0.50, never a
+    # favorite, no PM trade ever. See gate_decisions.jsonl bid_px=0.01/ask=0.99.
+    payload = {
+        "event_type": "book",
+        "asset_id": "tok-z",
+        "timestamp": "1716545000123",
+        "bids": [
+            {"price": "0.01", "size": "2536.99"},
+            {"price": "0.30", "size": "10"},
+            {"price": "0.49", "size": "114.6"},
+        ],
+        "asks": [
+            {"price": "0.99", "size": "2536.99"},
+            {"price": "0.70", "size": "10"},
+            {"price": "0.51", "size": "66.22"},
+        ],
+    }
+    ev = parse_book_message(payload, local_recv_ts=0)
+    # Best bid = highest price first; best ask = lowest price first.
+    assert ev.bid_px == [0.49, 0.30, 0.01]
+    assert ev.bid_sz == [114.6, 10.0, 2536.99]
+    assert ev.ask_px == [0.51, 0.70, 0.99]
+    assert ev.ask_sz == [66.22, 10.0, 2536.99]
+
+
+def test_parse_price_change_message_orders_levels_best_first():
+    payload = {
+        "event_type": "price_change",
+        "asset_id": "tok-w",
+        "timestamp": "1716545002000",
+        "changes": [
+            {"price": "0.01", "size": "500", "side": "BUY"},
+            {"price": "0.49", "size": "25", "side": "BUY"},
+            {"price": "0.99", "size": "70", "side": "SELL"},
+            {"price": "0.51", "size": "40", "side": "SELL"},
+        ],
+    }
+    ev = parse_price_change_message(payload, local_recv_ts=0)
+    assert ev is not None
+    assert ev.bid_px == [0.49, 0.01]
+    assert ev.bid_sz == [25.0, 500.0]
+    assert ev.ask_px == [0.51, 0.99]
+    assert ev.ask_sz == [40.0, 70.0]
+
+
 def test_parse_trade_message_yields_trade_event():
     payload = {
         "event_type": "last_trade_price",

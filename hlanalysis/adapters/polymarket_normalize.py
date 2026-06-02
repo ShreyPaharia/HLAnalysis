@@ -29,9 +29,27 @@ def _ts_ms_to_ns(ms_str: str | int) -> int:
     return int(ms_str) * 1_000_000
 
 
+def _levels_best_first(
+    raw: list[dict[str, Any]], *, is_bid: bool,
+) -> tuple[list[float], list[float]]:
+    """Return (prices, sizes) sorted best-first: bids descending (highest
+    price = best bid first), asks ascending (lowest price = best ask first).
+
+    PM CLOB `book`/`price_change` frames list levels WORST-first (bids
+    ascending, asks descending). The consumer (MarketState.apply) reads index
+    [0] as top-of-book and walks bid_levels/ask_levels for depth, so the raw
+    order would pin top-of-book to the 0.01/0.99 extremes — mid 0.50, no
+    favorite, no PM trade. Sorting here makes [0] the best level for every
+    downstream reader.
+    """
+    pairs = [(float(lvl["price"]), float(lvl["size"])) for lvl in raw]
+    pairs.sort(key=lambda ps: ps[0], reverse=is_bid)
+    return [p for p, _ in pairs], [s for _, s in pairs]
+
+
 def parse_book_message(payload: dict[str, Any], *, local_recv_ts: int) -> BookSnapshotEvent:
-    bids = payload.get("bids") or []
-    asks = payload.get("asks") or []
+    bid_px, bid_sz = _levels_best_first(payload.get("bids") or [], is_bid=True)
+    ask_px, ask_sz = _levels_best_first(payload.get("asks") or [], is_bid=False)
     return BookSnapshotEvent(
         venue=_VENUE,
         product_type=ProductType.PREDICTION_BINARY,
@@ -39,10 +57,10 @@ def parse_book_message(payload: dict[str, Any], *, local_recv_ts: int) -> BookSn
         symbol=str(payload["asset_id"]),
         exchange_ts=_ts_ms_to_ns(payload.get("timestamp", 0)),
         local_recv_ts=local_recv_ts,
-        bid_px=[float(b["price"]) for b in bids],
-        bid_sz=[float(b["size"]) for b in bids],
-        ask_px=[float(a["price"]) for a in asks],
-        ask_sz=[float(a["size"]) for a in asks],
+        bid_px=bid_px,
+        bid_sz=bid_sz,
+        ask_px=ask_px,
+        ask_sz=ask_sz,
     )
 
 
@@ -76,6 +94,8 @@ def parse_price_change_message(
     asks = [c for c in changes if str(c.get("side", "")).upper() == "SELL"]
     if not bids and not asks:
         return None
+    bid_px, bid_sz = _levels_best_first(bids, is_bid=True)
+    ask_px, ask_sz = _levels_best_first(asks, is_bid=False)
     return BookSnapshotEvent(
         venue=_VENUE,
         product_type=ProductType.PREDICTION_BINARY,
@@ -83,10 +103,10 @@ def parse_price_change_message(
         symbol=str(payload["asset_id"]),
         exchange_ts=_ts_ms_to_ns(payload.get("timestamp", 0)),
         local_recv_ts=local_recv_ts,
-        bid_px=[float(b["price"]) for b in bids],
-        bid_sz=[float(b["size"]) for b in bids],
-        ask_px=[float(a["price"]) for a in asks],
-        ask_sz=[float(a["size"]) for a in asks],
+        bid_px=bid_px,
+        bid_sz=bid_sz,
+        ask_px=ask_px,
+        ask_sz=ask_sz,
     )
 
 
