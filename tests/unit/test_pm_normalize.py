@@ -243,12 +243,17 @@ def test_parse_gamma_market_emits_target_price_when_group_item_title_numeric():
     assert keys["question_name"] == "BTC above $80,000 on May 25?"
 
 
+# endDate of _SAMPLE_GAMMA_MARKET ("2026-05-25T00:00:00Z") == 1779667200e9 ns.
+_AFTER_ENDDATE_NS = 1779667260_000_000_000   # endDate + 60s (resolved, polled just after)
+_BEFORE_ENDDATE_NS = 1779494400_000_000_000  # endDate − 2d (still open)
+
+
 def test_parse_gamma_market_to_settlement_when_resolved_yes():
     resolved = dict(_SAMPLE_GAMMA_MARKET, outcomePrices='["1.0","0.0"]')
     ev = parse_gamma_market_to_settlement(
         resolved,
         series_slug="btc-up-or-down-daily",
-        local_recv_ts=1716631400000_000_000,
+        local_recv_ts=_AFTER_ENDDATE_NS,
     )
     assert ev is not None
     assert ev.event_type == "settlement"
@@ -262,7 +267,7 @@ def test_parse_gamma_market_to_settlement_when_resolved_no():
     ev = parse_gamma_market_to_settlement(
         resolved,
         series_slug="btc-up-or-down-daily",
-        local_recv_ts=1716631400000_000_000,
+        local_recv_ts=_AFTER_ENDDATE_NS,
     )
     assert ev is not None
     assert ev.settled_side_idx == 1
@@ -276,3 +281,29 @@ def test_parse_gamma_market_to_settlement_returns_none_when_open():
         local_recv_ts=0,
     )
     assert ev is None
+
+
+def test_parse_gamma_market_to_settlement_none_before_enddate_even_at_extreme_price():
+    # Regression: a BTC up/down daily priced at 0.99/1.0 BEFORE its endDate is
+    # just a strong favorite — the market resolves on the endDate candle (often
+    # hours later). Treating the extreme price as "settled" de-tracked a still-
+    # open live position and booked phantom PnL. Must return None until endDate.
+    almost = dict(_SAMPLE_GAMMA_MARKET, outcomePrices='["0.0","1.0"]')
+    ev = parse_gamma_market_to_settlement(
+        almost,
+        series_slug="btc-up-or-down-daily",
+        local_recv_ts=_BEFORE_ENDDATE_NS,
+    )
+    assert ev is None
+
+
+def test_parse_gamma_market_to_settlement_falls_back_to_price_when_enddate_missing():
+    # No endDate → can't time-gate; preserve the legacy price>=0.99 behaviour
+    # rather than never settling.
+    resolved = dict(_SAMPLE_GAMMA_MARKET, outcomePrices='["1.0","0.0"]')
+    del resolved["endDate"]
+    ev = parse_gamma_market_to_settlement(
+        resolved, series_slug="btc-up-or-down-daily", local_recv_ts=0,
+    )
+    assert ev is not None
+    assert ev.settled_side_idx == 0

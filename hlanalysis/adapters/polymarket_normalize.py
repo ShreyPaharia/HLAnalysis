@@ -258,12 +258,28 @@ def parse_gamma_market_to_question_meta(
 def parse_gamma_market_to_settlement(
     market: dict, *, series_slug: str, local_recv_ts: int,
 ) -> SettlementEvent | None:
-    """Returns a SettlementEvent iff the market has resolved (one of YES/NO
-    has outcome price ≥ 0.99). Open markets return None.
+    """Returns a SettlementEvent iff the market has actually resolved: the poll
+    time is at/after the market's ``endDate`` AND one of YES/NO has an outcome
+    price ≥ 0.99. Open markets return None.
+
+    The endDate gate is load-bearing: these BTC up/down dailies resolve on the
+    endDate reference candle (often hours after the favourite is already priced
+    at 0.99). Treating a ≥0.99 price BEFORE endDate as "settled" fired a phantom
+    settlement that de-tracked a still-open live position and booked bogus PnL
+    (2026-06-02). A 0.99 price with hours to go is a strong favourite, not a
+    resolution. If endDate is missing/unparseable we fall back to price-only so
+    we never silently stop settling.
     """
     raw = market.get("outcomePrices")
     if not raw:
         return None
+    end_iso = market.get("endDate") or ""
+    if end_iso:
+        try:
+            if local_recv_ts < _parse_iso_ns(end_iso):
+                return None  # not yet at resolution — 0.99 is a favourite, not a settle
+        except ValueError:
+            pass  # unparseable endDate → fall back to price-only (legacy)
     prices = json.loads(raw) if isinstance(raw, str) else raw
     if not isinstance(prices, list) or len(prices) != 2:
         return None
