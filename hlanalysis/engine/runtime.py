@@ -27,6 +27,7 @@ from .config import (
 )
 from .event_bus import EventBus
 from .exec_client import ExecutionClient
+from .exec_types import ClearinghouseState, OpenOrderRow, UserFillRow
 from .hl_client import HLClient
 from .market_state import MarketState
 from .reconcile import Reconciler
@@ -474,10 +475,11 @@ class EngineRuntime:
                     block_path=slot.kill_switch_path.parent / "restart_blocked",
                     account_alias=slot.alias,
                 )
+                venue_open, venue_state, all_fills = await self._venue_snapshot(slot)
                 drift_res = gate.run(
-                    venue_open=slot.exec_client.open_orders(),
-                    venue_state=slot.exec_client.clearinghouse_state(),
-                    fills_lookup=lambda c, _ec=slot.exec_client: _ec.user_fills(),
+                    venue_open=venue_open,
+                    venue_state=venue_state,
+                    fills_lookup=lambda c, _f=all_fills: _f,
                     now_ns=now_ns0,
                 )
                 for ev in drift_res.drift_events:
@@ -810,7 +812,10 @@ class EngineRuntime:
             try:
                 now = self._now_ns()
                 slot.scanner.last_reconcile_ns = slot.last_reconcile_ns
-                for sd in slot.scanner.scan(now_ns=now):
+                realized_today = await self._realized_pnl_today(slot, now_ns=now)
+                for sd in slot.scanner.scan(
+                    now_ns=now, realized_pnl_today=realized_today,
+                ):
                     slot.decisions_emitted += 1
                     await slot.router.handle(sd.decision, inputs=sd.inputs, now_ns=now)
                 slot.scans_completed += 1
@@ -853,6 +858,50 @@ class EngineRuntime:
             except Exception:
                 logger.exception("heartbeat crashed")
 
+    # ---- venue IO offload (SHR-41) -----------------------------------------
+    # Every ExecutionClient method is a synchronous, requests-backed SDK call
+    # (some wrapped in tenacity retries). The engine runs ONE asyncio loop
+    # shared by WS ingest, heartbeat, the stop-loss enforcer, reconcile, and
+    # every slot — so calling these inline parks the whole loop for the network
+    # round-trip, exactly when the venue is congested. These helpers push the
+    # blocking call onto a worker thread. We deliberately offload only the
+    # venue calls, not the surrounding DAL/MarketState work: StateDAL opens a
+    # fresh connection per call (thread-safe), but MarketState is mutated by the
+    # ingest loop and must stay on the loop thread.
+
+    async def _venue_snapshot(
+        self, slot: AccountSlot,
+    ) -> tuple[list[OpenOrderRow], ClearinghouseState, list[UserFillRow]]:
+        """Fetch venue open-orders, clearinghouse state, and the full fills list
+        off the event loop. Fills are fetched once and reused as the reconcile
+        `fills_lookup` for every cloid — the live lambda ignores its cloid arg
+        and returns all fills anyway, so this is behaviour-preserving."""
+        open_orders = await asyncio.to_thread(slot.exec_client.open_orders)
+        state = await asyncio.to_thread(slot.exec_client.clearinghouse_state)
+        fills = await asyncio.to_thread(slot.exec_client.user_fills)
+        return open_orders, state, fills
+
+    async def _realized_pnl_today(self, slot: AccountSlot, *, now_ns: int) -> float:
+        """Realized PnL since the slot's daily window start, read from the venue
+        (truth) off the event loop, with a DAL fallback on venue failure. Single
+        source for both the Scanner daily-loss read and the continuous-checks
+        daily-loss cap."""
+        window_start_ns = Scanner._daily_window_start_ns(
+            now_ns, hour=slot.cfg.global_.daily_window_start_hour_utc,
+        )
+        try:
+            return await asyncio.to_thread(
+                slot.exec_client.realized_pnl_since, window_start_ns,
+            )
+        except Exception:
+            logger.warning(
+                "realized_pnl_since failed alias={}; falling back to DAL",
+                slot.alias,
+            )
+            return await asyncio.to_thread(
+                slot.dal.realized_pnl_since, window_start_ns,
+            )
+
     async def _reconcile_loop(self, slot: AccountSlot) -> None:
         interval = slot.cfg.global_.reconcile_interval_seconds
         while not self.stop_event.is_set():
@@ -871,17 +920,20 @@ class EngineRuntime:
                 #         trust our own fill ledger and only alert on diffs.
                 is_pm = self._is_pm_slot(slot)
                 apply_positions = (not is_pm) or (not slot.pm_startup_position_synced)
-                venue_state = slot.exec_client.clearinghouse_state()
+                # Fetch venue open-orders, clearinghouse state, and fills off the
+                # event loop (SHR-41); the cached fills feed the Reconciler's
+                # fills_lookup for every cloid.
+                venue_open, venue_state, all_fills = await self._venue_snapshot(slot)
                 rec = Reconciler(
                     slot.dal,
-                    fills_lookup=lambda c, _ec=slot.exec_client: _ec.user_fills(),
+                    fills_lookup=lambda c, _f=all_fills: _f,
                     symbol_to_question=self.market_state.symbol_to_question_map(),
                     cloid_prefix=slot.cloid_prefix,
                     account_alias=slot.alias,
                     apply_position_changes=apply_positions,
                 )
                 res = rec.run(
-                    venue_open=slot.exec_client.open_orders(),
+                    venue_open=venue_open,
                     venue_state=venue_state,
                     now_ns=now,
                 )
@@ -927,7 +979,9 @@ class EngineRuntime:
                 for ev in res.drift_events:
                     await self.bus.publish(ev)
                 for cloid, symbol in res.orphans_to_cancel:
-                    slot.exec_client.cancel(cloid=cloid, symbol=symbol)
+                    await asyncio.to_thread(
+                        slot.exec_client.cancel, cloid=cloid, symbol=symbol,
+                    )
                 slot.last_reconcile_ns = now
             except Exception:
                 logger.exception("reconcile crashed alias={}", slot.alias)
@@ -1022,15 +1076,10 @@ class EngineRuntime:
                 # The window cutoff is `daily_window_start_hour_utc` (default
                 # 0 = UTC midnight; set to 6 to align with HL HIP-4 binary
                 # settlement at 06:00 UTC / 11:30 IST so the cap resets in
-                # lockstep with the market cycle).
-                window_start_ns = Scanner._daily_window_start_ns(
-                    now, hour=slot.cfg.global_.daily_window_start_hour_utc,
-                )
-                try:
-                    pnl = slot.exec_client.realized_pnl_since(window_start_ns)
-                except Exception:
-                    logger.warning("hl.realized_pnl_since failed alias={}; falling back to DAL", slot.alias)
-                    pnl = slot.dal.realized_pnl_since(window_start_ns)
+                # lockstep with the market cycle). Offloaded off the event loop
+                # (SHR-41) via the shared helper, which also handles the DAL
+                # fallback on venue outage.
+                pnl = await self._realized_pnl_today(slot, now_ns=now)
                 if pnl < -slot.cfg.global_.daily_loss_cap_usd:
                     await self.bus.publish(DailyLossHalt(
                         ts_ns=now, account_alias=slot.alias,

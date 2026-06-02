@@ -151,7 +151,9 @@ class Scanner:
             return self.ms.question(q.question_idx) or q
         return q
 
-    def scan(self, *, now_ns: int) -> list[ScannedDecision]:
+    def scan(
+        self, *, now_ns: int, realized_pnl_today: float | None = None,
+    ) -> list[ScannedDecision]:
         out: list[ScannedDecision] = []
         ref = self.ms.last_mark(self.ref_symbol)
         if ref is None:
@@ -170,7 +172,13 @@ class Scanner:
         midnight_ns = self._daily_window_start_ns(
             now_ns, hour=self.cfg.global_.daily_window_start_hour_utc,
         )
-        if self._pnl_provider is not None:
+        if realized_pnl_today is not None:
+            # SHR-41: the live runtime pre-fetches realized PnL off the event
+            # loop and injects it here so this scan tick never blocks the loop
+            # on a REST round-trip. Falls through to the provider/DAL paths for
+            # backtests and unit tests that don't inject.
+            realized_today = realized_pnl_today
+        elif self._pnl_provider is not None:
             try:
                 realized_today = self._pnl_provider(midnight_ns)
             except Exception:

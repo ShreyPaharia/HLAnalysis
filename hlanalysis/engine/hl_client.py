@@ -6,7 +6,8 @@ from typing import Literal
 
 from loguru import logger
 from tenacity import (
-    retry, retry_if_exception_type, stop_after_attempt, wait_exponential,
+    retry, retry_if_exception_type, stop_after_attempt, stop_after_delay,
+    wait_exponential,
 )
 
 from .exec_types import (
@@ -201,7 +202,11 @@ class HLClient:
 
     @retry(
         retry=retry_if_exception_type(ConnectionError),
-        stop=stop_after_attempt(3),
+        # Bound BOTH the attempt count and total elapsed retry time (SHR-41) so
+        # a flapping connection can't keep this call alive indefinitely. The
+        # call is offloaded off the event loop by the runtime, so this guards
+        # the worker thread / order-resolution latency rather than the loop.
+        stop=stop_after_attempt(3) | stop_after_delay(5.0),
         wait=wait_exponential(multiplier=0.2, max=2.0),
         reraise=True,
     )
@@ -274,7 +279,11 @@ class HLClient:
 
     @retry(
         retry=retry_if_exception_type(ConnectionError),
-        stop=stop_after_attempt(3),
+        # Bound BOTH the attempt count and total elapsed retry time (SHR-41) so
+        # a flapping connection can't keep this call alive indefinitely. The
+        # call is offloaded off the event loop by the runtime, so this guards
+        # the worker thread / order-resolution latency rather than the loop.
+        stop=stop_after_attempt(3) | stop_after_delay(5.0),
         wait=wait_exponential(multiplier=0.2, max=2.0),
         reraise=True,
     )

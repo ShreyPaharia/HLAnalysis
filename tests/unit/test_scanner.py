@@ -211,6 +211,22 @@ from hlanalysis.engine.scanner import Scanner as _Scanner
 import datetime as _dt
 
 
+def test_scan_uses_injected_realized_pnl_and_skips_provider(tmp_path):
+    """SHR-41: the runtime pre-fetches realized PnL off the event loop and
+    injects it, so scan() must use the injected value and NOT call its
+    (blocking) pnl_provider."""
+    now = 1_700_000_000_000_000_000
+    ms = _seed_market(now)
+    cfg = _strategy_cfg()
+    scanner = _scanner_for(cfg, ms, tmp_path, now)
+    calls: list[int] = []
+    scanner._pnl_provider = lambda ns: (calls.append(ns), 0.0)[1]
+
+    scanner.scan(now_ns=now, realized_pnl_today=-123.0)
+
+    assert calls == [], "pnl_provider was called despite an injected value"
+
+
 def test_daily_window_start_at_midnight_utc_is_today_when_after_midnight():
     # 2026-05-19 12:34:56 UTC → window started at 2026-05-19 00:00:00 UTC.
     now_dt = _dt.datetime(2026, 5, 19, 12, 34, 56, tzinfo=_dt.timezone.utc)

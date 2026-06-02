@@ -10,6 +10,9 @@ from hlanalysis.engine.config import (
     AllowlistEntry, GlobalRiskConfig, StrategyConfig,
 )
 from hlanalysis.engine.event_bus import EventBus
+from hlanalysis.engine.exec_types import (
+    ClearinghouseState, OrderAck, PlaceRequest,
+)
 from hlanalysis.engine.hl_client import HLClient
 from hlanalysis.engine.risk import RiskGate, RiskInputs
 from hlanalysis.engine.risk_events import RiskVeto
@@ -643,3 +646,136 @@ async def test_cooldown_veto_uses_persisted_state_after_restart(tmp_path):
     assert isinstance(veto, _RiskVeto)
     assert veto.reason == "post_exit_cooldown"
     assert dal.get_order("hla-router-restart-reentry") is None
+
+
+class _CountingExec:
+    """ExecutionClient stand-in that auto-fills like paper mode but records
+    every PlaceRequest, so a test can assert a reduce-only re-fire against a
+    flat position is suppressed (SHR-47)."""
+
+    paper_mode = False
+
+    def __init__(self) -> None:
+        self.placed: list[PlaceRequest] = []
+
+    def place(self, req: PlaceRequest) -> OrderAck:
+        self.placed.append(req)
+        return OrderAck(cloid=req.cloid, venue_oid="v", status="filled",
+                        fill_price=req.price, fill_size=req.size)
+
+    def cancel(self, *, cloid: str, symbol: str) -> bool:
+        return True
+
+    def open_orders(self):
+        return []
+
+    def clearinghouse_state(self) -> ClearinghouseState:
+        return ClearinghouseState(positions=(), account_value_usd=0.0)
+
+    def user_fills(self, *, since_ts_ns: int = 0):
+        return []
+
+    def realized_pnl_since(self, since_ts_ns: int) -> float:
+        return 0.0
+
+
+@pytest.mark.asyncio
+async def test_reduce_only_sell_suppressed_when_position_already_flat(tmp_path):
+    """The stop-loss enforcer re-fires a full-size IOC every ~1s. If the prior
+    fill already closed the position, a re-fired reduce-only sell must NOT be
+    placed — otherwise it opens a naked short on the outcome leg (SHR-47)."""
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    client = _CountingExec()
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
+                    strategy_cfg=cfg)
+
+    # 1) Open a long (qty +10).
+    await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
+    assert dal.get_position(42).qty == 10.0
+
+    # 2) Reduce-only sell closes it (qty -> 0).
+    close = OrderIntent(
+        question_idx=42, symbol="@30", side="sell", size=10.0, limit_price=0.95,
+        cloid="hla-exit-1", time_in_force="ioc", reduce_only=True,
+        exit_reason="stop_loss",
+    )
+    await router.handle(Decision(action=Action.EXIT, intents=(close,)),
+                        inputs=_approval_inputs(), now_ns=3)
+    pos = dal.get_position(42)
+    assert pos is None or abs(pos.qty) < 1e-9
+    n_after_close = len(client.placed)
+
+    # 3) Re-fire the same reduce-only sell against the now-flat position.
+    refire = OrderIntent(
+        question_idx=42, symbol="@30", side="sell", size=10.0, limit_price=0.95,
+        cloid="hla-exit-2", time_in_force="ioc", reduce_only=True,
+        exit_reason="stop_loss",
+    )
+    await router.handle(Decision(action=Action.EXIT, intents=(refire,)),
+                        inputs=_approval_inputs(), now_ns=4)
+
+    assert len(client.placed) == n_after_close, (
+        "re-fired reduce-only order was placed against a flat position — "
+        "oversell into a naked short"
+    )
+    pos = dal.get_position(42)
+    assert pos is None or abs(pos.qty) < 1e-9, (
+        f"reduce-only re-fire created a naked position: {pos}"
+    )
+
+
+class _PartialExec(_CountingExec):
+    """Fills at most `fill_cap` units per order, so reduce-only exits partial-
+    fill and the position drains gradually across stop-loss ticks (SHR-47)."""
+
+    def __init__(self, fill_cap: float) -> None:
+        super().__init__()
+        self.fill_cap = fill_cap
+
+    def place(self, req: PlaceRequest) -> OrderAck:
+        self.placed.append(req)
+        filled = min(req.size, self.fill_cap)
+        return OrderAck(cloid=req.cloid, venue_oid="v", status="filled",
+                        fill_price=req.price, fill_size=filled)
+
+
+@pytest.mark.asyncio
+async def test_reduce_only_clamps_to_remaining_qty_after_partial_fill(tmp_path):
+    """A re-fired stop-loss must never request more than is currently held, even
+    when the prior IOC only partially filled — otherwise the residual order
+    oversells past flat into a naked short (SHR-47)."""
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    client = _PartialExec(fill_cap=4.0)
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
+                    strategy_cfg=cfg)
+
+    # Open long qty +10 (entry isn't reduce-only, fills 4 of 10).
+    await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
+    held0 = dal.get_position(42).qty
+    assert held0 == 4.0  # only 4 filled
+
+    # Fire a full-size (10) reduce-only sell. It must be clamped to held (4),
+    # and the resulting placed size must never exceed what we hold.
+    stop = OrderIntent(
+        question_idx=42, symbol="@30", side="sell", size=10.0, limit_price=0.95,
+        cloid="hla-stop-1", time_in_force="ioc", reduce_only=True,
+        exit_reason="stop_loss",
+    )
+    await router.handle(Decision(action=Action.EXIT, intents=(stop,)),
+                        inputs=_approval_inputs(), now_ns=3)
+
+    sell = client.placed[-1]
+    assert sell.side == "sell"
+    assert sell.size <= held0, (
+        f"reduce-only sell size {sell.size} exceeded held {held0}"
+    )
+    assert sell.size == 4.0  # clamped to held, not the requested 10
+    # Position never crosses zero into a short.
+    pos = dal.get_position(42)
+    assert pos is None or pos.qty >= 0.0, f"position went short: {pos}"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -182,6 +183,36 @@ class Router:
         question: QuestionView | None = None,
         question_fields: dict[str, str] | None = None,
     ) -> None:
+        # 0. Reduce-only clamp (SHR-47). The stop-loss enforcer re-fires a
+        # full-size IOC every ~1s; if a prior fill already reduced/closed the
+        # position, an unclamped reduce-only order oversells into a NAKED SHORT
+        # on the outcome leg. HIP-4 makes this load-bearing: HL strips
+        # reduce_only for `#` symbols, so the venue never enforces it and this
+        # router-side check is the only guard. Read held qty from the DAL
+        # (venue-truth via reconcile); once flat, further stop-loss fires are
+        # no-ops, and a reduce-only order can never exceed what we hold.
+        if intent.reduce_only:
+            pos = self.dal.get_position(intent.question_idx)
+            held = pos.qty if pos is not None else 0.0
+            reducing = (
+                (held > 0 and intent.side == "sell")
+                or (held < 0 and intent.side == "buy")
+            )
+            if not reducing or abs(held) < 1e-9:
+                logger.info(
+                    "reduce_only suppressed cloid={} qidx={} side={} size={} "
+                    "held={} (nothing to reduce / wrong direction)",
+                    intent.cloid, intent.question_idx, intent.side,
+                    intent.size, held,
+                )
+                return
+            if intent.size > abs(held):
+                logger.info(
+                    "reduce_only clamp cloid={} qidx={} size={}->{} held={}",
+                    intent.cloid, intent.question_idx, intent.size,
+                    abs(held), held,
+                )
+                intent = _dc_replace(intent, size=abs(held))
         # 1. Persist pending row before the network call (spec §5.5 idempotency).
         self.dal.upsert_order(OpenOrder(
             cloid=intent.cloid, venue_oid=None, question_idx=intent.question_idx,
@@ -189,8 +220,11 @@ class Router:
             size=intent.size, status="pending", placed_ts_ns=now_ns,
             last_update_ts_ns=now_ns, strategy_id=self.strategy_id,
         ))
-        # 2. Send.
-        ack = self.exec_client.place(PlaceRequest(
+        # 2. Send. The ExecutionClient is a synchronous, requests-backed SDK
+        # call wrapped in tenacity retries; running it inline would park the
+        # shared event loop (WS ingest, heartbeat, stop-loss enforcer) for the
+        # whole network round-trip. Offload to a worker thread (SHR-41).
+        ack = await asyncio.to_thread(self.exec_client.place, PlaceRequest(
             cloid=intent.cloid, symbol=intent.symbol, side=intent.side,
             size=intent.size, price=intent.limit_price,
             reduce_only=intent.reduce_only, time_in_force=intent.time_in_force,
