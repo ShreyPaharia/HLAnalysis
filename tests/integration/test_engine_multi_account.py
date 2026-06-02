@@ -48,9 +48,12 @@ class _FakeAdapter(VenueAdapter):
             keys=["class", "underlying", "period", "expiry", "strike"],
             values=["priceBinary", "BTC", "1h", expiry_str, "80000"],
         )
-        # 2026-05-21: MarketState buckets marks to 1m windows. Space 60s apart.
+        # 2026-05-21: MarketState buckets marks to 1m windows. Space 60s apart,
+        # landing the latest at `now` — a live reference feed streams
+        # continuously, so the newest tick is current (else the SHR-60
+        # stale-reference gate correctly vetoes entries on a frozen reference).
         for i in range(8):
-            ts = now - (8 - i) * 60_000_000_000
+            ts = now - (7 - i) * 60_000_000_000
             yield MarkEvent(
                 venue="hyperliquid", product_type=ProductType.PERP,
                 mechanism=Mechanism.CLOB, symbol="BTC",

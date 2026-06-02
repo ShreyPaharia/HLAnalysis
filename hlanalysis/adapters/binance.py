@@ -51,6 +51,12 @@ _PERP_REST_CHANNELS = {"mark", "funding"}
 
 class BinanceAdapter(VenueAdapter):
     venue = "binance"
+    # Per-frame staleness watchdog (SHR-60). If no frame arrives within this
+    # window the stream is force-closed (→ reconnect). Binance BBO/trade frames
+    # arrive multiple times per second, so a frameless 30s is unambiguously a
+    # dead/half-open stream — not a quiet market. Also acts as the first-data
+    # deadline ("subscribed but silent").
+    stale_timeout_s: float = 30.0
 
     def supports(self, product_type: ProductType, mechanism: Mechanism) -> bool:
         return mechanism == Mechanism.CLOB and product_type in {
@@ -127,19 +133,52 @@ class BinanceAdapter(VenueAdapter):
                     await ws.send(
                         json.dumps({"method": "SUBSCRIBE", "params": streams, "id": 1})
                     )
-                    async for raw in ws:
-                        recv_ns = time.time_ns()
-                        try:
-                            msg = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
-                        for ev in self._handle(msg, recv_ns, sym_to_sub, label):
-                            await queue.put(ev)
+                    # Returns (exits the `async with`, closing the socket) when
+                    # the watchdog trips, so the outer loop reconnects.
+                    await self._recv_until_stale(ws, sym_to_sub, label, queue)
             except Exception as e:
                 log.warning("binance/%s ws error: %s; backoff=%.1fs", label, e, backoff)
                 await queue.put(self._health(f"reconnect/{label}", str(e)))
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
+
+    async def _recv_until_stale(
+        self,
+        ws,
+        sym_to_sub: dict[str, Subscription],
+        label: str,
+        queue: asyncio.Queue[NormalizedEvent],
+    ) -> None:
+        """Consume frames until the per-frame watchdog trips (SHR-60).
+
+        `ping_interval/timeout` only catch a dead TCP layer; a half-open or
+        silently-idle stream (the geo-blocked "subscribed but silent" case)
+        keeps the socket open and `recv()` blocks forever with no exception and
+        no reconnect. Bounding each `recv()` with `stale_timeout_s` detects that:
+        on timeout we emit a `feed_stale` health event and return, which exits
+        the caller's `async with websockets.connect(...)` and forces a
+        reconnect. The first `recv()` is bounded too, so "subscribed but never
+        delivered" is caught as a first-data deadline."""
+        while True:
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=self.stale_timeout_s)
+            except asyncio.TimeoutError:
+                log.warning(
+                    "binance/%s no frame in %.0fs; force-reconnecting",
+                    label, self.stale_timeout_s,
+                )
+                await queue.put(self._health(
+                    f"feed_stale/{label}",
+                    f"no frame in {self.stale_timeout_s:.0f}s",
+                ))
+                return
+            recv_ns = time.time_ns()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            for ev in self._handle(msg, recv_ns, sym_to_sub, label):
+                await queue.put(ev)
 
     def _handle(
         self,

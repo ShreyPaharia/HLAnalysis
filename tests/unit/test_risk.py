@@ -169,6 +169,21 @@ def test_reject_when_book_stale():
     assert v.approved is False and "stale" in v.reason
 
 
+def test_reject_when_reference_feed_stale():
+    """SHR-60: the book stale gate does not cover the Binance/HL reference feed
+    that sets reference_price + σ. A silently dead reference must veto entries so
+    the strategy can't keep firing on a frozen price."""
+    inp = _inputs(reference_age_ns=10 * 1_000_000_000)  # 10s > 5s threshold
+    v = _gate().check_pre_trade(_intent(), inp)
+    assert v.approved is False and "stale_reference" in v.reason
+
+
+def test_fresh_reference_is_approved():
+    inp = _inputs(reference_age_ns=1 * 1_000_000_000)  # 1s < 5s threshold
+    v = _gate().check_pre_trade(_intent(), inp)
+    assert v.approved is True
+
+
 # 11. No conflicting leg
 def test_reject_when_holding_opposite_leg_of_same_question():
     pos = Position(question_idx=42, symbol="@31", qty=10.0, avg_entry=0.05,

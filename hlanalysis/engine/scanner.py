@@ -158,6 +158,10 @@ class Scanner:
         ref = self.ms.last_mark(self.ref_symbol)
         if ref is None:
             return out
+        # Age of the reference feed at decision time, for the gate's
+        # stale-reference check (SHR-60). ref is not None here, so a ts exists.
+        ref_ts = self.ms.last_mark_ts(self.ref_symbol)
+        reference_age_ns = (now_ns - ref_ts) if ref_ts is not None else 0
         positions_db = self.dal.all_positions()
         positions_by_q = {p.question_idx: p for p in positions_db}
         all_positions_strategy = [
@@ -278,6 +282,7 @@ class Scanner:
                     kill_switch_active=kill,
                     last_reconcile_ns=self.last_reconcile_ns,
                     now_ns=now_ns,
+                    reference_age_ns=reference_age_ns,
                 )
                 out.append(ScannedDecision(
                     decision=Decision(action=decision.action, intents=(intent,),

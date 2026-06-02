@@ -115,6 +115,16 @@ def _mark(symbol: str, px: float, ts: int) -> MarkEvent:
     )
 
 
+def test_last_mark_ts_tracks_latest_reference_tick():
+    """SHR-60: MarketState must expose the timestamp of the latest reference
+    tick so the risk gate can detect a stale reference feed."""
+    ms = MarketState()
+    assert ms.last_mark_ts("BTC") is None
+    ms.apply(_mark("BTC", 100.0, ts=1_000))
+    ms.apply(_mark("BTC", 101.0, ts=2_000))
+    assert ms.last_mark_ts("BTC") == 2_000
+
+
 def test_pm_updown_question_has_nan_strike_until_captured():
     # PM up/down markets carry no numeric strike; QuestionView.strike is NaN
     # so the strategy can't price it until the open is captured.

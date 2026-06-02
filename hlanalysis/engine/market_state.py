@@ -60,6 +60,9 @@ class MarketState:
         # fresh bar. Maxlen is sized per symbol via ``set_reference_cadence``.
         self._marks: dict[str, deque[tuple[float, float, float]]] = {}
         self._last_mark: dict[str, float] = {}
+        # Timestamp of the latest reference tick per symbol; lets the risk gate
+        # detect a stale reference feed (SHR-60).
+        self._last_mark_ts: dict[str, int] = {}
         # 2026-05-21: bucket marks into ``mark_bucket_ns``-wide windows so the
         # strategy's σ formula (which assumes 60s-spaced returns) sees a
         # correctly-spaced series. Without this, HL's ~1.2/s markPx feed
@@ -262,6 +265,7 @@ class MarketState:
         Parkinson.
         """
         self._last_mark[symbol] = price
+        self._last_mark_ts[symbol] = ts
         hist = self._marks.get(symbol)
         if hist is None:
             maxlen = self._mark_history_by_symbol.get(symbol, self._mark_history)
@@ -463,6 +467,12 @@ class MarketState:
 
     def last_mark(self, symbol: str) -> float | None:
         return self._last_mark.get(symbol)
+
+    def last_mark_ts(self, symbol: str) -> int | None:
+        """Timestamp (ns) of the latest reference tick for ``symbol``, or None
+        if none seen yet. Used by the Scanner to compute reference-feed age for
+        the risk gate's stale-reference check (SHR-60)."""
+        return self._last_mark_ts.get(symbol)
 
     def recent_returns(self, symbol: str, n: int) -> tuple[float, ...]:
         """Last ``n`` close-to-close log returns for ``symbol``'s OHLC bars.

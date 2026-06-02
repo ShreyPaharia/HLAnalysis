@@ -21,6 +21,11 @@ class RiskInputs:
     kill_switch_active: bool
     last_reconcile_ns: int
     now_ns: int
+    # Age of the latest reference-feed (Binance/HL) price tick at decision time.
+    # Defaults to 0 (fresh) so callers that don't track it — the stop-loss
+    # enforcer, tests — are unaffected; the Scanner sets it for entries so the
+    # gate can veto on a stale reference (SHR-60).
+    reference_age_ns: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +121,13 @@ class RiskGate:
         stale_ns = self.cfg.global_.stale_data_halt_seconds * 1_000_000_000
         if inp.now_ns - inp.book.last_l2_ts_ns > stale_ns:
             return RiskVerdict(False, "stale_data")
+        # Reference-feed staleness (SHR-60). The book gate above covers only the
+        # HL/PM trading leg, not the Binance/HL reference feed that sets
+        # reference_price + σ. A silently dead reference freezes edge computation
+        # while the strategy keeps firing; veto entries when it's stale. Exits
+        # are short-circuited earlier, so this never blocks a close.
+        if inp.reference_age_ns > stale_ns:
+            return RiskVerdict(False, "stale_reference")
         # last_reconcile_ns: tolerate 2x the configured interval
         if inp.last_reconcile_ns > 0 and (
             inp.now_ns - inp.last_reconcile_ns
