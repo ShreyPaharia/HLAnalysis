@@ -164,64 +164,91 @@ def test_positions_unknown_skips_position_reconciliation(dal):
     assert res.vanished_positions == []
 
 
-def test_vanish_grace_defers_then_allows_vanish(dal):
-    # PM data-api lags a fresh fill; a position younger than the grace window
-    # must not be mistaken for a settlement when absent from venue. Once it
-    # ages past the grace, absence is a real vanish.
-    grace = 100_000_000_000  # 100s
-    entry_ns = 1_000_000_000
+def test_alert_only_does_not_vanish_local_on_venue_absence(dal):
+    # PM live (apply_position_changes=False): the data-api drops/flaps
+    # positions, so venue-absence must NOT delete the local position or emit a
+    # settlement. Only an informational drift; closure comes from fills + the
+    # endDate gamma settlement.
     dal.upsert_position(Position(
         question_idx=42, symbol="tok", qty=10.0, avg_entry=0.95,
-        realized_pnl=0.0, last_update_ts_ns=entry_ns, stop_loss_price=-1.0,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
     ))
-    flat = ClearinghouseState(positions=(), account_value_usd=0)
-    # within grace (Δ=50s < 100s) → graced, not vanished
     res = Reconciler(
         dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 42},
-        vanish_grace_ns=grace,
-    ).run(venue_open=[], venue_state=flat, now_ns=entry_ns + 50_000_000_000)
-    assert dal.get_position(42) is not None
-    assert res.vanished_positions == []
-    # past grace (Δ=150s > 100s) → vanished
-    res2 = Reconciler(
-        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 42},
-        vanish_grace_ns=grace,
-    ).run(venue_open=[], venue_state=flat, now_ns=entry_ns + 150_000_000_000)
-    assert dal.get_position(42) is None
-    assert len(res2.vanished_positions) == 1
+        apply_position_changes=False,
+    ).run(venue_open=[],
+          venue_state=ClearinghouseState(positions=(), account_value_usd=0),
+          now_ns=2)
+    assert dal.get_position(42) is not None       # not deleted
+    assert res.vanished_positions == []           # no settlement triggered
+    assert any(
+        d.detail.get("resolution") == "venue_absent_alert_only"
+        for d in res.drift_events
+    )
 
 
-def test_qty_drift_within_grace_keeps_fresh_local_qty(dal):
-    # PM data-api lags our own fills: right after a SELL reduces the local
-    # position to dust, the venue still reports the PRE-sell qty. Within the
-    # grace window the reconciler must NOT overwrite the fresh local qty with
-    # that stale venue value — doing so reverted the fill and made the strategy
-    # re-fire the exit (2026-06-02 double-exit). Past grace, venue wins again.
-    grace = 100_000_000_000  # 100s
-    entry_ns = 1_000_000_000
+def test_alert_only_keeps_local_qty_on_drift(dal):
+    # PM live: a SELL reduced local to dust (0.006) but the data-api still
+    # reports the pre-sell 51.536 (lag). Alert-only must KEEP the fresh local
+    # qty (our fill ledger is truth) and only alert — overwriting it reverted
+    # the fill and caused the 2026-06-02 double-exit.
     dal.upsert_position(Position(
         question_idx=42, symbol="tok", qty=0.006, avg_entry=0.97,
-        realized_pnl=0.0, last_update_ts_ns=entry_ns, stop_loss_price=-1.0,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
     ))
     venue = ClearinghouseState(
         positions=(VenuePosition(
             symbol="tok", qty=51.536, avg_entry=0.97, unrealized_pnl=0.0),),
         account_value_usd=0,
     )
-    # within grace → local dust kept, not reverted to the stale 51.536
     res = Reconciler(
         dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 42},
-        vanish_grace_ns=grace,
-    ).run(venue_open=[], venue_state=venue, now_ns=entry_ns + 50_000_000_000)
-    assert dal.get_position(42).qty == 0.006
-    assert not any(d.case == "position_mismatch" for d in res.drift_events)
-    # past grace → venue wins (normal drift-adopt resumes)
-    res2 = Reconciler(
-        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 42},
-        vanish_grace_ns=grace,
-    ).run(venue_open=[], venue_state=venue, now_ns=entry_ns + 150_000_000_000)
-    assert dal.get_position(42).qty == 51.536
-    assert any(d.case == "position_mismatch" for d in res2.drift_events)
+        apply_position_changes=False,
+    ).run(venue_open=[], venue_state=venue, now_ns=2)
+    assert dal.get_position(42).qty == 0.006      # local kept, not reverted
+    assert any(
+        d.detail.get("resolution") == "qty_mismatch_alert_only"
+        for d in res.drift_events
+    )
+
+
+def test_alert_only_does_not_adopt_venue_orphan(dal):
+    # PM live: a venue position we don't track locally is NOT adopted (re-
+    # adopting a just-closed position from the laggy data-api would resurrect
+    # it). Only an alert. (Apply-mode adoption is covered separately.)
+    venue = ClearinghouseState(
+        positions=(VenuePosition(
+            symbol="tok", qty=5.0, avg_entry=0.4, unrealized_pnl=0.0),),
+        account_value_usd=0,
+    )
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 99},
+        apply_position_changes=False,
+    ).run(venue_open=[], venue_state=venue, now_ns=2)
+    assert dal.get_position(99) is None           # not adopted
+    assert any(
+        d.detail.get("resolution") == "venue_orphan_alert_only"
+        for d in res.drift_events
+    )
+
+
+def test_apply_mode_adopts_venue_orphan(dal):
+    # Restart / HL (apply_position_changes=True, the default): a venue position
+    # we don't track locally IS adopted into the DB.
+    venue = ClearinghouseState(
+        positions=(VenuePosition(
+            symbol="tok", qty=5.0, avg_entry=0.4, unrealized_pnl=0.0),),
+        account_value_usd=0,
+    )
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 99},
+    ).run(venue_open=[], venue_state=venue, now_ns=2)
+    assert dal.get_position(99) is not None
+    assert dal.get_position(99).qty == 5.0
+    assert any(
+        d.detail.get("resolution") == "adopted_venue_orphan"
+        for d in res.drift_events
+    )
 
 
 def test_position_disappearance_drops_local_position(dal):

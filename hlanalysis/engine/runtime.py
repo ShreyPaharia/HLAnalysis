@@ -75,14 +75,6 @@ def _remap_reference_symbol(ev: NormalizedEvent) -> NormalizedEvent:
 # without a status change. 30s gives PM CLOB plenty of room under heavy chain
 # load while still surfacing stuck orders before the next scan tick would
 # top up on top of stale state.
-# PM venue positions come from the data-api, which lags a fresh fill by a few
-# seconds. The reconciler must not treat a just-opened PM position as
-# "vanished/settled" during that window — grace it for 120s (8 reconcile
-# cycles at the 15s interval). HL stays at 0 (a settled HIP-4 row disappears
-# instantly and must be detected before stale_data_halt).
-PM_VANISH_GRACE_NS: int = 120 * 1_000_000_000
-
-
 PM_UNCONFIRMED_THRESHOLD_S: float = 30.0
 
 # PM redemption watchdog: RedemptionTimeout fires this long after the
@@ -356,6 +348,14 @@ class AccountSlot:
     # RedemptionTimeout — prevents per-tick spam after the 6h threshold trips.
     pm_settlements: dict[int, tuple[int, str, float, float]] = field(default_factory=dict)
     pm_alerted_redemption_qidxs: set[int] = field(default_factory=set)
+    # PM only: set True after the first reconcile pass that authoritatively
+    # synced positions from venue truth (the data-api). Until then the live
+    # reconcile APPLIES venue changes (to adopt positions missed while the
+    # engine was down — the restart gate runs before market data loads, so it
+    # can't); afterwards the live reconcile is alert-only and our fill ledger is
+    # the source of truth (PM data-api lags/flaps). HL ignores this (always
+    # applies).
+    pm_startup_position_synced: bool = False
     # Symbols that have already fired a StaleDataHalt alert this stale episode.
     # The continuous-checks loop runs every ~1s; without this a held position
     # whose leg book goes quiet (PM books update in bursts, esp. near
@@ -473,7 +473,6 @@ class EngineRuntime:
                     dal=slot.dal,
                     block_path=slot.kill_switch_path.parent / "restart_blocked",
                     account_alias=slot.alias,
-                    vanish_grace_ns=self._vanish_grace_ns_for(slot),
                 )
                 drift_res = gate.run(
                     venue_open=slot.exec_client.open_orders(),
@@ -520,12 +519,10 @@ class EngineRuntime:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _vanish_grace_ns_for(self, slot: "AccountSlot") -> int:
-        """PM slots grace position-vanish detection (data-api indexing lag);
-        HL stays at 0. Keyed off the account's venue discriminator."""
+    def _is_pm_slot(self, slot: "AccountSlot") -> bool:
+        """True for Polymarket slots (venue discriminator)."""
         acct = self.deploy_cfg.accounts.get(slot.alias)
-        venue = getattr(acct, "venue", "") if acct is not None else ""
-        return PM_VANISH_GRACE_NS if venue == "polymarket" else 0
+        return getattr(acct, "venue", "") == "polymarket" if acct is not None else False
 
     # ---------- cadence registration ----------
 
@@ -864,19 +861,35 @@ class EngineRuntime:
                 return
             try:
                 now = self._now_ns()
+                # Venue-truth application policy:
+                #   HL  → always apply (clearinghouseState is instant +
+                #         authoritative; needed for live HIP-4 settlement detect).
+                #   PM  → apply only on the FIRST successful pass after startup
+                #         (to adopt positions we missed while down — the restart
+                #         gate runs before market data is loaded so it can't),
+                #         then alert-only. PM's data-api lags/flaps, so live we
+                #         trust our own fill ledger and only alert on diffs.
+                is_pm = self._is_pm_slot(slot)
+                apply_positions = (not is_pm) or (not slot.pm_startup_position_synced)
+                venue_state = slot.exec_client.clearinghouse_state()
                 rec = Reconciler(
                     slot.dal,
                     fills_lookup=lambda c, _ec=slot.exec_client: _ec.user_fills(),
                     symbol_to_question=self.market_state.symbol_to_question_map(),
                     cloid_prefix=slot.cloid_prefix,
                     account_alias=slot.alias,
-                    vanish_grace_ns=self._vanish_grace_ns_for(slot),
+                    apply_position_changes=apply_positions,
                 )
                 res = rec.run(
                     venue_open=slot.exec_client.open_orders(),
-                    venue_state=slot.exec_client.clearinghouse_state(),
+                    venue_state=venue_state,
                     now_ns=now,
                 )
+                # Mark the PM startup sync done only once we've had an
+                # authoritative (positions_known) pass — so a data-api outage at
+                # startup doesn't prematurely flip us to alert-only.
+                if is_pm and apply_positions and venue_state.positions_known:
+                    slot.pm_startup_position_synced = True
                 # Translate "local position vanished from venue" into a
                 # settlement event before publishing any other drift. On HL
                 # HIP-4 the venue auto-closes positions at settlement and the

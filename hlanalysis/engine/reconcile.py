@@ -56,19 +56,22 @@ class Reconciler:
         symbol_to_question: dict[str, int] | None = None,
         cloid_prefix: str = CLOID_PREFIX,
         account_alias: str = "",
-        vanish_grace_ns: int = 0,
+        apply_position_changes: bool = True,
     ) -> None:
         self.dal = dal
         self.fills_lookup = fills_lookup
         self.symbol_to_question = symbol_to_question or {}
         self.cloid_prefix = cloid_prefix
-        # Minimum age a local position must reach before "absent from venue" is
-        # treated as vanished/settled. 0 for HL (a settled HIP-4 row disappears
-        # instantly and must be detected fast, before stale_data_halt). >0 for
-        # PM, whose venue position set comes from the data-api and lags a fresh
-        # fill by seconds — without grace the next reconcile would vanish-delete
-        # a just-opened position before the data-api has indexed it.
-        self.vanish_grace_ns = vanish_grace_ns
+        # When False, the positions pass DETECTS venue/local mismatches and
+        # emits drift alerts but does NOT mutate the DB (no vanish, no
+        # qty-overwrite, no adopt). Used for the PM live loop: PM's only
+        # position-truth source is the data-api indexer, which lags our own
+        # fills by seconds and flaps — so live we trust our fill ledger and only
+        # alert on differences. Venue truth is APPLIED at restart (the
+        # RestartDriftGate, to recover fills missed while down) and continuously
+        # for HL (clearinghouseState is instant + authoritative). PM positions
+        # close via our sell fills + the endDate-gated gamma SettlementEvent.
+        self.apply_position_changes = apply_position_changes
         # Stamped onto every ReconcileDrift this Reconciler emits so alerts
         # carry the account that detected the drift.
         self.account_alias = account_alias
@@ -175,67 +178,65 @@ class Reconciler:
                 vanished_positions=vanished,
             )
 
+        apply = self.apply_position_changes
         venue_by_symbol = {p.symbol: p for p in venue_state.positions}
         local_by_qidx = {p.question_idx: p for p in self.dal.all_positions()}
 
         for qidx, lp in local_by_qidx.items():
             vp = venue_by_symbol.get(lp.symbol)
             if vp is None or abs(vp.qty) < 1e-9:
-                # Indexing-lag guard: a freshly-opened position not yet visible
-                # on the venue (PM data-api lag) must not be mistaken for a
-                # settlement. Only vanish once it's older than the grace window.
-                if (now_ns - lp.last_update_ts_ns) < self.vanish_grace_ns:
-                    continue
-                # Position vanished from venue, OR present at exactly qty=0.
-                # On HL HIP-4 the row disappears entirely at settlement; on
-                # Polymarket the venue position stays at qty=0 until redemption
-                # so the row is still present. Both flavours mean "the market
-                # resolved and the position is closed" — surface as a
-                # vanished_positions entry so the caller publishes a settlement
-                # Exit via _close_settled and marks the question settled in
-                # MarketState. We snapshot the Position before deletion so
-                # callers don't race the DB. The polled SettlementEvent
-                # typically arrives later than this reconcile cycle, so we
-                # treat the vanish itself as the settlement signal.
-                vanished.append((qidx, lp.symbol, lp))
-                self.dal.delete_position(qidx)
+                # Position absent on venue (or present at qty=0). On HL this is
+                # a HIP-4 settlement auto-close: surface it as a
+                # vanished_positions entry so the runtime publishes a settlement
+                # Exit + marks the question settled (suppressing stale_data_halt
+                # on the now-silent book). In alert-only mode (PM live) venue
+                # absence is NOT trusted as a close — the data-api drops
+                # positions transiently / lags our own sell fills — so we only
+                # emit an informational drift and leave local state to the fill
+                # ledger + the endDate gamma settlement.
+                if apply:
+                    vanished.append((qidx, lp.symbol, lp))
+                    self.dal.delete_position(qidx)
+                else:
+                    drift.append(ReconcileDrift(
+                        ts_ns=now_ns, account_alias=self.account_alias,
+                        case="position_mismatch", question_idx=qidx,
+                        detail={"resolution": "venue_absent_alert_only",
+                                "symbol": lp.symbol, "db_qty": f"{lp.qty}"},
+                    ))
                 continue
             qty_diff = abs(vp.qty - lp.qty) > 1e-9
             avg_diff = abs(vp.avg_entry - lp.avg_entry) > 1e-9
             if qty_diff or avg_diff:
-                # Indexing-lag guard (same rationale as the vanish branch): the
-                # PM data-api lags our own fills by seconds, so right after a
-                # fill the venue still reports the PRE-fill qty. Overwriting our
-                # fresh local qty with that stale value reverts the fill — which
-                # made the strategy re-fire the exit it had just completed
-                # (2026-06-02 double-exit). Within the grace window, trust the
-                # local fill over the (likely stale) venue.
-                if (now_ns - lp.last_update_ts_ns) < self.vanish_grace_ns:
-                    continue
-                # avg_entry is display-only (the daily-loss gate reads PnL from
-                # HL directly), so we silently adopt HL's value without firing
-                # an alert. qty is load-bearing — it gates risk caps and the
-                # strategy's have_position branch — so any qty drift must
-                # surface as a drift event.
-                self.dal.upsert_position(Position(
-                    question_idx=qidx, symbol=lp.symbol, qty=vp.qty,
-                    avg_entry=vp.avg_entry, realized_pnl=lp.realized_pnl,
-                    last_update_ts_ns=now_ns, stop_loss_price=lp.stop_loss_price,
-                ))
+                # In apply mode the venue wins (HL is authoritative): adopt its
+                # qty/avg. In alert-only mode we KEEP local (our fill ledger is
+                # truth) and only alert — overwriting with a stale data-api qty
+                # reverts our own fills (2026-06-02 double-exit).
+                if apply:
+                    # avg_entry is display-only (the daily-loss gate reads PnL
+                    # from HL directly); qty is load-bearing (risk caps +
+                    # have_position), so qty drift surfaces as an alert.
+                    self.dal.upsert_position(Position(
+                        question_idx=qidx, symbol=lp.symbol, qty=vp.qty,
+                        avg_entry=vp.avg_entry, realized_pnl=lp.realized_pnl,
+                        last_update_ts_ns=now_ns, stop_loss_price=lp.stop_loss_price,
+                    ))
                 if qty_diff:
+                    detail = {"hl_qty": f"{vp.qty}", "db_qty": f"{lp.qty}"}
+                    if not apply:
+                        detail["resolution"] = "qty_mismatch_alert_only"
                     drift.append(ReconcileDrift(
-                        ts_ns=now_ns, account_alias=self.account_alias, case="position_mismatch", question_idx=qidx,
-                        detail={"hl_qty": f"{vp.qty}", "db_qty": f"{lp.qty}"},
+                        ts_ns=now_ns, account_alias=self.account_alias,
+                        case="position_mismatch", question_idx=qidx,
+                        detail=detail,
                     ))
 
-        # Position on venue we don't track locally — adopt it into the DB so
-        # the risk gate's caps and the strategy's `have_position` HOLD branch
-        # both see it. Without adoption the strategy re-fires entries each
-        # scan tick and the venue rejects them for insufficient quote balance.
-        # Stop-loss is disabled on adopted rows: we have no entry context to
-        # compute it from, and the alternative (exit-at-bid panic) would dump
-        # a position we may want to hold to settlement. Settlement-driven
-        # exits still work via _close_settled.
+        # Position on venue we don't track locally. In apply mode (restart / HL)
+        # adopt it into the DB so risk caps + the strategy's have_position HOLD
+        # branch see it (without adoption the strategy re-fires entries). In
+        # alert-only mode (PM live) we don't adopt from the laggy data-api —
+        # re-adopting a just-closed position would resurrect it — so we only
+        # alert. Stop-loss is disabled on adopted rows (no entry context).
         _STOP_DISABLED_SENTINEL = -1.0
         for sym, vp in venue_by_symbol.items():
             qidx = self.symbol_to_question.get(sym)
@@ -252,15 +253,17 @@ class Reconciler:
                 continue
             if qidx in local_by_qidx:
                 continue
-            self.dal.upsert_position(Position(
-                question_idx=qidx, symbol=sym, qty=vp.qty,
-                avg_entry=vp.avg_entry, realized_pnl=0.0,
-                last_update_ts_ns=now_ns,
-                stop_loss_price=_STOP_DISABLED_SENTINEL,
-            ))
+            if apply:
+                self.dal.upsert_position(Position(
+                    question_idx=qidx, symbol=sym, qty=vp.qty,
+                    avg_entry=vp.avg_entry, realized_pnl=0.0,
+                    last_update_ts_ns=now_ns,
+                    stop_loss_price=_STOP_DISABLED_SENTINEL,
+                ))
             drift.append(ReconcileDrift(
                 ts_ns=now_ns, account_alias=self.account_alias, case="position_mismatch", question_idx=qidx,
-                detail={"resolution": "adopted_venue_orphan", "symbol": sym,
+                detail={"resolution": "adopted_venue_orphan" if apply
+                        else "venue_orphan_alert_only", "symbol": sym,
                         "qty": f"{vp.qty}", "avg_entry": f"{vp.avg_entry}"},
             ))
 
