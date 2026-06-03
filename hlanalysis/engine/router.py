@@ -440,6 +440,13 @@ class Router:
         realized = settlement_pnl_usd(
             question, p.symbol, p.qty, p.avg_entry, prior_realized=p.realized_pnl,
         )
+        # Persist the settlement PnL (SHR-53) BEFORE alerting so the daily-loss
+        # gate sees it. Idempotent per qidx — if the reconcile vanished-position
+        # path already recorded this settlement, this is a no-op (no double-book).
+        self.dal.record_settlement(
+            question_idx=question_idx, symbol=p.symbol,
+            realized_pnl=realized, ts_ns=now_ns,
+        )
         q_desc = question_description(question) if question else ""
         o_desc = outcome_description(question, p.symbol) if question else ""
         await self.bus.publish(Exit(

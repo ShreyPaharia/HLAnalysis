@@ -17,7 +17,7 @@ from hlanalysis.engine.hl_client import HLClient
 from hlanalysis.engine.risk import RiskGate, RiskInputs
 from hlanalysis.engine.risk_events import RiskVeto
 from hlanalysis.engine.router import Router
-from hlanalysis.engine.state import StateDAL
+from hlanalysis.engine.state import Position, StateDAL
 from hlanalysis.strategy.types import (
     Action, BookState, Decision, OrderIntent, QuestionView,
 )
@@ -646,6 +646,31 @@ async def test_cooldown_veto_uses_persisted_state_after_restart(tmp_path):
     assert isinstance(veto, _RiskVeto)
     assert veto.reason == "post_exit_cooldown"
     assert dal.get_order("hla-router-restart-reentry") is None
+
+
+@pytest.mark.asyncio
+async def test_close_settled_persists_settlement_pnl(tmp_path):
+    """SHR-53: settling a position must persist its realized PnL (not just emit
+    an Exit alert) so the daily-loss gate can see it."""
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    cfg = _strategy_cfg()
+    client = HLClient(account_address="0x", api_secret_key="0x",
+                      base_url="x", paper_mode=True)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
+                    strategy_cfg=cfg)
+    dal.upsert_position(Position(
+        question_idx=42, symbol="@30", qty=10.0, avg_entry=0.6,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=0.0,
+    ))
+    settled_q = replace(_q(), settled=True, settled_symbol="@30")
+
+    await router._close_settled(42, now_ns=100, question=settled_q)
+
+    assert dal.get_position(42) is None
+    # Winning leg: 10 * (1.0 - 0.6) = +4.0, now persisted.
+    assert dal.settlement_pnl_since(0) == pytest.approx(4.0)
 
 
 class _CountingExec:

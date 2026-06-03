@@ -73,6 +73,18 @@ class PmStrike(SQLModel, table=True):
     strike: float
 
 
+class Settlement(SQLModel, table=True):
+    """Persisted realized PnL of a settled position (SHR-53). HIP-4 binaries
+    close via settlement payouts, not HL fills, so this PnL was previously only
+    alerted, never stored — leaving the daily-loss gate blind to it. Keyed by
+    question_idx so the two close paths can't double-book (first writer wins)."""
+    __tablename__ = "settlement"
+    question_idx: int = Field(primary_key=True)
+    symbol: str
+    realized_pnl: float
+    ts_ns: int
+
+
 # Public alias for tests / external users.
 Session = Session_  # noqa: F811
 
@@ -219,6 +231,40 @@ class StateDAL:
                 s.add(existing)
             s.commit()
 
+    # ---- settlements ----
+
+    def record_settlement(
+        self, *, question_idx: int, symbol: str, realized_pnl: float, ts_ns: int,
+    ) -> None:
+        """Persist a settled position's realized PnL, keyed by question_idx
+        (SHR-53). Upsert (single row per qidx) so the two close paths — the
+        reconcile vanished-position path and router._close_settled — can't
+        double-book: the daily-loss gate sums one row per settlement, never two.
+        Last write wins, which is correct because the vanished-position path can
+        fire BEFORE the settle event with an incomplete PnL (falls back to prior
+        realized) and then re-emit the authoritative payout once settled_symbol
+        is known; the authoritative value, written later, must overwrite."""
+        with _Session(self._engine) as s:
+            existing = s.get(Settlement, question_idx)
+            if existing is None:
+                s.add(Settlement(
+                    question_idx=question_idx, symbol=symbol,
+                    realized_pnl=realized_pnl, ts_ns=ts_ns,
+                ))
+            else:
+                existing.symbol = symbol
+                existing.realized_pnl = realized_pnl
+                existing.ts_ns = ts_ns
+                s.add(existing)
+            s.commit()
+
+    def settlement_pnl_since(self, since_ts_ns: int) -> float:
+        with _Session(self._engine) as s:
+            rows = list(s.exec(
+                select(Settlement).where(Settlement.ts_ns >= since_ts_ns)
+            ).all())
+        return sum(r.realized_pnl for r in rows)
+
     # ---- fills ----
 
     def append_fill(self, f: Fill) -> None:
@@ -268,7 +314,11 @@ class StateDAL:
             fills = list(s.exec(stmt).all())
         with _Session(self._engine) as s:
             positions = list(s.exec(select(Position)).all())
+        # Settlement payouts are not fills (HIP-4 binaries close via settlement,
+        # not HL trades), so without this the dominant PnL component of the
+        # binary strategy is invisible here (SHR-53/49).
         return (
             sum(getattr(f, "closed_pnl", 0.0) - f.fee for f in fills)
             + sum(p.realized_pnl for p in positions)
+            + self.settlement_pnl_since(since_ts_ns)
         )

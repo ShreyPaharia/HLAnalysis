@@ -400,6 +400,11 @@ class EngineRuntime:
     ingest_reconnect_base_s: float = 1.0
     ingest_reconnect_max_s: float = 30.0
     ingest_halt_after_failures: int = 5
+    # Daily-loss venue-read fail-safe (SHR-49). After this many CONSECUTIVE
+    # failed venue realized-PnL reads, latch the slot halted rather than keep
+    # trading on a venue-blind PnL — a transient outage must not defeat the cap.
+    daily_loss_venue_fail_halt: int = 3
+    _venue_pnl_failures: dict[str, int] = field(default_factory=dict)
     # Process-wide counter for events ingested (one WS feed, shared).
     events_ingested: int = 0
     # Populated by run() so external observers (heartbeat consumers, tests)
@@ -967,22 +972,43 @@ class EngineRuntime:
         return open_orders, state, fills
 
     async def _realized_pnl_today(self, slot: AccountSlot, *, now_ns: int) -> float:
-        """Realized PnL since the slot's daily window start, read from the venue
-        (truth) off the event loop, with a DAL fallback on venue failure. Single
-        source for both the Scanner daily-loss read and the continuous-checks
-        daily-loss cap."""
+        """Realized PnL since the slot's daily window start, for both the Scanner
+        daily-loss read and the continuous-checks cap.
+
+        Settlement-inclusive (SHR-49/53): HL `realized_pnl_since` returns
+        closedPnl from fills only — HIP-4 binaries close via settlement payouts,
+        which are NOT fills — so persisted settlement PnL is added on top. On a
+        venue-read failure we fall back to the DAL value (now also
+        settlement-inclusive, no longer structurally zero) and count the
+        failure; after `daily_loss_venue_fail_halt` consecutive failures we latch
+        the slot halted (fail-safe) rather than keep trading venue-blind."""
         window_start_ns = Scanner._daily_window_start_ns(
             now_ns, hour=slot.cfg.global_.daily_window_start_hour_utc,
         )
+        settlement_pnl = await asyncio.to_thread(
+            slot.dal.settlement_pnl_since, window_start_ns,
+        )
         try:
-            return await asyncio.to_thread(
+            venue_pnl = await asyncio.to_thread(
                 slot.exec_client.realized_pnl_since, window_start_ns,
             )
+            self._venue_pnl_failures[slot.alias] = 0
+            return venue_pnl + settlement_pnl
         except Exception:
+            n = self._venue_pnl_failures.get(slot.alias, 0) + 1
+            self._venue_pnl_failures[slot.alias] = n
             logger.warning(
-                "realized_pnl_since failed alias={}; falling back to DAL",
-                slot.alias,
+                "realized_pnl_since failed alias={} (consecutive={}); using "
+                "settlement-inclusive DAL", slot.alias, n,
             )
+            if n >= self.daily_loss_venue_fail_halt:
+                logger.error(
+                    "venue PnL unreadable for {} consecutive checks; halting "
+                    "slot {} (fail-safe — cap can't be trusted venue-blind)",
+                    n, slot.alias,
+                )
+                slot.halted = True
+            # DAL realized_pnl_since already includes settlement PnL (SHR-53).
             return await asyncio.to_thread(
                 slot.dal.realized_pnl_since, window_start_ns,
             )
@@ -1052,6 +1078,14 @@ class EngineRuntime:
                     realized = settlement_pnl_usd(
                         qv, sym, lp.qty, lp.avg_entry,
                         prior_realized=lp.realized_pnl,
+                    )
+                    # Persist settlement PnL for the daily-loss gate (SHR-53).
+                    # Upsert keyed by qidx: if this is the pre-settle vanish
+                    # (incomplete PnL) the later authoritative re-emit overwrites
+                    # it; shared with router._close_settled, so no double-book.
+                    slot.dal.record_settlement(
+                        question_idx=qidx, symbol=sym,
+                        realized_pnl=realized, ts_ns=now,
                     )
                     await self.bus.publish(Exit(
                         ts_ns=now, account_alias=slot.alias,

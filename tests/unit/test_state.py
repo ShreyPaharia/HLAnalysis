@@ -77,6 +77,28 @@ def test_fill_append_and_query(dal):
     assert fills[0].fill_id == "f-1"
 
 
+def test_settlement_persisted_idempotently_and_counted_in_realized_pnl(dal):
+    """SHR-53/49: settlement realized PnL must be persisted (not just alerted)
+    so the daily-loss gate sees it, and the two close paths (reconcile +
+    router._close_settled) must not double-book — first writer per qidx wins."""
+    assert dal.realized_pnl_since(0) == 0.0
+    dal.record_settlement(question_idx=42, symbol="@30",
+                          realized_pnl=-25.0, ts_ns=1_000)
+    assert dal.realized_pnl_since(0) == -25.0
+    # Second close path for the same qidx must NOT double-book — single row per
+    # qidx, last authoritative write wins (the vanished path may write an
+    # incomplete value first, then the settle event re-emits the real payout).
+    dal.record_settlement(question_idx=42, symbol="@30",
+                          realized_pnl=-30.0, ts_ns=1_001)
+    assert dal.realized_pnl_since(0) == -30.0  # overwritten, not summed
+    # A different settled question accumulates.
+    dal.record_settlement(question_idx=43, symbol="@40",
+                          realized_pnl=10.0, ts_ns=2_000)
+    assert dal.realized_pnl_since(0) == -20.0
+    # Window cutoff excludes earlier settlements.
+    assert dal.realized_pnl_since(1_500) == 10.0
+
+
 def test_cloid_uniqueness_enforced(dal):
     base = dict(
         cloid="hla-dup", venue_oid=None, question_idx=42, symbol="@30",
