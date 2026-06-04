@@ -5,7 +5,7 @@ import signal
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dataclass_fields_of
 from pathlib import Path
 from typing import Awaitable
 
@@ -237,35 +237,26 @@ def build_theta_harvester_config(cfg: StrategyConfig) -> ThetaHarvesterConfig:
             f"strategy '{cfg.name}' (alias={cfg.account_alias}) is "
             "strategy_type=theta_harvester but no `theta:` block was supplied",
         )
+    # Forward EVERY field the `theta:` block declares straight through to the
+    # dataclass — no hand-maintained subset, so a new tuned knob can never be
+    # silently dropped (SHR-65). The four fields below come from the allowlist
+    # `defaults:` block instead and are not part of the theta block.
+    # test_theta_config_parity.py guards that ThetaParams stays a full mirror.
+    _ALLOWLIST_SOURCED = {
+        "max_position_usd", "tte_min_seconds", "tte_max_seconds", "stop_loss_pct",
+    }
+    dataclass_fields = {f.name for f in dataclass_fields_of(ThetaHarvesterConfig)}
+    forwarded = {
+        name: getattr(t, name)
+        for name in dataclass_fields & set(type(t).model_fields)
+        if name not in _ALLOWLIST_SOURCED
+    }
     return ThetaHarvesterConfig(
-        vol_lookback_seconds=t.vol_lookback_seconds,
-        vol_sampling_dt_seconds=t.vol_sampling_dt_seconds,
-        vol_clip_min=t.vol_clip_min,
-        vol_clip_max=t.vol_clip_max,
-        edge_buffer=t.edge_buffer,
-        fee_taker=t.fee_taker,
-        half_spread_assumption=t.half_spread_assumption,
-        drift_lookback_seconds=t.drift_lookback_seconds,
-        drift_blend=t.drift_blend,
         max_position_usd=d.max_position_usd,
-        favorite_threshold=t.favorite_threshold,
         tte_min_seconds=d.tte_min_seconds,
         tte_max_seconds=d.tte_max_seconds,
         stop_loss_pct=d.stop_loss_pct,
-        exit_edge_threshold=t.exit_edge_threshold,
-        take_profit_price=t.take_profit_price,
-        time_stop_seconds=t.time_stop_seconds,
-        edge_max=t.edge_max,
-        min_distance_pct=getattr(t, "min_distance_pct", None),
-        min_bid_notional_usd=getattr(t, "min_bid_notional_usd", 0.0),
-        gamma_lambda=getattr(t, "gamma_lambda", None),
-        topup_enabled=getattr(t, "topup_enabled", True),
-        topup_threshold_pct=getattr(t, "topup_threshold_pct", 0.2),
-        topup_min_notional_usd=getattr(t, "topup_min_notional_usd", 11.0),
-        exit_take_profit_mode=getattr(t, "exit_take_profit_mode", False),
-        exit_fee=getattr(t, "exit_fee", 0.0007),
-        fee_model=getattr(t, "fee_model", "flat"),
-        fee_rate=getattr(t, "fee_rate", 0.0),
+        **forwarded,
     )
 
 

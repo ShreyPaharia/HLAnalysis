@@ -1,0 +1,83 @@
+# tests/unit/test_theta_config_parity.py
+"""Train/serve-skew guard for the theta_harvester live config path (SHR-65).
+
+The live `ThetaParams` pydantic model parses the YAML `theta:` block and
+`build_theta_harvester_config` turns it into the `ThetaHarvesterConfig` the
+strategy runs. If `ThetaParams` omits a knob, that knob silently falls back to
+the dataclass default and the live engine runs a *different* strategy than the
+backtest that justified it. These tests pin the two models together.
+"""
+from __future__ import annotations
+
+import dataclasses
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from hlanalysis.engine.config import ThetaParams, load_strategies_config
+from hlanalysis.engine.runtime import build_theta_harvester_config
+from hlanalysis.strategy.theta_harvester import ThetaHarvesterConfig
+
+# Fields the engine intentionally sources from the allowlist `defaults:` block,
+# NOT from the `theta:` block. Everything else MUST be settable via `theta:`.
+_ALLOWLIST_SOURCED = {
+    "max_position_usd",
+    "tte_min_seconds",
+    "tte_max_seconds",
+    "stop_loss_pct",
+}
+
+
+def test_theta_params_declares_every_theta_block_knob() -> None:
+    """ThetaParams must declare every ThetaHarvesterConfig field except the
+    handful sourced from the allowlist defaults. A field on the dataclass but
+    not on ThetaParams is unsettable live → silent train/serve skew."""
+    dataclass_fields = {f.name for f in dataclasses.fields(ThetaHarvesterConfig)}
+    theta_param_fields = set(ThetaParams.model_fields.keys())
+    must_be_settable = dataclass_fields - _ALLOWLIST_SOURCED
+
+    missing = must_be_settable - theta_param_fields
+    assert not missing, (
+        f"ThetaParams is missing theta-block knobs (silently unsettable live): "
+        f"{sorted(missing)}"
+    )
+
+
+def test_theta_params_rejects_unknown_keys() -> None:
+    """A typo'd or unsupported theta knob must fail loudly at load, not be
+    silently dropped (extra='forbid')."""
+    with pytest.raises(ValidationError):
+        ThetaParams(definitely_not_a_real_knob=1.23)
+
+
+def test_live_strategy_yaml_forwards_exit_safety_d() -> None:
+    """Regression for the headline SHR-65 bug: config/strategy.yaml sets
+    exit_safety_d=1.0 on both live theta slots; the built config must carry
+    1.0 through to the strategy (it was silently 0.0)."""
+    cfgs = load_strategies_config(Path("config/strategy.yaml"))
+    theta_slots = [c for c in cfgs.strategies if c.strategy_type == "theta_harvester"]
+    assert theta_slots, "expected at least one theta_harvester slot in strategy.yaml"
+    for c in theta_slots:
+        built = build_theta_harvester_config(c)
+        assert built.exit_safety_d == 1.0, (
+            f"slot {c.account_alias}: exit_safety_d forwarded as "
+            f"{built.exit_safety_d}, expected 1.0 (YAML intent)"
+        )
+
+
+def test_build_forwards_all_declared_theta_fields() -> None:
+    """Every field shared between ThetaParams and ThetaHarvesterConfig must be
+    forwarded verbatim by build_theta_harvester_config (no silent default
+    fallback). Uses a non-default value per field to catch drops."""
+    cfgs = load_strategies_config(Path("config/strategy.yaml"))
+    c = next(c for c in cfgs.strategies if c.strategy_type == "theta_harvester")
+    built = build_theta_harvester_config(c)
+    shared = set(ThetaParams.model_fields.keys()) & {
+        f.name for f in dataclasses.fields(ThetaHarvesterConfig)
+    }
+    for name in shared - _ALLOWLIST_SOURCED:
+        assert getattr(built, name) == getattr(c.theta, name), (
+            f"field {name!r} not forwarded: theta={getattr(c.theta, name)!r} "
+            f"built={getattr(built, name)!r}"
+        )

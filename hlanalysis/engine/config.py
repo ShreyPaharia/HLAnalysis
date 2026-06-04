@@ -143,10 +143,15 @@ class GlobalRiskConfig(BaseModel):
 class ThetaParams(BaseModel):
     """v3.1 theta_harvester knobs. Only consumed when strategy_type='theta_harvester'.
 
-    Mirrors ThetaHarvesterConfig fields the engine needs to seed the strategy.
-    Unsupplied fields fall back to the strategy's own defaults via getattr.
+    Complete mirror of every ThetaHarvesterConfig field EXCEPT the handful the
+    engine sources from the allowlist `defaults:` block (max_position_usd,
+    tte_min_seconds, tte_max_seconds, stop_loss_pct). A field missing here would
+    be silently unsettable from YAML and fall back to the dataclass default —
+    train/serve skew (SHR-65). `tests/unit/test_theta_config_parity.py` pins the
+    two models together; `extra='forbid'` makes a typo'd knob fail loudly at
+    load instead of being dropped.
     """
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
     vol_lookback_seconds: int = 3600
     vol_sampling_dt_seconds: int = 60
     vol_clip_min: float = 0.05
@@ -184,6 +189,29 @@ class ThetaParams(BaseModel):
     # Default "flat" / 0.0 preserves HL v31 bit-identically.
     fee_model: Literal["flat", "pm_binary"] = "flat"
     fee_rate: float = 0.0
+    # See ThetaHarvesterConfig.exit_safety_d — σ-normalized mid-hold distance
+    # exit. 0.0 disables. config/strategy.yaml ships 1.0 on the live slots;
+    # before SHR-65 this field was undeclared here and silently ran at 0.0.
+    exit_safety_d: float = 0.0
+    # See ThetaHarvesterConfig.vol_estimator — "sample_std" (v3.1 baseline) |
+    # "bipower" (jump-robust BV σ).
+    vol_estimator: str = "sample_std"
+    # See ThetaHarvesterConfig.lm_threshold — Lee-Mykland jump gate. None disables.
+    lm_threshold: float | None = None
+    # See ThetaHarvesterConfig.momentum_mr_* — v3.5/v3.6 momentum/MR gate or tilt.
+    momentum_mr_enabled: bool = False
+    momentum_mr_indicator: str = "z_ret"
+    momentum_mr_lookback_min: int = 15
+    momentum_mr_mode: str = "gate"
+    momentum_mr_tau_gate: float = 1.0
+    momentum_mr_alpha_tilt: float = 0.5
+    momentum_mr_jr_trust_weight: bool = False
+    # See ThetaHarvesterConfig.vol_scaled_tte_* — vol-scaled (variable) TTE
+    # entry window. Disabled by default (fixed tte_max applies).
+    vol_scaled_tte_enabled: bool = False
+    vol_scaled_tte_ref_sigma: float = 0.0
+    vol_scaled_tte_exponent: float = 1.0
+    vol_scaled_tte_ceiling_seconds: int = 0
 
 
 class StrategyConfig(BaseModel):
