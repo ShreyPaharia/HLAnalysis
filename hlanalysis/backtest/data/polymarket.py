@@ -31,6 +31,7 @@ from loguru import logger
 
 from hlanalysis.strategy.types import QuestionView
 
+from .binance_klines import fetch_klines
 from ..core.data_source import QuestionDescriptor
 from ..core.events import (
     BookSnapshot,
@@ -52,6 +53,21 @@ _DEFAULT_KLINES_SUBDIR = "btc_klines"
 # tick coverage right now.
 _BINANCE_PERP_REF_SYMBOL = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
 _BINANCE_PERP_DATA_SUBPATH = "venue=binance/product_type=perp/mechanism=clob"
+# reference_symbol → Binance SPOT kline symbol used for strike resolution +
+# the coupled fetch (SHR-54). Spot symbols match the perp strings on Binance.
+# Underlyings absent here (e.g. WTI → Pyth klines) are not Binance-fetchable.
+_BINANCE_SPOT_KLINE_SYMBOL = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
+# One 1m bar in ns — coverage tolerance for the strike guard.
+_BAR_NS = 60 * 1_000_000_000
+
+
+class StrikeCoverageError(Exception):
+    """Raised when a PM market's strike-reference ts falls outside the cached
+    Binance kline series, so the strike cannot be resolved without fabricating
+    a frozen value. Fails loud at strike-resolution time rather than letting
+    `_binary_strike` silently return a stale close (SHR-54); the coupled fetch
+    in `fetch_and_cache` keeps the cache covered so this should not fire in the
+    normal populate→run flow."""
 # Recorded PM L2 book partitions (native recorder; coverage starts 2026-05-27).
 # Symbol partition is the PM token_id, joining to manifest yes/no token ids.
 _PM_BOOK_DATA_SUBPATH = (
@@ -503,6 +519,21 @@ class PolymarketDataSource:
                 manifest, start_iso=start, end_iso=end, refresh=refresh,
             )
         self._write_manifest(manifest)
+        # SHR-54: keep the kline series advancing in lockstep with the PM market
+        # cache. Without this the klines froze behind newly-cached markets and
+        # their strikes silently resolved to a stale close.
+        starts = [
+            int(e["market"]["start_ts_ns"])
+            for e in manifest.values()
+            if e.get("kind") == "binary" and (e.get("market") or {}).get("start_ts_ns")
+        ]
+        ends = [
+            int(e["market"]["end_ts_ns"])
+            for e in manifest.values()
+            if e.get("kind") == "binary" and (e.get("market") or {}).get("end_ts_ns")
+        ]
+        if starts and ends:
+            self._ensure_kline_coverage(min(starts), max(ends))
         return self.discover(start=start, end=end, kind=kind)
 
     # -- internals: descriptors --------------------------------------------
@@ -578,24 +609,43 @@ class PolymarketDataSource:
         from the cached kline file. Uses the nearest-preceding 1m candle if
         the exact ts isn't present in the data (data gap).
         """
+        strike_ts_ns = self._strike_ts_ns(q)
+        klines = self._load_all_klines()
+        if not klines:
+            raise StrikeCoverageError(
+                f"{q.question_id}: no cached klines in {self._klines_subdir}/ — "
+                f"cannot resolve strike at ts={strike_ts_ns}"
+            )
+        import bisect
+        ts_list = [int(k["ts_ns"]) for k in klines]
+        # Coverage guard (SHR-54): the strike ts must fall inside the cached
+        # series. Past the last candle (+1 bar tolerance) bisect would silently
+        # return the final close as a frozen, arbitrarily-wrong strike; before
+        # the first candle there is no preceding close at all. Either way the
+        # cache does not cover this market — refuse rather than fabricate.
+        # Interior gaps (a missing minute with later candles, e.g. weekend) are
+        # still resolved to the nearest-preceding close below.
+        if strike_ts_ns < ts_list[0] or strike_ts_ns > ts_list[-1] + _BAR_NS:
+            raise StrikeCoverageError(
+                f"{q.question_id}: strike ts={strike_ts_ns} outside cached kline "
+                f"coverage [{ts_list[0]}, {ts_list[-1]}] in {self._klines_subdir}/"
+            )
+        idx = bisect.bisect_right(ts_list, strike_ts_ns) - 1
+        return float(klines[idx]["close"])
+
+    def _strike_ts_ns(self, q: QuestionDescriptor) -> int:
+        """Resolve the strike-reference ts for a binary market: the parsed
+        ``strike_ref_ts_ns`` from the manifest, else the ``end_ts - 24h``
+        fallback (every BTC Up/Down market in the corpus uses that offset)."""
         entry = self._load_manifest().get(q.question_id, {})
         strike_ts_ns = entry.get("strike_ref_ts_ns")
         # Non-BTC underlyings (e.g. WTI) hit this fallback because the strike-rule
-        # regex is BTC-specific. The bisect-to-nearest-preceding-1m-candle behavior
-        # correctly resolves to the prior trading session's close on weekend gaps,
-        # matching PM's "most recent prior trading day" resolution semantics.
+        # regex is BTC-specific. The nearest-preceding-1m-candle lookup correctly
+        # resolves to the prior trading session's close on weekend gaps, matching
+        # PM's "most recent prior trading day" resolution semantics.
         if strike_ts_ns is None:
             strike_ts_ns = q.end_ts_ns - 24 * 3600 * 1_000_000_000
-        strike_ts_ns = int(strike_ts_ns)
-        klines = self._load_all_klines()
-        if not klines:
-            return 0.0
-        import bisect
-        ts_list = [int(k["ts_ns"]) for k in klines]
-        idx = bisect.bisect_right(ts_list, strike_ts_ns) - 1
-        if idx < 0:
-            return 0.0
-        return float(klines[idx]["close"])
+        return int(strike_ts_ns)
 
     def _question_view_bucket(
         self, q: QuestionDescriptor, entry: dict, *, now_ns: int, settled: bool,
@@ -834,6 +884,58 @@ class PolymarketDataSource:
     def _load_klines_window(self, start_ns: int, end_ns: int) -> list[dict]:
         rows = self._load_all_klines()
         return [r for r in rows if start_ns <= int(r["ts_ns"]) <= end_ns]
+
+    def _kline_coverage(self) -> tuple[int, int] | None:
+        """(first_ts_ns, last_ts_ns) spanned by the cached kline series, or
+        None when the cache is empty."""
+        rows = self._load_all_klines()
+        if not rows:
+            return None
+        return int(rows[0]["ts_ns"]), int(rows[-1]["ts_ns"])
+
+    def _ensure_kline_coverage(self, start_ns: int, end_ns: int) -> None:
+        """Extend the cached Binance spot kline series forward to cover
+        ``[start_ns, end_ns]`` (SHR-54 coupled fetch).
+
+        Keeps the kline cache advancing in lockstep with the PM market cache:
+        the manual-klines split was what let the cache freeze at 05-09 while
+        ``fetch_and_cache`` kept pulling newer markets. No-op when the window is
+        already covered, or for non-Binance underlyings (WTI uses Pyth klines).
+        Only forward gaps are fetched — backfilling before the cache start is
+        out of scope (markets that old aren't in the corpus).
+        """
+        symbol = _BINANCE_SPOT_KLINE_SYMBOL.get(self._reference_symbol)
+        if symbol is None:
+            return  # non-Binance underlying (e.g. WTI/Pyth) — not our series
+        cov = self._kline_coverage()
+        last_ns = cov[1] if cov is not None else (start_ns - _BAR_NS)
+        if end_ns <= last_ns:
+            return  # already covered
+        fetch_start_ms = (last_ns + _BAR_NS) // 1_000_000
+        fetch_end_ms = (end_ns // 1_000_000) + 60_000  # inclusive of end bar
+        rows = fetch_klines(fetch_start_ms, fetch_end_ms, symbol=symbol)
+        if not rows:
+            logger.warning(
+                f"kline coverage fetch for {symbol} returned no rows "
+                f"({fetch_start_ms}..{fetch_end_ms}ms); cache unchanged"
+            )
+            return
+        klines_dir = self._cache_root / self._klines_subdir
+        klines_dir.mkdir(parents=True, exist_ok=True)
+        out = [
+            {"ts_ns": k.ts_ns, "open": k.open, "high": k.high,
+             "low": k.low, "close": k.close, "volume": k.volume}
+            for k in rows
+        ]
+        # Name by covered range. Fetch starts one bar past the cache end, so the
+        # new file never overlaps existing ones; _load_all_klines globs + ts-sorts.
+        fname = f"fetch_{out[0]['ts_ns']}_{out[-1]['ts_ns']}.json"
+        (klines_dir / fname).write_text(json.dumps(out))
+        self._klines_cache = None  # invalidate so the next load picks up the extension
+        logger.info(
+            f"extended {self._klines_subdir}/ coverage with {len(out)} {symbol} "
+            f"bars up to ts={out[-1]['ts_ns']} (SHR-54 coupled fetch)"
+        )
 
     def _load_binance_bbo_reference(
         self, start_ns: int, end_ns: int,

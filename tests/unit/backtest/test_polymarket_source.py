@@ -132,6 +132,11 @@ def binary_cache(tmp_path: Path) -> Path:
     _write_klines(cache, [
         {"ts_ns": start + 50,  "open": 80000.0, "high": 80100.0, "low": 79900.0, "close": 80050.0, "volume": 1.0},
         {"ts_ns": start + 150, "open": 80050.0, "high": 80200.0, "low": 79950.0, "close": 80100.0, "volume": 1.2},
+        # Cover the strike ts (end - 24h) so _binary_strike resolves instead of
+        # raising StrikeCoverageError (SHR-54). A realistic PM market always has
+        # klines spanning its strike.
+        {"ts_ns": end - 24 * 3600 * 1_000_000_000, "open": 80100.0, "high": 80200.0,
+         "low": 80000.0, "close": 80075.0, "volume": 1.1},
     ])
     return cache
 

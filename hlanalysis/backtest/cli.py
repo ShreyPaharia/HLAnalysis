@@ -378,7 +378,9 @@ def _strike_for_data_source(name: str) -> Callable[[QuestionDescriptor], float]:
 
 
 def cmd_fetch(args: argparse.Namespace) -> int:
-    """Populate the polymarket cache (Gamma + CLOB + Binance klines)."""
+    """Populate the polymarket cache: PM markets/trades (Gamma + CLOB) plus a
+    coupled fetch of the Binance spot klines covering those markets, so strike
+    resolution never lags the market cache (SHR-54)."""
     if args.data_source != "polymarket":
         raise SystemExit(f"fetch supports --data-source polymarket only, got {args.data_source!r}")
 
