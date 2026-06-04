@@ -48,6 +48,21 @@ _ENV_PM_BOOK_SOURCE = "HLBT_PM_BOOK_SOURCE"
 _ENV_PM_REF_SOURCE = "HLBT_PM_REFERENCE_SOURCE"
 _ENV_PM_RESAMPLE_S = "HLBT_PM_RESAMPLE_SECONDS"
 _ENV_PM_BBO_PRODUCT = "HLBT_PM_BBO_PRODUCT_TYPE"
+# HL construction knobs for subprocess workers (--workers>1 / tune). The HL
+# reference resample period MUST track the strategy's vol_sampling_dt_seconds —
+# otherwise sigma annualization and the reference feed disagree and every tick
+# gets gated (the dt=5-vs-default-60 regression).
+_ENV_HL_RESAMPLE_S = "HLBT_HL_RESAMPLE_SECONDS"
+_ENV_HL_REF_SOURCE = "HLBT_HL_REF_SOURCE"
+
+
+def _set_hl_worker_env(args: argparse.Namespace, params: dict) -> None:
+    """Persist HL construction knobs to the environment so spawned worker
+    factories (`make_hl_hip4_source`) rebuild an identical source."""
+    if getattr(args, "data_source", None) != "hl_hip4":
+        return
+    os.environ[_ENV_HL_RESAMPLE_S] = str(int(params.get("vol_sampling_dt_seconds", 60)))
+    os.environ[_ENV_HL_REF_SOURCE] = getattr(args, "ref_source", None) or "hl_perp"
 
 
 def _set_pm_worker_env(args: argparse.Namespace) -> None:
@@ -174,7 +189,14 @@ def make_hl_hip4_source() -> "DataSource":
     from .data.hl_hip4 import HLHip4DataSource
 
     root = os.environ.get(_ENV_HL_DATA, "data")
-    return HLHip4DataSource(data_root=Path(root))
+    # reference_resample_seconds MUST match the strategy's vol_sampling_dt_seconds
+    # (propagated via env by _set_hl_worker_env); defaulting to 60 here while the
+    # strategy annualizes at a different dt inflates sigma and gates every tick.
+    return HLHip4DataSource(
+        data_root=Path(root),
+        ref_source=os.environ.get(_ENV_HL_REF_SOURCE, "hl_perp"),  # type: ignore[arg-type]
+        reference_resample_seconds=int(os.environ.get(_ENV_HL_RESAMPLE_S, "60")),
+    )
 
 
 def _factory_dotted_for(name: str) -> str:
@@ -399,6 +421,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     fills_dir = out_dir / "fills"
 
     n_workers = max(1, int(getattr(args, "workers", 1)))
+    # Build the strategy once; the in-process path uses this + the already-built
+    # `data_source` (which carries config-derived knobs like the dt=5 reference
+    # resample) DIRECTLY, instead of reconstructing them from the zero-arg
+    # worker factory (which would silently revert those knobs to defaults).
+    strategy = _build_strategy_for_cli(args.strategy, params)
+    # For the subprocess path (--workers>1) workers DO reconstruct via the
+    # factory, so propagate the HL construction knobs to them via env.
+    _set_hl_worker_env(args, params)
     results = run_questions_parallel(
         descriptors=descriptors,
         strategy_id=args.strategy,
@@ -411,6 +441,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         hedge_data_path=_hedge_data_path_for(args),
         hedge_half_spread_bps=_hedge_half_spread_for(args),
         n_workers=n_workers,
+        data_source=data_source,
+        strategy=strategy,
     )
     per_q_pnl = [r.realized_pnl_usd for r in results]
     n_trades = sum(r.n_fills for r in results)

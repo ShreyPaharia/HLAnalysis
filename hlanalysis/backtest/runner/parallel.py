@@ -113,11 +113,37 @@ def run_questions_parallel(
     hedge_data_path: str | None,
     hedge_half_spread_bps: float,
     n_workers: int,
+    data_source=None,
+    strategy=None,
 ) -> list[QResult]:
     """Run each descriptor's backtest, returning QResult in INPUT order.
 
-    n_workers <= 1 runs in-process (clean tracebacks, cheap for tiny runs).
+    When ``n_workers <= 1`` and the caller passes the already-built
+    ``data_source`` + ``strategy``, the in-process path uses them DIRECTLY.
+    This is load-bearing: the source carries config-derived construction params
+    (e.g. ``reference_resample_seconds`` coupled to ``vol_sampling_dt_seconds``)
+    that the zero-arg worker factory does NOT reconstruct — reconstructing the
+    source in-process would silently revert those to defaults and change fills.
+    Only true subprocess workers (``n_workers > 1``) reconstruct from the dotted
+    factory (env-propagated), because the source/strategy may not pickle.
     """
+    if n_workers <= 1 and data_source is not None and strategy is not None:
+        results: list[QResult] = []
+        hedge_source = build_hedge_source(run_cfg, hedge_data_path, hedge_half_spread_bps)
+        for i, q in enumerate(descriptors):
+            hedge_events = None
+            if hedge_source is not None:
+                hedge_events = list(hedge_source.book_events(
+                    start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns))
+            res = run_one_question(
+                strategy, data_source, q, run_cfg,
+                diagnostics_dir=diagnostics_dir, fills_dir=fills_dir,
+                strike=strike_for(q), hedge_events=hedge_events,
+            )
+            results.append(QResult(i, res.realized_pnl_usd or 0.0, len(res.fills),
+                                   data_source.resolved_outcome(q)))
+        return results
+
     run_cfg_kwargs = asdict(run_cfg)
     work = [
         (i, q.question_id, strike_for(q), strategy_id, params, run_cfg_kwargs,

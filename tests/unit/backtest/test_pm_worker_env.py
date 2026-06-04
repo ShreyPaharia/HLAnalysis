@@ -47,3 +47,21 @@ def test_set_pm_worker_env_round_trips_recorded(tmp_path, monkeypatch):
 def test_set_pm_worker_env_noop_for_non_pm():
     args = argparse.Namespace(data_source="hl_hip4")
     _set_pm_worker_env(args)  # must not raise / touch PM env
+
+
+def test_hl_worker_factory_honors_resample_env(tmp_path, monkeypatch):
+    """make_hl_hip4_source must rebuild with the env-propagated resample period
+    (coupled to vol_sampling_dt_seconds) — not the hardcoded 60s default."""
+    from hlanalysis.backtest.cli import make_hl_hip4_source, _set_hl_worker_env
+
+    monkeypatch.setenv("HLBT_HL_DATA_ROOT", str(tmp_path))
+    for k in ("HLBT_HL_RESAMPLE_SECONDS", "HLBT_HL_REF_SOURCE"):
+        monkeypatch.delenv(k, raising=False)
+
+    # Default when unset.
+    assert make_hl_hip4_source().reference_resample_seconds == 60
+
+    # Propagated from a dt=5 config.
+    args = argparse.Namespace(data_source="hl_hip4", ref_source=None)
+    _set_hl_worker_env(args, {"vol_sampling_dt_seconds": 5})
+    assert make_hl_hip4_source().reference_resample_seconds == 5

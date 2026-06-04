@@ -20,6 +20,7 @@ from __future__ import annotations
 import itertools
 import json
 import multiprocessing as mp
+import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -179,6 +180,15 @@ def _run_one_cell(args: tuple) -> dict:
     ) = args
 
     from .runner.parallel import reconstruct_source, build_hedge_source
+
+    # The reference resample period MUST track this cell's vol_sampling_dt_seconds
+    # (a per-cell grid param). The zero-arg source factory reads it from the env,
+    # so set it from THIS cell's params before reconstructing — otherwise the
+    # source reverts to the default 60s while the strategy annualizes at the
+    # cell's dt, inflating sigma and gating every tick (the dt=5 regression).
+    _dt = str(int(params.get("vol_sampling_dt_seconds", 60)))
+    os.environ["HLBT_HL_RESAMPLE_SECONDS"] = _dt
+    os.environ["HLBT_PM_RESAMPLE_SECONDS"] = _dt
 
     data_source = reconstruct_source(data_source_dotted)
 
