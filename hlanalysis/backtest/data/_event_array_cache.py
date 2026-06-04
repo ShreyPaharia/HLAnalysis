@@ -125,6 +125,10 @@ def cached_bundle(
     calls ``build_fn()`` and attempts to persist the result. Write failures are
     logged and silently skipped — the returned bundle is always correct.
     """
+    import os
+    # HLBT_REBUILD_CACHE=1 forces a rebuild process-wide; set by the CLI's
+    # --rebuild-cache flag and inherited by spawn workers via the environment.
+    force_rebuild = force_rebuild or bool(os.environ.get("HLBT_REBUILD_CACHE"))
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_dir / f"{cache_key(question_id, source_files)}.npz"

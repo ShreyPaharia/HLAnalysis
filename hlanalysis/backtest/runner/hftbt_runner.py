@@ -346,8 +346,15 @@ def run_one_question(
         None if os.environ.get("HLBT_DISABLE_FASTPATH")
         else getattr(data_source, "events_arrays", None)
     )
+    bundle = None
     if fast_path_fn is not None:
-        bundle = fast_path_fn(q)
+        try:
+            bundle = fast_path_fn(q)
+        except NotImplementedError:
+            # Source exposes events_arrays() but not for this config (e.g. PM
+            # synthetic book mode) — fall back to the legacy events() path.
+            bundle = None
+    if bundle is not None:
         leg_event_arrays = {sym: legarr.events for sym, legarr in bundle.leg_arrays.items()}
         book_ts_per_leg = {sym: legarr.book_ts for sym, legarr in bundle.leg_arrays.items()}
         ref_events = bundle.reference_events

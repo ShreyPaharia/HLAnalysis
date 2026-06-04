@@ -43,17 +43,35 @@ class QResult:
     outcome: str
 
 
+def build_strategy_for_run(strategy_id: str, params: dict):
+    """Worker-safe strategy construction shared by the CLI and pool workers.
+
+    Mirrors the CLI's strategy resolution: registry-constructible strategies
+    plus the ``_dummy_enter_yes`` smoke-test escape hatch (not in the registry).
+    Lives here (not cli.py) so spawn workers can call it without importing the
+    CLI module.
+    """
+    # Importing strategy triggers auto-registration of all real strategies.
+    import hlanalysis.strategy  # noqa: F401
+    from ..core.registry import build, ids
+
+    if strategy_id in ids():
+        return build(strategy_id, params)
+    if strategy_id == "_dummy_enter_yes":
+        from ..data.synthetic import build_dummy_enter_strategy
+        return build_dummy_enter_strategy(params)
+    raise SystemExit(
+        f"Unknown --strategy: {strategy_id}. Registered: {ids()}."
+    )
+
+
 def _run_question_worker(args: tuple) -> QResult:
     (idx, q_id, strike, strategy_id, params, run_cfg_kwargs, data_source_dotted,
      diag_dir, fills_dir, hedge_data_path, hedge_half_spread_bps) = args
 
-    # Importing strategy triggers auto-registration of all strategies.
-    import hlanalysis.strategy  # noqa: F401
-    from ..core.registry import build as build_strategy
-
     data_source = reconstruct_source(data_source_dotted)
     run_cfg = RunConfig(**run_cfg_kwargs)
-    strategy = build_strategy(strategy_id, params)
+    strategy = build_strategy_for_run(strategy_id, params)
 
     # Wide window: cache-driven sources (PM) filter by end_ts ∈ [start,end);
     # re-discover everything, then map id → descriptor (mirrors tuning worker).

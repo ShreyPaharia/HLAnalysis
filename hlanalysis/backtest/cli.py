@@ -284,6 +284,11 @@ def make_synthetic_source() -> "DataSource":
 def cmd_run(args: argparse.Namespace) -> int:
     params = json.loads(Path(args.config).read_text())
 
+    # --rebuild-cache: force event-array rebuild process-wide (inherited by
+    # spawn workers via the environment).
+    if getattr(args, "rebuild_cache", False):
+        os.environ["HLBT_REBUILD_CACHE"] = "1"
+
     # Extract hedge config from params before passing to the strategy factory.
     # This keeps the strategy factory clean (it only sees binary knobs).
     params, hedge_cfg = _extract_hedge_config(params)
@@ -407,18 +412,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def _build_strategy_for_cli(strategy_id: str, params: dict):
-    if strategy_id in registry_ids():
-        return build_strategy(strategy_id, params)
-    # Allow a smoke-test escape hatch: ``dummy`` strategy emits one ENTER then
-    # holds. Used by tests/integration/test_backtest_synthetic_smoke.py.
-    if strategy_id == "_dummy_enter_yes":
-        from .data.synthetic import build_dummy_enter_strategy
+    # Single source of truth shared with the pool workers (registry + the
+    # ``_dummy_enter_yes`` smoke escape hatch).
+    from .runner.parallel import build_strategy_for_run
 
-        return build_dummy_enter_strategy(params)
-    raise SystemExit(
-        f"Unknown --strategy: {strategy_id}. "
-        f"Registered: {registry_ids()}. (Task E wires real strategies.)"
-    )
+    return build_strategy_for_run(strategy_id, params)
 
 
 def _strike_for_data_source(name: str) -> Callable[[QuestionDescriptor], float]:
@@ -463,6 +461,10 @@ def cmd_tune(args: argparse.Namespace) -> int:
             f"No grid defined for strategy {args.strategy!r} in {args.grid}. "
             f"Known grid keys: {sorted(tcfg.grids)}"
         )
+
+    # --rebuild-cache: force event-array rebuild once; spawn workers inherit it.
+    if getattr(args, "rebuild_cache", False):
+        os.environ["HLBT_REBUILD_CACHE"] = "1"
 
     # Pass cache locations to workers via env (ProcessPoolExecutor inherits env).
     if args.cache_root:
@@ -708,6 +710,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     pr.add_argument("--workers", type=int, default=1,
                     help="Parallel worker processes for independent markets "
                          "(default 1 = serial). Use up to #cores for big runs.")
+    pr.add_argument("--rebuild-cache", action="store_true",
+                    help="Ignore cached event arrays and rebuild them (then "
+                         "repopulate the cache).")
     pr.set_defaults(func=cmd_run)
 
     pf = sp.add_parser("fetch", help="Populate polymarket cache from Gamma + CLOB")
@@ -773,6 +778,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     pt.add_argument("--skip-markets", type=int, default=0)
     pt.add_argument("--max-markets", type=int, default=None)
     pt.add_argument("--top-k", type=int, default=10)
+    pt.add_argument("--rebuild-cache", action="store_true",
+                    help="Ignore cached event arrays and rebuild them once "
+                         "(then reuse across the sweep).")
     pt.add_argument(
         "--kind",
         choices=["binary", "bucket", "both"],

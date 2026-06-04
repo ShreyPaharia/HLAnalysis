@@ -479,62 +479,96 @@ class PolymarketDataSource:
 
         from ._pm_fastpath import build_pm_fast_path_bundle
 
-        entry_kind = entry.get("kind", "binary")
+        # All source reads (trades, klines/BBO reference, book parquet,
+        # settlement) are deferred into ``_build`` so a cache HIT skips ALL of
+        # them — only the cheap source-file stat + npz load runs.
+        def _build() -> "FastPathBundle":
+            if entry.get("kind", "binary") == "binary":
+                trades = self._read_trades(q.question_id)
+                outcome = self._binary_outcome(q, entry)
+                yes_t, no_t = q.leg_symbols[0], q.leg_symbols[1]
+                per_leg_outcomes: dict[str, str] = {yes_t: outcome, no_t: _flip(outcome)}
+            else:
+                b = entry.get("bucket") or {}
+                leg_tokens: list[list[str]] = b.get("leg_tokens", [])
+                leg_cond_ids: list[str] = b.get("leg_condition_ids", [])
+                leg_resolutions: list[str] = b.get("leg_resolutions", [])
+                trades = []
+                per_leg_outcomes = {}
+                for pair, cond_id, res in zip(leg_tokens, leg_cond_ids, leg_resolutions):
+                    trades.extend(self._read_trades(cond_id))
+                    yes_outcome: Literal["yes", "no", "unknown"] = (
+                        "yes" if res == "yes" else ("no" if res == "no" else "unknown")
+                    )
+                    per_leg_outcomes[str(pair[0])] = yes_outcome
+                    per_leg_outcomes[str(pair[1])] = _flip(yes_outcome)
 
-        if entry_kind == "binary":
-            cond_id = q.question_id
-            trades = self._read_trades(cond_id)
-            outcome = self._binary_outcome(q, entry)
-            yes_t, no_t = q.leg_symbols[0], q.leg_symbols[1]
-            per_leg_outcomes: dict[str, str] = {yes_t: outcome, no_t: _flip(outcome)}
-        else:
-            # Bucket: collect trades across all leg condition IDs.
-            b = entry.get("bucket") or {}
-            leg_tokens: list[list[str]] = b.get("leg_tokens", [])
-            leg_cond_ids: list[str] = b.get("leg_condition_ids", [])
-            leg_resolutions: list[str] = b.get("leg_resolutions", [])
-            trades = []
-            per_leg_outcomes = {}
-            for pair, cond_id, res in zip(leg_tokens, leg_cond_ids, leg_resolutions):
-                trades.extend(self._read_trades(cond_id))
-                yes_outcome: Literal["yes", "no", "unknown"] = (
-                    "yes" if res == "yes" else ("no" if res == "no" else "unknown")
-                )
-                per_leg_outcomes[str(pair[0])] = yes_outcome
-                per_leg_outcomes[str(pair[1])] = _flip(yes_outcome)
+            # Reference events (klines or BBO — same logic as _build_stream).
+            if self._reference_source == "binance_bbo":
+                ref_events = self._load_binance_bbo_reference(q.start_ts_ns, q.end_ts_ns)
+            else:
+                klines = self._load_klines_window(q.start_ts_ns, q.end_ts_ns)
+                ref_events = [
+                    ReferenceEvent(
+                        ts_ns=int(k["ts_ns"]), symbol=self._reference_symbol,
+                        high=float(k["high"]), low=float(k["low"]),
+                        close=float(k["close"]), open=float(k["open"]),
+                    )
+                    for k in sorted(klines, key=lambda k: int(k["ts_ns"]))
+                ]
 
-        # Reference events (klines or BBO — same logic as _build_stream).
-        if self._reference_source == "binance_bbo":
-            ref_events = self._load_binance_bbo_reference(q.start_ts_ns, q.end_ts_ns)
-        else:
-            klines = self._load_klines_window(q.start_ts_ns, q.end_ts_ns)
-            ref_events = [
-                ReferenceEvent(
-                    ts_ns=int(k["ts_ns"]), symbol=self._reference_symbol,
-                    high=float(k["high"]), low=float(k["low"]),
-                    close=float(k["close"]), open=float(k["open"]),
+            settle_events = [
+                SettlementEvent(
+                    ts_ns=q.end_ts_ns,
+                    question_idx=q.question_idx,
+                    outcome=per_leg_outcomes.get(sym, "unknown"),  # type: ignore[arg-type]
+                    symbol=sym,
                 )
-                for k in sorted(klines, key=lambda k: int(k["ts_ns"]))
+                for sym in q.leg_symbols
             ]
-
-        # Settlement events — one per leg at end_ts_ns.
-        settle_events = [
-            SettlementEvent(
-                ts_ns=q.end_ts_ns,
-                question_idx=q.question_idx,
-                outcome=per_leg_outcomes.get(sym, "unknown"),  # type: ignore[arg-type]
-                symbol=sym,
+            return build_pm_fast_path_bundle(
+                q=q,
+                book_glob_for=self._recorded_book_glob,
+                trades=trades,
+                reference_events=ref_events,
+                settlement_events=settle_events,
             )
-            for sym in q.leg_symbols
-        ]
 
-        return build_pm_fast_path_bundle(
-            q=q,
-            book_glob_for=self._recorded_book_glob,
-            trades=trades,
-            reference_events=ref_events,
-            settlement_events=settle_events,
+        from ._event_array_cache import cached_bundle
+
+        return cached_bundle(
+            self._cache_root / "_event_array_cache",
+            q.question_id,
+            self._fastpath_source_files(q),
+            _build,
+            force_rebuild=getattr(self, "_force_rebuild_cache", False),
         )
+
+    def _fastpath_source_files(self, q: QuestionDescriptor) -> list[Path]:
+        """Concrete parquet/json files feeding ``events_arrays(q)`` — the
+        event-array cache keys on their (size, mtime) so any re-record or
+        kline refresh invalidates the cached bundle."""
+        from glob import glob as _glob
+
+        files: list[str] = []
+        for sym in q.leg_symbols:
+            files += _glob(self._recorded_book_glob(sym), recursive=True)
+            files += _glob(
+                str(self._pm_book_root / _PM_SETTLEMENT_DATA_SUBPATH
+                    / f"symbol={sym}" / "**" / "*.parquet"),
+                recursive=True,
+            )
+        entry = self._load_manifest().get(q.question_id) or {}
+        cond_ids = [q.question_id]
+        if entry.get("kind") == "bucket":
+            cond_ids = (entry.get("bucket") or {}).get("leg_condition_ids", []) or cond_ids
+        for c in cond_ids:
+            p = self._cache_root / "pm_trades" / f"{c}.parquet"
+            if p.exists():
+                files.append(str(p))
+        # Reference events derive from klines — include them in the key.
+        files += _glob(str(self._cache_root / self._klines_subdir / "*.json"))
+        return [Path(f) for f in files]
 
     def _recorded_book_glob(self, token_id: str) -> str:
         """Glob pattern for the recorded ``book_snapshot`` parquet of one leg.
