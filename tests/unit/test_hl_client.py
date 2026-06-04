@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from hyperliquid.utils.error import ClientError
+
 from hlanalysis.engine.hl_client import (
-    HLClient, OrderAck, PlaceRequest, RestError,
+    HLClient, OrderAck, PlaceRequest, RateLimitError, RestError,
 )
 
 
@@ -201,6 +203,66 @@ def test_realized_pnl_since_is_cached_to_bound_rest_calls():
     for _ in range(5):
         c.realized_pnl_since(0)
     assert call_count["n"] == 1  # cache hit on the next four
+
+
+class _FlakyInfo:
+    """Stub Info whose user_state raises ClientError(status) for the first
+    `fail_times` calls, then returns a valid empty perp state."""
+
+    def __init__(self, *, fail_times: int, status: int = 429) -> None:
+        self.fail_times = fail_times
+        self.status = status
+        self.calls = 0
+
+    def user_state(self, _addr):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise ClientError(self.status, None, "null", None, {})
+        return {"assetPositions": [], "marginSummary": {"accountValue": "0.0"}}
+
+    def spot_user_state(self, _addr):
+        return {"balances": []}
+
+    def user_fills(self, _addr):
+        return []
+
+
+def _live_client() -> HLClient:
+    return HLClient(
+        account_address="0xtest", api_secret_key="0xfake",
+        base_url="https://api.hyperliquid.xyz", paper_mode=False,
+    )
+
+
+def test_clearinghouse_state_retries_on_429_then_succeeds():
+    # HL REST rate-limits per IP; two HL slots on one box trip 429s. A transient
+    # 429 on the reconcile read path must NOT crash the pass — retry and recover.
+    c = _live_client()
+    info = _FlakyInfo(fail_times=2)
+    c._info = info  # type: ignore[assignment]
+    state = c.clearinghouse_state()
+    assert info.calls == 3  # 2x 429 then success
+    assert state.positions == ()
+
+
+def test_clearinghouse_state_raises_rate_limit_after_exhausting_retries():
+    c = _live_client()
+    info = _FlakyInfo(fail_times=99)  # always 429
+    c._info = info  # type: ignore[assignment]
+    with pytest.raises(RateLimitError):
+        c.clearinghouse_state()
+    assert info.calls >= 3  # bounded retries attempted, then gave up
+
+
+def test_clearinghouse_state_does_not_retry_non_rate_limit_errors():
+    # A 422-style client error (bad request) is not transient — fail fast,
+    # don't waste the retry budget hammering the venue.
+    c = _live_client()
+    info = _FlakyInfo(fail_times=99, status=422)
+    c._info = info  # type: ignore[assignment]
+    with pytest.raises(RestError):
+        c.clearinghouse_state()
+    assert info.calls == 1
 
 
 def test_clearinghouse_state_empty_spot_balances_ok():

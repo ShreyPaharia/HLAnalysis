@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, NoReturn
 
 from loguru import logger
 from tenacity import (
@@ -22,6 +22,40 @@ from .exec_types import (
 
 class RestError(Exception):
     pass
+
+
+class RateLimitError(RestError):
+    """HL REST returned HTTP 429. A subclass of RestError so existing callers
+    that catch RestError are unaffected on final failure, but distinct enough
+    for the retry predicate to single it out for backoff."""
+
+
+def _reraise_rest(e: Exception) -> NoReturn:
+    """Map a venue read-path exception onto our error hierarchy, preserving the
+    distinctions the read-retry decorator needs:
+      - ConnectionError → re-raised as-is (transient; retried)
+      - HTTP 429        → RateLimitError (transient; retried)
+      - anything else   → RestError (not retried — fail fast)
+    """
+    if isinstance(e, ConnectionError):
+        raise e
+    if getattr(e, "status_code", None) == 429:
+        raise RateLimitError(str(e)) from e
+    raise RestError(str(e)) from e
+
+
+# Shared retry policy for the READ path (open_orders / clearinghouse_state /
+# user_fills). Reconcile polls these every cycle from two HL slots on one IP, so
+# a transient 429 or connection blip must back off and recover rather than crash
+# the reconcile pass (it previously propagated immediately — only ConnectionError
+# was retried, and only on the write path). Bounded in both attempts and elapsed
+# time (SHR-41 discipline) so a sustained outage can't pin the worker thread.
+_read_retry = retry(
+    retry=retry_if_exception_type((ConnectionError, RateLimitError)),
+    stop=stop_after_attempt(4) | stop_after_delay(8.0),
+    wait=wait_exponential(multiplier=0.2, max=2.0),
+    reraise=True,
+)
 
 
 _HEX_CHARS = set("0123456789abcdefABCDEF")
@@ -302,6 +336,7 @@ class HLClient:
 
     # ---- read path ----
 
+    @_read_retry
     def open_orders(self) -> list[OpenOrderRow]:
         if self.paper_mode:
             return list(self._paper_open.values())
@@ -309,7 +344,7 @@ class HLClient:
         try:
             rows = self._info.open_orders(self.account_address)
         except Exception as e:
-            raise RestError(str(e)) from e
+            _reraise_rest(e)
         out: list[OpenOrderRow] = []
         for r in rows or []:
             out.append(OpenOrderRow(
@@ -323,6 +358,7 @@ class HLClient:
             ))
         return out
 
+    @_read_retry
     def clearinghouse_state(self) -> ClearinghouseState:
         if self.paper_mode:
             return ClearinghouseState(
@@ -333,7 +369,7 @@ class HLClient:
         try:
             data = self._info.user_state(self.account_address)
         except Exception as e:
-            raise RestError(str(e)) from e
+            _reraise_rest(e)
         positions: list[VenuePosition] = []
         for ap in data.get("assetPositions", []):
             p = ap.get("position", {})
@@ -356,7 +392,7 @@ class HLClient:
         try:
             spot = self._info.spot_user_state(self.account_address)
         except Exception as e:
-            raise RestError(str(e)) from e
+            _reraise_rest(e)
         for bal in spot.get("balances", []):
             coin = str(bal.get("coin", ""))
             if not coin.startswith("+"):
@@ -380,6 +416,7 @@ class HLClient:
             account_value_usd=float(data.get("marginSummary", {}).get("accountValue", 0)),
         )
 
+    @_read_retry
     def user_fills(self, *, since_ts_ns: int = 0) -> list[UserFillRow]:
         if self.paper_mode:
             return [f for f in self._paper_fills if f.ts_ns >= since_ts_ns]
@@ -387,7 +424,7 @@ class HLClient:
         try:
             rows = self._info.user_fills(self.account_address)
         except Exception as e:
-            raise RestError(str(e)) from e
+            _reraise_rest(e)
         out: list[UserFillRow] = []
         for r in rows or []:
             ts_ms = int(r.get("time", 0))
