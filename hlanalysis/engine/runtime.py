@@ -1261,7 +1261,11 @@ class EngineRuntime:
                 # Stop-loss enforcement. When stop_loss_loop_enabled, a dedicated
                 # event-driven loop owns this (acts within scan_min_interval);
                 # otherwise enforce here at the continuous-checks 1 Hz cadence.
-                if not slot.cfg.global_.stop_loss_loop_enabled:
+                # A `blocked` slot never gets the dedicated loop spawned (see
+                # run(): `... and not slot.blocked`), so it MUST still be enforced
+                # here even when the flag is on — else a blocked slot holding a
+                # position would have no stop-loss path at all.
+                if (not slot.cfg.global_.stop_loss_loop_enabled) or slot.blocked:
                     await self._enforce_stop_losses(slot, now_ns=now)
 
                 # Daily loss — per slot. Read from HL (venue truth) instead of
@@ -1322,6 +1326,13 @@ class EngineRuntime:
                         await self.bus.publish(redempt)
 
                 # Stale-data halt is per-trade; we also surface it as an alert here.
+                # Re-read positions (cached, cheap): the P1.4 stop-loss extraction
+                # moved the prior shared `positions_db` fetch into
+                # _enforce_stop_losses, so this block must fetch its own — without
+                # it the name is undefined, the broad `except` below swallows the
+                # NameError, and StaleDataHalt alerting is silently dead for every
+                # slot holding a position (a forbidden safety-gate regression).
+                positions_db = slot.dal.all_positions()
                 if positions_db:
                     settled_qidxs = {
                         q.question_idx for q in self.market_state.all_questions() if q.settled
@@ -1454,6 +1465,9 @@ class EngineRuntime:
         finally:
             dirty.cancel()
             stop.cancel()
+            # Await the cancelled futures so their CancelledError is observed
+            # (no "Task was destroyed but it is pending" warnings under load).
+            await asyncio.gather(dirty, stop, return_exceptions=True)
         self._market_dirty.clear()
 
     async def _sleep_or_stop(self, seconds: float) -> None:
