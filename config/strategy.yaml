@@ -387,7 +387,7 @@ strategies:
       daily_loss_cap_usd: 100               # operator-locked
       max_strike_distance_pct: 50
       min_recent_volume_usd: 100
-      stale_data_halt_seconds: 30
+      stale_data_halt_seconds: 180          # 2026-06-04: PM CLOB favorite books legitimately go quiet >30s (a held 0.89 leg updated ~1/100s) → 30s flapped StaleDataHalt + stale_data entry-veto every ~1-2 min. 180s stops the flap while still vetoing entry on a genuinely frozen book. HL/HIP-4 stays 30s (burst feed).
       reconcile_interval_seconds: 15
       daily_window_start_hour_utc: 6
       # Depth-walk slippage cap — ~0.5¢ at a 0.95-favorite leg. PM books are
@@ -539,7 +539,7 @@ strategies:
       daily_loss_cap_usd: 100
       max_strike_distance_pct: 50
       min_recent_volume_usd: 100
-      stale_data_halt_seconds: 30
+      stale_data_halt_seconds: 180          # 2026-06-04: see v31_pm — PM favorite books go quiet >30s, 180s stops the StaleDataHalt flap; HL/HIP-4 stays 30s.
       reconcile_interval_seconds: 15
       daily_window_start_hour_utc: 6
       # Depth-walk slippage cap — same as v31_pm. PM books are thin at top
