@@ -313,6 +313,12 @@ class DeployConfig(BaseModel):
     alerts: AlertsConfig
     state_db_path: str
     kill_switch_path: str
+    # Retention bounds for the events table (Component 2 — engine observability).
+    # Age is the primary prune (rows older than N days are dropped); max_rows is
+    # a burst backstop so a reject storm can't grow the table between age-prunes.
+    # Both default to conservative values safe for the 1 GiB EC2 box.
+    events_retention_days: int = 14
+    events_retention_max_rows: int = 1_000_000
 
     def state_db_path_for(self, alias: str) -> str:
         """Per-account state DB path. Multiple accounts → namespaced subdir;

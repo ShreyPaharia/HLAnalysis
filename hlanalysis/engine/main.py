@@ -95,10 +95,26 @@ def main() -> None:
         help="Subscriptions feeding MarketState (HIP-4 binaries + BTC spot bbo reference).",
     )
     p.add_argument("--log-level", default="INFO")
+    p.add_argument(
+        "--log-format", choices=["json", "pretty"], default="json",
+        help=(
+            "Log output format. 'json' (default) emits one JSON object per line, "
+            "suitable for journald / SSM / jq pipelines. "
+            "'pretty' emits human-readable coloured text for local dev runs."
+        ),
+    )
     args = p.parse_args()
 
     logger.remove()
-    logger.add(sys.stderr, level=args.log_level)
+    if args.log_format == "json":
+        # Structured JSON sink: every line is a self-contained JSON object with
+        # `time`, `level`, `message`, and `extra.{alias, kind, question_idx, ...}`
+        # as top-level queryable fields. This is the deployed (journald) default so
+        # that `journalctl -u engine | jq ...` works without grep archaeology.
+        logger.add(sys.stderr, serialize=True, level=args.log_level)
+    else:
+        # Human-readable coloured output for local dev / debugging.
+        logger.add(sys.stderr, level=args.log_level)
     # Route stdlib logging (used by adapters/hyperliquid.py + SDK + asyncio)
     # into loguru. Without this, adapter INFO logs are silently dropped and
     # only WARNING+ leaks to stderr via Python's lastResort handler.

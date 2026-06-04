@@ -34,6 +34,7 @@ from .reconcile import Reconciler
 from .restart_drift import RestartDriftGate
 from .risk import RiskGate
 from .risk_events import (
+    BusEvent,
     DailyLossHalt, EngineHeartbeat, Exit, FeedDown, FeedRecovered, FeedStale,
     KillSwitchActivated, NewQuestion, OrderUnconfirmed, RedemptionTimeout,
     StaleDataHalt, StopLossTriggered,
@@ -514,6 +515,7 @@ class EngineRuntime:
                 asyncio.create_task(rules.run(alerts_sub)),
                 asyncio.create_task(self._heartbeat_loop(slots)),
                 asyncio.create_task(self._pm_strike_capture_loop(slots)),
+                asyncio.create_task(self._events_persist_loop()),
             ]
             for slot in slots:
                 tasks.append(asyncio.create_task(self._reconcile_loop(slot)))
@@ -905,6 +907,110 @@ class EngineRuntime:
                 )
             except Exception:
                 logger.exception("heartbeat crashed")
+
+    # ---- events persistence (Component 2 — engine observability) -----------
+
+    @staticmethod
+    def _event_columns(ev: BusEvent) -> dict[str, Any]:
+        """Extract the stable, queryable columns from a bus event.
+
+        Single source of truth for how an event maps to the `events` table so
+        the static and instance persist loops can't drift. ``reason`` is
+        normalised across event types: ``.reason`` (RiskVeto/RiskHalt/
+        StaleDataHalt/Exit/ReconcileDrift) or ``.error`` (OrderRejected),
+        else None. The full event is kept as ``payload_json`` for fidelity.
+        """
+        return {
+            "ts_ns": ev.ts_ns,
+            "alias": getattr(ev, "account_alias", None) or None,
+            "kind": ev.kind,
+            "question_idx": getattr(ev, "question_idx", None),
+            "reason": getattr(ev, "reason", None) or getattr(ev, "error", None) or None,
+            "payload_json": ev.model_dump_json(),
+        }
+
+    @staticmethod
+    async def _events_persist_loop_static(
+        sub: asyncio.Queue[BusEvent],
+        dal: StateDAL,
+        *,
+        max_age_ns: int,
+        max_rows: int,
+        prune_every_n: int = 500,
+        # Kept for back-compat with any callers that pass stop_event; ignored
+        # because the loop terminates via task cancellation (same pattern as
+        # AlertRules.run) so CancelledError exits cleanly.
+        stop_event: asyncio.Event | None = None,
+    ) -> None:
+        """Consume every BusEvent and write it to the events table.
+
+        Symmetric to AlertRules.run(alerts_sub): loops on sub.get(), extracts
+        the stable fields (alias, kind, question_idx, reason) into named columns
+        for SQL queries, and writes the full event as payload_json for fidelity.
+        Terminates via task cancellation (CancelledError from sub.get()).
+
+        Prune runs every prune_every_n inserts (not per-insert) to avoid a
+        steady per-row overhead while still bounding growth between long idle
+        periods. Both age and row-count bounds are applied on each prune call.
+
+        Exposed as a @staticmethod so tests can call it directly without
+        constructing a full EngineRuntime, following the same pattern as
+        the test suite for alert rules.
+        """
+        inserted = 0
+        while True:
+            ev = await sub.get()
+            try:
+                dal.append_event(**EngineRuntime._event_columns(ev))
+                inserted += 1
+                if inserted % prune_every_n == 0:
+                    try:
+                        dal.prune_events(max_age_ns=max_age_ns, max_rows=max_rows)
+                    except Exception:
+                        logger.exception("events_persist_loop: prune failed")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("events_persist_loop: failed to persist {}", ev.kind)
+
+    async def _events_persist_loop(self) -> None:
+        """Subscribe to the bus and persist every event to each slot's DB.
+
+        Route events to every slot's DAL. All slots' DBs are independent
+        (one state.db per alias). We write the same event to every slot so
+        each slot has a full engine-wide event log — cheap (event volume is
+        low) and avoids needing a cross-alias query.
+
+        NOTE: self.slots is populated by run() before tasks are spawned, so
+        it is non-empty when this coroutine is awaited. Terminates via task
+        cancellation (CancelledError), matching the alerts loop pattern.
+        """
+        sub = self.bus.subscribe()
+        max_age_ns = self.deploy_cfg.events_retention_days * 24 * 3600 * 10**9
+        max_rows = self.deploy_cfg.events_retention_max_rows
+        dals = [s.dal for s in self.slots]
+        inserted = 0
+        while True:
+            ev = await sub.get()
+            try:
+                cols = EngineRuntime._event_columns(ev)
+                for dal in dals:
+                    dal.append_event(**cols)
+                inserted += 1
+                if inserted % 500 == 0:
+                    try:
+                        for dal in dals:
+                            dal.prune_events(
+                                max_age_ns=max_age_ns, max_rows=max_rows
+                            )
+                    except Exception:
+                        logger.exception("events_persist_loop: prune failed")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "events_persist_loop: failed to persist {}", ev.kind
+                )
 
     # ---- liveness / dead-man's-switch (SHR-43) -----------------------------
 

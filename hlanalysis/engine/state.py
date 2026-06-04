@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from pathlib import Path
+from typing import Any
 
 from sqlmodel import Field, Session as _Session, SQLModel, create_engine, select
 
@@ -83,6 +84,25 @@ class Settlement(SQLModel, table=True):
     symbol: str
     realized_pnl: float
     ts_ns: int
+
+
+class Event(SQLModel, table=True):
+    """Append-only log of every BusEvent published by the engine (Component 2).
+
+    Written by _events_persist_loop in runtime.py — one row per published event.
+    Retention is bounded by both age (max_age_ns) and row count (max_rows) via
+    StateDAL.prune_events; prune is called periodically from the persist loop,
+    not on every insert. The unbounded-_questions→OOM scar (hl_live_eval_2026_05_31)
+    is why the row ceiling is non-optional.
+    """
+    __tablename__ = "events"
+    id: int | None = Field(default=None, primary_key=True)
+    ts_ns: int
+    alias: str | None = None
+    kind: str
+    question_idx: int | None = None
+    reason: str | None = None
+    payload_json: str | None = None
 
 
 # Public alias for tests / external users.
@@ -294,6 +314,126 @@ class StateDAL:
                 row.halt_reason = halt_reason
                 s.add(row)
                 s.commit()
+
+    # ---- events ----
+
+    def append_event(
+        self,
+        *,
+        ts_ns: int,
+        alias: str | None,
+        kind: str,
+        question_idx: int | None,
+        reason: str | None,
+        payload_json: str | None,
+    ) -> None:
+        """Insert one event row. Thread-safe (opens a fresh connection)."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO events (ts_ns, alias, kind, question_idx, reason, payload_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (ts_ns, alias, kind, question_idx, reason, payload_json),
+            )
+            conn.commit()
+
+    def events_since(self, since_ts_ns: int) -> list[dict[str, Any]]:
+        """Return all events with ts_ns >= since_ts_ns, ordered by ts_ns asc."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, ts_ns, alias, kind, question_idx, reason, payload_json "
+                "FROM events WHERE ts_ns >= ? ORDER BY ts_ns ASC",
+                (since_ts_ns,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def reject_counts_since(self, since_ts_ns: int) -> list[dict[str, Any]]:
+        """Group events by (kind, reason) since since_ts_ns with counts.
+
+        Returns a list of dicts with keys: kind, reason, count, sample_payload.
+        Covers all event kinds (not just order_rejected) so callers can aggregate
+        risk_veto counts too. Rows ordered by count desc.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT kind, reason, COUNT(*) AS count,
+                       MAX(payload_json) AS sample_payload
+                FROM events
+                WHERE ts_ns >= ?
+                GROUP BY kind, reason
+                ORDER BY count DESC
+                """,
+                (since_ts_ns,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def events_for_question(self, question_idx: int) -> list[dict[str, Any]]:
+        """Return all events for a given question_idx, ordered by ts_ns asc."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, ts_ns, alias, kind, question_idx, reason, payload_json "
+                "FROM events WHERE question_idx = ? ORDER BY ts_ns ASC",
+                (question_idx,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def last_event_by_kind(
+        self, kind: str, *, alias: str | None = None
+    ) -> dict[str, Any] | None:
+        """Return the single most-recent event of the given kind.
+
+        When alias is provided, filter to that slot. Returns None if no match.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            if alias is not None:
+                row = conn.execute(
+                    "SELECT id, ts_ns, alias, kind, question_idx, reason, payload_json "
+                    "FROM events WHERE kind = ? AND alias = ? "
+                    "ORDER BY ts_ns DESC LIMIT 1",
+                    (kind, alias),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT id, ts_ns, alias, kind, question_idx, reason, payload_json "
+                    "FROM events WHERE kind = ? "
+                    "ORDER BY ts_ns DESC LIMIT 1",
+                    (kind,),
+                ).fetchone()
+        return dict(row) if row is not None else None
+
+    def prune_events(self, *, max_age_ns: int, max_rows: int) -> None:
+        """Delete events older than max_age_ns, then enforce max_rows ceiling.
+
+        Age prune runs first (primary). Row-count prune is a burst backstop:
+        if a reject storm or heartbeat flood writes more rows than the age
+        prune removes, the oldest rows above the ceiling are deleted.
+        Both bounds apply on every call — caller decides the frequency.
+        """
+        cutoff_ns = time.time_ns() - max_age_ns
+        with sqlite3.connect(self.db_path) as conn:
+            # 1) Age prune
+            conn.execute("DELETE FROM events WHERE ts_ns < ?", (cutoff_ns,))
+            # 2) Row-count ceiling: keep only the newest max_rows rows.
+            # We count current rows; if count > max_rows, delete the oldest
+            # (count - max_rows) rows. Using COUNT avoids the NULL-subquery
+            # problem when OFFSET >= row count (LIMIT 1 OFFSET N returns NULL
+            # when N >= count, causing `id <= NULL` to silently delete nothing
+            # or everything depending on the DB).
+            count_row = conn.execute("SELECT COUNT(*) FROM events").fetchone()
+            count = count_row[0] if count_row else 0
+            excess = count - max_rows
+            if excess > 0:
+                conn.execute(
+                    "DELETE FROM events WHERE id IN ("
+                    "  SELECT id FROM events ORDER BY id ASC LIMIT ?"
+                    ")",
+                    (excess,),
+                )
+            conn.commit()
 
     # ---- realized pnl helpers ----
 

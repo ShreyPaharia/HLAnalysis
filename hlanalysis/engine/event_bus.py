@@ -30,13 +30,30 @@ class EventBus:
     async def publish(self, ev: BusEvent) -> None:
         # Surface every bus event in journalctl so post-mortems aren't limited
         # to Telegram (ephemeral, no search) and gate_decisions.jsonl
-        # (gate-side only). Pydantic's model_dump_json gives a compact
-        # one-line representation that survives the discriminator. INFO level
-        # so routine operation is searchable without flipping the engine to
-        # debug — the noisy stuff (heartbeat, topup_skip) is logged
-        # separately at the appropriate level.
+        # (gate-side only). Bind key fields into loguru's structured extra so
+        # they are top-level queryable fields in the JSON line (Component 1 of
+        # the observability tier). Pydantic's model_dump_json gives the full
+        # compact payload. INFO level so routine operation is searchable without
+        # flipping the engine to debug — the noisy stuff (heartbeat, topup_skip)
+        # is logged separately at the appropriate level.
         try:
-            logger.info("bus {} {}", ev.kind, ev.model_dump_json())
+            bound_fields: dict = {
+                "kind": ev.kind,
+                "alias": ev.account_alias,
+                "payload": ev.model_dump_json(),
+            }
+            # Bind optional per-event fields when present so they are directly
+            # queryable (e.g. `jq 'select(.record.extra.reason == "cap_hit")'`).
+            # `reason` is normalised the same way the events table is (.reason
+            # or OrderRejected's .error) so a reject storm is greppable in
+            # journald, not just in the DB.
+            question_idx = getattr(ev, "question_idx", None)
+            if question_idx is not None:
+                bound_fields["question_idx"] = question_idx
+            reason = getattr(ev, "reason", None) or getattr(ev, "error", None) or None
+            if reason is not None:
+                bound_fields["reason"] = reason
+            logger.bind(**bound_fields).info("bus {}", ev.kind)
         except Exception:
             # Defensive: a logging failure must never block a bus publish.
             logger.exception("event_bus: failed to log {}", ev.kind)

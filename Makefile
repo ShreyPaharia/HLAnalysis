@@ -1,4 +1,4 @@
-.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy deploy-recorder deploy-engine engine-local install-engine-on-ec2 push-engine-secrets ssh-ec2 status engine-status logs engine-logs query data-summary pull-data help
+.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy deploy-recorder deploy-engine engine-local install-engine-on-ec2 push-engine-secrets ssh-ec2 status engine-status logs engine-logs engine-diag engine-events query data-summary pull-data help
 
 # Stack name
 STACK_NAME=HLRecorderStack
@@ -218,6 +218,54 @@ engine-logs:
 		--output text | xargs -I {} sh -c \
 		'sleep 3 && aws ssm get-command-invocation --command-id {} --instance-id '"$$INSTANCE_ID"' --query "StandardOutputContent" --output text'
 
+# One-shot JSON snapshot of engine state: positions, open orders, feed health,
+# reject counts, last decision, config fingerprint, flag files.
+# Pass ALIAS=v1 to filter to a single slot; WINDOW=48 to widen the reject window.
+# Pass PRETTY=1 for indented output.
+engine-diag:
+	@INSTANCE_ID=$$(aws cloudformation describe-stacks --stack-name $(STACK_NAME) \
+		--query "Stacks[0].Outputs[?ExportName=='HLRecorderInstanceID'].OutputValue" \
+		--output text) && \
+	if [ -z "$$INSTANCE_ID" ]; then \
+		echo "ERROR: Could not fetch instance ID. Is the stack deployed?"; \
+		exit 1; \
+	fi && \
+	ALIAS_ARG="" && [ -n "$$ALIAS" ] && ALIAS_ARG="--alias $$ALIAS" || true && \
+	WINDOW_ARG="" && [ -n "$$WINDOW" ] && WINDOW_ARG="--reject-window-hours $$WINDOW" || true && \
+	PRETTY_ARG="" && [ -n "$$PRETTY" ] && PRETTY_ARG="--pretty" || true && \
+	echo "Fetching engine diagnostic snapshot from $$INSTANCE_ID..." && \
+	CMD_ID=$$(aws ssm send-command \
+		--instance-ids "$$INSTANCE_ID" \
+		--document-name "AWS-RunShellScript" \
+		--parameters "commands=[\"cd /opt/hl-recorder && source /etc/hl-engine/env && uv run python -m hlanalysis.engine.diag $$ALIAS_ARG $$WINDOW_ARG $$PRETTY_ARG\"]" \
+		--query "Command.CommandId" --output text) && \
+	sleep 5 && \
+	aws ssm get-command-invocation --command-id "$$CMD_ID" --instance-id "$$INSTANCE_ID" \
+		--query "StandardOutputContent" --output text
+
+# Event trace for a single question index: make engine-events Q=<question_idx>
+# Shows all events (entry/exit/veto/reject) for the given question across all slots.
+engine-events:
+	@INSTANCE_ID=$$(aws cloudformation describe-stacks --stack-name $(STACK_NAME) \
+		--query "Stacks[0].Outputs[?ExportName=='HLRecorderInstanceID'].OutputValue" \
+		--output text) && \
+	if [ -z "$$INSTANCE_ID" ]; then \
+		echo "ERROR: Could not fetch instance ID. Is the stack deployed?"; \
+		exit 1; \
+	fi && \
+	if [ -z "$$Q" ]; then \
+		echo 'Usage: make engine-events Q=<question_idx>'; exit 1; \
+	fi && \
+	echo "Fetching event trace for question $$Q from $$INSTANCE_ID..." && \
+	CMD_ID=$$(aws ssm send-command \
+		--instance-ids "$$INSTANCE_ID" \
+		--document-name "AWS-RunShellScript" \
+		--parameters "commands=[\"for db in /opt/hl-recorder/data/engine/*/state.db /opt/hl-recorder/data/engine/state.db; do [ -f \\\"\\$$db\\\" ] && sqlite3 \\\"\\$$db\\\" \\\"SELECT ts_ns, alias, kind, reason, payload_json FROM events WHERE question_idx=$$Q ORDER BY ts_ns ASC\\\" || true; done\"]" \
+		--query "Command.CommandId" --output text) && \
+	sleep 5 && \
+	aws ssm get-command-invocation --command-id "$$CMD_ID" --instance-id "$$INSTANCE_ID" \
+		--query "StandardOutputContent" --output text
+
 # Tail logs from the recorder
 logs:
 	@INSTANCE_ID=$$(aws cloudformation describe-stacks --stack-name $(STACK_NAME) \
@@ -266,6 +314,8 @@ help:
 	@echo "  logs              Tail last 100 lines of recorder logs"
 	@echo "  engine-status     Check engine service + restart_blocked / halt flags + journal"
 	@echo "  engine-logs       Tail last 200 lines of engine journal"
+	@echo "  engine-diag       One-shot JSON snapshot: positions, rejects, config hash, feed (ALIAS=v1, WINDOW=48, PRETTY=1)"
+	@echo "  engine-events Q=N Event trace for question_idx N across all slot DBs"
 	@echo "  data-summary      Show event counts grouped by venue and event type"
 	@echo "  query Q=\"...\"     Run custom DuckDB query, e.g. Q=\"SELECT COUNT(*) FROM ...\""
 	@echo "  pull-data         Sync archived data from S3 to local ./data/ (incremental)"
