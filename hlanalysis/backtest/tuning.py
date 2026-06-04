@@ -178,26 +178,16 @@ def _run_one_cell(args: tuple) -> dict:
         hedge_half_spread_bps,
     ) = args
 
-    import importlib
+    from .runner.parallel import reconstruct_source, build_hedge_source
 
-    mod_name, _, attr = data_source_dotted.rpartition(".")
-    ds_factory = getattr(importlib.import_module(mod_name), attr)
-    data_source = ds_factory()
+    data_source = reconstruct_source(data_source_dotted)
 
     strategy = build_strategy(strategy_id, params)
     run_cfg = RunConfig(**run_cfg_kwargs)
 
     # Build hedge source lazily (one per worker process, re-used across questions).
     # We ship the file path rather than the parsed list to avoid pickle overhead.
-    hedge_source = None
-    if run_cfg.hedge_enabled and hedge_data_path:
-        from pathlib import Path as _Path
-        from hlanalysis.backtest.data.binance_perp import BinancePerpKlinesSource
-        hedge_source = BinancePerpKlinesSource(
-            path=_Path(hedge_data_path),
-            symbol=run_cfg.hedge_symbol,
-            half_spread_bps=hedge_half_spread_bps,
-        )
+    hedge_source = build_hedge_source(run_cfg, hedge_data_path, hedge_half_spread_bps)
 
     pnl: list[float] = []
     n_trades = 0

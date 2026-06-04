@@ -33,6 +33,7 @@ from .core.registry import build as build_strategy
 from .core.registry import ids as registry_ids
 from .report import write_single_run_report, write_tuning_report
 from .runner.hftbt_runner import RunConfig, run_one_question
+from .runner.parallel import run_questions_parallel
 from .runner.result import summarise_run
 
 # Environment knobs read by the data-source factories. Workers spawned by
@@ -234,12 +235,69 @@ def _build_hedge_source(hedge_data_path: str | None, hedge_cfg: dict | None):
     )
 
 
+def _data_source_dotted(name: str) -> str:
+    """Return the zero-arg factory dotted path for a data source name.
+
+    Reuses the same resolver as `_factory_dotted_for` (used by tune), extended
+    to support sources that only `run` needs (synthetic, pm_nba).
+    """
+    if name in ("polymarket", "hl_hip4"):
+        return _factory_dotted_for(name)
+    # For synthetic / pm_nba — fall back to a dotted path that the worker can
+    # reconstruct.  Synthetic is rarely used in multi-worker runs but must not
+    # crash the arg-path.  Workers re-discover via wide date windows so synthetic
+    # rebuilds an identical question set.
+    if name == "pm_nba":
+        return "hlanalysis.backtest.cli.make_pm_nba_source"
+    # synthetic: not parallelisable in practice (in-memory source), but still
+    # needs a path so workers can reconstruct it.
+    return "hlanalysis.backtest.cli.make_synthetic_source"
+
+
+def _hedge_data_path_for(args: argparse.Namespace) -> str | None:
+    """Extract the hedge data path from parsed CLI args (None when not provided)."""
+    return getattr(args, "hedge_data_path", None) or None
+
+
+def _hedge_half_spread_for(args: argparse.Namespace) -> float:
+    """Extract hedge half-spread bps from parsed CLI args."""
+    return float(getattr(args, "hedge_half_spread_bps", 1.0))
+
+
+# Zero-arg factories for additional data sources (used by parallel workers).
+def make_pm_nba_source() -> "DataSource":
+    import os
+    from .data.pm_nba import PolymarketNBADataSource
+
+    root = os.environ.get("HLBT_PM_NBA_CACHE_ROOT", "data/sim/pm_nba")
+    return PolymarketNBADataSource(cache_root=Path(root))
+
+
+def make_synthetic_source() -> "DataSource":
+    from .data.synthetic import SyntheticDataSource, make_default_binary_question
+
+    ds = SyntheticDataSource()
+    ds.add_question(make_default_binary_question())
+    return ds
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     params = json.loads(Path(args.config).read_text())
 
     # Extract hedge config from params before passing to the strategy factory.
     # This keeps the strategy factory clean (it only sees binary knobs).
     params, hedge_cfg = _extract_hedge_config(params)
+
+    # Propagate cache/data-root to workers via env (mirrors cmd_tune so spawned
+    # worker factories pick up the same root as the parent process).
+    if args.cache_root:
+        if args.data_source == "polymarket":
+            os.environ[_ENV_PM_CACHE] = str(args.cache_root)
+        elif args.data_source == "hl_hip4":
+            os.environ[_ENV_HL_DATA] = str(args.cache_root)
+    if args.data_source == "polymarket":
+        os.environ[_ENV_PM_FLAVOR] = getattr(args, "pm_flavor", "btc_updown") or "btc_updown"
+
     strategy = _build_strategy_for_cli(args.strategy, params)
 
     hedge_source = _build_hedge_source(args.hedge_data_path, hedge_cfg)
@@ -308,31 +366,24 @@ def cmd_run(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir)
     diag_dir = out_dir / "diagnostics"
     fills_dir = out_dir / "fills"
-    per_q_pnl: list[float] = []
-    outcomes: list[str] = []
-    n_trades = 0
-    for q in descriptors:
-        # Slice hedge events for this question's time window when available.
-        hedge_events = None
-        if hedge_source is not None:
-            hedge_events = list(
-                hedge_source.book_events(
-                    start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns
-                )
-            )
-        res = run_one_question(
-            strategy,
-            data_source,
-            q,
-            run_cfg,
-            diagnostics_dir=diag_dir,
-            fills_dir=fills_dir,
-            strike=strike_fn(q),
-            hedge_events=hedge_events,
-        )
-        per_q_pnl.append(res.realized_pnl_usd or 0.0)
-        n_trades += len(res.fills)
-        outcomes.append(data_source.resolved_outcome(q))
+
+    n_workers = max(1, int(getattr(args, "workers", 1)))
+    results = run_questions_parallel(
+        descriptors=descriptors,
+        strategy_id=args.strategy,
+        params=params,
+        run_cfg=run_cfg,
+        data_source_dotted=_data_source_dotted(args.data_source),
+        diagnostics_dir=diag_dir,
+        fills_dir=fills_dir,
+        strike_for=strike_fn,
+        hedge_data_path=_hedge_data_path_for(args),
+        hedge_half_spread_bps=_hedge_half_spread_for(args),
+        n_workers=n_workers,
+    )
+    per_q_pnl = [r.realized_pnl_usd for r in results]
+    n_trades = sum(r.n_fills for r in results)
+    outcomes = [r.outcome for r in results]
 
     summary = summarise_run(per_q_pnl, n_trades=n_trades)
     write_single_run_report(
@@ -654,6 +705,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "the real multi-level L2 `book_snapshot` parquet per leg (HL parity; "
         "coverage from 2026-05-27).",
     )
+    pr.add_argument("--workers", type=int, default=1,
+                    help="Parallel worker processes for independent markets "
+                         "(default 1 = serial). Use up to #cores for big runs.")
     pr.set_defaults(func=cmd_run)
 
     pf = sp.add_parser("fetch", help="Populate polymarket cache from Gamma + CLOB")
