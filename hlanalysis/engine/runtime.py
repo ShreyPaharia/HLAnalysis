@@ -873,6 +873,9 @@ class EngineRuntime:
             await self._sleep_or_stop(1.0)
 
     async def _scan_loop(self, slot: AccountSlot) -> None:
+        g = slot.cfg.global_
+        min_iv = float(getattr(g, "scan_min_interval_seconds", 1.0))
+        max_iv = float(getattr(g, "scan_max_interval_seconds", 1.0))
         while not self.stop_event.is_set():
             if slot.halted:
                 await self._sleep_or_stop(1.0)
@@ -889,7 +892,11 @@ class EngineRuntime:
                 slot.scans_completed += 1
             except Exception:
                 logger.exception("scan tick crashed alias={}", slot.alias)
-            await self._sleep_or_stop(1.0)
+            # Coalesce bursts (min floor), then wake on the next tick up to the
+            # idle max. min==max reproduces the legacy fixed-interval poll.
+            await self._sleep_or_stop(min_iv)
+            if max_iv > min_iv:
+                await self._wait_for_market_or_timeout(max_interval=max_iv - min_iv)
 
     async def _heartbeat_loop(self, slots: list[AccountSlot]) -> None:
         """Periodic visibility into engine health, one line per slot. Without
@@ -1399,6 +1406,26 @@ class EngineRuntime:
         self._slot_halt_count += 1
         if self._slot_halt_count >= self._slot_total:
             self.stop_event.set()
+
+    async def _wait_for_market_or_timeout(self, *, max_interval: float) -> None:
+        """Block until the market-dirty signal fires OR max_interval elapses OR
+        the engine stops. Clears the signal before returning so the next call
+        waits for a fresh tick. Multi-consumer note: several loops await the one
+        shared Event; a clear() by one consumer may make a sibling wait up to
+        max_interval, which is the intended idle floor — benign and bounded."""
+        if self.stop_event.is_set():
+            return
+        dirty = asyncio.ensure_future(self._market_dirty.wait())
+        stop = asyncio.ensure_future(self.stop_event.wait())
+        try:
+            await asyncio.wait(
+                {dirty, stop}, timeout=max_interval,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            dirty.cancel()
+            stop.cancel()
+        self._market_dirty.clear()
 
     async def _sleep_or_stop(self, seconds: float) -> None:
         try:
