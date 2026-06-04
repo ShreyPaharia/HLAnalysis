@@ -35,6 +35,7 @@ existing sim's IOC-against-synthetic-L2 semantics.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -341,7 +342,10 @@ def run_one_question(
     ref_events: list[ReferenceEvent]
     settle_events: list[SettlementEvent]
 
-    fast_path_fn = getattr(data_source, "events_arrays", None)
+    fast_path_fn = (
+        None if os.environ.get("HLBT_DISABLE_FASTPATH")
+        else getattr(data_source, "events_arrays", None)
+    )
     if fast_path_fn is not None:
         bundle = fast_path_fn(q)
         leg_event_arrays = {sym: legarr.events for sym, legarr in bundle.leg_arrays.items()}

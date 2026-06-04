@@ -446,6 +446,107 @@ class PolymarketDataSource:
             return self._events_binary(q, entry)
         return self._events_bucket(q, entry)
 
+    def events_arrays(self, q: QuestionDescriptor):
+        """Return a ``FastPathBundle`` for *recorded* mode, skipping the
+        dataclass round-trip of ``events()``.
+
+        Only ``book_source="recorded"`` is supported.  Raises
+        ``NotImplementedError`` for synthetic mode — the runner's
+        ``getattr(data_source, "events_arrays", None)`` guard means the legacy
+        path is taken instead.
+
+        The bundle is bit-equivalent to the legacy path: the within-snapshot
+        level ordering of ``read_pm_book_columns`` matches ``_normalize_levels``
+        (bids px DESC, asks px ASC), and the same trade / reference / settlement
+        lists feed the shared assembler.
+        """
+        if self._book_source != "recorded":
+            raise NotImplementedError(
+                "PM fast path is recorded-mode only; "
+                "use book_source='recorded' to enable events_arrays()"
+            )
+        manifest = self._load_manifest()
+        entry = manifest.get(q.question_id)
+        if entry is None:
+            from ._fastpath_core import FastPathBundle, LegArrays
+            import numpy as np
+            empty = np.zeros(0, dtype=__import__("hftbacktest.types", fromlist=["event_dtype"]).event_dtype)
+            return FastPathBundle(
+                leg_arrays={sym: LegArrays(events=empty, book_ts=np.zeros(0, dtype=np.int64)) for sym in q.leg_symbols},
+                reference_events=[],
+                settlement_events=[],
+            )
+
+        from ._pm_fastpath import build_pm_fast_path_bundle
+
+        entry_kind = entry.get("kind", "binary")
+
+        if entry_kind == "binary":
+            cond_id = q.question_id
+            trades = self._read_trades(cond_id)
+            outcome = self._binary_outcome(q, entry)
+            yes_t, no_t = q.leg_symbols[0], q.leg_symbols[1]
+            per_leg_outcomes: dict[str, str] = {yes_t: outcome, no_t: _flip(outcome)}
+        else:
+            # Bucket: collect trades across all leg condition IDs.
+            b = entry.get("bucket") or {}
+            leg_tokens: list[list[str]] = b.get("leg_tokens", [])
+            leg_cond_ids: list[str] = b.get("leg_condition_ids", [])
+            leg_resolutions: list[str] = b.get("leg_resolutions", [])
+            trades = []
+            per_leg_outcomes = {}
+            for pair, cond_id, res in zip(leg_tokens, leg_cond_ids, leg_resolutions):
+                trades.extend(self._read_trades(cond_id))
+                yes_outcome: Literal["yes", "no", "unknown"] = (
+                    "yes" if res == "yes" else ("no" if res == "no" else "unknown")
+                )
+                per_leg_outcomes[str(pair[0])] = yes_outcome
+                per_leg_outcomes[str(pair[1])] = _flip(yes_outcome)
+
+        # Reference events (klines or BBO — same logic as _build_stream).
+        if self._reference_source == "binance_bbo":
+            ref_events = self._load_binance_bbo_reference(q.start_ts_ns, q.end_ts_ns)
+        else:
+            klines = self._load_klines_window(q.start_ts_ns, q.end_ts_ns)
+            ref_events = [
+                ReferenceEvent(
+                    ts_ns=int(k["ts_ns"]), symbol=self._reference_symbol,
+                    high=float(k["high"]), low=float(k["low"]),
+                    close=float(k["close"]), open=float(k["open"]),
+                )
+                for k in sorted(klines, key=lambda k: int(k["ts_ns"]))
+            ]
+
+        # Settlement events — one per leg at end_ts_ns.
+        settle_events = [
+            SettlementEvent(
+                ts_ns=q.end_ts_ns,
+                question_idx=q.question_idx,
+                outcome=per_leg_outcomes.get(sym, "unknown"),  # type: ignore[arg-type]
+                symbol=sym,
+            )
+            for sym in q.leg_symbols
+        ]
+
+        return build_pm_fast_path_bundle(
+            q=q,
+            book_glob_for=self._recorded_book_glob,
+            trades=trades,
+            reference_events=ref_events,
+            settlement_events=settle_events,
+        )
+
+    def _recorded_book_glob(self, token_id: str) -> str:
+        """Glob pattern for the recorded ``book_snapshot`` parquet of one leg.
+
+        Shared by ``_load_recorded_book`` and the fast path
+        ``events_arrays``.
+        """
+        return str(
+            self._pm_book_root / _PM_BOOK_DATA_SUBPATH
+            / f"symbol={token_id}" / "**" / "*.parquet"
+        )
+
     def question_view(
         self, q: QuestionDescriptor, *, now_ns: int, settled: bool,
     ) -> QuestionView:
@@ -1057,10 +1158,7 @@ class PolymarketDataSource:
         Mirrors the ``_load_binance_bbo_reference`` duckdb reader pattern.
         """
         import duckdb
-        glob = str(
-            self._pm_book_root / _PM_BOOK_DATA_SUBPATH
-            / f"symbol={token_id}" / "**" / "*.parquet"
-        )
+        glob = self._recorded_book_glob(token_id)
         from glob import glob as _glob
         if not _glob(glob, recursive=True):
             logger.info(f"recorded PM book: no coverage for token {token_id}")
