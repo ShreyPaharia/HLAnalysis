@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+
+from .._fastjson import decode as _json_decode
 from datetime import datetime, timezone
 from typing import Any
 
@@ -154,7 +156,7 @@ def _parse_token_ids(market: dict) -> tuple[str, str] | None:
     raw = market.get("clobTokenIds")
     if not raw:
         return None
-    toks = json.loads(raw) if isinstance(raw, str) else raw
+    toks = _json_decode(raw) if isinstance(raw, str) else raw
     if not isinstance(toks, list) or len(toks) < 2:
         return None
     return str(toks[0]), str(toks[1])
@@ -280,7 +282,7 @@ def parse_gamma_market_to_settlement(
                 return None  # not yet at resolution — 0.99 is a favourite, not a settle
         except ValueError:
             pass  # unparseable endDate → fall back to price-only (legacy)
-    prices = json.loads(raw) if isinstance(raw, str) else raw
+    prices = _json_decode(raw) if isinstance(raw, str) else raw
     if not isinstance(prices, list) or len(prices) != 2:
         return None
     yes_p, no_p = float(prices[0]), float(prices[1])

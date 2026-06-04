@@ -32,6 +32,8 @@ import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from .._fastjson import decode as _json_decode
+
 import websockets
 import websockets.exceptions
 
@@ -109,7 +111,7 @@ class PolymarketAdapter(VenueAdapter):
                             underlying=underlying,
                         )
                         await queue.put(qmeta)
-                        toks = json.loads(mk["clobTokenIds"])
+                        toks = _json_decode(mk["clobTokenIds"])
                         active_tokens.update(str(t) for t in toks)
                     settle = parse_gamma_market_to_settlement(
                         mk, series_slug=series_str,
@@ -186,8 +188,8 @@ class PolymarketAdapter(VenueAdapter):
                 log.warning("pm ws: undecodable bytes discarded")
                 return
         try:
-            payloads = json.loads(raw)
-        except json.JSONDecodeError:
+            payloads = _json_decode(raw)
+        except (ValueError, TypeError):
             # PM sends literal "PONG" keepalives between bursts; not JSON.
             log.debug("pm ws: non-json frame discarded (%r)", raw[:40])
             return

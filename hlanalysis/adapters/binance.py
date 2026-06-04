@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 import requests
 import websockets
 
+from .._fastjson import decode as _json_decode
 from ..config import Subscription
 from ..events import (
     BboEvent,
@@ -174,8 +175,8 @@ class BinanceAdapter(VenueAdapter):
                 return
             recv_ns = time.time_ns()
             try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
+                msg = _json_decode(raw)
+            except (ValueError, TypeError):
                 continue
             for ev in self._handle(msg, recv_ns, sym_to_sub, label):
                 await queue.put(ev)
