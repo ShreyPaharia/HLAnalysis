@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -14,6 +15,19 @@ from .state import Fill, OpenOrder, Position, StateDAL
 
 
 CLOID_PREFIX = "hla-"
+
+# Position quantities are compared across two independently-sourced floats: the
+# venue's reported size (HL szi / spot balance, or the PM data-api `/positions`
+# `size` truncated to 4dp) versus our fill ledger's summed fill sizes. They
+# express the same holding but disagree in the low decimals — a 56.1685-share
+# PM position routinely differs from our accumulated 56.16850001 by sub-share
+# rounding. An exact `>1e-9` check treats that noise as a position_mismatch and
+# re-fires a DRIFT alert every reconcile cycle. A real fill discrepancy (a
+# missed buy/sell) is on the order of whole shares, so we only flag a mismatch
+# when the quantities differ by more than rounding noise. abs_tol clears 4dp
+# truncation (≤5e-5) with margin; rel_tol keeps it scale-safe for large lots.
+_QTY_MISMATCH_REL_TOL = 1e-4
+_QTY_MISMATCH_ABS_TOL = 1e-3
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,7 +219,10 @@ class Reconciler:
                                 "symbol": lp.symbol, "db_qty": f"{lp.qty}"},
                     ))
                 continue
-            qty_diff = abs(vp.qty - lp.qty) > 1e-9
+            qty_diff = not math.isclose(
+                vp.qty, lp.qty,
+                rel_tol=_QTY_MISMATCH_REL_TOL, abs_tol=_QTY_MISMATCH_ABS_TOL,
+            )
             avg_diff = abs(vp.avg_entry - lp.avg_entry) > 1e-9
             if qty_diff or avg_diff:
                 # In apply mode the venue wins (HL is authoritative): adopt its

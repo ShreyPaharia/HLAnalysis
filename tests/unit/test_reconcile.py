@@ -120,6 +120,29 @@ def test_position_avg_entry_only_diff_silently_adopts_no_drift(dal):
     assert not any(d.case == "position_mismatch" for d in res.drift_events)
 
 
+def test_position_qty_subshare_rounding_diff_no_drift(dal):
+    # Regression: PM share qty comes from two independent float sources — the
+    # data-api `/positions` `size` (4dp, e.g. 56.1685) vs our fill ledger's
+    # summed `takingAmount`. They agree to a fraction of a share but differ
+    # below ~1e-3, which the old exact `>1e-9` check flagged as a
+    # position_mismatch DRIFT every reconcile cycle, flooding Telegram. A real
+    # fill discrepancy is ≥~1 share; sub-share rounding is not a mismatch.
+    dal.upsert_position(Position(
+        question_idx=42, symbol="tok", qty=56.16850001, avg_entry=0.89,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
+    ))
+    venue_state = ClearinghouseState(
+        positions=(VenuePosition(symbol="tok", qty=56.1685, avg_entry=0.89,
+                                  unrealized_pnl=0.0),),
+        account_value_usd=0,
+    )
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 42},
+        apply_position_changes=False,
+    ).run(venue_open=[], venue_state=venue_state, now_ns=2)
+    assert not any(d.case == "position_mismatch" for d in res.drift_events)
+
+
 def test_position_both_qty_and_avg_diff_emits_single_qty_drift(dal):
     # If both fields drift, we still only fire one drift event and it carries
     # the qty-diff detail (the load-bearing field). The local row is updated
