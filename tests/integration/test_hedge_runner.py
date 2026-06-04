@@ -208,3 +208,15 @@ def test_runner_fills_both_binary_and_hedge_intents(tmp_path: Path) -> None:
     assert hf.symbol == HEDGE_SYMBOL
     assert hf.is_hedge is True
     assert hf.price > 1.0, f"Hedge fill price {hf.price} should be BTC-scale, not clamped to [0,1]"
+
+    # SHR-55: the hedge SELL is held to expiry, so end-of-data must mark it to
+    # the last hedge mid with a closing BUY fill — otherwise realized PnL only
+    # books the opening leg. Expect exactly two hedge fills (open + MTM close).
+    assert len(hedge_fills) == 2, (
+        f"Expected open + MTM-close hedge fills; got {hedge_fills}"
+    )
+    open_fill, close_fill = hedge_fills[0], hedge_fills[1]
+    assert open_fill.side == "sell" and close_fill.side == "buy"
+    assert close_fill.cloid.startswith("hedge_settle")
+    assert close_fill.price == pytest.approx(80_000.0, rel=1e-6)  # last hedge mid
+    assert close_fill.size == pytest.approx(open_fill.size)

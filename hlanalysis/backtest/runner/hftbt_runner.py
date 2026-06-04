@@ -422,6 +422,7 @@ def run_one_question(
     pos: Position | None = None
     # Hedge positions are tracked independently; they do NOT affect binary pos.
     hedge_positions: dict[str, Position] = {}
+    last_hedge_mid: float | None = None  # last observed hedge mid for SHR-55 MTM
     diag_rows: list[DiagnosticRow] = []
     fill_meta: dict[str, dict[str, Any]] = {}
     fill_ts: dict[str, int] = {}
@@ -578,6 +579,10 @@ def run_one_question(
             hbs = _book_state(hbt, hedge_asset_no, cfg.hedge_symbol)
             if hbs is not None:
                 books[cfg.hedge_symbol] = hbs
+                # Track the last observed hedge mid for end-of-data MTM (SHR-55).
+                # `books` is rebuilt every tick, so a dedicated var is needed.
+                if hbs.bid_px is not None and hbs.ask_px is not None:
+                    last_hedge_mid = (hbs.bid_px + hbs.ask_px) / 2.0
 
         # Update last_scan_ns BEFORE the `continue` so we don't loop forever
         # re-targeting the same ts when books are missing.
@@ -720,27 +725,23 @@ def run_one_question(
                     result.fills.append(h_fill)
                     fill_ts[h_fill.cloid] = now_ns
                     fill_question_idx[h_fill.cloid] = q.question_idx
-                    # Track hedge position independently.
+                    # Track hedge position independently. Qty-weighted cost basis
+                    # across fills (SHR-55) — avg_entry was previously clobbered
+                    # with the latest fill price on every top-up.
                     h_pos = hedge_positions.get(cfg.hedge_symbol)
-                    if h_pos is None:
-                        hedge_positions[cfg.hedge_symbol] = Position(
-                            question_idx=q.question_idx,
-                            symbol=cfg.hedge_symbol,
-                            qty=h_fill.size if h_fill.side == "buy" else -h_fill.size,
-                            avg_entry=h_fill.price,
-                            stop_loss_price=0.0,
-                            last_update_ts_ns=now_ns,
-                        )
-                    else:
-                        new_qty = h_pos.qty + (h_fill.size if h_fill.side == "buy" else -h_fill.size)
-                        hedge_positions[cfg.hedge_symbol] = Position(
-                            question_idx=q.question_idx,
-                            symbol=cfg.hedge_symbol,
-                            qty=new_qty,
-                            avg_entry=h_fill.price,
-                            stop_loss_price=0.0,
-                            last_update_ts_ns=now_ns,
-                        )
+                    prev_qty = h_pos.qty if h_pos is not None else 0.0
+                    prev_avg = h_pos.avg_entry if h_pos is not None else 0.0
+                    new_qty, new_avg = _hedge_avg_entry(
+                        prev_qty, prev_avg, h_fill.side, h_fill.size, h_fill.price,
+                    )
+                    hedge_positions[cfg.hedge_symbol] = Position(
+                        question_idx=q.question_idx,
+                        symbol=cfg.hedge_symbol,
+                        qty=new_qty,
+                        avg_entry=new_avg,
+                        stop_loss_price=0.0,
+                        last_update_ts_ns=now_ns,
+                    )
 
         if decision.action == Action.ENTER and decision.intents:
             intent = decision.intents[0]
@@ -902,6 +903,25 @@ def run_one_question(
             fill_meta["settle"] = {"resolved_outcome": outcome}
         pos = None
 
+    # SHR-55: mark any open hedge residual to the last observed hedge mid and
+    # book a closing fill. Without this only the OPENING hedge leg lands in
+    # result.fills, so realized PnL omits the entire hedge value and the
+    # backtest can't tell whether the hedge protects or destroys PnL.
+    for h_sym, h_pos in hedge_positions.items():
+        if h_pos.qty == 0.0:
+            continue
+        if last_hedge_mid is None:
+            logger.warning(
+                f"hedge {h_sym} qty={h_pos.qty} held to expiry but no hedge mid "
+                f"was observed; cannot mark-to-market (PnL excludes this leg)"
+            )
+            continue
+        mtm_fill = _hedge_mtm_fill(h_sym, h_pos.qty, last_hedge_mid)
+        result.fills.append(mtm_fill)
+        fill_ts[mtm_fill.cloid] = q.end_ts_ns
+        fill_question_idx[mtm_fill.cloid] = h_pos.question_idx
+    hedge_positions.clear()
+
     try:
         hbt.close()
     except Exception:
@@ -949,6 +969,53 @@ def run_one_question(
         write_fills(fill_rows, fills_dir / f"{q.question_id}.parquet")
 
     return result
+
+
+def _hedge_avg_entry(
+    prev_qty: float, prev_avg: float, fill_side: str, fill_size: float, fill_price: float,
+) -> tuple[float, float]:
+    """Return (new_qty, new_avg_entry) after applying a hedge fill (SHR-55).
+
+    Qty-weighted average when adding in the same direction, basis preserved when
+    reducing, and reset to the fill price when the position flips through zero.
+    Replaces the bug where avg_entry was overwritten with the latest fill price
+    on every top-up.
+    """
+    add = fill_size if fill_side == "buy" else -fill_size
+    new_qty = prev_qty + add
+    if prev_qty == 0.0:
+        return new_qty, fill_price
+    if (prev_qty > 0) == (add > 0):  # growing in the same direction
+        new_avg = (prev_avg * abs(prev_qty) + fill_price * fill_size) / (
+            abs(prev_qty) + fill_size
+        )
+        return new_qty, new_avg
+    if abs(add) < abs(prev_qty):  # partial reduction — basis unchanged
+        return new_qty, prev_avg
+    if new_qty == 0.0:  # fully closed
+        return 0.0, 0.0
+    return new_qty, fill_price  # flipped past zero — new basis is the fill price
+
+
+def _hedge_mtm_fill(symbol: str, qty: float, mark_px: float) -> Fill:
+    """Closing Fill that marks an open hedge residual to ``mark_px`` (the last
+    observed hedge mid) at end-of-data, mirroring binary settlement (SHR-55).
+
+    No slippage/fee — this is a mark-to-market of the residual at fair value,
+    not a modelled liquidation, so realized PnL reflects the hedge's true
+    economic value rather than only its opening leg.
+    """
+    side = "sell" if qty > 0 else "buy"
+    return Fill(
+        cloid=f"hedge_settle:{symbol}",
+        symbol=symbol,
+        side=side,
+        price=mark_px,
+        size=abs(qty),
+        fee=0.0,
+        partial=False,
+        is_hedge=True,
+    )
 
 
 def _settle_px_for_outcome(pos: Position, q: QuestionDescriptor, outcome: str) -> float:
