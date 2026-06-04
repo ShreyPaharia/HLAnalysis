@@ -99,10 +99,13 @@ more `bus.subscribe()` alongside alerts/heartbeat.
   to the alerts loop. Pulls from its own bus queue, calls
   `StateDAL.append_event(...)`. Never blocks publish (bus already drops on slow
   consumers).
-- **Retention (load-bearing on a 1 GiB box):** cap by row count and/or age.
-  On each insert (or periodically) delete rows older than N days or beyond M
-  rows. The unbounded-`_questions`→OOM scar (`hl_live_eval_2026_05_31`) is the
-  reason this is non-optional. Retention bound is a config value.
+- **Retention (load-bearing on a 1 GiB box):** prune by **both** age and row
+  count — age is the primary prune (config default **14 days**), with a hard
+  **row-count ceiling** as a burst backstop (config default **1,000,000 rows**)
+  so a reject storm can't grow the table unbounded between age-prunes. Prune
+  runs periodically (not per-insert). Both bounds are config values. The
+  unbounded-`_questions`→OOM scar (`hl_live_eval_2026_05_31`) is why this is
+  non-optional.
 - **Migration:** `0006_events.sql` following the existing
   `migrations/000N_*.sql` + `schema_migrations` pattern.
 - **Why:** turns "why didn't slot X trade between T1 and T2?" and "how many
@@ -113,8 +116,9 @@ more `bus.subscribe()` alongside alerts/heartbeat.
 
 ### Component 3 — `engine-diag` one-shot snapshot
 
-A new CLI subcommand (e.g. `python -m hlanalysis.engine.diag` or a
-`hl-engine diag` entry) that reads `state.db` (incl. the new `events` table) and
+A new `python -m hlanalysis.engine.diag` command (matches how the engine is
+launched, `python -m hlanalysis.engine.main`; no new console-script plumbing)
+that reads `state.db` (incl. the new `events` table) and
 flag files, and prints **one JSON object** to stdout. No engine introspection /
 no IPC — it reads the same on-disk state the engine writes, so it's safe to run
 against a live engine over SSM.
