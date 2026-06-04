@@ -294,36 +294,75 @@ class HLHip4DataSource:
         array fully vectorised. On HL HIP-4 with 20-level books, this is
         ~4× faster than the dataclass path for the per-leg build alone and
         avoids creating ~160k ``BookSnapshot`` objects per leg per question.
+
+        The assembled bundle is cached on disk keyed by source-file
+        metadata (mtime + size) plus BUILD_VERSION from ``_fastpath_core``,
+        so re-runs over the same data skip the DuckDB reads entirely.
         """
-        date_list = _date_partitions_in_range(q.start_ts_ns, q.end_ts_ns)
-        con = duckdb.connect()
-        try:
-            # Reference rows: same query as ``_reference_iter`` but kept as
-            # raw fetchall tuples so the fast path can build the events list
-            # without going through the gen() generator.
-            evt = self.ref_event
-            ref_rows = self._reference_rows(con, evt, q.start_ts_ns, q.end_ts_ns, date_list)
-            if not ref_rows:
-                fallback = "mark" if evt == "bbo" else "bbo"
-                log.warning(
-                    "HL perp BTC %s yielded 0 rows in [%d, %d); falling back to %s",
-                    evt, q.start_ts_ns, q.end_ts_ns, fallback,
+        from ._event_array_cache import cached_bundle
+
+        source_files = self._fastpath_source_files(q)
+        cache_dir = Path(self.data_root) / "_event_array_cache"
+
+        def _build() -> FastPathBundle:
+            date_list = _date_partitions_in_range(q.start_ts_ns, q.end_ts_ns)
+            con = duckdb.connect()
+            try:
+                # Reference rows: same query as ``_reference_iter`` but kept as
+                # raw fetchall tuples so the fast path can build the events list
+                # without going through the gen() generator.
+                evt = self.ref_event
+                ref_rows = self._reference_rows(con, evt, q.start_ts_ns, q.end_ts_ns, date_list)
+                if not ref_rows:
+                    fallback = "mark" if evt == "bbo" else "bbo"
+                    log.warning(
+                        "HL perp BTC %s yielded 0 rows in [%d, %d); falling back to %s",
+                        evt, q.start_ts_ns, q.end_ts_ns, fallback,
+                    )
+                    ref_rows = self._reference_rows(con, fallback, q.start_ts_ns, q.end_ts_ns, date_list)
+                    evt = fallback
+                return build_fast_path_bundle(
+                    con=con,
+                    q=q,
+                    date_list=date_list,
+                    book_glob_for=lambda leg: self._partition_glob("book_snapshot", symbol=leg),
+                    trade_glob_for=lambda leg: self._partition_glob("trade", symbol=leg),
+                    settlement_glob_for=lambda leg: self._partition_glob("settlement", symbol=leg),
+                    reference_rows=ref_rows,
+                    ref_event_kind=evt,
+                    reference_resample_ns=self._reference_resample_ns,
                 )
-                ref_rows = self._reference_rows(con, fallback, q.start_ts_ns, q.end_ts_ns, date_list)
-                evt = fallback
-            return build_fast_path_bundle(
-                con=con,
-                q=q,
-                date_list=date_list,
-                book_glob_for=lambda leg: self._partition_glob("book_snapshot", symbol=leg),
-                trade_glob_for=lambda leg: self._partition_glob("trade", symbol=leg),
-                settlement_glob_for=lambda leg: self._partition_glob("settlement", symbol=leg),
-                reference_rows=ref_rows,
-                ref_event_kind=evt,
-                reference_resample_ns=self._reference_resample_ns,
-            )
-        finally:
-            con.close()
+            finally:
+                con.close()
+
+        return cached_bundle(
+            cache_dir,
+            q.question_id,
+            source_files,
+            _build,
+            force_rebuild=getattr(self, "_force_rebuild_cache", False),
+        )
+
+    def _fastpath_source_files(self, q: QuestionDescriptor) -> list[Path]:
+        """Return the concrete parquet paths feeding the fast-path bundle.
+
+        Expands the same globs that ``build_fast_path_bundle`` reads so the
+        cache key tracks the right parquet files. Includes book_snapshot,
+        trade, and settlement partitions for each leg, plus the reference
+        (perp BBO/mark) partitions.
+        """
+        from glob import glob as _glob
+
+        files: list[str] = []
+        for leg in q.leg_symbols:
+            for event in ("book_snapshot", "trade", "settlement"):
+                g = self._partition_glob(event, symbol=leg)
+                files.extend(_glob(g, recursive=True))
+        # Reference feed (perp BBO primary, mark fallback).
+        for evt in ("bbo", "mark"):
+            g = self._perp_partition_glob(evt, symbol="BTC")
+            files.extend(_glob(g, recursive=True))
+        return [Path(f) for f in files]
 
     def events(self, q: QuestionDescriptor) -> Iterator[MarketEvent]:
         date_list = _date_partitions_in_range(q.start_ts_ns, q.end_ts_ns)

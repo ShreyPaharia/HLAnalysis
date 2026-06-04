@@ -37,3 +37,6 @@ config/tuning.v3-5-tilt-*.yaml
 config/tuning.v3-5-ext-*.yaml
 config/tuning.v3-6-tilt-*.yaml
 config/tuning.v3-6-jr-tilt-*.yaml
+
+# generated event-array caches
+_event_array_cache/
