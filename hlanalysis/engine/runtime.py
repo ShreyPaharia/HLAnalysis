@@ -538,6 +538,8 @@ class EngineRuntime:
                 tasks.append(asyncio.create_task(self._continuous_checks_loop(slot)))
                 if not slot.blocked:
                     tasks.append(asyncio.create_task(self._scan_loop(slot)))
+                if slot.cfg.global_.stop_loss_loop_enabled and not slot.blocked:
+                    tasks.append(asyncio.create_task(self._stop_loss_loop(slot)))
 
             await self.stop_event.wait()
             for t in tasks:
@@ -1256,58 +1258,11 @@ class EngineRuntime:
                     self._maybe_stop_all_halted(slot)
                     continue
 
-                # Stop-loss enforcer
-                positions_db = slot.dal.all_positions()
-                if positions_db:
-                    books = {}
-                    from ..strategy.types import Position as SPos
-                    for p in positions_db:
-                        b = self.market_state.book(p.symbol)
-                        if b is not None:
-                            books[p.symbol] = b
-                    sps = [
-                        SPos(question_idx=p.question_idx, symbol=p.symbol, qty=p.qty,
-                              avg_entry=p.avg_entry, stop_loss_price=p.stop_loss_price,
-                              last_update_ts_ns=p.last_update_ts_ns)
-                        for p in positions_db
-                    ]
-                    breached = slot.risk.breached_stops(sps, books)
-                    for sp in breached:
-                        await self.bus.publish(StopLossTriggered(
-                            ts_ns=now, account_alias=slot.alias,
-                            question_idx=sp.question_idx,
-                            symbol=sp.symbol, qty=sp.qty,
-                            trigger_px=sp.stop_loss_price,
-                        ))
-                        from ..strategy.types import (
-                            Action, Decision, OrderIntent,
-                        )
-                        b = books.get(sp.symbol)
-                        if b is None or b.bid_px is None:
-                            continue
-                        # cloid carries the slot's account prefix so a stop-loss
-                        # exit is attributable to this slot in venue logs.
-                        intent = OrderIntent(
-                            question_idx=sp.question_idx, symbol=sp.symbol,
-                            side="sell" if sp.qty > 0 else "buy",
-                            size=abs(sp.qty), limit_price=b.bid_px,
-                            cloid=f"{slot.cloid_prefix}{uuid.uuid4().hex}",
-                            time_in_force="ioc", reduce_only=True,
-                            exit_reason="stop_loss",
-                        )
-                        from .risk import RiskInputs
-                        inp = RiskInputs(
-                            question=self.market_state.question(sp.question_idx) or _stub_question(sp),
-                            question_fields={}, reference_price=0.0, book=b,
-                            recent_volume_usd=0.0, positions=sps,
-                            live_orders_total_notional=0.0,
-                            realized_pnl_today=0.0, kill_switch_active=False,
-                            last_reconcile_ns=slot.last_reconcile_ns, now_ns=now,
-                        )
-                        await slot.router.handle(
-                            Decision(action=Action.EXIT, intents=(intent,)),
-                            inputs=inp, now_ns=now,
-                        )
+                # Stop-loss enforcement. When stop_loss_loop_enabled, a dedicated
+                # event-driven loop owns this (acts within scan_min_interval);
+                # otherwise enforce here at the continuous-checks 1 Hz cadence.
+                if not slot.cfg.global_.stop_loss_loop_enabled:
+                    await self._enforce_stop_losses(slot, now_ns=now)
 
                 # Daily loss — per slot. Read from HL (venue truth) instead of
                 # the local DB; same reasoning as Scanner._pnl_provider — the
@@ -1392,6 +1347,80 @@ class EngineRuntime:
             except Exception:
                 logger.exception("continuous checks crashed alias={}", slot.alias)
             await self._sleep_or_stop(1.0)
+
+    # ---------- stop-loss enforcement (extracted for event-driven loop) --------
+
+    async def _enforce_stop_losses(self, slot: AccountSlot, *, now_ns: int) -> None:
+        """One stop-loss enforcement pass: find breached stops on held
+        positions and fire reduce-only IOC exits. Extracted from
+        _continuous_checks_loop so it can run in its own event-driven loop
+        (P1). Behaviour-identical to the prior inline block."""
+        now = now_ns
+        positions_db = slot.dal.all_positions()
+        if not positions_db:
+            return
+        books = {}
+        from ..strategy.types import Position as SPos
+        for p in positions_db:
+            b = self.market_state.book(p.symbol)
+            if b is not None:
+                books[p.symbol] = b
+        sps = [
+            SPos(question_idx=p.question_idx, symbol=p.symbol, qty=p.qty,
+                 avg_entry=p.avg_entry, stop_loss_price=p.stop_loss_price,
+                 last_update_ts_ns=p.last_update_ts_ns)
+            for p in positions_db
+        ]
+        breached = slot.risk.breached_stops(sps, books)
+        for sp in breached:
+            await self.bus.publish(StopLossTriggered(
+                ts_ns=now, account_alias=slot.alias,
+                question_idx=sp.question_idx, symbol=sp.symbol, qty=sp.qty,
+                trigger_px=sp.stop_loss_price,
+            ))
+            from ..strategy.types import Action, Decision, OrderIntent
+            b = books.get(sp.symbol)
+            if b is None or b.bid_px is None:
+                continue
+            intent = OrderIntent(
+                question_idx=sp.question_idx, symbol=sp.symbol,
+                side="sell" if sp.qty > 0 else "buy",
+                size=abs(sp.qty), limit_price=b.bid_px,
+                cloid=f"{slot.cloid_prefix}{uuid.uuid4().hex}",
+                time_in_force="ioc", reduce_only=True, exit_reason="stop_loss",
+            )
+            from .risk import RiskInputs
+            inp = RiskInputs(
+                question=self.market_state.question(sp.question_idx) or _stub_question(sp),
+                question_fields={}, reference_price=0.0, book=b,
+                recent_volume_usd=0.0, positions=sps,
+                live_orders_total_notional=0.0, realized_pnl_today=0.0,
+                kill_switch_active=False, last_reconcile_ns=slot.last_reconcile_ns,
+                now_ns=now,
+            )
+            await slot.router.handle(
+                Decision(action=Action.EXIT, intents=(intent,)), inputs=inp, now_ns=now,
+            )
+
+    async def _stop_loss_loop(self, slot: AccountSlot) -> None:
+        """Event-driven stop-loss enforcement (P1). Active only when
+        stop_loss_loop_enabled; wakes on the market-dirty signal, bounded by
+        scan_min/max_interval_seconds, so a stop breach is acted on promptly
+        without speeding up the venue-reading checks in _continuous_checks_loop."""
+        g = slot.cfg.global_
+        min_iv = float(getattr(g, "scan_min_interval_seconds", 1.0))
+        max_iv = float(getattr(g, "scan_max_interval_seconds", 1.0))
+        while not self.stop_event.is_set():
+            if slot.halted:
+                await self._sleep_or_stop(1.0)
+                continue
+            try:
+                await self._enforce_stop_losses(slot, now_ns=self._now_ns())
+            except Exception:
+                logger.exception("stop-loss loop crashed alias={}", slot.alias)
+            await self._sleep_or_stop(min_iv)
+            if max_iv > min_iv:
+                await self._wait_for_market_or_timeout(max_interval=max_iv - min_iv)
 
     # ---------- helpers ----------
 
