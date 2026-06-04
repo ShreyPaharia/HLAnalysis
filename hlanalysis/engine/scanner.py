@@ -96,6 +96,15 @@ class Scanner:
         # PM up/down questions whose open-strike this slot has already resolved
         # and persisted — short-circuits the per-tick capture/persist work.
         self._pm_strike_seen: set[int] = set()
+        # P4: memoized allowlist-match verdict per question_idx. The match fields
+        # (class/underlying/period/venue/series_slug) are immutable per question
+        # and the allowlist/blocklist are static for this slot, so the verdict is
+        # stable — compute it once, then skip non-tradeable questions with a dict
+        # lookup instead of a full match_question() on every scan tick. This keeps
+        # the per-tick cost proportional to the questions this slot actually
+        # trades, not the whole ingested registry (which holds many series no slot
+        # trades). Decisions are bit-identical to the un-memoized path.
+        self._tradeable_cache: dict[int, bool] = {}
         # Number of 1m log-returns to pull from MarketState each scan tick.
         # Derived from cfg so the YAML's vol_lookback_seconds actually
         # reflects the σ window the strategy sees. Previously hard-coded to
@@ -196,6 +205,12 @@ class Scanner:
         kill = self.kill_switch_path.exists()
 
         for q in self.ms.all_questions():
+            qidx = q.question_idx
+            # P4: skip questions already known non-tradeable for this slot with a
+            # single dict lookup — no fields build, no match_question call.
+            cached = self._tradeable_cache.get(qidx)
+            if cached is False:
+                continue
             # `venue` + `series_slug` let a slot's allowlist scope to one venue
             # (and, for PM, one Gamma series): PM and HL share class/underlying
             # but resolve to different books/token namespaces, so without this
@@ -206,8 +221,14 @@ class Scanner:
                 "class": q.klass, "underlying": q.underlying, "period": q.period,
                 "venue": q.venue, "series_slug": series_slug,
             }
-            if match_question(self.cfg, question_idx=q.question_idx, fields=fields) is None:
-                continue
+            if cached is None:
+                # First sight of this qidx — compute and memoize the verdict.
+                cached = match_question(
+                    self.cfg, question_idx=qidx, fields=fields,
+                ) is not None
+                self._tradeable_cache[qidx] = cached
+                if not cached:
+                    continue
             # PM up/down markets carry no static strike. The runtime's async
             # _maybe_capture_pm_strike fetches the Binance spot 1m close once
             # the reference candle has closed. Here we only reload a strike

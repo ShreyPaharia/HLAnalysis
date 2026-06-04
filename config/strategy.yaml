@@ -158,7 +158,7 @@ strategies:
       min_recent_volume_usd: 100        # HL HIP-4 binaries are inherently thin; 1000 vetoed every trade
       stale_data_halt_seconds: 30       # HIP-4 books update on bursts not steady streams; 5s vetoed every trade
       reconcile_interval_seconds: 15      # 2026-05-22: 60→15 to close the post-settlement gap where the reconciler hasn't yet detected position-vanished and the leg's silent book trips stale_data_halt_seconds (30s)
-      scan_min_interval_seconds: 0.1        # P1 2026-06-05: event-driven scan floor → ~10 scans/s in an active market
+      scan_min_interval_seconds: 0.2        # P1 2026-06-05: event-driven scan floor → ~5 scans/s in an active market
       scan_max_interval_seconds: 2.0        # idle backoff → with no feed updates a scan still runs every 2s
       # Align the daily PnL window with HL HIP-4 binary settlement
       # (06:00 UTC = 11:30 IST). Losses on a market that just settled
@@ -247,7 +247,7 @@ strategies:
       min_recent_volume_usd: 100
       stale_data_halt_seconds: 30
       reconcile_interval_seconds: 15      # 2026-05-22: 60→15 to close the post-settlement gap where the reconciler hasn't yet detected position-vanished and the leg's silent book trips stale_data_halt_seconds (30s)
-      scan_min_interval_seconds: 0.1        # P1 2026-06-05: event-driven scan floor → ~10 scans/s in an active market
+      scan_min_interval_seconds: 0.2        # P1 2026-06-05: event-driven scan floor → ~5 scans/s in an active market
       scan_max_interval_seconds: 2.0        # idle backoff → with no feed updates a scan still runs every 2s
       # Same rationale as v1 — settlement-aligned window.
       daily_window_start_hour_utc: 6
@@ -393,7 +393,7 @@ strategies:
       min_recent_volume_usd: 100
       stale_data_halt_seconds: 180          # 2026-06-04: PM CLOB favorite books legitimately go quiet >30s (a held 0.89 leg updated ~1/100s) → 30s flapped StaleDataHalt + stale_data entry-veto every ~1-2 min. 180s stops the flap while still vetoing entry on a genuinely frozen book. HL/HIP-4 stays 30s (burst feed).
       reconcile_interval_seconds: 15
-      scan_min_interval_seconds: 0.1        # P1 2026-06-05: event-driven scan floor → ~10 scans/s in an active market
+      scan_min_interval_seconds: 0.2        # P1 2026-06-05: event-driven scan floor → ~5 scans/s in an active market
       scan_max_interval_seconds: 2.0        # idle backoff → with no feed updates a scan still runs every 2s
       daily_window_start_hour_utc: 6
       # Depth-walk slippage cap — ~0.5¢ at a 0.95-favorite leg. PM books are
@@ -547,7 +547,7 @@ strategies:
       min_recent_volume_usd: 100
       stale_data_halt_seconds: 180          # 2026-06-04: see v31_pm — PM favorite books go quiet >30s, 180s stops the StaleDataHalt flap; HL/HIP-4 stays 30s.
       reconcile_interval_seconds: 15
-      scan_min_interval_seconds: 0.1        # P1 2026-06-05: event-driven scan floor → ~10 scans/s in an active market
+      scan_min_interval_seconds: 0.2        # P1 2026-06-05: event-driven scan floor → ~5 scans/s in an active market
       scan_max_interval_seconds: 2.0        # idle backoff → with no feed updates a scan still runs every 2s
       daily_window_start_hour_utc: 6
       # Depth-walk slippage cap — same as v31_pm. PM books are thin at top
