@@ -60,7 +60,7 @@ def build_strategy_for_run(strategy_id: str, params: dict):
     if strategy_id == "_dummy_enter_yes":
         from ..data.synthetic import build_dummy_enter_strategy
         return build_dummy_enter_strategy(params)
-    raise SystemExit(
+    raise ValueError(
         f"Unknown --strategy: {strategy_id}. Registered: {ids()}."
     )
 

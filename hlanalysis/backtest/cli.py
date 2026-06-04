@@ -41,6 +41,26 @@ from .runner.result import summarise_run
 _ENV_PM_CACHE = "HLBT_PM_CACHE_ROOT"
 _ENV_HL_DATA = "HLBT_HL_DATA_ROOT"
 _ENV_PM_FLAVOR = "HLBT_PM_FLAVOR"  # propagated to tune workers via env
+# PM construction knobs propagated to spawn workers (run + tune) so worker
+# sources match the parent exactly — otherwise --workers>1 silently reverts to
+# defaults (e.g. synthetic book) and diverges from the serial path.
+_ENV_PM_BOOK_SOURCE = "HLBT_PM_BOOK_SOURCE"
+_ENV_PM_REF_SOURCE = "HLBT_PM_REFERENCE_SOURCE"
+_ENV_PM_RESAMPLE_S = "HLBT_PM_RESAMPLE_SECONDS"
+_ENV_PM_BBO_PRODUCT = "HLBT_PM_BBO_PRODUCT_TYPE"
+
+
+def _set_pm_worker_env(args: argparse.Namespace) -> None:
+    """Persist PM construction knobs to the environment so spawned worker
+    factories (`make_polymarket_source`) rebuild an identical source."""
+    if getattr(args, "data_source", None) != "polymarket":
+        return
+    os.environ[_ENV_PM_FLAVOR] = getattr(args, "pm_flavor", None) or "btc_updown"
+    os.environ[_ENV_PM_BOOK_SOURCE] = getattr(args, "pm_book_source", None) or "synthetic"
+    os.environ[_ENV_PM_REF_SOURCE] = getattr(args, "pm_reference_source", None) or "klines"
+    rrs = getattr(args, "pm_reference_resample_seconds", None)
+    os.environ[_ENV_PM_RESAMPLE_S] = str(int(rrs)) if rrs else "60"
+    os.environ[_ENV_PM_BBO_PRODUCT] = getattr(args, "pm_binance_bbo_product_type", None) or "perp"
 
 _PM_FLAVORS: dict[str, dict[str, str]] = {
     "btc_updown": {
@@ -140,7 +160,14 @@ def make_polymarket_source() -> "DataSource":
 
     root = os.environ.get(_ENV_PM_CACHE, "data/sim")
     flavor = os.environ.get(_ENV_PM_FLAVOR, "btc_updown")
-    return PolymarketDataSource(cache_root=Path(root), **_PM_FLAVORS[flavor])
+    return PolymarketDataSource(
+        cache_root=Path(root),
+        reference_source=os.environ.get(_ENV_PM_REF_SOURCE, "klines"),  # type: ignore[arg-type]
+        reference_resample_seconds=int(os.environ.get(_ENV_PM_RESAMPLE_S, "60")),
+        book_source=os.environ.get(_ENV_PM_BOOK_SOURCE, "synthetic"),  # type: ignore[arg-type]
+        binance_bbo_product_type=os.environ.get(_ENV_PM_BBO_PRODUCT, "perp"),  # type: ignore[arg-type]
+        **_PM_FLAVORS[flavor],
+    )
 
 
 def make_hl_hip4_source() -> "DataSource":
@@ -300,8 +327,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             os.environ[_ENV_PM_CACHE] = str(args.cache_root)
         elif args.data_source == "hl_hip4":
             os.environ[_ENV_HL_DATA] = str(args.cache_root)
-    if args.data_source == "polymarket":
-        os.environ[_ENV_PM_FLAVOR] = getattr(args, "pm_flavor", "btc_updown") or "btc_updown"
+    _set_pm_worker_env(args)
 
     strategy = _build_strategy_for_cli(args.strategy, params)
 
@@ -473,8 +499,7 @@ def cmd_tune(args: argparse.Namespace) -> int:
         elif args.data_source == "hl_hip4":
             os.environ[_ENV_HL_DATA] = str(args.cache_root)
 
-    if args.data_source == "polymarket":
-        os.environ[_ENV_PM_FLAVOR] = args.pm_flavor
+    _set_pm_worker_env(args)
 
     data_source = _resolve_data_source(
         args.data_source,

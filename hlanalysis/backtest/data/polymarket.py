@@ -468,9 +468,9 @@ class PolymarketDataSource:
         manifest = self._load_manifest()
         entry = manifest.get(q.question_id)
         if entry is None:
-            from ._fastpath_core import FastPathBundle, LegArrays
             import numpy as np
-            empty = np.zeros(0, dtype=__import__("hftbacktest.types", fromlist=["event_dtype"]).event_dtype)
+            from ._fastpath_core import FastPathBundle, LegArrays, event_dtype
+            empty = np.zeros(0, dtype=event_dtype)
             return FastPathBundle(
                 leg_arrays={sym: LegArrays(events=empty, book_ts=np.zeros(0, dtype=np.int64)) for sym in q.leg_symbols},
                 reference_events=[],
