@@ -15,7 +15,18 @@ from loguru import logger
 from ..adapters.base import VenueAdapter
 from ..adapters.binance_klines import binance_1m_close_at
 from ..config import Subscription
-from ..events import NormalizedEvent, ProductType
+from ..events import (
+    NormalizedEvent, ProductType,
+    BboEvent, BookSnapshotEvent, BookDeltaEvent, MarkEvent, TradeEvent,
+)
+
+# Event classes that move a price/book and should wake the scan + stop-loss
+# loops (P1). QuestionMetaEvent / SettlementEvent do not move prices, so they
+# don't trigger an immediate re-scan (the idle max-interval floor still covers
+# their time-based effects).
+_PRICE_EVENT_TYPES = (
+    BboEvent, BookSnapshotEvent, BookDeltaEvent, MarkEvent, TradeEvent,
+)
 from .config import (
     AccountConfig,
     DeployConfig,
@@ -383,6 +394,11 @@ class EngineRuntime:
     market_state: MarketState = field(default_factory=MarketState)
     bus: EventBus = field(default_factory=EventBus)
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # Set by the ingest loop on every price-moving event; awaited by the
+    # event-driven scan + stop-loss loops so a market move triggers a re-scan
+    # within scan_min_interval_seconds (P1). Idle behaviour is unchanged: the
+    # loops also wake on their max-interval floor.
+    _market_dirty: asyncio.Event = field(default_factory=asyncio.Event)
     heartbeat_interval_s: float = 30.0
     # Ingest reconnect/backoff (SHR-42). On a feed drop the loop reconnects with
     # exponential backoff between base and max; after this many consecutive
@@ -696,6 +712,8 @@ class EngineRuntime:
         ev = _remap_reference_symbol(ev)
         self.market_state.apply(ev)
         self.events_ingested += 1
+        if isinstance(ev, _PRICE_EVENT_TYPES):
+            self._market_dirty.set()
         if not isinstance(ev, QuestionMetaEvent):
             return
         qidx = ev.question_idx
