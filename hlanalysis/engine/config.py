@@ -138,6 +138,23 @@ class GlobalRiskConfig(BaseModel):
     # the window with settlement means losses from a market that just
     # settled don't carry into the next market cycle's cap.
     daily_window_start_hour_utc: int = 0
+    # Event-driven loop cadence (P1). The scan + stop-loss loops wake on a
+    # market-data signal but are bounded:
+    #   * scan_min_interval_seconds — minimum gap between scans (coalesces a
+    #     burst of ticks into one scan; protects DB/CPU). 1.0 = legacy 1 Hz.
+    #   * scan_max_interval_seconds — maximum gap (idle floor; a scan still
+    #     runs this often even with no ticks, preserving time-based logic like
+    #     TTE windows). 1.0 = legacy 1 Hz.
+    # Defaults keep today's exact 1 Hz behaviour; set min < max to go
+    # event-driven (e.g. 0.05 / 1.0 → ≤50 ms reaction, ≤20 scans/s).
+    scan_min_interval_seconds: float = 1.0
+    scan_max_interval_seconds: float = 1.0
+    # When True, stop-loss enforcement runs in its own event-driven loop (woken
+    # by the same market signal, same min/max bounds) instead of the 1 Hz
+    # continuous-checks loop — so a stop breach is acted on within
+    # scan_min_interval_seconds rather than up to 1 s later. Default False keeps
+    # stop-loss on the legacy continuous-checks cadence.
+    stop_loss_loop_enabled: bool = False
 
 
 class ThetaParams(BaseModel):
