@@ -333,8 +333,9 @@ def make_synthetic_source() -> "DataSource":
 def cmd_run(args: argparse.Namespace) -> int:
     params = json.loads(Path(args.config).read_text())
 
-    # --rebuild-cache: force event-array rebuild process-wide (inherited by
-    # spawn workers via the environment).
+    # Event-array cache is opt-in (default OFF). --rebuild-cache implies it.
+    if getattr(args, "cache_event_arrays", False) or getattr(args, "rebuild_cache", False):
+        os.environ["HLBT_CACHE_EVENT_ARRAYS"] = "1"
     if getattr(args, "rebuild_cache", False):
         os.environ["HLBT_REBUILD_CACHE"] = "1"
 
@@ -520,7 +521,10 @@ def cmd_tune(args: argparse.Namespace) -> int:
             f"Known grid keys: {sorted(tcfg.grids)}"
         )
 
-    # --rebuild-cache: force event-array rebuild once; spawn workers inherit it.
+    # Event-array cache is opt-in (default OFF). --rebuild-cache implies it.
+    # Spawn workers inherit these via the environment.
+    if getattr(args, "cache_event_arrays", False) or getattr(args, "rebuild_cache", False):
+        os.environ["HLBT_CACHE_EVENT_ARRAYS"] = "1"
     if getattr(args, "rebuild_cache", False):
         os.environ["HLBT_REBUILD_CACHE"] = "1"
 
@@ -767,9 +771,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     pr.add_argument("--workers", type=int, default=1,
                     help="Parallel worker processes for independent markets "
                          "(default 1 = serial). Use up to #cores for big runs.")
+    pr.add_argument("--cache-event-arrays", action="store_true",
+                    help="Enable the event-array disk cache (default OFF). A "
+                         "tuning-sweep speedup; uses tens of GB on a full HL "
+                         "corpus, so opt in deliberately.")
     pr.add_argument("--rebuild-cache", action="store_true",
                     help="Ignore cached event arrays and rebuild them (then "
-                         "repopulate the cache).")
+                         "repopulate the cache). Implies --cache-event-arrays.")
     pr.set_defaults(func=cmd_run)
 
     pf = sp.add_parser("fetch", help="Populate polymarket cache from Gamma + CLOB")
@@ -835,9 +843,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     pt.add_argument("--skip-markets", type=int, default=0)
     pt.add_argument("--max-markets", type=int, default=None)
     pt.add_argument("--top-k", type=int, default=10)
+    pt.add_argument("--cache-event-arrays", action="store_true",
+                    help="Enable the event-array disk cache for the sweep "
+                         "(default OFF). Speeds repeated builds but uses tens "
+                         "of GB on a full HL corpus.")
     pt.add_argument("--rebuild-cache", action="store_true",
                     help="Ignore cached event arrays and rebuild them once "
-                         "(then reuse across the sweep).")
+                         "(then reuse across the sweep). Implies "
+                         "--cache-event-arrays.")
     pt.add_argument(
         "--kind",
         choices=["binary", "bucket", "both"],

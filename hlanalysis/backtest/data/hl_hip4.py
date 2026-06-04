@@ -341,6 +341,10 @@ class HLHip4DataSource:
             source_files,
             _build,
             force_rebuild=getattr(self, "_force_rebuild_cache", False),
+            # The bundle's reference events depend on the resample period and
+            # the reference feed kind — both must be in the key, or a dt=5
+            # bundle aliases to a dt=60 request (the sigma-inflation footgun).
+            config_sig=f"rrs={self._reference_resample_ns}|ref={self.ref_event}",
         )
 
     def _fastpath_source_files(self, q: QuestionDescriptor) -> list[Path]:

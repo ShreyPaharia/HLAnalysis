@@ -542,6 +542,13 @@ class PolymarketDataSource:
             self._fastpath_source_files(q),
             _build,
             force_rebuild=getattr(self, "_force_rebuild_cache", False),
+            # Reference events depend on the resample period + reference/book
+            # mode; keep them in the key so a bundle built under one config
+            # never aliases to a request under another.
+            config_sig=(
+                f"rrs={self._reference_resample_ns}|refsrc={self._reference_source}"
+                f"|book={self._book_source}|bbo={self._binance_bbo_product_type}"
+            ),
         )
 
     def _fastpath_source_files(self, q: QuestionDescriptor) -> list[Path]:

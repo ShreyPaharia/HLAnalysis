@@ -1,8 +1,15 @@
 # tests/unit/backtest/test_event_array_cache.py
 from __future__ import annotations
 import numpy as np
+import pytest
 from hlanalysis.backtest.data._event_array_cache import cached_bundle, cache_key
 from hlanalysis.backtest.data._fastpath_core import FastPathBundle, LegArrays, event_dtype
+
+
+@pytest.fixture(autouse=True)
+def _enable_caching(monkeypatch):
+    # Caching is opt-in (default OFF); these tests exercise the cache itself.
+    monkeypatch.setenv("HLBT_CACHE_EVENT_ARRAYS", "1")
 
 
 def _bundle():
@@ -24,6 +31,27 @@ def test_miss_then_hit(tmp_path):
     assert calls["n"] == 1  # second call is a hit
     assert np.array_equal(b1.leg_arrays["#0"].events, b2.leg_arrays["#0"].events)
     assert np.array_equal(b1.leg_arrays["#0"].book_ts, b2.leg_arrays["#0"].book_ts)
+
+
+def test_config_sig_differentiates_key():
+    """A different config_sig (e.g. dt=5 vs dt=60) MUST produce a different key,
+    so a bundle built at one dt can never be served for a request at another."""
+    src = []
+    assert cache_key("q1", src, "rrs=5000000000") != cache_key("q1", src, "rrs=60000000000")
+    assert cache_key("q1", src, "") != cache_key("q1", src, "rrs=5000000000")
+
+
+def test_config_sig_change_forces_rebuild(tmp_path):
+    """Two requests for the same question + files but different config_sig must
+    NOT share a cached bundle (the dt=60-bundle-for-dt=5-request footgun)."""
+    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    calls = {"n": 0}
+    def build():
+        calls["n"] += 1
+        return _bundle()
+    cached_bundle(tmp_path / "cache", "q1", [src], build, config_sig="rrs=60000000000")
+    cached_bundle(tmp_path / "cache", "q1", [src], build, config_sig="rrs=5000000000")
+    assert calls["n"] == 2  # different dt -> rebuilt, not aliased
 
 
 def test_mtime_change_invalidates(tmp_path):

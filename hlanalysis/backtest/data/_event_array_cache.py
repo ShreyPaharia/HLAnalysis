@@ -21,8 +21,15 @@ from ..core.events import ReferenceEvent, SettlementEvent
 log = logging.getLogger(__name__)
 
 
-def cache_key(question_id: str, source_files: list[Path]) -> str:
-    """Compute a cache key from question_id, source file metadata, and BUILD_VERSION.
+def cache_key(question_id: str, source_files: list[Path], config_sig: str = "") -> str:
+    """Compute a cache key from question_id, source file metadata, BUILD_VERSION,
+    and ``config_sig``.
+
+    ``config_sig`` MUST capture every non-source-file input that changes the
+    built bundle — notably the reference resample period (coupled to
+    vol_sampling_dt_seconds) and reference/book source mode. Omitting it lets a
+    bundle built at one dt alias to a request at another dt (dt=5 vs dt=60),
+    silently serving the wrong reference events.
 
     Uses the module-level ``_BUILD_VERSION`` so ``monkeypatch.setattr`` in tests
     can override it and verify version changes produce different keys.
@@ -31,6 +38,7 @@ def cache_key(question_id: str, source_files: list[Path]) -> str:
     h = hashlib.sha256()
     h.update(question_id.encode())
     h.update(str(_self._BUILD_VERSION).encode())
+    h.update(config_sig.encode())
     for p in sorted(source_files, key=str):
         try:
             st = Path(p).stat()
@@ -111,6 +119,21 @@ def _load(path: Path) -> FastPathBundle:
     )
 
 
+def caching_enabled() -> bool:
+    """Event-array disk caching is OPT-IN (default OFF).
+
+    The cache is a tuning-sweep speedup, but the assembled HL bundles are large
+    (20-level books, ~160k events/leg → ~hundreds of MB/question), so a full
+    corpus can consume tens of GB and fill the disk; a stale entry across a
+    config change also silently served the wrong dt. Default-off keeps normal
+    `run`/`tune` always-fresh and correct; enable via `--cache-event-arrays`
+    (sets HLBT_CACHE_EVENT_ARRAYS=1, inherited by spawn workers) when the
+    sweep speedup is worth the disk + invalidation discipline.
+    """
+    import os
+    return bool(os.environ.get("HLBT_CACHE_EVENT_ARRAYS"))
+
+
 def cached_bundle(
     cache_dir: Path,
     question_id: str,
@@ -118,20 +141,25 @@ def cached_bundle(
     build_fn: Callable[[], FastPathBundle],
     *,
     force_rebuild: bool = False,
+    config_sig: str = "",
 ) -> FastPathBundle:
     """Return a FastPathBundle, loading from disk cache if valid.
 
-    On cache miss (no file, mtime/size change, corrupt file, or force_rebuild),
-    calls ``build_fn()`` and attempts to persist the result. Write failures are
-    logged and silently skipped — the returned bundle is always correct.
+    When caching is disabled (the default — see ``caching_enabled``), this just
+    calls ``build_fn()`` and returns, touching no disk. Otherwise: on cache miss
+    (no file, mtime/size change, corrupt file, or force_rebuild), calls
+    ``build_fn()`` and attempts to persist the result. Write failures are logged
+    and silently skipped — the returned bundle is always correct.
     """
     import os
+    if not caching_enabled():
+        return build_fn()
     # HLBT_REBUILD_CACHE=1 forces a rebuild process-wide; set by the CLI's
     # --rebuild-cache flag and inherited by spawn workers via the environment.
     force_rebuild = force_rebuild or bool(os.environ.get("HLBT_REBUILD_CACHE"))
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / f"{cache_key(question_id, source_files)}.npz"
+    path = cache_dir / f"{cache_key(question_id, source_files, config_sig)}.npz"
     if path.exists() and not force_rebuild:
         try:
             return _load(path)

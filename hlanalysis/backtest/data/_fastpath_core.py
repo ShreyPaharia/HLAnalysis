@@ -11,7 +11,11 @@ event-array cache key so a logic change invalidates every cached entry.
 from __future__ import annotations
 
 # Bump on ANY change to assembly semantics below (cache-invalidation tag).
-BUILD_VERSION = 1
+# v2: cache key now folds in config_sig (reference resample dt + source mode).
+# Bumped to orphan any pre-existing on-disk cache keyed WITHOUT config_sig —
+# those could serve a bundle built at the wrong dt (a dt=60 bundle for a dt=5
+# request), the sigma-inflation footgun.
+BUILD_VERSION = 2
 
 import logging
 from dataclasses import dataclass
