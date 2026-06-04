@@ -408,6 +408,10 @@ strategies:
       vol_sampling_dt_seconds: 5            # dt=5 (was 60); LOCKSTEP with v1_pm on shared BTCUSDT_SPOT bbo feed. theta σ=bipower (return-based, clean Pareto at dt=5: backtest $229 vs $195)
       vol_clip_min: 0.0
       vol_clip_max: 5.0
+      # 2026-06-04 (SHR-65): the dt=5 backtest above was validated with the
+      # jump-robust bipower σ. The key was never settable before SHR-65, so live
+      # silently ran sample_std; now plumbed, set it to match the backtest.
+      vol_estimator: bipower
       edge_buffer: 0.02                     # aligned with HL v31 (was 0.03 PM-tuned) — 16h live shadow took 0 trades; relaxing to HL band per operator call 2026-05-26
       fee_taker: 0.0
       half_spread_assumption: 0.005
