@@ -462,3 +462,95 @@ class StateDAL:
             + sum(p.realized_pnl for p in positions)
             + self.settlement_pnl_since(since_ts_ns)
         )
+
+
+class CachedStateDAL(StateDAL):
+    """StateDAL with an in-memory write-through cache of positions + live orders.
+
+    Why: the scan, stop-loss, and heartbeat loops read positions/orders many
+    times per second; under an event-driven loop (P1) that read rate climbs.
+    Those reads are all on the event-loop thread and `slot.dal` is the single
+    handle to each state.db, so a cache layered here is coherent by construction
+    — there is no out-of-band writer to invalidate it.
+
+    Invariants:
+      * Reads (all_positions/get_position/live_orders) serve from memory.
+      * Writes go DB-FIRST (super().<write>()), THEN update the cache, so a failed
+        commit raises before the cache mutates → DB and cache fail together.
+      * The cache is lazily loaded from the DB on first access (AFTER run_migrations
+        has created the tables) so restart recovery is automatic.
+      * Off-loop aggregate reads (settlement_pnl_since / realized_pnl_since) are
+        inherited UNCHANGED and keep reading the DB — they run on worker threads
+        and must never touch the cache dicts. Same for the events-table helpers.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        super().__init__(db_path)
+        self._loaded = False
+        self._pos_cache: dict[int, Position] = {}
+        self._order_cache: dict[str, OpenOrder] = {}
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        # Pull current truth from the DB once. live_orders() returns only the
+        # not-terminal statuses, which is all the cache ever needs to serve.
+        self._pos_cache = {p.question_idx: p for p in super().all_positions()}
+        self._order_cache = {o.cloid: o for o in super().live_orders()}
+        self._loaded = True
+
+    # ---- positions: cached reads, write-through writes ----
+
+    def upsert_position(self, p: Position) -> None:
+        self._ensure_loaded()
+        # Snapshot field values BEFORE the DB write: SQLAlchemy's
+        # expire_on_commit=True (default) marks all attributes expired after
+        # commit, making any post-commit attribute access raise
+        # DetachedInstanceError once the session closes. Snapshotting first
+        # preserves the values independently of session lifetime.
+        data = p.model_dump()
+        super().upsert_position(p)            # DB first
+        self._pos_cache[data["question_idx"]] = Position(**data)
+
+    def get_position(self, question_idx: int) -> Position | None:
+        self._ensure_loaded()
+        return self._pos_cache.get(question_idx)
+
+    def all_positions(self) -> list[Position]:
+        self._ensure_loaded()
+        return list(self._pos_cache.values())
+
+    def delete_position(self, question_idx: int) -> None:
+        self._ensure_loaded()
+        super().delete_position(question_idx)
+        self._pos_cache.pop(question_idx, None)
+
+    # ---- orders: cached reads, write-through writes ----
+
+    def upsert_order(self, o: OpenOrder) -> None:
+        self._ensure_loaded()
+        # Snapshot before DB write for the same session-expiry reason.
+        data = o.model_dump()
+        super().upsert_order(o)
+        self._order_cache[data["cloid"]] = OpenOrder(**data)
+
+    def update_order_status(
+        self, cloid: str, *, status: str, venue_oid: str | None = None, now_ns: int,
+    ) -> None:
+        self._ensure_loaded()
+        super().update_order_status(
+            cloid, status=status, venue_oid=venue_oid, now_ns=now_ns,
+        )
+        o = self._order_cache.get(cloid)
+        if o is not None:
+            o.status = status
+            o.last_update_ts_ns = now_ns
+            if venue_oid is not None:
+                o.venue_oid = venue_oid
+
+    def live_orders(self) -> list[OpenOrder]:
+        self._ensure_loaded()
+        return [
+            o for o in self._order_cache.values()
+            if o.status in ("pending", "open", "partially_filled")
+        ]
