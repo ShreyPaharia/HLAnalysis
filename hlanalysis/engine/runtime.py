@@ -41,7 +41,7 @@ from .risk_events import (
 )
 from .router import Router
 from .scanner import Scanner
-from .state import StateDAL
+from .state import CachedStateDAL, StateDAL
 from ..alerts.rules import AlertRules
 from ..alerts.telegram import TelegramClient
 from ..strategy.base import Strategy
@@ -568,7 +568,10 @@ class EngineRuntime:
         kill_switch_path = Path(self.deploy_cfg.kill_switch_path_for(alias))
         cloid_prefix = f"hla-{alias}-"
 
-        dal = StateDAL(state_db_path)
+        # Cached DAL: positions/orders are read every loop wake (esp. under the
+        # event-driven scan, P1); serve those from memory, write through to the
+        # DB. run_migrations FIRST so the lazy cache load sees existing tables.
+        dal = CachedStateDAL(state_db_path)
         dal.run_migrations()
 
         if self.exec_client_factory is not None:
