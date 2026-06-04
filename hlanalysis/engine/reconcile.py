@@ -136,6 +136,21 @@ class Reconciler:
                         fee=f.fee, ts_ns=f.ts_ns,
                     ))
                 self.dal.update_order_status(cloid, status="filled", now_ns=now_ns)
+                # Diagnostic (incident 2026-06-04, #1 root-cause suspect): this
+                # path replays the Fill rows + marks the order filled but does
+                # NOT apply the fills to the position table. If the router never
+                # booked this fill (PM ack returned no fill info), the position
+                # stays open by `net_delta` forever → endless re-exit loop. Log
+                # the unapplied delta so the next occurrence is unambiguous.
+                net_delta = sum(
+                    (f.size if f.side == "buy" else -f.size) for f in fills
+                )
+                logger.info(
+                    "reconcile_fill_discovered cloid={} qidx={} symbol={} "
+                    "n_fills={} net_delta={:g} (order marked filled; position "
+                    "table NOT auto-applied — verify router booked it)",
+                    cloid, db_o.question_idx, db_o.symbol, len(fills), net_delta,
+                )
                 drift.append(ReconcileDrift(
                     ts_ns=now_ns, account_alias=self.account_alias, case="state_mismatch", cloid=cloid,
                     detail={"resolution": "filled_via_user_fills"},

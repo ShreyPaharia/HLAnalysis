@@ -43,6 +43,7 @@ class Router:
         strategy_cfg: StrategyConfig,
         strategy_id: str = "late_resolution",
         cloid_prefix: str = "hla-",
+        reject_breaker_threshold: int = 5,
     ) -> None:
         self.dal = dal
         self.gate = gate
@@ -68,6 +69,16 @@ class Router:
         # the first scan tick after restart sees an empty map and lets
         # re-entries through within the cooldown window.
         self._last_exit_ts: dict[int, int] = self._load_cooldowns()
+        # Reject circuit-breaker (incident 2026-06-04). A stale-open position
+        # whose exit can never fill (price out of band / shares already gone)
+        # re-fires every scan tick — 1,200+ identical rejects in ~1h, flooding
+        # Telegram and the PM API. After `reject_breaker_threshold` consecutive
+        # rejects for the same (question_idx, side) we stop placing until a
+        # fill on that question clears the count. Keyed per (qidx, side) so an
+        # unfillable exit doesn't gag unrelated orders; reset on any fill for
+        # the question (a fill proves the leg is tradeable again).
+        self._reject_breaker_threshold = reject_breaker_threshold
+        self._consecutive_rejects: dict[tuple[int, str], int] = {}
 
     def _cooldown_path(self) -> Path:
         return Path(self.dal.db_path).parent / "exit_cooldowns.json"
@@ -213,6 +224,14 @@ class Router:
                     abs(held), held,
                 )
                 intent = _dc_replace(intent, size=abs(held))
+        # 0.5 Reject circuit-breaker. Once a (question, side) has rejected
+        # `threshold` times in a row with no intervening fill, stop placing —
+        # the leg is wedged (price out of band, shares gone) and further IOCs
+        # just flood. Suppressing here skips both the DB write and the network
+        # call. A fill on the question resets the count (see _book_fill).
+        breaker_key = (intent.question_idx, intent.side)
+        if self._consecutive_rejects.get(breaker_key, 0) >= self._reject_breaker_threshold:
+            return
         # 1. Persist pending row before the network call (spec §5.5 idempotency).
         self.dal.upsert_order(OpenOrder(
             cloid=intent.cloid, venue_oid=None, question_idx=intent.question_idx,
@@ -238,6 +257,16 @@ class Router:
         # "orders placed silently never fill", which is what bit us live with
         # the HYPE-short eating all margin and HIP-4 buys getting rejected.
         if ack.status == "rejected":
+            n = self._consecutive_rejects.get(breaker_key, 0) + 1
+            self._consecutive_rejects[breaker_key] = n
+            if n == self._reject_breaker_threshold:
+                logger.warning(
+                    "reject circuit-breaker TRIPPED qidx={} side={} after {} "
+                    "consecutive rejects; suppressing further placements until a "
+                    "fill clears it (last err: {})",
+                    intent.question_idx, intent.side, n,
+                    ack.error or "<no_error_field>",
+                )
             logger.warning(
                 "order rejected cloid={} symbol={} side={} size={} price={} err={}",
                 intent.cloid, intent.symbol, intent.side, intent.size,
@@ -307,10 +336,27 @@ class Router:
         question: QuestionView | None = None,
         question_fields: dict[str, str] | None = None,
     ) -> None:
+        # A fill proves this question's legs are tradeable again — clear any
+        # reject-breaker state for it (both sides) so a fresh position can exit.
+        self._consecutive_rejects = {
+            k: v for k, v in self._consecutive_rejects.items()
+            if k[0] != intent.question_idx
+        }
         q_desc = question_description(question) if question else ""
         o_desc = outcome_description(question, intent.symbol) if question else ""
         existing = self.dal.get_position(intent.question_idx)
         signed = size if intent.side == "buy" else -size
+        # Position-write audit (incident 2026-06-04). Log every fill-driven
+        # position transition with before/after qty so a stale/re-inflated
+        # position can be traced to the exact fill that wrote it — the evidence
+        # that was missing when the v31_pm position stuck at 56.1685.
+        _qty_before = existing.qty if existing is not None else 0.0
+        logger.info(
+            "position_write cloid={} qidx={} symbol={} side={} fill_size={:g} "
+            "fill_price={:g} qty_before={:g} qty_after={:g}",
+            intent.cloid, intent.question_idx, intent.symbol, intent.side,
+            size, price, _qty_before, _qty_before + signed,
+        )
         # Realized PnL on this fill (0 on opens, signed on reduces). Computed
         # here so we can record it on the Fill row and the Exit event with one
         # source of truth. For reduce/close legs, PnL = (close_px − avg_entry) × |closed_qty|

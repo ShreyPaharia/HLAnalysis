@@ -165,6 +165,61 @@ def test_live_place_ioc_sell_amount_is_share_count():
     assert fake.market_placed[0]["order_type"].endswith("FAK")
 
 
+def test_live_place_ioc_sell_clamps_price_above_max_to_0_99():
+    # Regression: near resolution the favorite's bid sits >0.99 (e.g. 0.992).
+    # theta_harvester exits at limit_price=held.bid_px, and PM rejects any
+    # price outside [0.01, 0.99] ("invalid price (0.992), min: 0.01 - max:
+    # 0.99"). Left unclamped this auto-rejects every exit and the engine
+    # re-fires every tick → 1000s of rejects (live incident 2026-06-04).
+    # The price sent to PM must be clamped to the venue's max of 0.99.
+    fake = _FakeClob()
+    c = _client()
+    c._sdk = fake
+    ack = c.place(PlaceRequest(
+        cloid="clamp-sell", symbol="tok", side="sell", size=56.1685,
+        price=0.992, reduce_only=True, time_in_force="ioc",
+    ))
+    assert fake.market_placed, "create_and_post_market_order was not invoked"
+    assert fake.market_placed[0]["price"] == 0.99
+    assert ack.status == "filled"
+
+
+def test_live_place_ioc_buy_clamps_price_below_min_to_0_01():
+    # Symmetric lower bound: a near-zero price (e.g. 0.005) is below PM's min
+    # tick of 0.01 and would reject. Clamp up to 0.01.
+    fake = _FakeClob()
+    c = _client()
+    c._sdk = fake
+    c.place(PlaceRequest(
+        cloid="clamp-buy", symbol="tok", side="buy", size=10.0,
+        price=0.005, reduce_only=False, time_in_force="ioc",
+    ))
+    assert fake.market_placed[0]["price"] == 0.01
+
+
+def test_live_place_gtc_clamps_price_to_valid_range():
+    # The clamp applies to the limit (GTC) path too, not just market orders.
+    fake = _FakeClob()
+    c = _client()
+    c._sdk = fake
+    c.place(PlaceRequest(
+        cloid="clamp-gtc", symbol="tok", side="sell", size=10.0,
+        price=1.0, reduce_only=False, time_in_force="gtc",
+    ))
+    assert fake.placed[0]["price"] == 0.99
+
+
+def test_live_place_in_range_price_passes_through_unchanged():
+    fake = _FakeClob()
+    c = _client()
+    c._sdk = fake
+    c.place(PlaceRequest(
+        cloid="ok", symbol="tok", side="buy", size=10.0,
+        price=0.5, reduce_only=False, time_in_force="ioc",
+    ))
+    assert fake.market_placed[0]["price"] == 0.5
+
+
 def test_live_place_gtc_maps_to_GTC_order_type():
     fake = _FakeClob()
     c = _client()

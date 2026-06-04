@@ -752,6 +752,171 @@ async def test_reduce_only_sell_suppressed_when_position_already_flat(tmp_path):
     )
 
 
+@pytest.mark.asyncio
+async def test_book_fill_emits_position_write_audit_log(tmp_path):
+    """Every fill-driven position write logs its before/after qty + cloid, so
+    the next stale-position incident (2026-06-04) shows exactly which fill
+    moved the position and to what — the missing evidence that blocked the #1
+    root-cause."""
+    from loguru import logger
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    _held(dal, 42, "@30", 10.0)
+    client = _CountingExec()
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=EventBus(),
+                    exec_client=client, strategy_cfg=cfg)
+    msgs: list[str] = []
+    sink = logger.add(lambda m: msgs.append(str(m)), level="INFO")
+    try:
+        await router.handle(
+            Decision(action=Action.EXIT, intents=(_exit_intent("hla-close"),)),
+            inputs=_approval_inputs(), now_ns=5,
+        )
+    finally:
+        logger.remove(sink)
+    audit = [m for m in msgs if "position_write" in m]
+    assert audit, f"no position_write audit log emitted; got {msgs}"
+    joined = " ".join(audit)
+    assert "qty_before=10" in joined and "qty_after=0" in joined, joined
+    assert "hla-close" in joined, joined
+
+
+class _RejectingExec(_CountingExec):
+    """Always rejects — models the live 2026-06-04 loop where every exit on a
+    stale-open PM position was rejected (invalid price / not enough balance)."""
+
+    def place(self, req: PlaceRequest) -> OrderAck:
+        self.placed.append(req)
+        return OrderAck(cloid=req.cloid, venue_oid="", status="rejected",
+                        error="invalid price (0.992), min: 0.01 - max: 0.99")
+
+
+class _ScriptedExec(_CountingExec):
+    """Returns a scripted sequence of statuses (one per call), then rejects."""
+
+    def __init__(self, statuses: list[str]) -> None:
+        super().__init__()
+        self._statuses = list(statuses)
+
+    def place(self, req: PlaceRequest) -> OrderAck:
+        self.placed.append(req)
+        status = self._statuses.pop(0) if self._statuses else "rejected"
+        if status == "filled":
+            return OrderAck(cloid=req.cloid, venue_oid="v", status="filled",
+                            fill_price=req.price, fill_size=req.size)
+        return OrderAck(cloid=req.cloid, venue_oid="", status="rejected",
+                        error="rej")
+
+
+def _held(dal: StateDAL, question_idx: int, symbol: str, qty: float) -> None:
+    dal.upsert_position(Position(
+        question_idx=question_idx, symbol=symbol, qty=qty, avg_entry=0.9,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
+    ))
+
+
+def _exit_intent(cloid: str, question_idx: int = 42, symbol: str = "@30") -> OrderIntent:
+    return OrderIntent(
+        question_idx=question_idx, symbol=symbol, side="sell", size=10.0,
+        limit_price=0.99, cloid=cloid, time_in_force="ioc", reduce_only=True,
+        exit_reason="exit_safety_d",
+    )
+
+
+@pytest.mark.asyncio
+async def test_repeated_rejects_trip_circuit_breaker_and_stop_placing(tmp_path):
+    """After N consecutive rejects for the same (question, side), the router
+    stops placing — backstop against the 2026-06-04 reject flood where a
+    stale-open position re-fired an unfillable exit every scan tick for ~1h
+    (1,200+ rejects). The held position stays put (rejects don't change it),
+    so the SHR-47 reduce-only clamp never fires — isolating the breaker."""
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    _held(dal, 42, "@30", 10.0)
+    client = _RejectingExec()
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=EventBus(),
+                    exec_client=client, strategy_cfg=cfg,
+                    reject_breaker_threshold=3)
+
+    for i in range(8):
+        await router.handle(
+            Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-x{i}"),)),
+            inputs=_approval_inputs(), now_ns=10 + i,
+        )
+
+    assert len(client.placed) == 3, (
+        f"breaker (threshold 3) should stop placing after 3 rejects; "
+        f"placed {len(client.placed)}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_resets_after_a_successful_fill(tmp_path):
+    """A successful fill clears the consecutive-reject counter, so a later
+    bout of rejects gets the full threshold again rather than being
+    permanently suppressed by stale history."""
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    _held(dal, 42, "@30", 100.0)  # large so fills never flatten it
+    # reject, reject, FILL, reject, reject, reject, (7th) ...
+    client = _ScriptedExec(["rejected", "rejected", "filled",
+                            "rejected", "rejected", "rejected", "rejected"])
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=EventBus(),
+                    exec_client=client, strategy_cfg=cfg,
+                    reject_breaker_threshold=3)
+
+    for i in range(7):
+        await router.handle(
+            Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-r{i}"),)),
+            inputs=_approval_inputs(), now_ns=10 + i,
+        )
+
+    # Without reset, the 3rd reject (counting the two before the fill) would
+    # trip the breaker and the 4th+ calls would be suppressed → 4 placements.
+    # With reset-on-fill, calls 4-6 get a fresh budget; only the 7th is
+    # suppressed → 6 placements.
+    assert len(client.placed) == 6
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_is_scoped_per_question(tmp_path):
+    """A tripped breaker on one question must not suppress exits on another —
+    the counter is keyed per (question, side)."""
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    _held(dal, 42, "@30", 10.0)
+    _held(dal, 99, "@40", 10.0)
+    client = _RejectingExec()
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=EventBus(),
+                    exec_client=client, strategy_cfg=cfg,
+                    reject_breaker_threshold=2)
+
+    # Trip q=42 (3 attempts → 2 placed, 3rd suppressed).
+    for i in range(3):
+        await router.handle(
+            Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-a{i}", 42, "@30"),)),
+            inputs=_approval_inputs(), now_ns=10 + i,
+        )
+    placed_after_q42 = len(client.placed)
+
+    # q=99 must still be placeable.
+    q99_inputs = replace(
+        _approval_inputs(),
+        question=replace(_q(), question_idx=99, yes_symbol="@40"),
+    )
+    await router.handle(
+        Decision(action=Action.EXIT, intents=(_exit_intent("hla-b0", 99, "@40"),)),
+        inputs=q99_inputs, now_ns=20,
+    )
+    assert len(client.placed) == placed_after_q42 + 1, (
+        "exit on a different question was wrongly suppressed by q=42's breaker"
+    )
+
+
 class _PartialExec(_CountingExec):
     """Fills at most `fill_cap` units per order, so reduce-only exits partial-
     fill and the position drains gradually across stop-loss ticks (SHR-47)."""

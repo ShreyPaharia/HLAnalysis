@@ -27,6 +27,17 @@ from .exec_types import (
 
 _PM_DATA_API = "https://data-api.polymarket.com"
 
+# Polymarket CLOB accepts prices in [0.01, 0.99] at tick 0.01. Outside this
+# band the venue rejects with "invalid price (X), min: 0.01 - max: 0.99". Near
+# resolution the favorite's bid sits >0.99, so an exit at limit_price=bid_px
+# (theta_harvester / late_resolution) auto-rejects every tick unless clamped.
+_PM_PRICE_MIN = 0.01
+_PM_PRICE_MAX = 0.99
+
+
+def _clamp_pm_price(p: float) -> float:
+    return min(_PM_PRICE_MAX, max(_PM_PRICE_MIN, p))
+
 
 def _real_data_api_get(url: str) -> list[dict]:
     r = requests.get(url, timeout=15)
@@ -206,6 +217,11 @@ class PMClient:
         )
         side = Side.BUY if req.side == "buy" else Side.SELL
         opts = PartialCreateOrderOptions(tick_size="0.01")
+        # Clamp to PM's [0.01, 0.99] tick band before the venue sees it. An
+        # exit priced at the favorite's bid_px (>0.99 near resolution) would
+        # otherwise auto-reject every tick. Affects the order price and the
+        # BUY's USDC `amount` (price·size); the SELL amount is share-count.
+        price = _clamp_pm_price(req.price)
         try:
             sdk = self._ensure_sdk()
             if req.time_in_force == "ioc":
@@ -219,7 +235,7 @@ class PMClient:
                 # spend (price·size); for a SELL it is the share count. Round
                 # down to 2 dp so the maker amount is always within PM's cap.
                 amount = (
-                    _round_down_2(req.price * req.size)
+                    _round_down_2(price * req.size)
                     if req.side == "buy"
                     else _round_down_2(req.size)
                 )
@@ -228,7 +244,7 @@ class PMClient:
                         token_id=req.symbol,
                         amount=amount,
                         side=side,
-                        price=req.price,
+                        price=price,
                         order_type=OrderType.FAK,
                     ),
                     options=opts,
@@ -238,7 +254,7 @@ class PMClient:
                 resp = sdk.create_and_post_order(
                     order_args=OrderArgs(
                         token_id=req.symbol,
-                        price=req.price,
+                        price=price,
                         side=side,
                         size=req.size,
                     ),
@@ -270,10 +286,10 @@ class PMClient:
         # reported making=19.5, taking=30.47 → 30.47 shares at $0.64/share.
         if req.side == "buy":
             fill_size = taking
-            fill_price = (making / taking) if taking > 0 else req.price
+            fill_price = (making / taking) if taking > 0 else price
         else:
             fill_size = making
-            fill_price = (taking / making) if making > 0 else req.price
+            fill_price = (taking / making) if making > 0 else price
         status = "filled" if fill_size > 0 else "open"
         return OrderAck(
             cloid=req.cloid, venue_oid=oid,

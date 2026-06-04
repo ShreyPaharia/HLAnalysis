@@ -60,6 +60,32 @@ def test_local_ghost_with_known_fill_marks_filled_and_replays(dal):
     assert any(d.case == "state_mismatch" for d in res.drift_events)
 
 
+def test_local_ghost_fill_discovery_logs_unapplied_position_delta(dal):
+    """When reconcile discovers a venue fill for a locally-live order it marks
+    the order filled + replays the Fill row, but does NOT touch the position
+    table. That gap is the #1 stale-position root-cause suspect (2026-06-04):
+    a sell fill the router never booked leaves the position open forever. Log
+    the net position delta the discovered fills represent + that it's
+    order-level only, so the next occurrence is unambiguous."""
+    from loguru import logger
+    dal.upsert_order(_db_order("hla-1"))  # local buy 10 @ @30
+    fills = [UserFillRow(
+        fill_id="f-1", cloid="hla-1", symbol="@30", side="buy",
+        price=0.95, size=10.0, fee=0.0, ts_ns=1,
+    )]
+    r = Reconciler(dal, fills_lookup=lambda c: fills if c == "hla-1" else [])
+    msgs: list[str] = []
+    sink = logger.add(lambda m: msgs.append(str(m)), level="INFO")
+    try:
+        r.run(venue_open=[], venue_state=ClearinghouseState(positions=(), account_value_usd=0), now_ns=2)
+    finally:
+        logger.remove(sink)
+    audit = [m for m in msgs if "reconcile_fill_discovered" in m]
+    assert audit, f"no reconcile_fill_discovered log; got {msgs}"
+    joined = " ".join(audit)
+    assert "hla-1" in joined and "net_delta=10" in joined, joined
+
+
 def test_venue_orphan_emits_drift_and_caller_cancels(dal):
     venue_open = [_row("hla-orphan")]
     r = Reconciler(dal, fills_lookup=lambda _cloid: [])
