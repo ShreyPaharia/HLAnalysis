@@ -93,10 +93,16 @@ def _list_keys(s3, bucket: str, prefix: str) -> list[str]:
     return keys
 
 
-def _duck(region: str):
+def _duck(region: str, mem_limit: str = "256MB"):
     import duckdb
 
     con = duckdb.connect()
+    # Under SSM/root there is no $HOME, so httpfs install/cache has nowhere to
+    # live; point DuckDB at a writable dir explicitly.
+    con.execute("SET home_directory='/tmp';")
+    # Cap memory so a merge never OOM-competes with the co-located live engine
+    # on the 1GB box; DuckDB spills to disk if a partition ever needs more.
+    con.execute(f"SET memory_limit='{mem_limit}';")
     con.execute("INSTALL httpfs; LOAD httpfs;")
     con.execute(
         f"CREATE SECRET s3backfill (TYPE S3, PROVIDER credential_chain, REGION '{region}');"
@@ -137,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--region", default="ap-northeast-1")
     ap.add_argument("--apply", action="store_true", help="execute (default: dry run)")
     ap.add_argument("--limit", type=int, default=0, help="cap partitions processed (0 = all)")
+    ap.add_argument("--mem-limit", default="256MB", help="DuckDB memory cap (gentle on the live box)")
     args = ap.parse_args(argv)
 
     import boto3
@@ -163,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\n(dry run — pass --apply to execute)")
         return 0
 
-    con = _duck(args.region)
+    con = _duck(args.region, args.mem_limit)
     done = failed = 0
     for p in plan:
         try:
