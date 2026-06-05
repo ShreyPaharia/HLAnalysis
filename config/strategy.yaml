@@ -210,11 +210,13 @@ strategies:
         max_position_usd: 500             # bumped 300→500 2026-05-24
         stop_loss_pct: null
         tte_min_seconds: 0
-        # 2026-05-21: 86400 → 43200. Post-σ-fix HL sweep: bucket leg at 12h
-        # cap = $101.28 PnL / $5.86 DD / 40 trades vs 24h cap = $95.57 /
-        # $10.37 / 52 trades. Buckets prefer 12h: +$6 PnL, 43% lower DD,
-        # 23% fewer trades.
-        tte_max_seconds: 43200
+        # 2026-06-05: 43200 → 28800 (12h → 8h). Independent bucket tune
+        # (v31_bucket_independent_tune_2026_06_05) found buckets want 8h: the
+        # short hold avoids the late-resolution reversals that drove prod DD.
+        # 24h is catastrophic; DD bifurcates 8h→~$0 vs 10h→~$120. Part of the
+        # bucket "best sim" (fav0.80/tte8h/vlb2700/dt2/esd0/eb0.005 → $1135.72,
+        # Sharpe 26.94, maxDD $0); the other axes live in theta_overrides below.
+        tte_max_seconds: 28800
         price_extreme_threshold: 0.0
         price_extreme_max: 1.0
         distance_from_strike_usd_min: 0
@@ -317,6 +319,34 @@ strategies:
       # d=1.0 / tte=12h: $177 PnL / Sharpe 16. 1.0 is the production
       # ceiling — d=1.5 triggers a re-entry cascade (see summary).
       exit_safety_d: 1.0
+
+    # Per-question.klass theta overrides. Each class maps to a PARTIAL theta
+    # block: only the listed fields override the shared `theta:` defaults above
+    # (resolution: per-class override > instance theta). Unknown knobs fail loud
+    # (extra='forbid', same as `theta:`). vol_sampling_dt_seconds is now
+    # overridable per class — the engine buckets the shared BTC reference feed at
+    # each registered cadence independently ((symbol, dt) MarketState + Scanner
+    # cadence_by_class), so buckets can run dt=2 while binary + v1 stay dt=5.
+    # Omitting this block is bit-identical to today.
+    #
+    # 2026-06-05: the independent HL bucket tune
+    # (v31_bucket_independent_tune_2026_06_05) found buckets want the OPPOSITE of
+    # binary on these axes. This is the bucket "best sim" config
+    # (fav0.80/tte8h/vlb2700/dt2/esd0/eb0.005 → backtest $1135.72, Sharpe 26.94,
+    # maxDD $0 on n=27; tte8h lives on the priceBucket allowlist above). dt=2 is
+    # applied PER-CLASS (bucket only) so binary + v1 stay on the dt=5 feed
+    # untouched. ⚠️ NOT yet burn-in-validated live: n=27 corpus and the mixed
+    # dt=5-binary / dt=2-bucket config has not been backtested as one run (the
+    # tuner is single-cadence) — watch the first live bucket entries. Binary's
+    # own free wins (vlb 3600→900, eb 0.02→0.0) and the shared dt=2 win ($872)
+    # are deliberately NOT applied here (separate, gated decisions).
+    theta_overrides:
+      priceBucket:
+        favorite_threshold: 0.80       # vs binary 0.85
+        vol_lookback_seconds: 2700     # vs binary 3600
+        vol_sampling_dt_seconds: 2     # per-class; binary + v1 stay dt=5
+        exit_safety_d: 0.0             # vs binary 1.0 (mid-hold exit off for buckets)
+        edge_buffer: 0.005             # vs binary 0.02
 
   # --- v3.1 Polymarket ---
   # PM ablation knobs: post-2026-05-23 walk-forward (see Appendix C of

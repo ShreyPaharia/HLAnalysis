@@ -284,16 +284,17 @@ def test_set_reference_cadence_buckets_per_symbol():
     assert math.isclose(rets[0], math.log(201.0 / 200.2), rel_tol=1e-9)
 
 
-def test_set_reference_cadence_conflict_raises():
-    """The shared mark history for a symbol can only be bucketed one way, so a
-    second registration at a different cadence must fail fast (prevents silent
-    skew when two slots read the same reference_symbol)."""
+def test_set_reference_cadence_accumulates_multiple_cadences() -> None:
+    """A symbol may carry multiple cadences — one tick stream fans into each.
+    (The old single-cadence conflict-guard was removed by the (symbol, dt)
+    refactor; v31 buckets dt=2 and v31 binary dt=5 share the BTC feed.)"""
     ms = MarketState()
     ms.set_reference_cadence("BTC", sampling_dt_seconds=5)
-    # Same value is idempotent.
-    ms.set_reference_cadence("BTC", sampling_dt_seconds=5)
-    with pytest.raises(ValueError, match="conflicting mark-bucket cadence"):
-        ms.set_reference_cadence("BTC", sampling_dt_seconds=60)
+    ms.set_reference_cadence("BTC", sampling_dt_seconds=2)  # no raise
+    # Both cadences are actually registered (not just resolvable by explicit dt,
+    # which holds unconditionally); first registered is the dt-less default.
+    assert ms._cadences_by_symbol["BTC"] == [5 * 1_000_000_000, 2 * 1_000_000_000]
+    assert ms.mark_bucket_ns_for("BTC") == 5 * 1_000_000_000
 
 
 def test_set_reference_cadence_sizes_history_for_sub_minute():

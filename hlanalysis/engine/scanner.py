@@ -113,34 +113,87 @@ class Scanner:
         # made σ jumpy enough to bounce p_model across edge_buffer once
         # per minute, churning enter/exit cycles on thin bucket books.
         self._recent_returns_n = self._required_returns_n(cfg)
+        # Per-class cadence overrides (dt, n) for question classes whose theta
+        # override changes vol_sampling_dt_seconds. Classes absent here use the
+        # default dt-less read below — bit-identical to pre-refactor behaviour.
+        self._cadence_by_class = self.cadence_by_class(cfg)
 
     @staticmethod
-    def _required_returns_n(cfg: StrategyConfig) -> int:
-        """How many 1m log-returns to request per scan tick for this strategy.
+    def _bars_for(secs: int, dt: int) -> int:
+        """Number of dt-spaced bars covering ``secs`` of lookback, floored at 32
+        (legacy) so downstream consumers assuming ≥32 (v3.4 LM K-of-N) keep working."""
+        return max(32, (secs + dt - 1) // dt)
 
-        Honors vol_lookback_seconds across cfg.defaults and every allowlist
-        entry, plus theta.{vol,drift}_lookback_seconds when the strategy is
-        theta_harvester. Floored at 32 (the legacy value) so any downstream
-        consumer that assumed ≥32 (e.g. v3.4 LM gate's K-of-N) keeps working.
+    @staticmethod
+    def _lookback_secs(cfg: StrategyConfig) -> int:
+        """Largest σ/drift lookback (seconds) across defaults, allowlist, and the
+        theta block — identical inputs to the legacy _required_returns_n.
+
+        Deliberately EXCLUDES theta_overrides (so the default-path `n` stays
+        bit-identical). cadence_by_class folds in each class's own override
+        lookback on top of this base. The "full" lookback that also spans
+        overrides — used to size MarketState history — is
+        runtime.reference_vol_lookback_seconds; use that, not this, if you need
+        the per-class-inclusive maximum.
         """
         secs = cfg.defaults.vol_lookback_seconds
         for entry in cfg.allowlist:
             secs = max(secs, entry.vol_lookback_seconds)
         if cfg.theta is not None:
-            secs = max(
-                secs,
-                cfg.theta.vol_lookback_seconds,
-                cfg.theta.drift_lookback_seconds,
-            )
-        # MarketState resamples the ref feed to vol_sampling_dt_seconds bars, so
-        # each sample = dt. Derive the divisor from the same config the bucket
-        # period is coupled to — at the default dt=60 this is unchanged, but at
-        # sub-minute cadences we must request more bars to cover the lookback
-        # (else the σ window silently shrinks vs the backtest). Round up to a
-        # whole bar; floor at 32 for the legacy behavior.
+            secs = max(secs, cfg.theta.vol_lookback_seconds, cfg.theta.drift_lookback_seconds)
+        return secs
+
+    @staticmethod
+    def _required_returns_n(cfg: StrategyConfig) -> int:
+        """Default bars/tick for the dt-less read. UNCHANGED output: dt divisor is
+        theta.vol_sampling_dt_seconds for theta slots, else 60 (legacy). The
+        MarketState default series is the slot's first registered cadence, which
+        equals this dt for theta slots — so the dt-less read stays bit-identical.
+
+        Honors vol_lookback_seconds across cfg.defaults and every allowlist
+        entry, plus theta.{vol,drift}_lookback_seconds when the strategy is
+        theta_harvester. Floored at 32 (the legacy value) so any downstream
+        consumer that assumed ≥32 (e.g. v3.4 LM gate's K-of-N) keeps working.
+        MarketState resamples the ref feed to vol_sampling_dt_seconds bars, so
+        each sample = dt. At sub-minute cadences we must request more bars to
+        cover the lookback (else the σ window silently shrinks vs the backtest).
+        Round up to a whole bar; floor at 32 for the legacy behavior.
+        """
         dt = cfg.theta.vol_sampling_dt_seconds if cfg.theta is not None else 60
-        bars = (secs + dt - 1) // dt
-        return max(32, bars)
+        return Scanner._bars_for(Scanner._lookback_secs(cfg), dt)
+
+    @staticmethod
+    def cadence_by_class(cfg: StrategyConfig) -> dict[str, tuple[int, int]]:
+        """Map question.klass -> (dt_seconds, n_bars) ONLY for classes whose
+        theta_override explicitly sets vol_sampling_dt_seconds (model_fields_set).
+        Classes absent here read the default series via the dt-less path, so a
+        slot with no dt override is bit-identical to today. Empty for non-theta
+        slots or slots with no dt override.
+
+        Live: the guard in build_theta_harvester_configs_by_class that previously
+        rejected a per-class vol_sampling_dt_seconds was removed in the (symbol,
+        dt) refactor, and the runtime registers each override cadence on the
+        shared MarketState (see _register_reference_cadences), so the override
+        branch is reachable on a real config.
+        """
+        out: dict[str, tuple[int, int]] = {}
+        base_secs = Scanner._lookback_secs(cfg)
+        for klass, override in (cfg.theta_overrides or {}).items():
+            set_fields = override.model_fields_set
+            if "vol_sampling_dt_seconds" not in set_fields:
+                continue
+            dt = override.vol_sampling_dt_seconds
+            # A class override may also widen its own σ/drift window; size n for
+            # the larger of base and the explicitly-set per-class lookbacks so the
+            # window isn't truncated. (Over-sizing is harmless — the strategy
+            # re-slices to its own vol_lookback; under-sizing truncates σ.)
+            secs = base_secs
+            if "vol_lookback_seconds" in set_fields:
+                secs = max(secs, override.vol_lookback_seconds)
+            if "drift_lookback_seconds" in set_fields:
+                secs = max(secs, override.drift_lookback_seconds)
+            out[klass] = (dt, Scanner._bars_for(secs, dt))
+        return out
 
     def _resolve_pm_strike(self, q: QuestionView) -> QuestionView:
         """Reload a PM up/down strike that the runtime's async capture path
@@ -261,22 +314,40 @@ class Scanner:
             volume_total = sum(
                 self.ms.recent_volume_usd(sym, now=now_ns) for sym in leg_syms
             )
+            # Resolve the (dt, n) for σ/OHLC history reads per question class.
+            # Classes with a theta_override that sets vol_sampling_dt_seconds read
+            # the matching (symbol, dt) bar series; all others use the default
+            # dt-less read — byte-identical to pre-refactor behaviour.
+            # Per-bucket (high, low) bars are also resolved at the same cadence for
+            # range-based σ estimators (Parkinson). Previously NEVER passed, so
+            # slots configured vol_estimator=parkinson silently fell back to stdev
+            # live (the backtest MarketState supplied this all along). Threading it
+            # activates Parkinson on the live path — see MarketState.recent_hl_bars
+            # and summeries/engine_bbo_sigma_source_2026_05_31.md.
+            cadence = self._cadence_by_class.get(q.klass)
+            if cadence is None:
+                # Default path — byte-identical to pre-refactor (dt-less read,
+                # resolves to the symbol's first registered cadence).
+                recent_returns = self.ms.recent_returns(
+                    self.ref_symbol, n=self._recent_returns_n,
+                )
+                recent_hl_bars = self.ms.recent_hl_bars(
+                    self.ref_symbol, n=self._recent_returns_n,
+                )
+            else:
+                dt_s, ret_n = cadence
+                recent_returns = self.ms.recent_returns(
+                    self.ref_symbol, n=ret_n, dt=dt_s,
+                )
+                recent_hl_bars = self.ms.recent_hl_bars(
+                    self.ref_symbol, n=ret_n, dt=dt_s,
+                )
             decision = self.strategy.evaluate(
                 question=q,
                 books=books,
                 reference_price=ref,
-                recent_returns=self.ms.recent_returns(
-                    self.ref_symbol, n=self._recent_returns_n,
-                ),
-                # Per-bucket (high, low) bars for range-based σ estimators.
-                # Previously NEVER passed, so slots configured
-                # vol_estimator=parkinson silently fell back to stdev live (the
-                # backtest MarketState supplied this all along). Threading it
-                # activates Parkinson on the live path — see MarketState.
-                # recent_hl_bars and summeries/engine_bbo_sigma_source_2026_05_31.md.
-                recent_hl_bars=self.ms.recent_hl_bars(
-                    self.ref_symbol, n=self._recent_returns_n,
-                ),
+                recent_returns=recent_returns,
+                recent_hl_bars=recent_hl_bars,
                 recent_volume_usd=volume_total,
                 position=strat_pos,
                 now_ns=now_ns,

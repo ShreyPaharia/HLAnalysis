@@ -51,14 +51,6 @@ class MarketState:
         self._books: dict[str, _MutableBook] = {}
         self._questions: dict[int, QuestionView] = {}
         self._trades: dict[str, deque[TradeEvent]] = {}
-        # Per reference symbol, a deque of per-bucket OHLC bars stored as
-        # ``(high, low, close)``. Close-to-close drives ``recent_returns`` (the
-        # legacy stdev path, bit-identical); high/low drive ``recent_hl_bars``
-        # which activates the strategy's Parkinson σ estimator. Open is not
-        # retained (no consumer needs it). Within a bucket the bar is updated
-        # in place (high=max, low=min, close=last); a new bucket appends a
-        # fresh bar. Maxlen is sized per symbol via ``set_reference_cadence``.
-        self._marks: dict[str, deque[tuple[float, float, float]]] = {}
         self._last_mark: dict[str, float] = {}
         # Timestamp of the latest reference tick per symbol; lets the risk gate
         # detect a stale reference feed (SHR-60).
@@ -70,23 +62,19 @@ class MarketState:
         # as if they were 32 minutes — σ collapses to the floor and
         # p_model/safety_d go to extremes. See bug memo
         # `engine_sigma_sampling_bug_2026_05_21.md`.
-        self._mark_bucket_ns = mark_bucket_ns
-        # Per-symbol overrides of the bucket period, registered by the live
-        # runtime via ``set_reference_cadence`` so each strategy slot's σ
-        # formula (which assumes returns spaced ``vol_sampling_dt_seconds``
-        # apart) sees a series bucketed at exactly that cadence. A single
-        # MarketState is shared across all slots, but each slot reads its own
-        # ``reference_symbol`` (HL=BTC, PM=BTCUSDT_SPOT), so per-symbol bucketing
-        # gives HL/PM independence. Symbols with no override fall back to
-        # ``_mark_bucket_ns`` (60s), preserving legacy behaviour. See
-        # `engine_sigma_sampling_bug_2026_05_21.md` and the v3.7 cadence port.
-        self._mark_bucket_ns_by_symbol: dict[str, int] = {}
-        # Per-symbol deque maxlen overrides. At sub-minute cadences the default
-        # 256-entry history is too short to cover ``vol_lookback_seconds`` of
-        # returns (e.g. dt=5s / 3600s lookback needs ~720 bars), which would
-        # silently truncate the σ window relative to the backtest (whose ring
-        # buffer auto-grows). Registered alongside the bucket period.
-        self._mark_history_by_symbol: dict[str, int] = {}
+        # Per (symbol, dt_ns): a deque of per-bucket OHLC bars (high, low, close).
+        # One reference-tick stream fans into every cadence registered for the
+        # symbol, so a single slot can run different vol_sampling_dt_seconds per
+        # question class off the SAME feed (see the (symbol, dt) refactor plan).
+        self._marks: dict[tuple[str, int], deque[tuple[float, float, float]]] = {}
+        self._mark_history: int = mark_history  # default deque maxlen (legacy)
+        self._mark_history_by_key: dict[tuple[str, int], int] = {}
+        self._mark_bucket_ns: int = mark_bucket_ns  # default (60s) for unregistered symbols
+        self._default_cadences: tuple[int, ...] = (self._mark_bucket_ns,)
+        # Cadences registered per symbol, in registration order. The FIRST
+        # registered cadence is the symbol's default (what a dt-less read
+        # resolves to), preserving single-cadence bit-identity.
+        self._cadences_by_symbol: dict[str, list[int]] = {}
         # Per reference symbol, which feed sources the σ/OHLC reference:
         #   "mark" (default) — the venue MarkEvent (HL perp mark; Binance perp
         #     mark REST-poll). Legacy behaviour, unchanged.
@@ -98,11 +86,10 @@ class MarketState:
         #     fed only one way (shared history), so conflicting registrations
         #     raise — same fail-fast rule as ``set_reference_cadence``.
         self._reference_source_by_symbol: dict[str, str] = {}
-        # Last-bucket-id we wrote to ``_marks`` per symbol; used to coalesce
-        # within-bucket reference-price updates into one bar.
-        self._last_mark_bucket: dict[str, int] = {}
+        # Last-bucket-id written per (symbol, dt_ns); coalesces within-bucket
+        # reference-price updates into one bar per cadence.
+        self._last_mark_bucket: dict[tuple[str, int], int] = {}
         self._volume_window_ns = volume_window_ns
-        self._mark_history = mark_history
         # Cached symbol→question_idx map. Rebuilt lazily on first access after
         # _update_question fires, and reused thereafter. Reconciler runs every
         # ~15s and previously rebuilt this from O(N legs × M questions) on
@@ -118,64 +105,63 @@ class MarketState:
         sampling_dt_seconds: int,
         lookback_seconds: int | None = None,
     ) -> None:
-        """Register the mark-bucketing cadence for ``symbol``.
+        """Register a mark-bucketing cadence for ``symbol``.
 
-        Couples MarketState's per-symbol bucket period to the consuming
-        strategy's ``vol_sampling_dt_seconds`` so there is no train/serve skew:
-        the period the strategy's σ formula assumes equals the period the marks
-        are bucketed at.
+        A symbol may carry MULTIPLE cadences (e.g. dt=5 for v31 binary and dt=2
+        for v31 buckets) — each is bucketed independently from the SAME shared
+        reference-tick stream. Re-registering an existing (symbol, dt) only grows
+        its history sizing (never shrinks, never raises). The first cadence
+        registered for a symbol is its default, returned by dt-less reads.
 
-        Because a single MarketState is shared across all slots, two slots that
-        read the *same* ``reference_symbol`` must agree on the cadence — the one
-        mark history for that symbol can only be bucketed one way. Conflicting
-        registrations raise, failing fast at startup rather than silently
-        skewing whichever slot loses. (On HL today both v1 and v31 read "BTC",
-        so flipping one to dt=5 requires the other to move in lockstep.)
-
-        ``lookback_seconds`` (when given) sizes the per-symbol history deque so
-        it can hold ``ceil(lookback/dt)`` returns; never shrinks below the
-        default ``mark_history``.
+        ``lookback_seconds`` sizes the (symbol, dt) history deque to hold at
+        least ``lookback//dt + 2`` bars; never shrinks below the default maxlen.
         """
-        ns = int(sampling_dt_seconds) * 1_000_000_000
-        if ns <= 0:
+        if sampling_dt_seconds <= 0:
             raise ValueError(
                 f"sampling_dt_seconds must be positive, got {sampling_dt_seconds!r}"
             )
-        prev = self._mark_bucket_ns_by_symbol.get(symbol)
-        if prev is not None and prev != ns:
-            raise ValueError(
-                f"conflicting mark-bucket cadence for symbol {symbol!r}: "
-                f"already registered at {prev // 1_000_000_000}s, refused "
-                f"re-registration at {sampling_dt_seconds}s. All strategy slots "
-                f"reading the same reference_symbol must share one "
-                f"vol_sampling_dt_seconds (the shared mark history can only be "
-                f"bucketed one way)."
-            )
-        self._mark_bucket_ns_by_symbol[symbol] = ns
+        ns = int(sampling_dt_seconds) * 1_000_000_000
+        cadences = self._cadences_by_symbol.setdefault(symbol, [])
+        if ns not in cadences:
+            cadences.append(ns)
+        key = (symbol, ns)
         if lookback_seconds is not None:
-            # +2: recent_returns needs n+1 prices for n returns, plus a margin
-            # so the oldest bar isn't evicted before the window is full.
+            # floor + 2: +1 for the n+1 prices needed to form n returns, +1
+            # margin so the oldest bar isn't evicted before the window fills.
             needed = int(lookback_seconds) // int(sampling_dt_seconds) + 2
-            self._mark_history_by_symbol[symbol] = max(
-                self._mark_history_by_symbol.get(symbol, self._mark_history),
-                needed,
-            )
+            prev = self._mark_history_by_key.get(key, self._mark_history)
+            self._mark_history_by_key[key] = max(prev, needed)
+            hist = self._marks.get(key)
+            if hist is not None and hist.maxlen != self._mark_history_by_key[key]:
+                self._marks[key] = deque(hist, maxlen=self._mark_history_by_key[key])
 
-    def mark_bucket_ns_for(self, symbol: str) -> int:
-        """The bucket period (ns) applied to ``symbol``'s marks. Returns the
-        per-symbol override if registered, else the default. Exposed so the
-        runtime/tests can assert no train/serve skew against the strategy's
-        configured vol_sampling_dt_seconds."""
-        return self._mark_bucket_ns_by_symbol.get(symbol, self._mark_bucket_ns)
+    def _resolve_dt_ns(self, symbol: str, dt: int | None) -> int:
+        """Bucket period (ns) for a (symbol, dt) read. ``dt=None`` resolves to
+        the symbol's FIRST registered cadence (single-cadence bit-identity), or
+        the global default if the symbol was never registered."""
+        if dt is not None:
+            return int(dt) * 1_000_000_000
+        cadences = self._cadences_by_symbol.get(symbol)
+        return cadences[0] if cadences else self._mark_bucket_ns
+
+    def mark_bucket_ns_for(self, symbol: str, dt: int | None = None) -> int:
+        """The bucket period (ns) applied to ``symbol`` at cadence ``dt`` (or the
+        symbol's default cadence when dt is None). Exposed so the runtime/tests
+        can assert no train/serve skew against the strategy's configured
+        vol_sampling_dt_seconds."""
+        return self._resolve_dt_ns(symbol, dt)
 
     def set_reference_source(self, symbol: str, source: str) -> None:
         """Register which feed sources ``symbol``'s σ/OHLC reference.
 
         ``"mark"`` (default) reads the venue MarkEvent; ``"bbo"`` reads the
-        dense BBO mid. Like ``set_reference_cadence`` this couples a per-symbol
-        choice to the shared MarketState, so two slots reading the same
-        reference symbol must agree — a conflicting re-registration raises
-        rather than silently feeding the shared history two ways.
+        dense BBO mid. The shared OHLC history for a symbol can only be fed
+        one way, so two slots reading the same reference symbol must agree on
+        the source — a conflicting re-registration raises (fail-fast) rather
+        than silently feeding the shared history two ways. Note: unlike
+        ``set_reference_source``, ``set_reference_cadence`` does NOT raise on
+        a second distinct cadence; multiple cadences per symbol are accepted
+        and bucketed independently.
         """
         if source not in ("mark", "bbo"):
             raise ValueError(
@@ -250,37 +236,40 @@ class MarketState:
                 pass  # other events ignored in Phase 1
 
     def _ingest_reference_price(self, symbol: str, price: float, ts: int) -> None:
-        """Feed one reference-price tick into the per-symbol OHLC bars +
-        ``last_mark``.
+        """Feed one reference-price tick into ``last_mark`` plus the per-cadence
+        OHLC bars.
 
         Shared by the mark-sourced (MarkEvent) and bbo-sourced (BboEvent mid)
         paths so both produce identical per-bucket ``(high, low, close)`` bars.
-        ``last_mark`` tracks the absolute latest tick (unbucketed). Ticks are
-        bucketed to ``vol_sampling_dt_seconds``-wide windows (default 60s;
-        per-symbol override via ``set_reference_cadence``): within a bucket the
-        bar updates in place (high=max, low=min, close=last); a new bucket
-        appends a fresh ``(price, price, price)`` bar. This keeps the strategy's
+        ``last_mark`` tracks the absolute latest tick (unbucketed). One shared
+        tick stream fans into every cadence registered for the symbol; within a
+        bucket the bar updates in place (high=max, low=min, close=last), a new
+        bucket appends a fresh (price, price, price). This keeps the strategy's
         ``recent_returns`` spanning the wall-clock window its σ formula assumes
         (not the raw sub-second tick rate) and supplies per-bar H/L for
-        Parkinson.
+        Parkinson. An unregistered symbol still gets the legacy single default
+        bucket so pre-registration ticks are not dropped (matches old behaviour).
         """
         self._last_mark[symbol] = price
         self._last_mark_ts[symbol] = ts
-        hist = self._marks.get(symbol)
-        if hist is None:
-            maxlen = self._mark_history_by_symbol.get(symbol, self._mark_history)
-            hist = deque(maxlen=maxlen)
-            self._marks[symbol] = hist
-        bucket = ts // self._mark_bucket_ns_by_symbol.get(
-            symbol, self._mark_bucket_ns,
-        )
-        last_bucket = self._last_mark_bucket.get(symbol)
-        if last_bucket is None or bucket != last_bucket or not hist:
-            hist.append((price, price, price))
-            self._last_mark_bucket[symbol] = bucket
-        else:
-            h, l, _c = hist[-1]
-            hist[-1] = (h if h >= price else price, l if l <= price else price, price)
+        # An unregistered symbol still gets the legacy single default bucket so
+        # pre-registration ticks are not dropped (matches old behaviour).
+        cadences = self._cadences_by_symbol.get(symbol) or self._default_cadences
+        for bucket_ns in cadences:
+            key = (symbol, bucket_ns)
+            hist = self._marks.get(key)
+            if hist is None:
+                maxlen = self._mark_history_by_key.get(key, self._mark_history)
+                hist = deque(maxlen=maxlen)
+                self._marks[key] = hist
+            bucket = ts // bucket_ns
+            last_bucket = self._last_mark_bucket.get(key)
+            if last_bucket is None or bucket != last_bucket or not hist:
+                hist.append((price, price, price))
+                self._last_mark_bucket[key] = bucket
+            else:
+                h, l, _c = hist[-1]
+                hist[-1] = (h if h >= price else price, l if l <= price else price, price)
 
     def _evict_old_trades(self, dq: "deque[TradeEvent]", *, now: int) -> None:
         cutoff = now - self._volume_window_ns
@@ -474,12 +463,14 @@ class MarketState:
         the risk gate's stale-reference check (SHR-60)."""
         return self._last_mark_ts.get(symbol)
 
-    def recent_returns(self, symbol: str, n: int) -> tuple[float, ...]:
-        """Last ``n`` close-to-close log returns for ``symbol``'s OHLC bars.
+    def recent_returns(self, symbol: str, n: int, dt: int | None = None) -> tuple[float, ...]:
+        """Last ``n`` close-to-close log returns for ``symbol`` at cadence ``dt``
+        (default = the symbol's first registered cadence).
 
         Close-to-close is the legacy stdev input; bit-identical to the pre-OHLC
         behaviour since the per-bucket close is still the bucket's last tick."""
-        hist = self._marks.get(symbol)
+        key = (symbol, self._resolve_dt_ns(symbol, dt))
+        hist = self._marks.get(key)
         if hist is None or len(hist) < 2:
             return ()
         bars = list(hist)[-(n + 1):]
@@ -490,8 +481,9 @@ class MarketState:
                 rets.append(math.log(curr_c / prev_c))
         return tuple(rets)
 
-    def recent_hl_bars(self, symbol: str, n: int) -> tuple[tuple[float, float], ...]:
-        """Last ``n`` per-bucket ``(high, low)`` bars for ``symbol``.
+    def recent_hl_bars(self, symbol: str, n: int, dt: int | None = None) -> tuple[tuple[float, float], ...]:
+        """Last ``n`` per-bucket ``(high, low)`` bars for ``symbol`` at cadence ``dt``
+        (default = the symbol's first registered cadence).
 
         Mirrors the backtest MarketState's ``recent_hl_bars`` (KlineRingBuffer
         rows ``[high, low]``) so the strategy's Parkinson σ estimator receives
@@ -501,7 +493,8 @@ class MarketState:
         dormant-Parkinson fix); ``(ln(H/L))²`` is order-invariant so the (high,
         low) row order does not affect σ, but it matches the backtest column
         order for clarity."""
-        hist = self._marks.get(symbol)
+        key = (symbol, self._resolve_dt_ns(symbol, dt))
+        hist = self._marks.get(key)
         if not hist:
             return ()
         bars = list(hist)[-n:]

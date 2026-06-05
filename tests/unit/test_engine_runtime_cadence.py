@@ -197,10 +197,11 @@ def test_hl_pm_independent(tmp_path):
     assert rt.market_state.mark_bucket_ns_for("BTCUSDT") == 60 * _NS
 
 
-def test_conflicting_cadence_same_symbol_raises(tmp_path):
-    """Two slots reading the SAME reference symbol with different dt is an
-    unsatisfiable request (one shared mark history) — must fail fast at startup
-    rather than silently skew one of them."""
+def test_same_symbol_different_cadence_coexist(tmp_path):
+    """Two slots reading the SAME reference symbol with different dt both
+    register successfully — each cadence is bucketed independently from the
+    shared feed (the old single-cadence conflict-guard was removed by the
+    (symbol, dt) refactor)."""
     rt = _runtime(
         [
             _theta_cfg(alias="v31", reference_symbol="BTC", dt=5),
@@ -208,8 +209,12 @@ def test_conflicting_cadence_same_symbol_raises(tmp_path):
         ],
         tmp_path,
     )
-    with pytest.raises(ValueError, match="conflicting mark-bucket cadence"):
-        rt._register_reference_cadences(rt.slots)
+    rt._register_reference_cadences(rt.slots)  # no raise
+    # Both cadences are actually registered on the shared symbol (not just
+    # resolvable by explicit dt, which holds unconditionally). The first
+    # registered cadence (dt=5) is the symbol's default for dt-less reads.
+    assert rt.market_state._cadences_by_symbol["BTC"] == [5 * _NS, 60 * _NS]
+    assert rt.market_state.mark_bucket_ns_for("BTC") == 5 * _NS
 
 
 # ---- per-symbol σ source: mark | bbo (Part B) ------------------------------
@@ -266,3 +271,20 @@ def test_conflicting_reference_source_same_symbol_raises(tmp_path):
     )
     with pytest.raises(ValueError, match="conflicting reference source"):
         rt._register_reference_cadences(rt.slots)
+
+
+def test_per_class_override_registers_extra_cadence(tmp_path) -> None:
+    """A v31 theta slot with a priceBucket dt=2 override registers BOTH dt=5
+    (default) and dt=2 on the shared MarketState for its reference symbol, so
+    both bar series accumulate from the one BTC feed."""
+    from hlanalysis.engine.config import ThetaParams
+    cfg = _theta_cfg(alias="v31", reference_symbol="BTC", dt=5)
+    cfg = cfg.model_copy(update={
+        "theta_overrides": {"priceBucket": ThetaParams(vol_sampling_dt_seconds=2)},
+    })
+    rt = _runtime([cfg], tmp_path)
+    rt._register_reference_cadences(rt.slots)
+    # Assert BOTH cadences are actually REGISTERED on the shared symbol. Do NOT
+    # assert via mark_bucket_ns_for(sym, dt=2) — that returns dt*1e9 for any
+    # explicit dt regardless of registration, so it would pass vacuously.
+    assert rt.market_state._cadences_by_symbol["BTC"] == [5 * _NS, 2 * _NS]

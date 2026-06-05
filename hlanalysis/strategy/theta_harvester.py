@@ -368,10 +368,61 @@ class ThetaHarvesterConfig:
 class ThetaHarvesterStrategy(Strategy):
     name = "theta_harvester"
 
-    def __init__(self, cfg: ThetaHarvesterConfig) -> None:
+    def __init__(
+        self,
+        cfg: ThetaHarvesterConfig,
+        *,
+        cfg_by_class: Mapping[str, ThetaHarvesterConfig] | None = None,
+    ) -> None:
+        # `cfg` is the default; `cfg_by_class` (built by the runtime from the
+        # YAML `theta_overrides:` block) overrides per question.klass. The active
+        # config swap happens inside evaluate() so every internal helper can keep
+        # reading self.cfg unmodified. Mirrors LateResolutionStrategy.
         self.cfg = cfg
+        self._default_cfg = cfg
+        self._cfg_by_class: dict[str, ThetaHarvesterConfig] = (
+            dict(cfg_by_class) if cfg_by_class else {}
+        )
+
+    def _cfg_for(self, question: QuestionView) -> ThetaHarvesterConfig:
+        return self._cfg_by_class.get(question.klass, self._default_cfg)
 
     def evaluate(
+        self,
+        *,
+        question: QuestionView,
+        books: Mapping[str, BookState],
+        reference_price: float,
+        recent_returns: tuple[float, ...],
+        recent_volume_usd: float,
+        position: Position | None,
+        now_ns: int,
+        recent_hl_bars: tuple[tuple[float, float], ...] = (),
+    ) -> Decision:
+        # Resolve and pin the per-class config for this evaluation. The body (and
+        # every helper it calls) reads self.cfg directly, so swapping it is the
+        # simplest correct way to honor per-class theta overrides. evaluate is
+        # single-threaded sync; restoring in finally keeps self.cfg stable for
+        # external readers (diagnostics, tests). No overrides → no swap.
+        resolved_cfg = self._cfg_for(question)
+        if resolved_cfg is self.cfg:
+            return self._evaluate(
+                question=question, books=books, reference_price=reference_price,
+                recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
+                position=position, now_ns=now_ns, recent_hl_bars=recent_hl_bars,
+            )
+        prev_cfg = self.cfg
+        self.cfg = resolved_cfg
+        try:
+            return self._evaluate(
+                question=question, books=books, reference_price=reference_price,
+                recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
+                position=position, now_ns=now_ns, recent_hl_bars=recent_hl_bars,
+            )
+        finally:
+            self.cfg = prev_cfg
+
+    def _evaluate(
         self,
         *,
         question: QuestionView,

@@ -5,7 +5,7 @@ import signal
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
-from dataclasses import dataclass, field, fields as dataclass_fields_of
+from dataclasses import dataclass, field, fields as dataclass_fields_of, replace as dataclass_replace
 from pathlib import Path
 from typing import Awaitable
 
@@ -272,6 +272,39 @@ def build_theta_harvester_config(cfg: StrategyConfig) -> ThetaHarvesterConfig:
     )
 
 
+def build_theta_harvester_configs_by_class(
+    cfg: StrategyConfig,
+) -> dict[str, ThetaHarvesterConfig]:
+    """Build per-question.klass ThetaHarvesterConfig overrides from the strategy's
+    `theta_overrides:` block. Mirrors build_late_resolution_configs_by_class.
+
+    Each class maps to a PARTIAL ThetaParams; only the fields the operator
+    explicitly set (pydantic ``model_fields_set``) override the instance theta
+    defaults built by ``build_theta_harvester_config``. Resolution order is
+    per-class override > instance theta defaults. When `theta_overrides` is unset
+    the map is empty and the strategy runs the single default config for every
+    class — bit-identical to today.
+
+    Using ``model_fields_set`` (not a value diff) is load-bearing: e.g.
+    exit_safety_d=0.0 is both the dataclass default AND a meaningful bucket
+    target, so an explicit 0.0 must win over the instance theta's 1.0.
+
+    Per-class ``vol_sampling_dt_seconds`` IS supported: MarketState buckets the
+    shared reference feed at each registered (symbol, dt) cadence independently,
+    so a class can run a different σ sampling cadence. The engine registers each
+    class's cadence so the dt divergence is realized at the σ-history read.
+    """
+    overrides = cfg.theta_overrides
+    if not overrides:
+        return {}
+    base = build_theta_harvester_config(cfg)
+    by_class: dict[str, ThetaHarvesterConfig] = {}
+    for klass, override in overrides.items():
+        set_fields = {name: getattr(override, name) for name in override.model_fields_set}
+        by_class[klass] = dataclass_replace(base, **set_fields)
+    return by_class
+
+
 def reference_sampling_dt_seconds(cfg: StrategyConfig) -> int:
     """Effective ``vol_sampling_dt_seconds`` for a slot's reference feed.
 
@@ -299,6 +332,17 @@ def reference_vol_lookback_seconds(cfg: StrategyConfig) -> int:
         secs = max(
             secs, cfg.theta.vol_lookback_seconds, cfg.theta.drift_lookback_seconds,
         )
+    # Per-class theta overrides may request a longer σ/drift window for one
+    # class; size MarketState history for the largest across all of them so a
+    # bucket-vs-binary divergence isn't truncated. Only explicitly-set fields
+    # carry a meaningful value (model_fields_set); unset ones fall back to the
+    # already-counted instance theta defaults above.
+    for override in (cfg.theta_overrides or {}).values():
+        set_fields = override.model_fields_set
+        if "vol_lookback_seconds" in set_fields:
+            secs = max(secs, override.vol_lookback_seconds)
+        if "drift_lookback_seconds" in set_fields:
+            secs = max(secs, override.drift_lookback_seconds)
     return secs
 
 
@@ -311,7 +355,10 @@ def _build_strategy_for_slot(cfg: StrategyConfig) -> Strategy:
             cfg_by_class=build_late_resolution_configs_by_class(cfg),
         )
     if cfg.strategy_type == "theta_harvester":
-        return ThetaHarvesterStrategy(build_theta_harvester_config(cfg))
+        return ThetaHarvesterStrategy(
+            build_theta_harvester_config(cfg),
+            cfg_by_class=build_theta_harvester_configs_by_class(cfg),
+        )
     raise ValueError(f"unknown strategy_type: {cfg.strategy_type!r}")
 
 
@@ -554,22 +601,31 @@ class EngineRuntime:
     # ---------- cadence registration ----------
 
     def _register_reference_cadences(self, slots: list[AccountSlot]) -> None:
-        """Register each slot's (reference_symbol → vol_sampling_dt_seconds)
-        on the shared MarketState so marks are bucketed at exactly the cadence
-        the strategy's σ formula assumes (no train/serve skew). Raises on
-        conflicting cadences for the same reference_symbol (see
-        MarketState.set_reference_cadence)."""
+        """Register each slot's default reference cadence AND any per-class
+        theta-override cadences on the shared MarketState, so every (symbol, dt)
+        bar series exists and accumulates from the one shared feed. Multiple
+        cadences per reference_symbol are supported (each bucketed independently).
+        Conflicting σ sources for the same reference_symbol still raise (see
+        MarketState.set_reference_source)."""
         for slot in slots:
+            sym = slot.cfg.reference_symbol
             self.market_state.set_reference_cadence(
-                slot.cfg.reference_symbol,
+                sym,
                 sampling_dt_seconds=reference_sampling_dt_seconds(slot.cfg),
                 lookback_seconds=reference_vol_lookback_seconds(slot.cfg),
             )
-            # Couple the σ/OHLC source (mark | bbo) per reference symbol. Same
-            # fail-fast conflict guard as the cadence — slots sharing a symbol
-            # must agree. Default "mark" preserves HL behaviour bit-identically.
+            for dt_s, _n in Scanner.cadence_by_class(slot.cfg).values():
+                self.market_state.set_reference_cadence(
+                    sym,
+                    sampling_dt_seconds=dt_s,
+                    lookback_seconds=reference_vol_lookback_seconds(slot.cfg),
+                )
+            # Couple the σ/OHLC source (mark | bbo) per reference symbol. Unlike
+            # the cadence (which now accepts multiple per symbol), the source is
+            # fail-fast: slots sharing a symbol must agree on one σ source.
+            # Default "mark" preserves HL behaviour bit-identically.
             self.market_state.set_reference_source(
-                slot.cfg.reference_symbol, slot.cfg.reference_sigma_source,
+                sym, slot.cfg.reference_sigma_source,
             )
 
     # ---------- slot construction ----------

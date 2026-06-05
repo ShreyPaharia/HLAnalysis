@@ -248,6 +248,20 @@ class StrategyConfig(BaseModel):
     strategy_type: StrategyType = "late_resolution"
     # Optional theta_harvester params (ignored when strategy_type != theta_harvester).
     theta: ThetaParams | None = None
+    # Optional per-question.klass theta overrides. Maps a question class (e.g.
+    # "priceBucket") to a PARTIAL ThetaParams: only the fields the operator
+    # explicitly sets override the instance `theta:` defaults (resolution order
+    # per-class override > instance theta). Reuses ThetaParams so the same
+    # extra='forbid' strictness applies — a typo'd knob fails loud (SHR-65). The
+    # independent HL bucket tune (v31_bucket_independent_tune_2026_06_05) found
+    # buckets want the OPPOSITE of binary on favorite_threshold /
+    # vol_lookback_seconds / exit_safety_d / edge_buffer; this is the seam that
+    # lets a class diverge within one strategy instance. No block → bit-identical
+    # to today. vol_sampling_dt_seconds may also be overridden per class: the
+    # engine buckets the shared reference feed at each class's cadence
+    # independently (see MarketState (symbol, dt) bucketing + Scanner
+    # cadence_by_class).
+    theta_overrides: dict[str, ThetaParams] | None = None
     # Symbol whose MarkEvent feeds σ + p_model. Default "BTC" = HL perp mark
     # (HL adapter emits MarkEvent with symbol="BTC"). For PM markets that
     # resolve on Binance SPOT, set "BTCUSDT_SPOT" so the Scanner reads the
