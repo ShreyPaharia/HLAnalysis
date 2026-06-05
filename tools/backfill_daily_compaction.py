@@ -176,13 +176,22 @@ def main(argv: list[str] | None = None) -> int:
         try:
             src_rows, merged_rows = _merge_partition(con, args.bucket, p)
             if src_rows != merged_rows:
-                print(f"  SKIP {p.date_prefix}: row mismatch src={src_rows} merged={merged_rows}")
+                # Roll back the orphan hour=all so it cannot double-count against
+                # the still-present hour=HH sources on read.
+                _delete(s3, args.bucket, [p.target_key])
+                print(f"  SKIP {p.date_prefix}: row mismatch src={src_rows} merged={merged_rows} (rolled back)")
                 failed += 1
                 continue
             _delete(s3, args.bucket, p.sources)
             done += 1
             print(f"  OK   {p.date_prefix}: {len(p.sources)} files -> 1 ({merged_rows} rows)")
         except Exception as e:  # noqa: BLE001 — one bad partition must not abort the run
+            # The merge may have partially written hour=all; remove it so a
+            # failed partition stays hour=HH-only (no duplicate).
+            try:
+                _delete(s3, args.bucket, [p.target_key])
+            except Exception:  # noqa: BLE001
+                pass
             print(f"  FAIL {p.date_prefix}: {type(e).__name__}: {e}")
             failed += 1
     print(f"\ndone: migrated={done} failed/skipped={failed}")
