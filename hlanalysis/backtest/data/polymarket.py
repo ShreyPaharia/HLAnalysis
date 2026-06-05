@@ -48,6 +48,10 @@ _CLOB_BASE = "https://clob.polymarket.com"
 _DEFAULT_REF_SYMBOL = "BTC"
 _DEFAULT_BINARY_SERIES_SLUG = "btc-up-or-down-daily"
 _DEFAULT_KLINES_SUBDIR = "btc_klines"
+# Genuine Binance 1s klines for the `klines_1s` reference source — kept in a
+# separate subdir so the canonical 1m `btc_klines` (PM strike resolution) is
+# untouched. Populated on demand by scripts/fetch_binance_1s_klines.py.
+_DEFAULT_KLINES_1S_SUBDIR = "btc_klines_1s"
 # Map PM reference_symbol → Binance perp partition symbol for the BBO-tick
 # reference variant (cadence-sweep path). Only BTC has overlapping recorded
 # tick coverage right now.
@@ -333,7 +337,8 @@ class PolymarketDataSource:
         reference_symbol: str = _DEFAULT_REF_SYMBOL,
         series_slug: str = _DEFAULT_BINARY_SERIES_SLUG,
         klines_subdir: str = _DEFAULT_KLINES_SUBDIR,
-        reference_source: Literal["klines", "binance_bbo"] = "klines",
+        klines_1s_subdir: str = _DEFAULT_KLINES_1S_SUBDIR,
+        reference_source: Literal["klines", "binance_bbo", "klines_1s"] = "klines",
         reference_resample_seconds: int = 60,
         binance_data_root: Path | str | None = None,
         binance_bbo_product_type: Literal["perp", "spot"] = "perp",
@@ -345,6 +350,7 @@ class PolymarketDataSource:
         self._reference_symbol = reference_symbol
         self._series_slug = series_slug
         self._klines_subdir = klines_subdir
+        self._klines_1s_subdir = klines_1s_subdir
         # Reference-feed mode.
         # - "klines" (default): emit cached 1m Binance klines as ReferenceEvents.
         #   This is the 12-month-corpus path used by the v3.1/v3.5/v3.6 tune.
@@ -356,8 +362,11 @@ class PolymarketDataSource:
         #   Use `binance_bbo_product_type="spot"` to match PM's settlement
         #   instrument (Binance SPOT 1m close); default is "perp" for
         #   backward-compatibility with existing BBO cadence sweeps.
-        if reference_source not in ("klines", "binance_bbo"):
-            raise ValueError(f"reference_source must be 'klines' or 'binance_bbo', got {reference_source!r}")
+        if reference_source not in ("klines", "binance_bbo", "klines_1s"):
+            raise ValueError(
+                "reference_source must be 'klines', 'binance_bbo', or 'klines_1s', "
+                f"got {reference_source!r}"
+            )
         if reference_resample_seconds <= 0:
             raise ValueError(f"reference_resample_seconds must be positive, got {reference_resample_seconds}")
         if binance_bbo_product_type not in ("perp", "spot"):
@@ -395,6 +404,7 @@ class PolymarketDataSource:
         # market would re-parse the manifest + the (large) BTC klines JSON.
         self._manifest_cache: dict | None = None
         self._klines_cache: list[dict] | None = None
+        self._klines_1s_cache: list[dict] | None = None
         # Markets we've already warned about for settlement→manifest fallback,
         # so the per-market warning fires once (resolved_outcome is queried
         # several times per market across the runner + CLI + event stream).
@@ -514,9 +524,11 @@ class PolymarketDataSource:
                     per_leg_outcomes[str(pair[0])] = yes_outcome
                     per_leg_outcomes[str(pair[1])] = _flip(yes_outcome)
 
-            # Reference events (klines or BBO — same logic as _build_stream).
+            # Reference events (klines / BBO / 1s-klines — same logic as _build_stream).
             if self._reference_source == "binance_bbo":
                 ref_events = self._load_binance_bbo_reference(q.start_ts_ns, q.end_ts_ns)
+            elif self._reference_source == "klines_1s":
+                ref_events = self._load_klines_1s_reference(q.start_ts_ns, q.end_ts_ns)
             else:
                 klines = self._load_klines_window(q.start_ts_ns, q.end_ts_ns)
                 ref_events = [
@@ -592,6 +604,8 @@ class PolymarketDataSource:
                 files.append(str(p))
         # Reference events derive from klines — include them in the key.
         files += _glob(str(self._cache_root / self._klines_subdir / "*.json"))
+        if self._reference_source == "klines_1s":
+            files += _glob(str(self._cache_root / self._klines_1s_subdir / "*.json"))
         return [Path(f) for f in files]
 
     def _recorded_book_glob(self, token_id: str) -> str:
@@ -956,6 +970,8 @@ class PolymarketDataSource:
         # contract is not negotiable. Only σ-feeding ReferenceEvents change.
         if self._reference_source == "binance_bbo":
             ref_events = self._load_binance_bbo_reference(q.start_ts_ns, q.end_ts_ns)
+        elif self._reference_source == "klines_1s":
+            ref_events = self._load_klines_1s_reference(q.start_ts_ns, q.end_ts_ns)
         else:
             # Populate `open` so binary-market runners can use the first bar's
             # open as the canonical strike — matching the legacy `day_open_btc`
@@ -1095,6 +1111,75 @@ class PolymarketDataSource:
             f"extended {self._klines_subdir}/ coverage with {len(out)} {symbol} "
             f"bars up to ts={out[-1]['ts_ns']} (SHR-54 coupled fetch)"
         )
+
+    def _load_all_klines_1s(self) -> list[dict]:
+        """Load + cache all genuine Binance 1s klines from the 1s subdir.
+
+        Separate from ``_load_all_klines`` (1m) so the canonical strike series is
+        never polluted by the 1s feed. Populated on demand by
+        scripts/fetch_binance_1s_klines.py."""
+        if self._klines_1s_cache is not None:
+            return self._klines_1s_cache
+        d = self._cache_root / self._klines_1s_subdir
+        rows: list[dict] = []
+        if d.exists():
+            for f in sorted(d.glob("*.json")):
+                rows.extend(json.loads(f.read_text()))
+        rows.sort(key=lambda r: int(r["ts_ns"]))
+        self._klines_1s_cache = rows
+        return rows
+
+    def _load_klines_1s_reference(
+        self, start_ns: int, end_ns: int,
+    ) -> list[ReferenceEvent]:
+        """Genuine Binance 1s klines for [start_ns, end_ns), bucketed to
+        ``reference_resample_seconds`` OHLC ReferenceEvents.
+
+        The on-demand-klines counterpart to ``_load_binance_bbo_reference``: same
+        OHLC bucketing contract (high/low = bucket extremes, close = last bar's
+        close, ts = last bar's ts) so a dt=5 1s-kline σ series is directly
+        comparable to the recorded-BBO σ series. The H/L here are TRADE-OHLC
+        extremes (vs the BBO path's quote-mid extremes) — that difference is the
+        whole point of the equivalence experiment, and it flows through the
+        Parkinson estimator. Half-open window [start, end) matches the BBO path.
+        Returns [] when the 1s cache is empty/uncovered (gates degrade gracefully).
+        """
+        resample_ns = self._reference_resample_ns
+        out: list[ReferenceEvent] = []
+        cur_bucket: int | None = None
+        o = h = l = c = 0.0
+        last_ts = 0
+        for k in self._load_all_klines_1s():
+            ts = int(k["ts_ns"])
+            if ts < start_ns or ts >= end_ns:
+                continue
+            kh, kl, kc, ko = float(k["high"]), float(k["low"]), float(k["close"]), float(k["open"])
+            bucket = ts // resample_ns
+            if cur_bucket is None:
+                cur_bucket = bucket
+                o, h, l, c = ko, kh, kl, kc
+                last_ts = ts
+            elif bucket != cur_bucket:
+                out.append(ReferenceEvent(
+                    ts_ns=last_ts, symbol=self._reference_symbol,
+                    high=h, low=l, close=c, open=o,
+                ))
+                cur_bucket = bucket
+                o, h, l, c = ko, kh, kl, kc
+                last_ts = ts
+            else:
+                if kh > h:
+                    h = kh
+                if kl < l:
+                    l = kl
+                c = kc
+                last_ts = ts
+        if cur_bucket is not None:
+            out.append(ReferenceEvent(
+                ts_ns=last_ts, symbol=self._reference_symbol,
+                high=h, low=l, close=c, open=o,
+            ))
+        return out
 
     def _load_binance_bbo_reference(
         self, start_ns: int, end_ns: int,

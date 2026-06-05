@@ -13,6 +13,31 @@ import requests
 _BASE = "https://api.binance.com"
 _LIMIT = 1000
 
+# Bar width per Binance kline ``interval`` string, in ms. Used to advance the
+# paging cursor one bar past the last row of each page. The legacy code
+# hardcoded 60_000 (correct only for "1m"); "1s" needs 1_000 or it skips 59 of
+# every 60 seconds. Extend this map to support more intervals as needed.
+_INTERVAL_MS = {
+    "1s": 1_000,
+    "1m": 60_000,
+    "3m": 180_000,
+    "5m": 300_000,
+    "15m": 900_000,
+    "30m": 1_800_000,
+    "1h": 3_600_000,
+    "4h": 14_400_000,
+    "1d": 86_400_000,
+}
+
+
+def _interval_ms(interval: str) -> int:
+    try:
+        return _INTERVAL_MS[interval]
+    except KeyError:
+        raise ValueError(
+            f"unsupported kline interval {interval!r}; known: {sorted(_INTERVAL_MS)}"
+        ) from None
+
 
 @dataclass(frozen=True, slots=True)
 class Kline:
@@ -36,7 +61,13 @@ def fetch_klines(
     symbol: str = "BTCUSDT",
     interval: str = "1m",
 ) -> list[Kline]:
-    """Page through Binance klines and return parsed rows ascending by ts."""
+    """Page through Binance klines and return parsed rows ascending by ts.
+
+    ``interval`` accepts any key in ``_INTERVAL_MS`` (e.g. "1s", "1m"); the
+    paging cursor advances one bar-width past each page's last open so 1s pulls
+    page correctly (the legacy hardcoded 60_000 advance only suited 1m).
+    """
+    step_ms = _interval_ms(interval)
     out: list[Kline] = []
     cursor = start_ts_ms
     while cursor < end_ts_ms:
@@ -64,7 +95,7 @@ def fetch_klines(
                 )
             )
         last_open_ms = int(page[-1][0])
-        cursor = last_open_ms + 60_000
+        cursor = last_open_ms + step_ms
         if len(page) < _LIMIT:
             break
     return out
