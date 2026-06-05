@@ -542,13 +542,19 @@ class PolymarketDataSource:
             self._fastpath_source_files(q),
             _build,
             force_rebuild=getattr(self, "_force_rebuild_cache", False),
-            # Reference events depend on the resample period + reference/book
-            # mode; keep them in the key so a bundle built under one config
-            # never aliases to a request under another.
-            config_sig=(
-                f"rrs={self._reference_resample_ns}|refsrc={self._reference_source}"
-                f"|book={self._book_source}|bbo={self._binance_bbo_product_type}"
-            ),
+            config_sig=self._bundle_config_sig(),
+        )
+
+    def _bundle_config_sig(self) -> str:
+        """Cache-key signature: every non-source-file input that changes the
+        built bundle (resample period + reference/book source mode), so a bundle
+        built under one config never aliases to a request under another. Keep in
+        sync with the params that flow into ``_build``."""
+        return (
+            f"rrs={self._reference_resample_ns}"
+            f"|refsrc={self._reference_source}"
+            f"|book={self._book_source}"
+            f"|bbo={self._binance_bbo_product_type}"
         )
 
     def _fastpath_source_files(self, q: QuestionDescriptor) -> list[Path]:

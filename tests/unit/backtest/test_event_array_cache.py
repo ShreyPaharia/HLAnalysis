@@ -2,14 +2,19 @@
 from __future__ import annotations
 import numpy as np
 import pytest
-from hlanalysis.backtest.data._event_array_cache import cached_bundle, cache_key
+from hlanalysis.backtest.data._event_array_cache import (
+    cached_bundle, cache_key, caching_enabled,
+)
 from hlanalysis.backtest.data._fastpath_core import FastPathBundle, LegArrays, event_dtype
+from hlanalysis.backtest.core.events import ReferenceEvent, SettlementEvent
 
 
 @pytest.fixture(autouse=True)
 def _enable_caching(monkeypatch):
-    # Caching is opt-in (default OFF); these tests exercise the cache itself.
+    # Caching is default-ON in prod, but the global conftest fixture forces it
+    # OFF for hermeticity; these tests exercise the cache itself so re-enable.
     monkeypatch.setenv("HLBT_CACHE_EVENT_ARRAYS", "1")
+    monkeypatch.delenv("HLBT_NO_CACHE", raising=False)
 
 
 def _bundle():
@@ -17,6 +22,31 @@ def _bundle():
     return FastPathBundle(
         leg_arrays={"#0": LegArrays(events=arr, book_ts=np.array([1, 2], dtype=np.int64))},
         reference_events=[], settlement_events=[],
+    )
+
+
+def _realistic_bundle(n: int = 40_000) -> FastPathBundle:
+    """A leg resembling real book depth: monotone ns timestamps, ~40 price
+    levels, low-card event flags, mostly-zero id columns; fewer book_ts than
+    events. Exercises the delta-encode/round-trip path (zeros would not)."""
+    rng = np.random.default_rng(0)
+    ev = np.zeros(n, dtype=event_dtype)
+    ts0 = 1_700_000_000_000_000_000
+    ev["exch_ts"] = ts0 + np.cumsum(rng.integers(1, 5_000_000, n))
+    ev["local_ts"] = ev["exch_ts"] + rng.integers(0, 1_000_000, n)
+    ev["px"] = rng.choice(40000.0 + np.arange(40) * 5.0, n)
+    ev["qty"] = rng.choice(np.arange(1, 50) * 0.01, n)
+    ev["ev"] = rng.choice([1, 2, 4], n).astype(ev["ev"].dtype)
+    bts = np.ascontiguousarray(ev["exch_ts"][::3])  # monotone, shorter than events
+    return FastPathBundle(
+        leg_arrays={"#0": LegArrays(events=ev, book_ts=bts)},
+        reference_events=[
+            ReferenceEvent(ts_ns=ts0 + i, symbol="BTC", high=1.0, low=0.5, close=0.7, open=0.6)
+            for i in range(5)
+        ],
+        settlement_events=[
+            SettlementEvent(ts_ns=ts0 + 9, question_idx=0, outcome="up", symbol="@30"),
+        ],
     )
 
 
@@ -86,3 +116,115 @@ def test_corrupt_cache_file_rebuilds(tmp_path):
         f.write_bytes(b"not-an-npz")
     cached_bundle(cdir, "q1", [src], build)
     assert calls["n"] == 2  # corruption treated as miss
+
+
+def test_saved_bundle_is_compressed(tmp_path):
+    """A bundle dominated by a large zero array must serialize far below its raw
+    nbytes — i.e. the .npz is compressed, not stored raw (the disk-blowup fix)."""
+    n = 50_000
+    big = np.zeros(n, dtype=event_dtype)
+    bundle = FastPathBundle(
+        leg_arrays={"#0": LegArrays(events=big, book_ts=np.zeros(n, dtype=np.int64))},
+        reference_events=[], settlement_events=[],
+    )
+    src = tmp_path / "a.parquet"; src.write_bytes(b"x")
+    cdir = tmp_path / "cache"
+    cached_bundle(cdir, "q1", [src], lambda: bundle)
+    npz = next(cdir.glob("*.npz"))
+    raw = big.nbytes + n * 8
+    assert npz.stat().st_size < raw * 0.1  # compresses to well under 10% of raw
+
+
+def test_stale_build_version_entries_evicted(tmp_path, monkeypatch):
+    """Entries from a superseded BUILD_VERSION are orphaned (unreachable) — a
+    later cache op must delete them so the dir doesn't grow without bound."""
+    import hlanalysis.backtest.data._event_array_cache as m
+    cdir = tmp_path / "cache"
+    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    monkeypatch.setattr(m, "_BUILD_VERSION", 1)
+    cached_bundle(cdir, "q1", [src], _bundle)
+    old = {p.name for p in cdir.glob("*.npz")}
+    assert old  # an entry was written under v1
+    monkeypatch.setattr(m, "_BUILD_VERSION", 2)
+    cached_bundle(cdir, "q2", [src], _bundle)
+    now = {p.name for p in cdir.glob("*.npz")}
+    assert now.isdisjoint(old)  # stale v1 files evicted
+    assert all(n.startswith("v2_") for n in now)
+
+
+def test_config_variants_under_same_version_kept(tmp_path):
+    """Different config_sig (e.g. dt=5 vs dt=60) under the SAME BUILD_VERSION are
+    both valid — eviction must NOT touch them."""
+    cdir = tmp_path / "cache"
+    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    cached_bundle(cdir, "q1", [src], _bundle, config_sig="rrs=5")
+    cached_bundle(cdir, "q1", [src], _bundle, config_sig="rrs=60")
+    assert len(list(cdir.glob("*.npz"))) == 2  # both kept
+
+
+def test_roundtrip_preserves_realistic_data(tmp_path):
+    """Column-split + delta-encoded storage must reconstruct the bundle exactly:
+    every struct field, book_ts, and the ref/settle events."""
+    b = _realistic_bundle()
+    cdir = tmp_path / "cache"; src = tmp_path / "a"; src.write_bytes(b"x")
+    cached_bundle(cdir, "q", [src], lambda: b)  # cold: writes
+    def _no_build():
+        raise AssertionError("should have hit the cache, not rebuilt")
+    got = cached_bundle(cdir, "q", [src], _no_build)  # warm: loads from disk
+    la0, la1 = b.leg_arrays["#0"], got.leg_arrays["#0"]
+    assert la1.events.dtype == event_dtype
+    assert la0.events.tobytes() == la1.events.tobytes()  # every field exact
+    assert np.array_equal(la0.book_ts, la1.book_ts)
+    assert [(r.ts_ns, r.symbol, r.high, r.low, r.close, r.open) for r in got.reference_events] \
+        == [(r.ts_ns, r.symbol, r.high, r.low, r.close, r.open) for r in b.reference_events]
+    assert [(s.ts_ns, s.question_idx, s.outcome, s.symbol) for s in got.settlement_events] \
+        == [(s.ts_ns, s.question_idx, s.outcome, s.symbol) for s in b.settlement_events]
+
+
+def test_column_split_smaller_than_struct_layout(tmp_path):
+    """The cache must store the event arrays column-split (not as the 64-byte
+    interleaved struct), so deflate compresses each homogeneous column far
+    better than the row-major record layout."""
+    import io
+    b = _realistic_bundle()
+    la = b.leg_arrays["#0"]
+    buf = io.BytesIO()
+    np.savez_compressed(buf, ev=la.events, bts=la.book_ts)  # old struct layout
+    struct_size = buf.getbuffer().nbytes
+    cdir = tmp_path / "cache"; src = tmp_path / "a"; src.write_bytes(b"x")
+    cached_bundle(cdir, "q", [src], lambda: b)
+    got = next(cdir.glob("*.npz")).stat().st_size
+    assert got < struct_size * 0.92  # meaningfully smaller than struct layout
+
+
+def test_caching_default_on_when_unset(monkeypatch):
+    """Default is ON: with no cache env vars set, caching is enabled."""
+    monkeypatch.delenv("HLBT_CACHE_EVENT_ARRAYS", raising=False)
+    monkeypatch.delenv("HLBT_NO_CACHE", raising=False)
+    assert caching_enabled() is True
+
+
+def test_no_cache_env_disables(monkeypatch):
+    """HLBT_NO_CACHE (set by --fresh/--no-cache) is a hard off, even if unset
+    otherwise-default-on."""
+    monkeypatch.delenv("HLBT_CACHE_EVENT_ARRAYS", raising=False)
+    monkeypatch.setenv("HLBT_NO_CACHE", "1")
+    assert caching_enabled() is False
+
+
+def test_explicit_zero_disables(monkeypatch):
+    monkeypatch.delenv("HLBT_NO_CACHE", raising=False)
+    monkeypatch.setenv("HLBT_CACHE_EVENT_ARRAYS", "0")
+    assert caching_enabled() is False
+
+
+def test_size_cap_evicts_oldest(tmp_path, monkeypatch):
+    """A configured byte cap evicts least-recently-written entries so the cache
+    cannot grow without bound under default-on."""
+    cdir = tmp_path / "cache"; src = tmp_path / "a"; src.write_bytes(b"x")
+    cached_bundle(cdir, "q1", [src], _realistic_bundle, config_sig="a")
+    one = next(cdir.glob("*.npz")).stat().st_size
+    monkeypatch.setenv("HLBT_CACHE_MAX_BYTES", str(int(one * 1.5)))  # holds ~1 entry
+    cached_bundle(cdir, "q2", [src], _realistic_bundle, config_sig="b")
+    names = sorted(p.name for p in cdir.glob("*.npz"))
+    assert len(names) == 1  # oldest evicted under the cap

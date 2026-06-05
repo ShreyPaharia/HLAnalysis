@@ -11,11 +11,14 @@ event-array cache key so a logic change invalidates every cached entry.
 from __future__ import annotations
 
 # Bump on ANY change to assembly semantics below (cache-invalidation tag).
+# Also bump on a change to the on-disk serialization format, since old entries
+# can no longer be read by the new loader; the version-prefixed filename makes
+# stale-format entries get evicted on the next run.
 # v2: cache key now folds in config_sig (reference resample dt + source mode).
-# Bumped to orphan any pre-existing on-disk cache keyed WITHOUT config_sig —
-# those could serve a bundle built at the wrong dt (a dt=60 bundle for a dt=5
-# request), the sigma-inflation footgun.
-BUILD_VERSION = 2
+# v3: on-disk format is column-split + delta-encoded timestamps (was the raw
+#     64-byte interleaved struct); deflate compresses homogeneous columns far
+#     better. Old v2 .npz are a different layout → orphaned + evicted.
+BUILD_VERSION = 3
 
 import logging
 from dataclasses import dataclass

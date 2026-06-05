@@ -341,10 +341,23 @@ class HLHip4DataSource:
             source_files,
             _build,
             force_rebuild=getattr(self, "_force_rebuild_cache", False),
-            # The bundle's reference events depend on the resample period and
-            # the reference feed kind — both must be in the key, or a dt=5
-            # bundle aliases to a dt=60 request (the sigma-inflation footgun).
-            config_sig=f"rrs={self._reference_resample_ns}|ref={self.ref_event}",
+            config_sig=self._bundle_config_sig(),
+        )
+
+    def _bundle_config_sig(self) -> str:
+        """Cache-key signature: every non-source-file input that changes the
+        built bundle. A dt or feed-kind change MUST alter this, or a dt=5 bundle
+        aliases to a dt=60 request (the sigma-inflation footgun).
+
+        ``ref_source`` is already keyed transitively (it changes the reference
+        parquet paths in ``_fastpath_source_files``), but it is included here
+        defensively so the contract holds even if that file-resolution is later
+        refactored. Keep this in sync with the params that flow into ``_build``.
+        """
+        return (
+            f"rrs={self._reference_resample_ns}"
+            f"|ref={self.ref_event}"
+            f"|refsrc={self.ref_source}"
         )
 
     def _fastpath_source_files(self, q: QuestionDescriptor) -> list[Path]:

@@ -138,3 +138,36 @@ per timestamp → identical fills (the same basis on which HL was validated).
   `tests/fixtures/configs/v1-smoke.json`.
 - MOD: `_hl_hip4_fastpath.py`, `hl_hip4.py`, `polymarket.py`, `hftbt_runner.py`
   (one-line `HLBT_DISABLE_FASTPATH` guard), `cli.py`, `tuning.py`, `.gitignore`.
+
+## Addendum (2026-06-05, same day) — cache hardened + flipped default-ON
+
+After a benchmark battery found two cache bugs, the cache was first made
+**opt-in/default-OFF** (commit `7881738`): (1) the key omitted
+`reference_resample_seconds`/source-mode so a dt=60 bundle could serve a dt=5
+request (σ-inflation poisoning); (2) uncompressed bundles filled the disk. Both
+are now fixed and the cache is **default-ON** again, with these safeguards:
+
+- **Poisoning** — `config_sig` (resample dt + feed/book source) folded into the
+  key on both venues; extracted to `HLHip4DataSource._bundle_config_sig()` /
+  `PolymarketDataSource._bundle_config_sig()` with a coverage test
+  (`test_bundle_config_sig.py`) asserting every bundle-affecting param changes
+  the signature — guards the "forgot-a-knob" regression class.
+- **Orphan eviction** — entries are filename-prefixed `v{BUILD_VERSION}_`;
+  `_prune_stale_versions` deletes superseded-version files on the next run
+  (cheap glob, no file reads). Disk is now bounded by *one entry per
+  (question, config)*, not unbounded growth.
+- **Size cap** — `_enforce_size_cap` LRU-evicts by mtime past a byte budget
+  (default 20 GiB; `HLBT_CACHE_MAX_GB` / `HLBT_CACHE_MAX_BYTES`).
+- **Compression / storage** — `np.savez` → `np.savez_compressed`, and the
+  event arrays are **column-split** (each `event_dtype` field stored as its own
+  homogeneous array) with **delta-encoded** monotone timestamp columns. On a
+  realistic 160k-event leg this is **5.7× vs raw** (vs 4.0× for compressed
+  struct layout). Tuned columnar parquet measured ~7× but needs a per-entry
+  multi-file directory serializer; rejected as over-engineering since eviction
+  already bounds disk — left as a documented follow-up if a real full-corpus
+  sweep proves disk is still the binding constraint. `BUILD_VERSION` 2→3
+  orphans the old struct-layout entries.
+- **Escape hatch** — `--fresh` / `--no-cache` (sets `HLBT_NO_CACHE`) forces a
+  guaranteed-fresh build; `--rebuild-cache` forces a one-time rebuild;
+  `--cache-event-arrays` is now a deprecated no-op. Tests are kept hermetic via
+  a global autouse conftest fixture that sets `HLBT_CACHE_EVENT_ARRAYS=0`.

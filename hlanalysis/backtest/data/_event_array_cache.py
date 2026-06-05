@@ -15,10 +15,36 @@ from typing import Callable
 import numpy as np
 
 from ._fastpath_core import BUILD_VERSION as _BUILD_VERSION
-from ._fastpath_core import FastPathBundle, LegArrays
+from ._fastpath_core import FastPathBundle, LegArrays, event_dtype
 from ..core.events import ReferenceEvent, SettlementEvent
 
 log = logging.getLogger(__name__)
+
+# Integer struct columns that are monotone-increasing (nanosecond timestamps).
+# Delta-encoding them before deflate turns large near-constant values into small
+# deltas that compress to almost nothing. Floats are NOT delta'd (lossy via
+# float accumulation); they rely on column-split + dictionary-like redundancy.
+_DELTA_FIELDS = ("exch_ts", "local_ts")
+
+
+def _delta(a: np.ndarray) -> np.ndarray:
+    """Successive-difference encode an integer array (first element kept raw).
+
+    ``_undelta(_delta(a)) == a`` exactly for int arrays. No-op for size < 2.
+    """
+    a = np.ascontiguousarray(a)
+    if a.size < 2:
+        return a
+    out = a.copy()
+    out[1:] = a[1:] - a[:-1]
+    return out
+
+
+def _undelta(d: np.ndarray) -> np.ndarray:
+    """Inverse of ``_delta`` — cumulative sum recovers the original int array."""
+    if d.size < 2:
+        return d
+    return np.cumsum(d, dtype=d.dtype)
 
 
 def cache_key(question_id: str, source_files: list[Path], config_sig: str = "") -> str:
@@ -74,13 +100,23 @@ def _save(path: Path, b: FastPathBundle) -> None:
     }
     for i, sym in enumerate(legs):
         la = b.leg_arrays[sym]
-        payload[f"ev_{i}"] = la.events
-        payload[f"bts_{i}"] = la.book_ts
-    # np.savez appends ".npz" to the path if not already present.
+        # Column-split: store each struct field as its own homogeneous array so
+        # deflate sees contiguous like-typed bytes (zeros, repeats, monotone
+        # runs) instead of a 64-byte interleaved record. Timestamp columns are
+        # delta-encoded. ``_load`` reassembles the event_dtype struct.
+        ev = la.events
+        for name in ev.dtype.names:
+            col = np.ascontiguousarray(ev[name])
+            payload[f"ev_{i}__{name}"] = _delta(col) if name in _DELTA_FIELDS else col
+        payload[f"bts_{i}"] = _delta(np.ascontiguousarray(la.book_ts))
+    # np.savez_compressed appends ".npz" to the path if not already present.
     # Use a tmp file that already ends in ".npz" so the written file
     # matches the tmp variable name, then atomically rename to final path.
+    # Compressed: assembled book bundles are large but highly repetitive
+    # (zero-padded fields, monotone timestamps), so deflate cuts the on-disk
+    # corpus by ~an order of magnitude — the disk-blowup mitigation.
     tmp = path.with_name(path.stem + ".tmp.npz")
-    np.savez(tmp, **payload)
+    np.savez_compressed(tmp, **payload)
     tmp.replace(path)
 
 
@@ -88,10 +124,16 @@ def _load(path: Path) -> FastPathBundle:
     """Deserialize a FastPathBundle from a .npz file."""
     z = np.load(path, allow_pickle=True)
     legs = list(z["__legs__"])
-    leg_arrays = {
-        sym: LegArrays(events=z[f"ev_{i}"], book_ts=z[f"bts_{i}"])
-        for i, sym in enumerate(legs)
-    }
+    leg_arrays = {}
+    for i, sym in enumerate(legs):
+        # Reassemble the event_dtype struct from its column-split fields,
+        # un-delta'ing the timestamp columns.
+        first = z[f"ev_{i}__{event_dtype.names[0]}"]
+        ev = np.zeros(len(first), dtype=event_dtype)
+        for name in event_dtype.names:
+            col = z[f"ev_{i}__{name}"]
+            ev[name] = _undelta(col) if name in _DELTA_FIELDS else col
+        leg_arrays[sym] = LegArrays(events=ev, book_ts=_undelta(z[f"bts_{i}"]))
     ref = [
         ReferenceEvent(
             ts_ns=int(r[0]),
@@ -119,19 +161,104 @@ def _load(path: Path) -> FastPathBundle:
     )
 
 
-def caching_enabled() -> bool:
-    """Event-array disk caching is OPT-IN (default OFF).
+_pruned: set[tuple[str, int]] = set()
 
-    The cache is a tuning-sweep speedup, but the assembled HL bundles are large
-    (20-level books, ~160k events/leg → ~hundreds of MB/question), so a full
-    corpus can consume tens of GB and fill the disk; a stale entry across a
-    config change also silently served the wrong dt. Default-off keeps normal
-    `run`/`tune` always-fresh and correct; enable via `--cache-event-arrays`
-    (sets HLBT_CACHE_EVENT_ARRAYS=1, inherited by spawn workers) when the
-    sweep speedup is worth the disk + invalidation discipline.
+
+def _version_prefix() -> str:
+    """Filename prefix encoding the current BUILD_VERSION (e.g. ``v2_``).
+
+    Folding the version into the *filename* (not just the key hash) lets eviction
+    identify stale-version orphans with a cheap glob — no need to open each .npz.
+    A config_sig change keeps the same prefix (different hash), so legitimate
+    config variants (dt=5 vs dt=60) are NOT mistaken for orphans.
+    """
+    import hlanalysis.backtest.data._event_array_cache as _self
+    return f"v{_self._BUILD_VERSION}_"
+
+
+def _prune_stale_versions(cache_dir: Path) -> None:
+    """Delete cached .npz files from a superseded BUILD_VERSION.
+
+    Such entries are unreachable (the key hash and filename prefix both fold in
+    BUILD_VERSION) but were never removed, so the dir grew without bound across
+    assembly-logic changes. Runs at most once per (dir, version) per process.
+    Best-effort: a concurrent spawn worker may unlink the same file first.
+    """
+    import hlanalysis.backtest.data._event_array_cache as _self
+    guard = (str(cache_dir), _self._BUILD_VERSION)
+    if guard in _pruned:
+        return
+    _pruned.add(guard)
+    prefix = _version_prefix()
+    for f in cache_dir.glob("*.npz"):
+        if not f.name.startswith(prefix):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+
+def caching_enabled() -> bool:
+    """Event-array disk caching is default-ON.
+
+    The two reasons it was once opt-in are both closed: poisoning (config_sig is
+    now in the key) and disk runaway (version-prefixed eviction + a size cap +
+    column-split compression bound the footprint). So normal `run`/`tune` cache
+    by default for the sweep speedup.
+
+    Escape hatches (both inherited by spawn workers via the environment):
+      * ``HLBT_NO_CACHE`` (set by ``--fresh``/``--no-cache``) — hard off, for
+        when you suspect a stale/poisoned entry and want a guaranteed fresh
+        build.
+      * ``HLBT_CACHE_EVENT_ARRAYS=0`` — also off (explicit disable; the test
+        suite sets this for hermeticity). Any other value, or unset, is ON.
     """
     import os
-    return bool(os.environ.get("HLBT_CACHE_EVENT_ARRAYS"))
+    if os.environ.get("HLBT_NO_CACHE"):
+        return False
+    v = os.environ.get("HLBT_CACHE_EVENT_ARRAYS")
+    if v is None:
+        return True
+    return v.strip().lower() not in ("0", "", "false", "no", "off")
+
+
+def _cache_max_bytes() -> int:
+    """Cache size cap in bytes. Override via ``HLBT_CACHE_MAX_BYTES`` (exact) or
+    ``HLBT_CACHE_MAX_GB``; default 20 GiB — a backstop, not a tight budget."""
+    import os
+    b = os.environ.get("HLBT_CACHE_MAX_BYTES")
+    if b is not None:
+        return int(b)
+    gb = float(os.environ.get("HLBT_CACHE_MAX_GB", "20"))
+    return int(gb * 1024 ** 3)
+
+
+def _enforce_size_cap(cache_dir: Path) -> None:
+    """Evict least-recently-written entries until the dir is under the cap.
+
+    LRU by mtime. Best-effort (a concurrent worker may unlink first). Keeps the
+    cache from growing without bound now that it is default-on.
+    """
+    max_bytes = _cache_max_bytes()
+    files = list(cache_dir.glob("*.npz"))
+    sized = []
+    total = 0
+    for f in files:
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        sized.append((st.st_mtime_ns, st.st_size, f))
+        total += st.st_size
+    sized.sort()  # oldest first
+    for _mtime, size, f in sized:
+        if total <= max_bytes:
+            break
+        try:
+            f.unlink()
+            total -= size
+        except OSError:
+            pass
 
 
 def cached_bundle(
@@ -159,7 +286,9 @@ def cached_bundle(
     force_rebuild = force_rebuild or bool(os.environ.get("HLBT_REBUILD_CACHE"))
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / f"{cache_key(question_id, source_files, config_sig)}.npz"
+    _prune_stale_versions(cache_dir)
+    key = cache_key(question_id, source_files, config_sig)
+    path = cache_dir / f"{_version_prefix()}{key}.npz"
     if path.exists() and not force_rebuild:
         try:
             return _load(path)
@@ -168,6 +297,7 @@ def cached_bundle(
     bundle = build_fn()
     try:
         _save(path, bundle)
+        _enforce_size_cap(cache_dir)
     except Exception as e:
         log.warning("event-array cache write failed (%s); continuing uncached", e)
     return bundle

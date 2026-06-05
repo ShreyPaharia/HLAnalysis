@@ -5,6 +5,15 @@ import pytest
 from hlanalysis.strategy.types import BookState, Position, QuestionView
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_event_array_cache(monkeypatch):
+    """Event-array caching is default-ON in production, but tests must not write
+    cache bundles into fixture data roots (non-hermetic, leaks across runs).
+    Force it OFF for the whole suite; tests that exercise the cache itself
+    re-enable it with their own ``HLBT_CACHE_EVENT_ARRAYS=1`` fixture."""
+    monkeypatch.setenv("HLBT_CACHE_EVENT_ARRAYS", "0")
+
+
 @pytest.fixture
 def question() -> QuestionView:
     return QuestionView(
