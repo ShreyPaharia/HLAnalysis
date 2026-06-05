@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Callable
 
@@ -115,9 +118,24 @@ def _save(path: Path, b: FastPathBundle) -> None:
     # Compressed: assembled book bundles are large but highly repetitive
     # (zero-padded fields, monotone timestamps), so deflate cuts the on-disk
     # corpus by ~an order of magnitude — the disk-blowup mitigation.
-    tmp = path.with_name(path.stem + ".tmp.npz")
-    np.savez_compressed(tmp, **payload)
-    tmp.replace(path)
+    #
+    # The tmp name MUST be unique per writer (pid + uuid), not derived from the
+    # final key alone: under `tune --workers N` several spawn workers rebuild the
+    # SAME bundle concurrently, and a shared tmp name made them truncate each
+    # other's bytes (corrupt npz) and ENOENT on the second rename (SHR-71 rebuild
+    # storm). With a private tmp each writer's bytes are intact and the atomic
+    # rename is simply last-writer-wins.
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}.{uuid.uuid4().hex}.tmp.npz")
+    try:
+        np.savez_compressed(tmp, **payload)
+        tmp.replace(path)
+    finally:
+        # If savez or replace failed, don't leave a private orphan behind.
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def _load(path: Path) -> FastPathBundle:
@@ -261,6 +279,120 @@ def _enforce_size_cap(cache_dir: Path) -> None:
             pass
 
 
+# --- Opt-in process-level bundle memo --------------------------------------
+# A tuning sweep replays the *same* question across many param cells; each cell
+# reconstructs the data source but the built event-array bundle is
+# param-independent, so re-running cache_key (file stat) + npz inflate per cell
+# is pure waste. When HLBT_INPROC_BUNDLE_MEMO=1 (set by `tune`), cached_bundle
+# keeps an in-process LRU of bundles keyed on (question_id, config_sig) and
+# returns the memoized object directly — skipping disk entirely on repeat.
+#
+# Default-OFF: a single `run` processes each question once (no repeat → no
+# benefit) and the memo assumes source files are immutable for the process
+# lifetime, which a `run`/`tune` over historical parquet satisfies but the
+# mtime-invalidation contract test deliberately violates. Off by default keeps
+# both honest.
+#
+# RAM bound (SHR-71): each bundle is ~100-140 MB of decompressed numpy arrays.
+# Bounding the memo by ENTRY COUNT alone (the old default 512) let one worker
+# retain ~65 GB, and `tune` spawns N such worker processes EACH with its own
+# module-global memo → ~TB aggregate at N=12 → OOM. So the memo is bounded
+# primarily by retained BYTES (worker-aware), with the count cap kept only as a
+# secondary backstop. See ``_inproc_max_bytes`` for the worker-aware budget.
+_INPROC_MEMO: "OrderedDict[tuple[str, str], FastPathBundle]" = OrderedDict()
+# Parallel size index (bytes per memo key) so eviction is O(1) per pop without
+# re-walking arrays; kept in lockstep with _INPROC_MEMO on every insert/evict.
+_INPROC_SIZES: "OrderedDict[tuple[str, str], int]" = OrderedDict()
+
+
+def _inproc_enabled() -> bool:
+    return os.environ.get("HLBT_INPROC_BUNDLE_MEMO", "0") not in ("0", "", "false", "False")
+
+
+def _inproc_max() -> int:
+    """Secondary entry-count backstop. Lowered from 512 (meaningless for ~130 MB
+    objects) to 32 — at ~130 MB/bundle that is ~4 GiB, matching the default byte
+    budget; the BYTE bound (``_inproc_max_bytes``) is the real limit."""
+    return int(os.environ.get("HLBT_INPROC_BUNDLE_MEMO_MAX", "32"))
+
+
+def _inproc_max_bytes() -> int:
+    """Primary per-process byte budget for the in-proc bundle memo.
+
+    Mirrors the disk cache's ``_cache_max_bytes`` style:
+      * ``HLBT_INPROC_BUNDLE_MEMO_MAX_BYTES`` — exact per-process budget (used
+        verbatim, NOT divided by the worker count).
+      * else ``HLBT_INPROC_BUNDLE_MEMO_MAX_GB`` (default 4 GiB) is the TOTAL
+        budget across all spawn workers, divided by
+        ``HLBT_INPROC_BUNDLE_MEMO_WORKERS`` (set by ``tune`` before the
+        ProcessPoolExecutor spawns; default 1) so the AGGREGATE stays under the
+        total regardless of ``--workers``. At 4 GiB / 12 workers that is
+        ~340 MiB/worker ≈ 2-3 bundles — enough to win the sweep memo (the same
+        question is replayed across many param cells) without the SHR-71 OOM.
+    """
+    b = os.environ.get("HLBT_INPROC_BUNDLE_MEMO_MAX_BYTES")
+    if b is not None:
+        return int(b)
+    gb = float(os.environ.get("HLBT_INPROC_BUNDLE_MEMO_MAX_GB", "4"))
+    total = int(gb * 1024 ** 3)
+    workers = max(1, int(os.environ.get("HLBT_INPROC_BUNDLE_MEMO_WORKERS", "1")))
+    return total // workers
+
+
+def _bundle_nbytes(b: FastPathBundle) -> int:
+    """Estimate a bundle's retained RAM: the numpy arrays dominate, so sum each
+    leg's ``events.nbytes + book_ts.nbytes`` plus a small constant per ref/settle
+    event for the Python object overhead."""
+    total = 0
+    for la in b.leg_arrays.values():
+        total += int(la.events.nbytes) + int(la.book_ts.nbytes)
+    total += (len(b.reference_events) + len(b.settlement_events)) * 64
+    return total
+
+
+def _inproc_clear() -> None:
+    _INPROC_MEMO.clear()
+    _INPROC_SIZES.clear()
+
+
+def _inproc_store(key: "tuple[str, str]", bundle: FastPathBundle) -> None:
+    """Insert ``bundle`` under ``key`` (most-recent) and LRU-evict until under
+    BOTH the byte budget (primary) and the count cap (secondary). The
+    just-inserted key is never evicted, so a bundle larger than the whole budget
+    still hits once before the next insert reclaims it."""
+    _INPROC_MEMO[key] = bundle
+    _INPROC_MEMO.move_to_end(key)
+    _INPROC_SIZES[key] = _bundle_nbytes(bundle)
+    _INPROC_SIZES.move_to_end(key)
+    max_bytes = _inproc_max_bytes()
+    max_count = _inproc_max()
+    retained = sum(_INPROC_SIZES.values())
+    while _INPROC_MEMO and (retained > max_bytes or len(_INPROC_MEMO) > max_count):
+        oldest = next(iter(_INPROC_MEMO))
+        if oldest == key:
+            break  # never evict the entry we just inserted
+        _INPROC_MEMO.pop(oldest, None)
+        retained -= _INPROC_SIZES.pop(oldest, 0)
+
+
+def inproc_lookup(
+    question_id: str, config_sig: str = "", *, force_rebuild: bool = False
+) -> "FastPathBundle | None":
+    """Peek the process memo for (question_id, config_sig) without touching disk.
+
+    Returns the memoized bundle if the memo is enabled and populated, else None.
+    Data sources call this *before* computing source_files so a memo hit skips
+    the source-file glob, not just the npz inflate inside ``cached_bundle``.
+    """
+    if force_rebuild or not _inproc_enabled() or os.environ.get("HLBT_REBUILD_CACHE"):
+        return None
+    key = (question_id, config_sig)
+    bundle = _INPROC_MEMO.get(key)
+    if bundle is not None:
+        _INPROC_MEMO.move_to_end(key)
+    return bundle
+
+
 def cached_bundle(
     cache_dir: Path,
     question_id: str,
@@ -277,8 +409,37 @@ def cached_bundle(
     (no file, mtime/size change, corrupt file, or force_rebuild), calls
     ``build_fn()`` and attempts to persist the result. Write failures are logged
     and silently skipped — the returned bundle is always correct.
+
+    When ``HLBT_INPROC_BUNDLE_MEMO`` is set, an in-process LRU keyed on
+    (question_id, config_sig) short-circuits both the disk cache and build on a
+    repeat call within the process (the tune-sweep fast path).
     """
-    import os
+    memo_on = _inproc_enabled()
+    rebuild = force_rebuild or bool(os.environ.get("HLBT_REBUILD_CACHE"))
+    memo_key = (question_id, config_sig)
+    if memo_on and not rebuild and memo_key in _INPROC_MEMO:
+        _INPROC_MEMO.move_to_end(memo_key)
+        return _INPROC_MEMO[memo_key]
+
+    bundle = _cached_bundle_disk(
+        cache_dir, question_id, source_files, build_fn,
+        force_rebuild=force_rebuild, config_sig=config_sig,
+    )
+
+    if memo_on:
+        _inproc_store(memo_key, bundle)
+    return bundle
+
+
+def _cached_bundle_disk(
+    cache_dir: Path,
+    question_id: str,
+    source_files: list[Path],
+    build_fn: Callable[[], FastPathBundle],
+    *,
+    force_rebuild: bool = False,
+    config_sig: str = "",
+) -> FastPathBundle:
     if not caching_enabled():
         return build_fn()
     # HLBT_REBUILD_CACHE=1 forces a rebuild process-wide; set by the CLI's

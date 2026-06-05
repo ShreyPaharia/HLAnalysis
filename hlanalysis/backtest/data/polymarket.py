@@ -465,6 +465,17 @@ class PolymarketDataSource:
                 "PM fast path is recorded-mode only; "
                 "use book_source='recorded' to enable events_arrays()"
             )
+
+        from ._event_array_cache import inproc_lookup
+
+        force_rebuild = getattr(self, "_force_rebuild_cache", False)
+        config_sig = self._bundle_config_sig()
+        # Short-circuit BEFORE the manifest load + source-file glob on a
+        # process-memo hit (tune replays the same question across param cells).
+        memo_hit = inproc_lookup(q.question_id, config_sig, force_rebuild=force_rebuild)
+        if memo_hit is not None:
+            return memo_hit
+
         manifest = self._load_manifest()
         entry = manifest.get(q.question_id)
         if entry is None:
@@ -541,8 +552,8 @@ class PolymarketDataSource:
             q.question_id,
             self._fastpath_source_files(q),
             _build,
-            force_rebuild=getattr(self, "_force_rebuild_cache", False),
-            config_sig=self._bundle_config_sig(),
+            force_rebuild=force_rebuild,
+            config_sig=config_sig,
         )
 
     def _bundle_config_sig(self) -> str:

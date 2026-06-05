@@ -2,6 +2,7 @@
 from __future__ import annotations
 import numpy as np
 import pytest
+import hlanalysis.backtest.data._event_array_cache as _cache_mod
 from hlanalysis.backtest.data._event_array_cache import (
     cached_bundle, cache_key, caching_enabled,
 )
@@ -15,6 +16,11 @@ def _enable_caching(monkeypatch):
     # OFF for hermeticity; these tests exercise the cache itself so re-enable.
     monkeypatch.setenv("HLBT_CACHE_EVENT_ARRAYS", "1")
     monkeypatch.delenv("HLBT_NO_CACHE", raising=False)
+    # The process-level bundle memo is a module global; clear it around every
+    # test so leftover entries can't leak across tests.
+    _cache_mod._inproc_clear()
+    yield
+    _cache_mod._inproc_clear()
 
 
 def _bundle():
@@ -93,6 +99,49 @@ def test_mtime_change_invalidates(tmp_path):
     src.write_bytes(b"y" * 20)  # size + mtime change
     cached_bundle(tmp_path / "cache", "q1", [src], build)
     assert calls["n"] == 2  # rebuilt
+
+
+# --- opt-in process-level bundle memo (the tune-sweep win) ------------------
+
+
+def test_inproc_bundle_memo_skips_rebuild_when_enabled(tmp_path, monkeypatch):
+    """With HLBT_INPROC_BUNDLE_MEMO=1, a repeat call for the same
+    (question_id, config_sig) within the process returns the *same* bundle
+    object without re-stat (cache_key) or npz re-load — the tune-sweep fast
+    path where one question is replayed across many param cells."""
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO", "1")
+    qid = f"q-{tmp_path.name}"
+    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    calls = {"n": 0}
+    def build():
+        calls["n"] += 1; return _bundle()
+    cdir = tmp_path / "cache"
+    b1 = cached_bundle(cdir, qid, [src], build, config_sig="c")
+    b2 = cached_bundle(cdir, qid, [src], build, config_sig="c")
+    assert calls["n"] == 1
+    assert b1 is b2  # served from the process memo, not a fresh disk load
+
+
+def test_inproc_bundle_memo_off_by_default_loads_fresh(tmp_path):
+    """Default-off: behaviour is unchanged — each call returns a freshly loaded
+    bundle (distinct objects), preserving the mtime-invalidation contract."""
+    qid = f"q-{tmp_path.name}"
+    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    cdir = tmp_path / "cache"
+    b1 = cached_bundle(cdir, qid, [src], _bundle, config_sig="c")
+    b2 = cached_bundle(cdir, qid, [src], _bundle, config_sig="c")
+    assert b1 is not b2
+
+
+def test_inproc_bundle_memo_keys_on_config_sig(tmp_path, monkeypatch):
+    """Different config_sig (e.g. dt=5 vs dt=60) must NOT share a memo entry."""
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO", "1")
+    qid = f"q-{tmp_path.name}"
+    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    cdir = tmp_path / "cache"
+    b1 = cached_bundle(cdir, qid, [src], _bundle, config_sig="dt5")
+    b2 = cached_bundle(cdir, qid, [src], _bundle, config_sig="dt60")
+    assert b1 is not b2
 
 
 def test_build_version_in_key(tmp_path, monkeypatch):
@@ -216,6 +265,96 @@ def test_explicit_zero_disables(monkeypatch):
     monkeypatch.delenv("HLBT_NO_CACHE", raising=False)
     monkeypatch.setenv("HLBT_CACHE_EVENT_ARRAYS", "0")
     assert caching_enabled() is False
+
+
+def test_concurrent_saves_same_key_dont_corrupt(tmp_path, monkeypatch):
+    """Several workers rebuilding the SAME bundle concurrently (the --workers
+    cold-cache case) must not corrupt the cache or crash: each writer needs its
+    OWN tmp file so they can't truncate each other's bytes, and the atomic rename
+    is last-writer-wins rather than ENOENT'ing when another already renamed
+    (SHR-71 rebuild storm)."""
+    import threading
+    import time
+    b = _realistic_bundle()
+    path = tmp_path / "v3_samekey.npz"
+
+    real_savez = np.savez_compressed
+
+    def slow_savez(file, **kw):
+        real_savez(file, **kw)
+        time.sleep(0.05)  # widen the write→rename window so writers overlap
+
+    monkeypatch.setattr(np, "savez_compressed", slow_savez)
+
+    errors: list[Exception] = []
+
+    def writer():
+        try:
+            _cache_mod._save(path, b)
+        except Exception as e:  # ENOENT on a collided rename == the bug
+            errors.append(e)
+
+    threads = [threading.Thread(target=writer) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"concurrent _save raised: {errors}"
+    got = _cache_mod._load(path)  # must be a complete, loadable bundle
+    assert got.leg_arrays["#0"].events.tobytes() == b.leg_arrays["#0"].events.tobytes()
+
+
+def test_bundle_nbytes_counts_arrays():
+    """The byte estimate sums each leg's events.nbytes + book_ts.nbytes (the RAM
+    the memo actually retains), plus a small per-event constant for ref/settle."""
+    b = _realistic_bundle()
+    la = b.leg_arrays["#0"]
+    est = _cache_mod._bundle_nbytes(b)
+    assert est >= la.events.nbytes + la.book_ts.nbytes
+    # ref/settle lists add a small constant, never less than the array floor.
+    assert est >= la.events.nbytes + la.book_ts.nbytes
+
+
+def test_inproc_memo_evicts_by_bytes(tmp_path, monkeypatch):
+    """With a tiny BYTE budget, inserting several realistic-sized bundles keeps
+    total retained bytes under the budget (LRU-evicts), while the just-inserted
+    key still hits the memo (no rebuild)."""
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO", "1")
+    one = _cache_mod._bundle_nbytes(_realistic_bundle())
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO_MAX_BYTES", str(int(one * 1.5)))
+    cdir = tmp_path / "cache"
+    src = tmp_path / "a.parquet"; src.write_bytes(b"x")
+    for i in range(3):
+        cached_bundle(cdir, f"q{i}", [src], _realistic_bundle, config_sig="c")
+    retained = sum(_cache_mod._bundle_nbytes(b) for b in _cache_mod._INPROC_MEMO.values())
+    assert retained <= int(one * 1.5)  # byte budget held via LRU eviction
+    # The most-recently inserted key is still memoized -> hit without rebuild.
+    def _no_build():
+        raise AssertionError("just-inserted key should hit the memo, not rebuild")
+    got = cached_bundle(cdir, "q2", [src], _no_build, config_sig="c")
+    assert got is not None
+
+
+def test_inproc_budget_is_worker_aware(monkeypatch):
+    """The default per-process budget is divided by the worker count so the
+    AGGREGATE across N spawn workers stays under the total budget (SHR-71)."""
+    monkeypatch.delenv("HLBT_INPROC_BUNDLE_MEMO_MAX_BYTES", raising=False)
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO_MAX_GB", "4")
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO_WORKERS", "1")
+    solo = _cache_mod._inproc_max_bytes()
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO_WORKERS", "8")
+    par = _cache_mod._inproc_max_bytes()
+    assert par < solo  # parallelism shrinks each worker's slice
+    assert par == solo // 8
+
+
+def test_inproc_explicit_max_bytes_overrides_worker_division(monkeypatch):
+    """An explicit per-process HLBT_INPROC_BUNDLE_MEMO_MAX_BYTES is exact — it is
+    NOT divided by the worker count (the knob the byte-budget tests pin)."""
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO_MAX_BYTES", "12345")
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO_WORKERS", "8")
+    assert _cache_mod._inproc_max_bytes() == 12345
 
 
 def test_size_cap_evicts_oldest(tmp_path, monkeypatch):

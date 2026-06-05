@@ -167,6 +167,18 @@ def run_tuning(
 # ---------------------------------------------------------------------------
 
 
+def _set_inproc_memo_worker_env(n_workers: int) -> None:
+    """Tell spawn workers how many of them share the box so each self-limits its
+    in-proc bundle memo to total_budget / n_workers (SHR-71).
+
+    Each spawn worker holds its OWN module-global memo, so a per-process-only
+    bound multiplies to N × per-process aggregate RAM. Setting this env BEFORE
+    the ProcessPoolExecutor spawns means children inherit it (spawn copies the
+    parent environment) and ``_inproc_max_bytes`` divides the total budget by it.
+    """
+    os.environ["HLBT_INPROC_BUNDLE_MEMO_WORKERS"] = str(max(1, int(n_workers)))
+
+
 def _run_one_cell(args: tuple) -> dict:
     (
         strategy_id,
@@ -189,6 +201,12 @@ def _run_one_cell(args: tuple) -> dict:
     _dt = str(int(params.get("vol_sampling_dt_seconds", 60)))
     os.environ["HLBT_HL_RESAMPLE_SECONDS"] = _dt
     os.environ["HLBT_PM_RESAMPLE_SECONDS"] = _dt
+
+    # A sweep replays each question across many param cells; the built
+    # event-array bundle is param-independent, so memoize it in-process to skip
+    # cache_key (file stat) + npz inflate on every cell after the first.
+    # setdefault so an operator can still force it off with HLBT_INPROC_BUNDLE_MEMO=0.
+    os.environ.setdefault("HLBT_INPROC_BUNDLE_MEMO", "1")
 
     data_source = reconstruct_source(data_source_dotted)
 
@@ -283,6 +301,10 @@ def run_tuning_parallel(
                     hedge_half_spread_bps,
                 )
             )
+
+    # Make the per-worker in-proc bundle memo budget worker-aware BEFORE spawning
+    # so each child self-limits to total/n_workers (SHR-71 OOM guard).
+    _set_inproc_memo_worker_env(n_workers)
 
     with log_path.open("a") as f, ProcessPoolExecutor(
         max_workers=n_workers, mp_context=mp.get_context("spawn")
