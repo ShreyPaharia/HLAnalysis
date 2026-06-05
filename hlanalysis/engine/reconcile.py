@@ -29,6 +29,21 @@ CLOID_PREFIX = "hla-"
 _QTY_MISMATCH_REL_TOL = 1e-4
 _QTY_MISMATCH_ABS_TOL = 1e-3
 
+# Dust floor for the alert-only venue-absent branch. PM market sells round the
+# share amount to 2dp, so closing a non-round-2dp buy strands sub-precision dust
+# (a 54.934055-share buy closes by selling 54.93, leaving 0.004055 shares). That
+# residual is BOTH un-sellable (below PM's ~$1 min order size) and un-reported
+# (below the data-api's dust filter), so the venue shows it absent forever and
+# the alert-only branch re-fires `venue_absent_alert_only` every reconcile cycle
+# (~1 Telegram DRIFT/min, permanently — incident 2026-06-05, q729375628). When
+# the LOCAL qty is itself this small AND the venue reports it absent, the
+# position is genuinely stranded-closed, not a data-api flap of a real holding:
+# clear the row so the flood stops. The threshold sits above the max 2dp sell
+# residual (≤5e-3) with margin and ~100x below a 1-share min order, so it can
+# never swallow a real lagging position (which is whole shares). PM prices are
+# ≤1.0, so 1e-2 shares is ≤$0.01 notional.
+_DUST_QTY_ABS_TOL = 1e-2
+
 
 @dataclass(frozen=True, slots=True)
 class ReconcileResult:
@@ -226,6 +241,20 @@ class Reconciler:
                 if apply:
                     vanished.append((qidx, lp.symbol, lp))
                     self.dal.delete_position(qidx)
+                elif abs(lp.qty) <= _DUST_QTY_ABS_TOL:
+                    # Stranded sub-precision dust (un-sellable + un-reported):
+                    # delete the row so the alert-only branch stops re-firing
+                    # forever. No vanished_positions entry — the round-trip PnL
+                    # is already booked in the sell fill's closed_pnl, so routing
+                    # a settlement Exit here would double-book it and surface a
+                    # misleading 🏁 on un-sellable dust. One informational drift.
+                    self.dal.delete_position(qidx)
+                    drift.append(ReconcileDrift(
+                        ts_ns=now_ns, account_alias=self.account_alias,
+                        case="position_mismatch", question_idx=qidx,
+                        detail={"resolution": "venue_absent_dust_cleared",
+                                "symbol": lp.symbol, "db_qty": f"{lp.qty}"},
+                    ))
                 else:
                     drift.append(ReconcileDrift(
                         ts_ns=now_ns, account_alias=self.account_alias,

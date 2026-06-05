@@ -236,6 +236,58 @@ def test_alert_only_does_not_vanish_local_on_venue_absence(dal):
     )
 
 
+def test_alert_only_clears_dust_position_on_venue_absence(dal):
+    # PM live: a closed round-trip leaves sub-precision dust behind. PM market
+    # sells round the share amount to 2dp, so closing a 54.934055-share buy
+    # sells 54.93 and strands 0.004055 shares. That dust is un-sellable (below
+    # PM's min order size) AND un-reported (below the data-api's dust filter),
+    # so the venue shows it absent forever. Without a dust floor the venue-
+    # absent branch re-fires `venue_absent_alert_only` every reconcile cycle —
+    # ~1 Telegram DRIFT/min, permanently (incident 2026-06-05, q729375628).
+    # When the LOCAL qty is itself dust and the venue reports it absent, the
+    # position is genuinely stranded-closed: clear the row so the flood stops,
+    # emit one informational drift, and do NOT route a settlement Exit (the
+    # round-trip PnL is already booked in the sell fill's closed_pnl).
+    dal.upsert_position(Position(
+        question_idx=42, symbol="tok", qty=0.00405500000000103, avg_entry=0.91,
+        realized_pnl=2.1972, last_update_ts_ns=1, stop_loss_price=-1.0,
+    ))
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 42},
+        apply_position_changes=False,
+    ).run(venue_open=[],
+          venue_state=ClearinghouseState(positions=(), account_value_usd=0),
+          now_ns=2)
+    assert dal.get_position(42) is None            # dust row cleared
+    assert res.vanished_positions == []            # no settlement Exit / re-book
+    assert any(
+        d.detail.get("resolution") == "venue_absent_dust_cleared"
+        for d in res.drift_events
+    )
+
+
+def test_alert_only_keeps_whole_share_position_on_venue_absence(dal):
+    # Boundary guard for the dust floor: a whole-share position the venue
+    # transiently drops (data-api flap) must NOT be cleared — only a real,
+    # below-min-order dust qty is. A 0.5-share position is far above the dust
+    # floor, so it keeps the legacy keep-local + `venue_absent_alert_only`.
+    dal.upsert_position(Position(
+        question_idx=42, symbol="tok", qty=0.5, avg_entry=0.91,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
+    ))
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 42},
+        apply_position_changes=False,
+    ).run(venue_open=[],
+          venue_state=ClearinghouseState(positions=(), account_value_usd=0),
+          now_ns=2)
+    assert dal.get_position(42) is not None         # not cleared
+    assert any(
+        d.detail.get("resolution") == "venue_absent_alert_only"
+        for d in res.drift_events
+    )
+
+
 def test_alert_only_keeps_local_qty_on_drift(dal):
     # PM live: a SELL reduced local to dust (0.006) but the data-api still
     # reports the pre-sell 51.536 (lag). Alert-only must KEEP the fresh local
