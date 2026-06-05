@@ -601,25 +601,31 @@ class EngineRuntime:
     # ---------- cadence registration ----------
 
     def _register_reference_cadences(self, slots: list[AccountSlot]) -> None:
-        """Register each slot's (reference_symbol → vol_sampling_dt_seconds)
-        on the shared MarketState so marks are bucketed at exactly the cadence
-        the strategy's σ formula assumes (no train/serve skew). Multiple
-        cadences per reference_symbol are accepted — each is bucketed
-        independently from the shared feed (e.g. dt=2 for v31 buckets and
-        dt=5 for v31 binary both reading BTC). Conflicting σ sources for the
-        same reference_symbol still raise (see
+        """Register each slot's default reference cadence AND any per-class
+        theta-override cadences on the shared MarketState, so every (symbol, dt)
+        bar series exists and accumulates from the one shared feed. Multiple
+        cadences per reference_symbol are supported (each bucketed independently).
+        Conflicting σ sources for the same reference_symbol still raise (see
         MarketState.set_reference_source)."""
+        from .scanner import Scanner
         for slot in slots:
+            sym = slot.cfg.reference_symbol
             self.market_state.set_reference_cadence(
-                slot.cfg.reference_symbol,
+                sym,
                 sampling_dt_seconds=reference_sampling_dt_seconds(slot.cfg),
                 lookback_seconds=reference_vol_lookback_seconds(slot.cfg),
             )
+            for dt_s, _n in Scanner.cadence_by_class(slot.cfg).values():
+                self.market_state.set_reference_cadence(
+                    sym,
+                    sampling_dt_seconds=dt_s,
+                    lookback_seconds=reference_vol_lookback_seconds(slot.cfg),
+                )
             # Couple the σ/OHLC source (mark | bbo) per reference symbol. Same
             # fail-fast conflict guard as the cadence — slots sharing a symbol
             # must agree. Default "mark" preserves HL behaviour bit-identically.
             self.market_state.set_reference_source(
-                slot.cfg.reference_symbol, slot.cfg.reference_sigma_source,
+                sym, slot.cfg.reference_sigma_source,
             )
 
     # ---------- slot construction ----------

@@ -271,3 +271,20 @@ def test_conflicting_reference_source_same_symbol_raises(tmp_path):
     )
     with pytest.raises(ValueError, match="conflicting reference source"):
         rt._register_reference_cadences(rt.slots)
+
+
+def test_per_class_override_registers_extra_cadence(tmp_path) -> None:
+    """A v31 theta slot with a priceBucket dt=2 override registers BOTH dt=5
+    (default) and dt=2 on the shared MarketState for its reference symbol, so
+    both bar series accumulate from the one BTC feed."""
+    from hlanalysis.engine.config import ThetaParams
+    cfg = _theta_cfg(alias="v31", reference_symbol="BTC", dt=5)
+    cfg = cfg.model_copy(update={
+        "theta_overrides": {"priceBucket": ThetaParams(vol_sampling_dt_seconds=2)},
+    })
+    rt = _runtime([cfg], tmp_path)
+    rt._register_reference_cadences(rt.slots)
+    # Assert BOTH cadences are actually REGISTERED on the shared symbol. Do NOT
+    # assert via mark_bucket_ns_for(sym, dt=2) — that returns dt*1e9 for any
+    # explicit dt regardless of registration, so it would pass vacuously.
+    assert rt.market_state._cadences_by_symbol["BTC"] == [5 * _NS, 2 * _NS]
