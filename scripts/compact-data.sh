@@ -62,8 +62,11 @@ done
 # matched by '*.parquet' so an existing target is never read mid-write.
 merge_parquet() {
   local out="$1" glob="$2" tmp="$1.tmp"
+  # union_by_name aligns columns by name across files so a stream whose schema
+  # drifted between hours (e.g. a Polymarket column added/dropped mid-day) still
+  # merges — the same promotion the readers do (read_recorded promote_options).
   if "$DUCKDB_BIN" -c \
-    "COPY (SELECT * FROM read_parquet('$glob')) TO '$tmp' (FORMAT 'PARQUET', COMPRESSION 'ZSTD');"
+    "COPY (SELECT * FROM read_parquet('$glob', union_by_name=true)) TO '$tmp' (FORMAT 'PARQUET', COMPRESSION 'ZSTD');"
   then
     if [ ! -s "$tmp" ]; then rm -f "$tmp"; return 1; fi
     mv -f "$tmp" "$out"
