@@ -154,19 +154,36 @@ class Scanner:
         dt = cfg.theta.vol_sampling_dt_seconds if cfg.theta is not None else 60
         return Scanner._bars_for(Scanner._lookback_secs(cfg), dt)
 
-    @classmethod
-    def cadence_by_class(cls, cfg: StrategyConfig) -> dict[str, tuple[int, int]]:
+    @staticmethod
+    def cadence_by_class(cfg: StrategyConfig) -> dict[str, tuple[int, int]]:
         """Map question.klass -> (dt_seconds, n_bars) ONLY for classes whose
         theta_override explicitly sets vol_sampling_dt_seconds (model_fields_set).
         Classes absent here read the default series via the dt-less path, so a
         slot with no dt override is bit-identical to today. Empty for non-theta
-        slots or slots with no dt override."""
+        slots or slots with no dt override.
+
+        NOTE: until the per-class vol_sampling_dt_seconds guard is removed in
+        build_theta_harvester_configs_by_class (a later task of the (symbol, dt)
+        refactor), a live config cannot reach the override branch — the runtime
+        raises before Scanner is constructed. This is forward scaffolding.
+        """
         out: dict[str, tuple[int, int]] = {}
+        base_secs = Scanner._lookback_secs(cfg)
         for klass, override in (cfg.theta_overrides or {}).items():
-            if "vol_sampling_dt_seconds" not in override.model_fields_set:
+            set_fields = override.model_fields_set
+            if "vol_sampling_dt_seconds" not in set_fields:
                 continue
-            dt = int(override.vol_sampling_dt_seconds)
-            out[klass] = (dt, cls._bars_for(cls._lookback_secs(cfg), dt))
+            dt = override.vol_sampling_dt_seconds
+            # A class override may also widen its own σ/drift window; size n for
+            # the larger of base and the explicitly-set per-class lookbacks so the
+            # window isn't truncated. (Over-sizing is harmless — the strategy
+            # re-slices to its own vol_lookback; under-sizing truncates σ.)
+            secs = base_secs
+            if "vol_lookback_seconds" in set_fields:
+                secs = max(secs, override.vol_lookback_seconds)
+            if "drift_lookback_seconds" in set_fields:
+                secs = max(secs, override.drift_lookback_seconds)
+            out[klass] = (dt, Scanner._bars_for(secs, dt))
         return out
 
     def _resolve_pm_strike(self, q: QuestionView) -> QuestionView:
