@@ -99,6 +99,99 @@ subscriptions:
       class: priceBinary
       series_slug: hype-up-or-down-daily
 
+  # ── Crypto daily multi-strike "above ___" (digital, settle-at-close) ──
+  # Same noon-ET Binance 1m-close resolution as up/down dailies, but a
+  # strike LADDER (~11-16 legs/event, daily settlement). Maps onto the v31
+  # bucket strategy. Each leg is a yes/no binary -> class: priceBinary
+  # (mirrors the gold/oil hit precedent below). Recording only; engine
+  # allowlists still guard trading. NOTE: high leg-count + heavy book
+  # traffic on a t4g.micro — BTC/ETH enabled; watch recorder RSS before
+  # enabling SOL/XRP below.
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: BTC
+      class: priceBinary
+      series_slug: btc-multi-strikes-weekly
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: ETH
+      class: priceBinary
+      series_slug: ethereum-multi-strikes-weekly
+  # SOL/XRP multi-strikes — 10-30x smaller volume; enabled per operator
+  # request. Watch recorder RSS on the t4g.micro (OOM risk with the added
+  # leg-count + book traffic).
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: SOL
+      class: priceBinary
+      series_slug: solana-multi-strikes-weekly
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: XRP
+      class: priceBinary
+      series_slug: xrp-multi-strikes-weekly
+
+  # ── Crypto daily hit-price (one-touch BARRIER, intraday High/Low) ─────
+  # Resolves YES the moment any Binance 1m candle High reaches ("reach $X")
+  # or Low dips to ("dip to $X") the level, anytime in the 24h ET window.
+  # Different instrument from the digitals above — needs a barrier pricer,
+  # NOT the N(d) model. Recording now purely to bank non-backfillable L2;
+  # no engine strategy trades these yet.
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: BTC
+      class: priceBinary
+      series_slug: bitcoin-hit-price-daily
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: ETH
+      class: priceBinary
+      series_slug: ethereum-hit-price-daily
+  # SOL/XRP hit-price daily — enabled alongside SOL/XRP multi-strikes per
+  # operator request.
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: SOL
+      class: priceBinary
+      series_slug: solana-hit-price-daily
+  - venue: polymarket
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book]
+    match:
+      underlying: XRP
+      class: priceBinary
+      series_slug: xrp-hit-price-daily
+
   # Commodity hit/settle multi-strike (monthly cadence — kept per operator
   # request as the only non-crypto/non-sports asset class in the recorder).
   - venue: polymarket
