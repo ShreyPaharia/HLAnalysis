@@ -744,12 +744,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     pr.add_argument(
         "--pm-reference-source",
-        choices=["klines", "binance_bbo"],
+        choices=["klines", "binance_bbo", "klines_1s"],
         default="klines",
         help="(polymarket only) Reference-feed source. `klines` (default) reads "
         "cached 1m Binance klines (12-month corpus). `binance_bbo` reads "
         "recorded Binance BBO ticks and buckets to vol_sampling_dt_seconds "
-        "(BBO-overlap window only).",
+        "(BBO-overlap window only). `klines_1s` pulls genuine Binance 1s klines "
+        "(cached under btc_klines_1s/) and buckets to vol_sampling_dt_seconds — "
+        "the on-demand-klines counterpart to binance_bbo for the ref-equivalence "
+        "experiment.",
     )
     pr.add_argument(
         "--pm-binance-bbo-product-type",
