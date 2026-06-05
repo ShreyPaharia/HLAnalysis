@@ -86,15 +86,44 @@ For P param cells × Q questions, same-dt:
   `events_arrays`, which runs *before* `cached_bundle` — hoisting the memo above
   the glob is the obvious follow-up.
 
+## Addendum (v3.1, same day) — sweep param-independent overhead → ~0
+
+The v3 step-bench is a single `run` (each question once), so it can't show the
+sweep wins. `scripts/perf/tune_pattern_bench.py` (new) simulates N param cells
+(a fresh source each) replaying one question. Two more fixes close the
+param-independent recompute that a sweep was paying every cell:
+
+3. **Process-level settlement memo.** `resolved_outcome` is param-independent but
+   the instance cache (lever 1) dies when `tune` rebuilds the source per cell, so
+   a P-cell sweep recomputed it P times. A process memo keyed on
+   `(data_root, question_id)`, gated by the same `HLBT_INPROC_BUNDLE_MEMO` flag,
+   computes it **once per question per worker**.
+4. **Hoist the bundle memo above the `events_arrays` glob.** `inproc_lookup` now
+   short-circuits in the data source *before* `_fastpath_source_files`, so a memo
+   hit skips the glob too — not just the npz inflate inside `cached_bundle`.
+   Applied to both `hl_hip4.py` and `polymarket.py`.
+
+Micro-benchmark, 6 cells replaying one HL question:
+
+| | settlement computes | data-prep replay (cells 2–6) |
+|---|---|---|
+| memo OFF | 6/6 | 968 ms/cell |
+| memo ON  | **1/6** | **0.0 ms/cell** |
+
+Net: after the first cell, a sweep cell's param-independent overhead is ~0 — only
+the param-dependent scan replay remains (which is the only thing that *should*
+scale with P×Q). Tests: `test_resolved_outcome_process_memo_survives_source_rebuild`,
+`_no_process_memo_when_disabled`, `test_events_arrays_memo_skips_glob_on_replay`.
+Suite **165 passed**.
+
 ## Not done / deferred
 
-- Hoist the process memo above the `events_arrays` glob (remove the 118ms floor).
 - npz compression level (savez_compressed → uncompressed/lz4): the 586ms/q
-  inflate is a disk-vs-CPU knob, only worth it if a real full-corpus sweep shows
-  inflate binding after lever 2.
+  inflate is a disk-vs-CPU knob, only relevant to *single* `run`s now (sweeps
+  skip it via the memo); worth it only if many single backtests dominate.
 - Numba jitclass spawn recompile (~4.2s/worker under spawn) — only bites
-  `--workers>1`/`tune` startup; fork-context / `NUMBA_CACHE_DIR` mitigation is
-  higher-risk, not attempted.
+  `--workers>1`/`tune` *startup* (once per worker, amortized over the sweep);
+  fork-context / `NUMBA_CACHE_DIR` mitigation is higher-risk, not attempted.
 
 ## Files changed
 

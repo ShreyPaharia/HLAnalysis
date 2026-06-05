@@ -291,6 +291,83 @@ def test_resolved_outcome_memoized_per_question(
     assert calls["n"] == 1  # second call served from the per-question cache
 
 
+def test_resolved_outcome_process_memo_survives_source_rebuild(
+    discovered: QuestionDescriptor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A tune sweep reconstructs the data source per param cell, so the instance
+    # cache dies each cell. The settled outcome is param-independent, so under
+    # HLBT_INPROC_BUNDLE_MEMO (set by tune) it must be cached process-wide:
+    # computed once per question, not once per cell.
+    from hlanalysis.backtest.data import hl_hip4 as hlmod
+
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO", "1")
+    hlmod._proc_outcome_clear()
+    calls = {"n": 0}
+    real = HLHip4DataSource._resolve_outcome_impl
+
+    def counting(self, q):
+        calls["n"] += 1
+        return real(self, q)
+
+    monkeypatch.setattr(HLHip4DataSource, "_resolve_outcome_impl", counting)
+
+    o1 = HLHip4DataSource(data_root=FIXTURE_ROOT).resolved_outcome(discovered)
+    o2 = HLHip4DataSource(data_root=FIXTURE_ROOT).resolved_outcome(discovered)
+
+    assert o1 == o2
+    assert calls["n"] == 1  # second cell served from the process memo
+
+
+def test_resolved_outcome_no_process_memo_when_disabled(
+    discovered: QuestionDescriptor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Default-off: behaviour is per-instance only — two freshly built sources do
+    # NOT share outcomes (preserves the existing contract for callers that build
+    # a new source expecting a fresh read).
+    from hlanalysis.backtest.data import hl_hip4 as hlmod
+
+    monkeypatch.delenv("HLBT_INPROC_BUNDLE_MEMO", raising=False)
+    hlmod._proc_outcome_clear()
+    calls = {"n": 0}
+    real = HLHip4DataSource._resolve_outcome_impl
+
+    def counting(self, q):
+        calls["n"] += 1
+        return real(self, q)
+
+    monkeypatch.setattr(HLHip4DataSource, "_resolve_outcome_impl", counting)
+
+    HLHip4DataSource(data_root=FIXTURE_ROOT).resolved_outcome(discovered)
+    HLHip4DataSource(data_root=FIXTURE_ROOT).resolved_outcome(discovered)
+
+    assert calls["n"] == 2  # no cross-source caching when the flag is off
+
+
+def test_events_arrays_memo_skips_glob_on_replay(
+    discovered: QuestionDescriptor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The process bundle memo must short-circuit BEFORE the source-file glob, so
+    # a tune replay (fresh source, same question) skips _fastpath_source_files
+    # entirely — not just the npz inflate inside cached_bundle.
+    import hlanalysis.backtest.data._event_array_cache as cache
+
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO", "1")
+    cache._inproc_clear()
+    calls = {"n": 0}
+    real = HLHip4DataSource._fastpath_source_files
+
+    def counting(self, q):
+        calls["n"] += 1
+        return real(self, q)
+
+    monkeypatch.setattr(HLHip4DataSource, "_fastpath_source_files", counting)
+
+    HLHip4DataSource(data_root=FIXTURE_ROOT).events_arrays(discovered)
+    HLHip4DataSource(data_root=FIXTURE_ROOT).events_arrays(discovered)
+
+    assert calls["n"] == 1  # second (replay) served from memo without re-globbing
+
+
 def test_question_view_bucket_synthetic(source: HLHip4DataSource) -> None:
     """The bucket path of question_view doesn't run against the fixture's binary,
     so unit-test it with a hand-crafted descriptor + mocked meta cache."""

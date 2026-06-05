@@ -38,6 +38,21 @@ from ._hl_hip4_fastpath import FastPathBundle, build_fast_path_bundle
 log = logging.getLogger(__name__)
 
 
+# Process-level settled-outcome memo. resolved_outcome(q) is param-independent
+# (it reads settlement data / final BTC ref, not strategy params), but a tune
+# sweep reconstructs the data source per param cell so the per-instance cache
+# dies each cell. Under HLBT_INPROC_BUNDLE_MEMO (set by `tune`), cache the
+# outcome process-wide keyed on (data_root, question_id) so a P-cell sweep
+# computes it once per question, not P times. Outcomes are tiny strings, so the
+# dict is unbounded (bounded by #questions per worker). Keyed on data_root too
+# so two sources over different corpora in one process can't collide.
+_PROC_OUTCOME_MEMO: "dict[tuple[str, str], Literal['yes', 'no', 'unknown']]" = {}
+
+
+def _proc_outcome_clear() -> None:
+    _PROC_OUTCOME_MEMO.clear()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -304,7 +319,15 @@ class HLHip4DataSource:
         metadata (mtime + size) plus BUILD_VERSION from ``_fastpath_core``,
         so re-runs over the same data skip the DuckDB reads entirely.
         """
-        from ._event_array_cache import cached_bundle
+        from ._event_array_cache import cached_bundle, inproc_lookup
+
+        force_rebuild = getattr(self, "_force_rebuild_cache", False)
+        config_sig = self._bundle_config_sig()
+        # Short-circuit BEFORE the source-file glob on a process-memo hit (tune
+        # replays the same question across param cells).
+        memo_hit = inproc_lookup(q.question_id, config_sig, force_rebuild=force_rebuild)
+        if memo_hit is not None:
+            return memo_hit
 
         source_files = self._fastpath_source_files(q)
         cache_dir = Path(self.data_root) / "_event_array_cache"
@@ -345,8 +368,8 @@ class HLHip4DataSource:
             q.question_id,
             source_files,
             _build,
-            force_rebuild=getattr(self, "_force_rebuild_cache", False),
-            config_sig=self._bundle_config_sig(),
+            force_rebuild=force_rebuild,
+            config_sig=config_sig,
         )
 
     def _bundle_config_sig(self) -> str:
@@ -632,8 +655,21 @@ class HLHip4DataSource:
         cached = self._outcome_cache.get(q.question_id)
         if cached is not None:
             return cached
+
+        from ._event_array_cache import _inproc_enabled
+
+        proc_memo = _inproc_enabled()
+        proc_key = (str(self.data_root), q.question_id)
+        if proc_memo:
+            shared = _PROC_OUTCOME_MEMO.get(proc_key)
+            if shared is not None:
+                self._outcome_cache[q.question_id] = shared
+                return shared
+
         outcome = self._resolve_outcome_impl(q)
         self._outcome_cache[q.question_id] = outcome
+        if proc_memo:
+            _PROC_OUTCOME_MEMO[proc_key] = outcome
         return outcome
 
     def _resolve_outcome_impl(

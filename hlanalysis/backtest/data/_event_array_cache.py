@@ -291,6 +291,24 @@ def _inproc_clear() -> None:
     _INPROC_MEMO.clear()
 
 
+def inproc_lookup(
+    question_id: str, config_sig: str = "", *, force_rebuild: bool = False
+) -> "FastPathBundle | None":
+    """Peek the process memo for (question_id, config_sig) without touching disk.
+
+    Returns the memoized bundle if the memo is enabled and populated, else None.
+    Data sources call this *before* computing source_files so a memo hit skips
+    the source-file glob, not just the npz inflate inside ``cached_bundle``.
+    """
+    if force_rebuild or not _inproc_enabled() or os.environ.get("HLBT_REBUILD_CACHE"):
+        return None
+    key = (question_id, config_sig)
+    bundle = _INPROC_MEMO.get(key)
+    if bundle is not None:
+        _INPROC_MEMO.move_to_end(key)
+    return bundle
+
+
 def cached_bundle(
     cache_dir: Path,
     question_id: str,
