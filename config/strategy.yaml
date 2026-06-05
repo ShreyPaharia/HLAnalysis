@@ -255,7 +255,19 @@ strategies:
       daily_window_start_hour_utc: 6
 
     theta:
-      vol_lookback_seconds: 3600
+      # 2026-06-05: 3600 → 900 (binary only; buckets override to 2700 below).
+      # Independent HL binary walk-forward tune
+      # (v31_binary_independent_tune_2026_06_05 /
+      # summeries/2026-06-05-v31-hl-binary-tune.md, n=25, engine bit-identical
+      # to prod baseline $830.24). At dt=5, vol_lookback=900 is the worst-half
+      # optimum AND lowers maxDD: full $863.51 (+$33), worst-half $385.52 (+$21),
+      # maxDD $111.51 (−$13), Sharpe 12.94 vs prod $830.24 / $364.10 / $124.57.
+      # 900 is interior (600 worse, 1800+ lower). ⚠️ Validated ONLY at dt=5 —
+      # binary stays dt=5 (vol_sampling_dt below); do NOT pair with edge_buffer=0.0
+      # (eb=0 + vlb=900 do not stack — combo craters the early half to $207/DD$166,
+      # so edge_buffer stays 0.02). dt=2 was rejected for binary (worst-half
+      # $364→$250, the OPPOSITE of buckets).
+      vol_lookback_seconds: 900
       # 2026-05-30: 60 → 5 (v3.7 T13). v31 + v1 share the BTC reference feed and
       # MUST move in lockstep — the engine conflict-guards a same-symbol cadence
       # mismatch. ⚠️ GATE: ≥1-week paper validation before live cutover (see
@@ -339,7 +351,10 @@ strategies:
     # dt=5-binary / dt=2-bucket config has not been backtested as one run (the
     # tuner is single-cadence) — watch the first live bucket entries. Binary's
     # own free wins (vlb 3600→900, eb 0.02→0.0) and the shared dt=2 win ($872)
-    # are deliberately NOT applied here (separate, gated decisions).
+    # were separate, gated decisions: vlb 3600→900 IS now applied in the shared
+    # `theta:` block above (binary at dt=5, 2026-06-05 tune); eb 0.02→0.0 and the
+    # shared dt=2 win stay UNAPPLIED (eb=0 doesn't stack with vlb=900; dt=2 is a
+    # binary worst-half regression).
     theta_overrides:
       priceBucket:
         favorite_threshold: 0.80       # vs binary 0.85

@@ -101,12 +101,14 @@ def test_no_overrides_yields_empty_by_class_map() -> None:
 
 
 def test_live_strategy_yaml_bucket_override_matches_tune() -> None:
-    """Guard the shipped HL v31 bucket override against the independent bucket
-    tune (v31_bucket_independent_tune_2026_06_05): priceBucket diverges to
-    fav0.80 / vlb2700 / dt2 / esd0.0 / eb0.005 while priceBinary keeps the shared
-    theta defaults. The PM (v31_pm) slot carries NO per-class override.
+    """Guard the shipped HL v31 per-class config against the independent tunes:
+    priceBucket diverges to fav0.80 / vlb2700 / dt2 / esd0.0 / eb0.005
+    (v31_bucket_independent_tune_2026_06_05); priceBinary keeps the shared theta
+    defaults EXCEPT vol_lookback_seconds=900 (binary @dt5, fav0.85/eb0.02/esd1.0
+    unchanged — v31_binary_independent_tune_2026_06_05). The PM (v31_pm) slot
+    carries NO per-class override.
 
-    If someone edits config/strategy.yaml's bucket override, this pins the
+    If someone edits config/strategy.yaml's theta config, this pins the
     intended live values so a typo/regression fails loudly."""
     cfgs = load_strategies_config(Path("config/strategy.yaml"))
     theta = {c.account_alias: c for c in cfgs.strategies
@@ -121,9 +123,10 @@ def test_live_strategy_yaml_bucket_override_matches_tune() -> None:
     assert bucket.vol_sampling_dt_seconds == 2
     assert bucket.exit_safety_d == 0.0
     assert bucket.edge_buffer == 0.005
-    # binary (the instance default) is untouched
+    # binary (the instance default): only vol_lookback diverges to the binary
+    # tune (3600→900 @dt5); fav/dt/esd/eb stay at prod (eb=0 does not stack).
     assert base.favorite_threshold == 0.85
-    assert base.vol_lookback_seconds == 3600
+    assert base.vol_lookback_seconds == 900
     assert base.vol_sampling_dt_seconds == 5
     assert base.exit_safety_d == 1.0
     assert base.edge_buffer == 0.02
