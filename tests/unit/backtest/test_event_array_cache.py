@@ -267,6 +267,44 @@ def test_explicit_zero_disables(monkeypatch):
     assert caching_enabled() is False
 
 
+def test_concurrent_saves_same_key_dont_corrupt(tmp_path, monkeypatch):
+    """Several workers rebuilding the SAME bundle concurrently (the --workers
+    cold-cache case) must not corrupt the cache or crash: each writer needs its
+    OWN tmp file so they can't truncate each other's bytes, and the atomic rename
+    is last-writer-wins rather than ENOENT'ing when another already renamed
+    (SHR-71 rebuild storm)."""
+    import threading
+    import time
+    b = _realistic_bundle()
+    path = tmp_path / "v3_samekey.npz"
+
+    real_savez = np.savez_compressed
+
+    def slow_savez(file, **kw):
+        real_savez(file, **kw)
+        time.sleep(0.05)  # widen the write→rename window so writers overlap
+
+    monkeypatch.setattr(np, "savez_compressed", slow_savez)
+
+    errors: list[Exception] = []
+
+    def writer():
+        try:
+            _cache_mod._save(path, b)
+        except Exception as e:  # ENOENT on a collided rename == the bug
+            errors.append(e)
+
+    threads = [threading.Thread(target=writer) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"concurrent _save raised: {errors}"
+    got = _cache_mod._load(path)  # must be a complete, loadable bundle
+    assert got.leg_arrays["#0"].events.tobytes() == b.leg_arrays["#0"].events.tobytes()
+
+
 def test_bundle_nbytes_counts_arrays():
     """The byte estimate sums each leg's events.nbytes + book_ts.nbytes (the RAM
     the memo actually retains), plus a small per-event constant for ref/settle."""

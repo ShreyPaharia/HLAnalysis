@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import uuid
 from collections import OrderedDict
 from pathlib import Path
 from typing import Callable
@@ -117,9 +118,24 @@ def _save(path: Path, b: FastPathBundle) -> None:
     # Compressed: assembled book bundles are large but highly repetitive
     # (zero-padded fields, monotone timestamps), so deflate cuts the on-disk
     # corpus by ~an order of magnitude — the disk-blowup mitigation.
-    tmp = path.with_name(path.stem + ".tmp.npz")
-    np.savez_compressed(tmp, **payload)
-    tmp.replace(path)
+    #
+    # The tmp name MUST be unique per writer (pid + uuid), not derived from the
+    # final key alone: under `tune --workers N` several spawn workers rebuild the
+    # SAME bundle concurrently, and a shared tmp name made them truncate each
+    # other's bytes (corrupt npz) and ENOENT on the second rename (SHR-71 rebuild
+    # storm). With a private tmp each writer's bytes are intact and the atomic
+    # rename is simply last-writer-wins.
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}.{uuid.uuid4().hex}.tmp.npz")
+    try:
+        np.savez_compressed(tmp, **payload)
+        tmp.replace(path)
+    finally:
+        # If savez or replace failed, don't leave a private orphan behind.
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def _load(path: Path) -> FastPathBundle:
