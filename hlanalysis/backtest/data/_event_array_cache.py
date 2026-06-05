@@ -275,8 +275,18 @@ def _enforce_size_cap(cache_dir: Path) -> None:
 # benefit) and the memo assumes source files are immutable for the process
 # lifetime, which a `run`/`tune` over historical parquet satisfies but the
 # mtime-invalidation contract test deliberately violates. Off by default keeps
-# both honest. Bounded LRU caps RAM (bundles are large numpy arrays).
+# both honest.
+#
+# RAM bound (SHR-71): each bundle is ~100-140 MB of decompressed numpy arrays.
+# Bounding the memo by ENTRY COUNT alone (the old default 512) let one worker
+# retain ~65 GB, and `tune` spawns N such worker processes EACH with its own
+# module-global memo → ~TB aggregate at N=12 → OOM. So the memo is bounded
+# primarily by retained BYTES (worker-aware), with the count cap kept only as a
+# secondary backstop. See ``_inproc_max_bytes`` for the worker-aware budget.
 _INPROC_MEMO: "OrderedDict[tuple[str, str], FastPathBundle]" = OrderedDict()
+# Parallel size index (bytes per memo key) so eviction is O(1) per pop without
+# re-walking arrays; kept in lockstep with _INPROC_MEMO on every insert/evict.
+_INPROC_SIZES: "OrderedDict[tuple[str, str], int]" = OrderedDict()
 
 
 def _inproc_enabled() -> bool:
@@ -284,11 +294,69 @@ def _inproc_enabled() -> bool:
 
 
 def _inproc_max() -> int:
-    return int(os.environ.get("HLBT_INPROC_BUNDLE_MEMO_MAX", "512"))
+    """Secondary entry-count backstop. Lowered from 512 (meaningless for ~130 MB
+    objects) to 32 — at ~130 MB/bundle that is ~4 GiB, matching the default byte
+    budget; the BYTE bound (``_inproc_max_bytes``) is the real limit."""
+    return int(os.environ.get("HLBT_INPROC_BUNDLE_MEMO_MAX", "32"))
+
+
+def _inproc_max_bytes() -> int:
+    """Primary per-process byte budget for the in-proc bundle memo.
+
+    Mirrors the disk cache's ``_cache_max_bytes`` style:
+      * ``HLBT_INPROC_BUNDLE_MEMO_MAX_BYTES`` — exact per-process budget (used
+        verbatim, NOT divided by the worker count).
+      * else ``HLBT_INPROC_BUNDLE_MEMO_MAX_GB`` (default 4 GiB) is the TOTAL
+        budget across all spawn workers, divided by
+        ``HLBT_INPROC_BUNDLE_MEMO_WORKERS`` (set by ``tune`` before the
+        ProcessPoolExecutor spawns; default 1) so the AGGREGATE stays under the
+        total regardless of ``--workers``. At 4 GiB / 12 workers that is
+        ~340 MiB/worker ≈ 2-3 bundles — enough to win the sweep memo (the same
+        question is replayed across many param cells) without the SHR-71 OOM.
+    """
+    b = os.environ.get("HLBT_INPROC_BUNDLE_MEMO_MAX_BYTES")
+    if b is not None:
+        return int(b)
+    gb = float(os.environ.get("HLBT_INPROC_BUNDLE_MEMO_MAX_GB", "4"))
+    total = int(gb * 1024 ** 3)
+    workers = max(1, int(os.environ.get("HLBT_INPROC_BUNDLE_MEMO_WORKERS", "1")))
+    return total // workers
+
+
+def _bundle_nbytes(b: FastPathBundle) -> int:
+    """Estimate a bundle's retained RAM: the numpy arrays dominate, so sum each
+    leg's ``events.nbytes + book_ts.nbytes`` plus a small constant per ref/settle
+    event for the Python object overhead."""
+    total = 0
+    for la in b.leg_arrays.values():
+        total += int(la.events.nbytes) + int(la.book_ts.nbytes)
+    total += (len(b.reference_events) + len(b.settlement_events)) * 64
+    return total
 
 
 def _inproc_clear() -> None:
     _INPROC_MEMO.clear()
+    _INPROC_SIZES.clear()
+
+
+def _inproc_store(key: "tuple[str, str]", bundle: FastPathBundle) -> None:
+    """Insert ``bundle`` under ``key`` (most-recent) and LRU-evict until under
+    BOTH the byte budget (primary) and the count cap (secondary). The
+    just-inserted key is never evicted, so a bundle larger than the whole budget
+    still hits once before the next insert reclaims it."""
+    _INPROC_MEMO[key] = bundle
+    _INPROC_MEMO.move_to_end(key)
+    _INPROC_SIZES[key] = _bundle_nbytes(bundle)
+    _INPROC_SIZES.move_to_end(key)
+    max_bytes = _inproc_max_bytes()
+    max_count = _inproc_max()
+    retained = sum(_INPROC_SIZES.values())
+    while _INPROC_MEMO and (retained > max_bytes or len(_INPROC_MEMO) > max_count):
+        oldest = next(iter(_INPROC_MEMO))
+        if oldest == key:
+            break  # never evict the entry we just inserted
+        _INPROC_MEMO.pop(oldest, None)
+        retained -= _INPROC_SIZES.pop(oldest, 0)
 
 
 def inproc_lookup(
@@ -343,10 +411,7 @@ def cached_bundle(
     )
 
     if memo_on:
-        _INPROC_MEMO[memo_key] = bundle
-        _INPROC_MEMO.move_to_end(memo_key)
-        while len(_INPROC_MEMO) > _inproc_max():
-            _INPROC_MEMO.popitem(last=False)
+        _inproc_store(memo_key, bundle)
     return bundle
 
 

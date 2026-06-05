@@ -14,6 +14,7 @@ from __future__ import annotations
 import heapq
 import logging
 import re
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -158,6 +159,35 @@ def _sql_in(items) -> str:
     """Render a Python iterable of strings as comma-separated SQL string literals
     suitable for placement inside an ``IN (...)`` clause (no surrounding parens)."""
     return ",".join(repr(x) for x in items)
+
+
+def _read_parquet_arg(globs: list[str]) -> str:
+    """Render a list of glob strings as a duckdb ``read_parquet`` list literal,
+    e.g. ``['a/*.parquet','b/*.parquet']``. A list (not a single ``**`` glob)
+    lets us point duckdb at only the in-range date partitions."""
+    return "[" + ",".join(repr(g) for g in globs) + "]"
+
+
+def _fetch_with_retry(
+    con: "duckdb.DuckDBPyConnection", sql: str, *, attempts: int = 3
+) -> list[tuple]:
+    """Run ``con.sql(sql).fetchall()`` with a small bounded retry.
+
+    Under heavy spawn-worker concurrency duckdb's parallel parquet glob expansion
+    can transiently raise ``IOException: No files found`` even when the files
+    exist (SHR-71). Narrowing the glob to the in-range date partitions makes this
+    rare, but a couple of retries with a short backoff covers any residual flake
+    without masking a genuinely empty partition (which returns ``[]``, not raise)."""
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            return con.sql(sql).fetchall()
+        except duckdb.IOException as e:  # transient parallel-glob race
+            last = e
+            if i + 1 < attempts:
+                time.sleep(0.05 * (i + 1))
+    assert last is not None
+    raise last
 
 
 def _date_partitions_in_range(start_ns: int, end_ns: int) -> list[str]:
@@ -546,10 +576,13 @@ class HLHip4DataSource:
         glob = self._perp_partition_glob(evt, symbol="BTC")
         if not self._partition_has_files(glob):
             return []
+        # Narrow to in-range date partitions to dodge the 12k-file ``**`` glob
+        # that flakes under spawn-worker concurrency (SHR-71); retry on residual.
+        src = _read_parquet_arg(self._narrowed_globs(glob, date_list))
         if evt == "bbo":
             sql = f"""
                 SELECT exchange_ts, bid_px, ask_px
-                FROM read_parquet('{glob}', hive_partitioning=1)
+                FROM read_parquet({src}, hive_partitioning=1)
                 WHERE date IN ({_sql_in(date_list)})
                   AND exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
                 ORDER BY exchange_ts
@@ -557,12 +590,12 @@ class HLHip4DataSource:
         else:
             sql = f"""
                 SELECT exchange_ts, mark_px
-                FROM read_parquet('{glob}', hive_partitioning=1)
+                FROM read_parquet({src}, hive_partitioning=1)
                 WHERE date IN ({_sql_in(date_list)})
                   AND exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
                 ORDER BY exchange_ts
                 """
-        return con.sql(sql).fetchall()
+        return _fetch_with_retry(con, sql)
 
     def _settlement_iter(
         self,
@@ -865,10 +898,13 @@ class HLHip4DataSource:
             glob = self._perp_partition_glob(evt, symbol="BTC")
             if not self._partition_has_files(glob):
                 continue
+            # Same narrowing as _reference_rows: avoid the fragile 12k-file ``**``
+            # glob under concurrency (SHR-71).
+            src = _read_parquet_arg(self._narrowed_globs(glob, date_list))
             if evt == "bbo":
                 q = f"""
                     SELECT (bid_px + ask_px)/2.0 AS mid
-                    FROM read_parquet('{glob}', hive_partitioning=1)
+                    FROM read_parquet({src}, hive_partitioning=1)
                     WHERE date IN ({_sql_in(date_list)})
                       AND exchange_ts <= {ts_ns}
                     ORDER BY exchange_ts DESC LIMIT 1
@@ -876,17 +912,17 @@ class HLHip4DataSource:
             else:
                 q = f"""
                     SELECT mark_px AS mid
-                    FROM read_parquet('{glob}', hive_partitioning=1)
+                    FROM read_parquet({src}, hive_partitioning=1)
                     WHERE date IN ({_sql_in(date_list)})
                       AND exchange_ts <= {ts_ns}
                     ORDER BY exchange_ts DESC LIMIT 1
                 """
             try:
-                row = con.sql(q).fetchone()
+                rows = _fetch_with_retry(con, q)
             except duckdb.Error:
-                row = None
-            if row is not None:
-                return float(row[0])
+                rows = []
+            if rows:
+                return float(rows[0][0])
         return None
 
     def _partition_glob(self, event: str, *, symbol: str) -> str:
@@ -915,6 +951,27 @@ class HLHip4DataSource:
             / f"symbol={symbol}"
             / "**" / "*.parquet"
         )
+
+    def _narrowed_globs(self, base_glob: str, date_list: list[str]) -> list[str]:
+        """Narrow a ``.../**/*.parquet`` partition glob to only the ``date=``
+        sub-partitions in ``date_list`` that actually contain files.
+
+        The whole-partition ``**/*.parquet`` recursive walk over a 12k-file
+        partition is both slow and fragile under heavy spawn-worker concurrency:
+        duckdb's parallel glob expansion intermittently reports "No files found"
+        even though the files exist (SHR-71). Restricting the glob to the handful
+        of in-range ``date=`` dirs avoids the deep recursive walk entirely.
+
+        Falls back to ``[base_glob]`` when no ``date=`` sub-partition matches
+        (e.g. a flat layout that stores ``date`` as a column, not a directory —
+        the test fixture shape), so non-date-partitioned trees keep working."""
+        p = Path(base_glob)
+        if p.name != "*.parquet" or p.parent.name != "**":
+            return [base_glob]
+        root = p.parent.parent  # the ``symbol=...`` partition dir
+        narrowed = [str(root / f"date={d}" / "**" / "*.parquet") for d in date_list]
+        kept = [g for g in narrowed if self._partition_has_files(g)]
+        return kept or [base_glob]
 
     @lru_cache(maxsize=4096)
     def _partition_has_files(self, glob: str) -> bool:

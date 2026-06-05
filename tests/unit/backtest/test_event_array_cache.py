@@ -267,6 +267,58 @@ def test_explicit_zero_disables(monkeypatch):
     assert caching_enabled() is False
 
 
+def test_bundle_nbytes_counts_arrays():
+    """The byte estimate sums each leg's events.nbytes + book_ts.nbytes (the RAM
+    the memo actually retains), plus a small per-event constant for ref/settle."""
+    b = _realistic_bundle()
+    la = b.leg_arrays["#0"]
+    est = _cache_mod._bundle_nbytes(b)
+    assert est >= la.events.nbytes + la.book_ts.nbytes
+    # ref/settle lists add a small constant, never less than the array floor.
+    assert est >= la.events.nbytes + la.book_ts.nbytes
+
+
+def test_inproc_memo_evicts_by_bytes(tmp_path, monkeypatch):
+    """With a tiny BYTE budget, inserting several realistic-sized bundles keeps
+    total retained bytes under the budget (LRU-evicts), while the just-inserted
+    key still hits the memo (no rebuild)."""
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO", "1")
+    one = _cache_mod._bundle_nbytes(_realistic_bundle())
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO_MAX_BYTES", str(int(one * 1.5)))
+    cdir = tmp_path / "cache"
+    src = tmp_path / "a.parquet"; src.write_bytes(b"x")
+    for i in range(3):
+        cached_bundle(cdir, f"q{i}", [src], _realistic_bundle, config_sig="c")
+    retained = sum(_cache_mod._bundle_nbytes(b) for b in _cache_mod._INPROC_MEMO.values())
+    assert retained <= int(one * 1.5)  # byte budget held via LRU eviction
+    # The most-recently inserted key is still memoized -> hit without rebuild.
+    def _no_build():
+        raise AssertionError("just-inserted key should hit the memo, not rebuild")
+    got = cached_bundle(cdir, "q2", [src], _no_build, config_sig="c")
+    assert got is not None
+
+
+def test_inproc_budget_is_worker_aware(monkeypatch):
+    """The default per-process budget is divided by the worker count so the
+    AGGREGATE across N spawn workers stays under the total budget (SHR-71)."""
+    monkeypatch.delenv("HLBT_INPROC_BUNDLE_MEMO_MAX_BYTES", raising=False)
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO_MAX_GB", "4")
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO_WORKERS", "1")
+    solo = _cache_mod._inproc_max_bytes()
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO_WORKERS", "8")
+    par = _cache_mod._inproc_max_bytes()
+    assert par < solo  # parallelism shrinks each worker's slice
+    assert par == solo // 8
+
+
+def test_inproc_explicit_max_bytes_overrides_worker_division(monkeypatch):
+    """An explicit per-process HLBT_INPROC_BUNDLE_MEMO_MAX_BYTES is exact — it is
+    NOT divided by the worker count (the knob the byte-budget tests pin)."""
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO_MAX_BYTES", "12345")
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO_WORKERS", "8")
+    assert _cache_mod._inproc_max_bytes() == 12345
+
+
 def test_size_cap_evicts_oldest(tmp_path, monkeypatch):
     """A configured byte cap evicts least-recently-written entries so the cache
     cannot grow without bound under default-on."""
