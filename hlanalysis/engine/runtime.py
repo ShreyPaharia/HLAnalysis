@@ -5,7 +5,7 @@ import signal
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
-from dataclasses import dataclass, field, fields as dataclass_fields_of
+from dataclasses import dataclass, field, fields as dataclass_fields_of, replace as dataclass_replace
 from pathlib import Path
 from typing import Awaitable
 
@@ -272,6 +272,47 @@ def build_theta_harvester_config(cfg: StrategyConfig) -> ThetaHarvesterConfig:
     )
 
 
+def build_theta_harvester_configs_by_class(
+    cfg: StrategyConfig,
+) -> dict[str, ThetaHarvesterConfig]:
+    """Build per-question.klass ThetaHarvesterConfig overrides from the strategy's
+    `theta_overrides:` block. Mirrors build_late_resolution_configs_by_class.
+
+    Each class maps to a PARTIAL ThetaParams; only the fields the operator
+    explicitly set (pydantic ``model_fields_set``) override the instance theta
+    defaults built by ``build_theta_harvester_config``. Resolution order is
+    per-class override > instance theta defaults. When `theta_overrides` is unset
+    the map is empty and the strategy runs the single default config for every
+    class — bit-identical to today.
+
+    Using ``model_fields_set`` (not a value diff) is load-bearing: e.g.
+    exit_safety_d=0.0 is both the dataclass default AND a meaningful bucket
+    target, so an explicit 0.0 must win over the instance theta's 1.0.
+
+    ``vol_sampling_dt_seconds`` is rejected per-class: it couples to the shared
+    MarketState mark-bucket period (all slots on a reference symbol move in
+    lockstep — the engine conflict-guards a mismatch), so the σ cadence cannot
+    diverge by question class. Set it in the shared `theta:` block instead.
+    """
+    overrides = cfg.theta_overrides
+    if not overrides:
+        return {}
+    base = build_theta_harvester_config(cfg)
+    by_class: dict[str, ThetaHarvesterConfig] = {}
+    for klass, override in overrides.items():
+        set_fields = {name: getattr(override, name) for name in override.model_fields_set}
+        if "vol_sampling_dt_seconds" in set_fields:
+            raise ValueError(
+                f"strategy '{cfg.name}' (alias={cfg.account_alias}): "
+                f"theta_overrides['{klass}'] sets vol_sampling_dt_seconds, but the "
+                "reference-feed cadence is shared across all slots on a symbol and "
+                "MUST move in lockstep — it cannot diverge per question class. Set "
+                "it in the shared `theta:` block instead.",
+            )
+        by_class[klass] = dataclass_replace(base, **set_fields)
+    return by_class
+
+
 def reference_sampling_dt_seconds(cfg: StrategyConfig) -> int:
     """Effective ``vol_sampling_dt_seconds`` for a slot's reference feed.
 
@@ -299,6 +340,17 @@ def reference_vol_lookback_seconds(cfg: StrategyConfig) -> int:
         secs = max(
             secs, cfg.theta.vol_lookback_seconds, cfg.theta.drift_lookback_seconds,
         )
+    # Per-class theta overrides may request a longer σ/drift window for one
+    # class; size MarketState history for the largest across all of them so a
+    # bucket-vs-binary divergence isn't truncated. Only explicitly-set fields
+    # carry a meaningful value (model_fields_set); unset ones fall back to the
+    # already-counted instance theta defaults above.
+    for override in (cfg.theta_overrides or {}).values():
+        set_fields = override.model_fields_set
+        if "vol_lookback_seconds" in set_fields:
+            secs = max(secs, override.vol_lookback_seconds)
+        if "drift_lookback_seconds" in set_fields:
+            secs = max(secs, override.drift_lookback_seconds)
     return secs
 
 
@@ -311,7 +363,10 @@ def _build_strategy_for_slot(cfg: StrategyConfig) -> Strategy:
             cfg_by_class=build_late_resolution_configs_by_class(cfg),
         )
     if cfg.strategy_type == "theta_harvester":
-        return ThetaHarvesterStrategy(build_theta_harvester_config(cfg))
+        return ThetaHarvesterStrategy(
+            build_theta_harvester_config(cfg),
+            cfg_by_class=build_theta_harvester_configs_by_class(cfg),
+        )
     raise ValueError(f"unknown strategy_type: {cfg.strategy_type!r}")
 
 

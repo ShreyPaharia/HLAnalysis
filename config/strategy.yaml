@@ -318,6 +318,25 @@ strategies:
       # ceiling — d=1.5 triggers a re-entry cascade (see summary).
       exit_safety_d: 1.0
 
+    # Per-question.klass theta overrides. Each class maps to a PARTIAL theta
+    # block: only the listed fields override the shared `theta:` defaults above
+    # (resolution: per-class override > instance theta). Unknown knobs fail loud
+    # (extra='forbid', same as `theta:`); vol_sampling_dt_seconds is rejected
+    # here because the reference-feed cadence is shared across all slots on a
+    # symbol and must move in lockstep. Omitting this block (the default below)
+    # is bit-identical to today.
+    #
+    # The independent HL bucket tune (summeries/v31_bucket_independent_tune_2026_06_05)
+    # found buckets want the OPPOSITE of binary on these axes. To diverge them,
+    # uncomment and tune (NOT yet validated for live — plumbing only):
+    #
+    # theta_overrides:
+    #   priceBucket:
+    #     favorite_threshold: 0.80     # vs binary 0.85
+    #     vol_lookback_seconds: 2700   # vs binary 3600
+    #     exit_safety_d: 0.0           # vs binary 1.0 (mid-hold exit off for buckets)
+    #     edge_buffer: 0.005           # vs binary 0.02
+
   # --- v3.1 Polymarket ---
   # PM ablation knobs: post-2026-05-23 walk-forward (see Appendix C of
   # docs/v31-polymarket-live-plan.md and [[v31-final-state-2026-05-23]]) picked
