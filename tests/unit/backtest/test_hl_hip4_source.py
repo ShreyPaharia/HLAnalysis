@@ -266,6 +266,31 @@ def test_resolved_outcome_falls_back_to_mark_vs_strike(
     assert outcome in ("yes", "no")
 
 
+def test_resolved_outcome_memoized_per_question(
+    discovered: QuestionDescriptor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # At settlement the runner calls resolved_outcome up to 3x per question
+    # (direct, via leg_payoff, and building the QResult). It is deterministic
+    # per question, so the expensive BTC-reference lookup must run exactly once
+    # per question_id and serve repeats from a per-question cache.
+    src = HLHip4DataSource(data_root=FIXTURE_ROOT)
+    calls = {"n": 0}
+    orig = src._last_btc_ref_at_or_before
+
+    def counting(*a, **kw):
+        calls["n"] += 1
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(src, "_last_btc_ref_at_or_before", counting)
+
+    first = src.resolved_outcome(discovered)
+    second = src.resolved_outcome(discovered)
+
+    assert first == second
+    assert first in ("yes", "no")
+    assert calls["n"] == 1  # second call served from the per-question cache
+
+
 def test_question_view_bucket_synthetic(source: HLHip4DataSource) -> None:
     """The bucket path of question_view doesn't run against the fixture's binary,
     so unit-test it with a hand-crafted descriptor + mocked meta cache."""

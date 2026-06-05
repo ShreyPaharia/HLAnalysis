@@ -190,6 +190,12 @@ def _run_one_cell(args: tuple) -> dict:
     os.environ["HLBT_HL_RESAMPLE_SECONDS"] = _dt
     os.environ["HLBT_PM_RESAMPLE_SECONDS"] = _dt
 
+    # A sweep replays each question across many param cells; the built
+    # event-array bundle is param-independent, so memoize it in-process to skip
+    # cache_key (file stat) + npz inflate on every cell after the first.
+    # setdefault so an operator can still force it off with HLBT_INPROC_BUNDLE_MEMO=0.
+    os.environ.setdefault("HLBT_INPROC_BUNDLE_MEMO", "1")
+
     data_source = reconstruct_source(data_source_dotted)
 
     strategy = build_strategy(strategy_id, params)

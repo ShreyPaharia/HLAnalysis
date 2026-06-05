@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+from collections import OrderedDict
 from pathlib import Path
 from typing import Callable
 
@@ -261,6 +263,34 @@ def _enforce_size_cap(cache_dir: Path) -> None:
             pass
 
 
+# --- Opt-in process-level bundle memo --------------------------------------
+# A tuning sweep replays the *same* question across many param cells; each cell
+# reconstructs the data source but the built event-array bundle is
+# param-independent, so re-running cache_key (file stat) + npz inflate per cell
+# is pure waste. When HLBT_INPROC_BUNDLE_MEMO=1 (set by `tune`), cached_bundle
+# keeps an in-process LRU of bundles keyed on (question_id, config_sig) and
+# returns the memoized object directly — skipping disk entirely on repeat.
+#
+# Default-OFF: a single `run` processes each question once (no repeat → no
+# benefit) and the memo assumes source files are immutable for the process
+# lifetime, which a `run`/`tune` over historical parquet satisfies but the
+# mtime-invalidation contract test deliberately violates. Off by default keeps
+# both honest. Bounded LRU caps RAM (bundles are large numpy arrays).
+_INPROC_MEMO: "OrderedDict[tuple[str, str], FastPathBundle]" = OrderedDict()
+
+
+def _inproc_enabled() -> bool:
+    return os.environ.get("HLBT_INPROC_BUNDLE_MEMO", "0") not in ("0", "", "false", "False")
+
+
+def _inproc_max() -> int:
+    return int(os.environ.get("HLBT_INPROC_BUNDLE_MEMO_MAX", "512"))
+
+
+def _inproc_clear() -> None:
+    _INPROC_MEMO.clear()
+
+
 def cached_bundle(
     cache_dir: Path,
     question_id: str,
@@ -277,8 +307,40 @@ def cached_bundle(
     (no file, mtime/size change, corrupt file, or force_rebuild), calls
     ``build_fn()`` and attempts to persist the result. Write failures are logged
     and silently skipped — the returned bundle is always correct.
+
+    When ``HLBT_INPROC_BUNDLE_MEMO`` is set, an in-process LRU keyed on
+    (question_id, config_sig) short-circuits both the disk cache and build on a
+    repeat call within the process (the tune-sweep fast path).
     """
-    import os
+    memo_on = _inproc_enabled()
+    rebuild = force_rebuild or bool(os.environ.get("HLBT_REBUILD_CACHE"))
+    memo_key = (question_id, config_sig)
+    if memo_on and not rebuild and memo_key in _INPROC_MEMO:
+        _INPROC_MEMO.move_to_end(memo_key)
+        return _INPROC_MEMO[memo_key]
+
+    bundle = _cached_bundle_disk(
+        cache_dir, question_id, source_files, build_fn,
+        force_rebuild=force_rebuild, config_sig=config_sig,
+    )
+
+    if memo_on:
+        _INPROC_MEMO[memo_key] = bundle
+        _INPROC_MEMO.move_to_end(memo_key)
+        while len(_INPROC_MEMO) > _inproc_max():
+            _INPROC_MEMO.popitem(last=False)
+    return bundle
+
+
+def _cached_bundle_disk(
+    cache_dir: Path,
+    question_id: str,
+    source_files: list[Path],
+    build_fn: Callable[[], FastPathBundle],
+    *,
+    force_rebuild: bool = False,
+    config_sig: str = "",
+) -> FastPathBundle:
     if not caching_enabled():
         return build_fn()
     # HLBT_REBUILD_CACHE=1 forces a rebuild process-wide; set by the CLI's

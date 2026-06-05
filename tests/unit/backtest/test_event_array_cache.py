@@ -2,6 +2,7 @@
 from __future__ import annotations
 import numpy as np
 import pytest
+import hlanalysis.backtest.data._event_array_cache as _cache_mod
 from hlanalysis.backtest.data._event_array_cache import (
     cached_bundle, cache_key, caching_enabled,
 )
@@ -15,6 +16,11 @@ def _enable_caching(monkeypatch):
     # OFF for hermeticity; these tests exercise the cache itself so re-enable.
     monkeypatch.setenv("HLBT_CACHE_EVENT_ARRAYS", "1")
     monkeypatch.delenv("HLBT_NO_CACHE", raising=False)
+    # The process-level bundle memo is a module global; clear it around every
+    # test so leftover entries can't leak across tests.
+    _cache_mod._inproc_clear()
+    yield
+    _cache_mod._inproc_clear()
 
 
 def _bundle():
@@ -93,6 +99,49 @@ def test_mtime_change_invalidates(tmp_path):
     src.write_bytes(b"y" * 20)  # size + mtime change
     cached_bundle(tmp_path / "cache", "q1", [src], build)
     assert calls["n"] == 2  # rebuilt
+
+
+# --- opt-in process-level bundle memo (the tune-sweep win) ------------------
+
+
+def test_inproc_bundle_memo_skips_rebuild_when_enabled(tmp_path, monkeypatch):
+    """With HLBT_INPROC_BUNDLE_MEMO=1, a repeat call for the same
+    (question_id, config_sig) within the process returns the *same* bundle
+    object without re-stat (cache_key) or npz re-load — the tune-sweep fast
+    path where one question is replayed across many param cells."""
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO", "1")
+    qid = f"q-{tmp_path.name}"
+    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    calls = {"n": 0}
+    def build():
+        calls["n"] += 1; return _bundle()
+    cdir = tmp_path / "cache"
+    b1 = cached_bundle(cdir, qid, [src], build, config_sig="c")
+    b2 = cached_bundle(cdir, qid, [src], build, config_sig="c")
+    assert calls["n"] == 1
+    assert b1 is b2  # served from the process memo, not a fresh disk load
+
+
+def test_inproc_bundle_memo_off_by_default_loads_fresh(tmp_path):
+    """Default-off: behaviour is unchanged — each call returns a freshly loaded
+    bundle (distinct objects), preserving the mtime-invalidation contract."""
+    qid = f"q-{tmp_path.name}"
+    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    cdir = tmp_path / "cache"
+    b1 = cached_bundle(cdir, qid, [src], _bundle, config_sig="c")
+    b2 = cached_bundle(cdir, qid, [src], _bundle, config_sig="c")
+    assert b1 is not b2
+
+
+def test_inproc_bundle_memo_keys_on_config_sig(tmp_path, monkeypatch):
+    """Different config_sig (e.g. dt=5 vs dt=60) must NOT share a memo entry."""
+    monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO", "1")
+    qid = f"q-{tmp_path.name}"
+    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    cdir = tmp_path / "cache"
+    b1 = cached_bundle(cdir, qid, [src], _bundle, config_sig="dt5")
+    b2 = cached_bundle(cdir, qid, [src], _bundle, config_sig="dt60")
+    assert b1 is not b2
 
 
 def test_build_version_in_key(tmp_path, monkeypatch):

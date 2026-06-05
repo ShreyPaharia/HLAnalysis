@@ -196,6 +196,11 @@ class HLHip4DataSource:
         self._reference_resample_ns = int(reference_resample_seconds) * 1_000_000_000
         # Cached per-instance: question_id -> parsed metadata bundle.
         self._meta_cache: dict[str, _QuestionMeta] = {}
+        # Cached per-instance: question_id -> settled outcome. resolved_outcome
+        # is deterministic per question (settlement data / final BTC ref don't
+        # change within a process) but the runner calls it up to 3x per question
+        # at settlement, each doing a duckdb settlement scan + BTC-ref lookup.
+        self._outcome_cache: dict[str, Literal["yes", "no", "unknown"]] = {}
 
     # ------------------------------ discovery -----------------------------
 
@@ -622,6 +627,16 @@ class HLHip4DataSource:
     # ---------------------------- resolved outcome ------------------------
 
     def resolved_outcome(
+        self, q: QuestionDescriptor
+    ) -> Literal["yes", "no", "unknown"]:
+        cached = self._outcome_cache.get(q.question_id)
+        if cached is not None:
+            return cached
+        outcome = self._resolve_outcome_impl(q)
+        self._outcome_cache[q.question_id] = outcome
+        return outcome
+
+    def _resolve_outcome_impl(
         self, q: QuestionDescriptor
     ) -> Literal["yes", "no", "unknown"]:
         # 1) Try real settlement events. Per-leg short-circuit on first hit.
