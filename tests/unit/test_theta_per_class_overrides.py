@@ -195,12 +195,15 @@ def test_strategy_restores_cfg_after_evaluate() -> None:
 
 # --- guards ------------------------------------------------------------------
 
-def test_vol_sampling_dt_override_rejected() -> None:
-    """vol_sampling_dt_seconds couples to the shared reference-feed bucketing
-    (all slots on a symbol move in lockstep). It MUST NOT diverge per class."""
+def test_vol_sampling_dt_override_now_allowed() -> None:
+    """Post (symbol, dt) refactor: a per-class vol_sampling_dt_seconds override
+    is legal — the engine maintains an independent bar series per cadence, so the
+    σ sampling cadence can diverge by question class."""
     cfg = _theta_cfg(theta_overrides={"priceBucket": {"vol_sampling_dt_seconds": 2}})
-    with pytest.raises(ValueError, match="vol_sampling_dt_seconds"):
-        build_theta_harvester_configs_by_class(cfg)
+    by_class = build_theta_harvester_configs_by_class(cfg)
+    assert by_class["priceBucket"].vol_sampling_dt_seconds == 2
+    base = build_theta_harvester_config(cfg)
+    assert base.vol_sampling_dt_seconds == 5  # binary keeps the shared default
 
 
 def test_unknown_override_knob_fails_loud() -> None:

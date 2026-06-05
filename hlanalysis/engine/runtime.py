@@ -289,10 +289,10 @@ def build_theta_harvester_configs_by_class(
     exit_safety_d=0.0 is both the dataclass default AND a meaningful bucket
     target, so an explicit 0.0 must win over the instance theta's 1.0.
 
-    ``vol_sampling_dt_seconds`` is rejected per-class: it couples to the shared
-    MarketState mark-bucket period (all slots on a reference symbol move in
-    lockstep — the engine conflict-guards a mismatch), so the σ cadence cannot
-    diverge by question class. Set it in the shared `theta:` block instead.
+    Per-class ``vol_sampling_dt_seconds`` IS supported: MarketState buckets the
+    shared reference feed at each registered (symbol, dt) cadence independently,
+    so a class can run a different σ sampling cadence. The engine registers each
+    class's cadence so the dt divergence is realized at the σ-history read.
     """
     overrides = cfg.theta_overrides
     if not overrides:
@@ -301,14 +301,6 @@ def build_theta_harvester_configs_by_class(
     by_class: dict[str, ThetaHarvesterConfig] = {}
     for klass, override in overrides.items():
         set_fields = {name: getattr(override, name) for name in override.model_fields_set}
-        if "vol_sampling_dt_seconds" in set_fields:
-            raise ValueError(
-                f"strategy '{cfg.name}' (alias={cfg.account_alias}): "
-                f"theta_overrides['{klass}'] sets vol_sampling_dt_seconds, but the "
-                "reference-feed cadence is shared across all slots on a symbol and "
-                "MUST move in lockstep — it cannot diverge per question class. Set "
-                "it in the shared `theta:` block instead.",
-            )
         by_class[klass] = dataclass_replace(base, **set_fields)
     return by_class
 

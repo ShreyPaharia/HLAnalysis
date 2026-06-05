@@ -257,8 +257,10 @@ class StrategyConfig(BaseModel):
     # buckets want the OPPOSITE of binary on favorite_threshold /
     # vol_lookback_seconds / exit_safety_d / edge_buffer; this is the seam that
     # lets a class diverge within one strategy instance. No block → bit-identical
-    # to today. vol_sampling_dt_seconds cannot be overridden here (shared
-    # reference-feed cadence; see build_theta_harvester_configs_by_class).
+    # to today. vol_sampling_dt_seconds may also be overridden per class: the
+    # engine buckets the shared reference feed at each class's cadence
+    # independently (see MarketState (symbol, dt) bucketing + Scanner
+    # cadence_by_class).
     theta_overrides: dict[str, ThetaParams] | None = None
     # Symbol whose MarkEvent feeds σ + p_model. Default "BTC" = HL perp mark
     # (HL adapter emits MarkEvent with symbol="BTC"). For PM markets that
