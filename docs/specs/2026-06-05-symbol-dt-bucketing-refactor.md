@@ -293,8 +293,10 @@ git commit -m "refactor(market-state): key reference bucketing by (symbol, dt)"
 
 The scanner currently uses one `self._recent_returns_n` and reads with the slot's single dt. Make it resolve `(dt, n)` per question **class** from the strategy config, then read the matching `(symbol, dt)` series. Falls back to the slot default for classes without an override, so single-cadence slots are bit-identical.
 
+**Bit-identity rule (critical):** the DEFAULT path must stay byte-identical to today. Today the scan does a **dt-less** `recent_returns(ref_symbol, n=self._recent_returns_n)` and `_required_returns_n` uses `dt = theta.vol_sampling_dt else 60`. We keep `_required_returns_n` and the default dt-less read exactly. We ONLY add explicit `(dt, n)` reads for question classes that actually override `vol_sampling_dt_seconds`. A class with a non-dt override (e.g. favorite_threshold only) is NOT in the cadence map and reads the default series. This guarantees v1 / v1_pm / v31-without-dt-override are unchanged.
+
 **Files:**
-- Modify: `hlanalysis/engine/scanner.py:115` (drop the single `_recent_returns_n` use in `scan`), `:117-143` (`_required_returns_n` → a per-class map), `:264-279` (the `recent_returns`/`recent_hl_bars` reads)
+- Modify: `hlanalysis/engine/scanner.py:115` (keep `_recent_returns_n`, add `_cadence_by_class`), `:117-143` (refactor `_required_returns_n` into shared helpers, identical output; add `cadence_by_class`), `:264-279` (per-class read)
 - Test: `tests/unit/test_scanner_per_class_cadence.py` (create)
 
 - [ ] **Step 1: Write the failing test**
@@ -331,47 +333,62 @@ def _entry(klass: str) -> AllowlistEntry:
     )
 
 
-def _cfg() -> StrategyConfig:
+def _cfg(theta_overrides: dict | None = None) -> StrategyConfig:
     defaults = AllowlistEntry(
         match={}, max_position_usd=500, stop_loss_pct=None, tte_min_seconds=0,
         tte_max_seconds=43200, price_extreme_threshold=0.0,
         distance_from_strike_usd_min=0, vol_max=100,
     )
-    return StrategyConfig(
+    kwargs: dict = dict(
         name="theta_harvester", account_alias="v31", paper_mode=False,
         strategy_type="theta_harvester",
         allowlist=[_entry("priceBinary"), _entry("priceBucket")],
         blocklist_question_idxs=[], defaults=defaults,
         theta=ThetaParams(vol_lookback_seconds=3600, vol_sampling_dt_seconds=5),
-        theta_overrides={"priceBucket": {"vol_sampling_dt_seconds": 2}},
         **{"global": _global()},
     )
+    if theta_overrides is not None:
+        kwargs["theta_overrides"] = theta_overrides
+    return StrategyConfig(**kwargs)
 
 
-def test_cadence_by_class_maps_each_class_to_its_dt() -> None:
-    m = Scanner.cadence_by_class(_cfg())
-    assert m["priceBinary"][0] == 5      # (dt_seconds, n)
-    assert m["priceBucket"][0] == 2
-    # dt=2 must request more bars than dt=5 for the same lookback
-    assert m["priceBucket"][1] > m["priceBinary"][1]
+def test_cadence_by_class_only_contains_dt_overriding_classes() -> None:
+    """Only classes whose override sets vol_sampling_dt_seconds get an entry;
+    binary (no dt override) is absent → it reads the default series."""
+    cfg = _cfg(theta_overrides={"priceBucket": {"vol_sampling_dt_seconds": 2}})
+    m = Scanner.cadence_by_class(cfg)
+    assert set(m) == {"priceBucket"}
+    assert m["priceBucket"][0] == 2                       # (dt_seconds, n_bars)
+    # dt=2 requests more bars than the default dt=5 for the same 3600s lookback.
+    assert m["priceBucket"][1] > Scanner._required_returns_n(cfg)
 
 
-def test_default_cadence_for_unmapped_class() -> None:
-    m = Scanner.cadence_by_class(_cfg())
-    dt_default, n_default = Scanner.default_cadence(_cfg())
-    assert dt_default == 5
-    # An unmapped class (e.g. a future "priceLadder") falls back to the default.
-    assert "priceLadder" not in m
+def test_non_dt_override_creates_no_cadence_entry() -> None:
+    """A class override that changes only a non-dt knob must NOT create a
+    cadence entry — that class keeps reading the default series (bit-identical)."""
+    cfg = _cfg(theta_overrides={"priceBucket": {"favorite_threshold": 0.80}})
+    assert Scanner.cadence_by_class(cfg) == {}
+
+
+def test_no_overrides_empty_cadence_map() -> None:
+    """No theta_overrides → empty map → every class reads the default series."""
+    assert Scanner.cadence_by_class(_cfg()) == {}
+
+
+def test_default_returns_n_unchanged() -> None:
+    """The default bars/tick is the legacy _required_returns_n value (dt=5 here:
+    ceil(3600/5)=720). This is what the dt-less default read uses, unchanged."""
+    assert Scanner._required_returns_n(_cfg()) == 720
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run python -m pytest tests/unit/test_scanner_per_class_cadence.py -q`
-Expected: FAIL — `Scanner.cadence_by_class` / `Scanner.default_cadence` do not exist.
+Expected: FAIL — `Scanner.cadence_by_class` does not exist.
 
-- [ ] **Step 3: Add the cadence-resolution staticmethods**
+- [ ] **Step 3: Refactor `_required_returns_n` into shared helpers (identical output) + add `cadence_by_class`**
 
-In `scanner.py`, replace `_required_returns_n` (`:117-143`) with a shared bars-for-lookback helper plus the two classmethods. Keep the lookback inputs identical to today (defaults + allowlist + theta), only the **dt divisor** varies per class:
+In `scanner.py`, refactor `_required_returns_n` (`:117-143`) to delegate to two helpers so `cadence_by_class` can reuse the lookback logic. `_required_returns_n` MUST return the identical value it does today (default path bit-identity). Replace the single method with:
 
 ```python
     @staticmethod
@@ -382,6 +399,8 @@ In `scanner.py`, replace `_required_returns_n` (`:117-143`) with a shared bars-f
 
     @staticmethod
     def _lookback_secs(cfg: StrategyConfig) -> int:
+        """Largest σ/drift lookback (seconds) across defaults, allowlist, and the
+        theta block — identical inputs to the legacy _required_returns_n."""
         secs = cfg.defaults.vol_lookback_seconds
         for entry in cfg.allowlist:
             secs = max(secs, entry.vol_lookback_seconds)
@@ -389,19 +408,22 @@ In `scanner.py`, replace `_required_returns_n` (`:117-143`) with a shared bars-f
             secs = max(secs, cfg.theta.vol_lookback_seconds, cfg.theta.drift_lookback_seconds)
         return secs
 
-    @classmethod
-    def default_cadence(cls, cfg: StrategyConfig) -> tuple[int, int]:
-        """(dt_seconds, n_bars) for the slot default cadence — used for any
-        question class without a per-class theta override."""
-        from .runtime import reference_sampling_dt_seconds  # avoid import cycle
-        dt = reference_sampling_dt_seconds(cfg)
-        return dt, cls._bars_for(cls._lookback_secs(cfg), dt)
+    @staticmethod
+    def _required_returns_n(cfg: StrategyConfig) -> int:
+        """Default bars/tick for the dt-less read. UNCHANGED output: dt divisor is
+        theta.vol_sampling_dt_seconds for theta slots, else 60 (legacy). The
+        MarketState default series is the slot's first registered cadence, which
+        equals this dt for theta slots — so the dt-less read stays bit-identical."""
+        dt = cfg.theta.vol_sampling_dt_seconds if cfg.theta is not None else 60
+        return Scanner._bars_for(Scanner._lookback_secs(cfg), dt)
 
     @classmethod
     def cadence_by_class(cls, cfg: StrategyConfig) -> dict[str, tuple[int, int]]:
-        """Map question.klass -> (dt_seconds, n_bars) for classes whose
-        theta_override sets vol_sampling_dt_seconds. Classes absent here use
-        default_cadence(). Empty for non-theta slots or slots with no dt override."""
+        """Map question.klass -> (dt_seconds, n_bars) ONLY for classes whose
+        theta_override explicitly sets vol_sampling_dt_seconds (model_fields_set).
+        Classes absent here read the default series via the dt-less path, so a
+        slot with no dt override is bit-identical to today. Empty for non-theta
+        slots or slots with no dt override."""
         out: dict[str, tuple[int, int]] = {}
         for klass, override in (cfg.theta_overrides or {}).items():
             if "vol_sampling_dt_seconds" not in override.model_fields_set:
@@ -411,29 +433,44 @@ In `scanner.py`, replace `_required_returns_n` (`:117-143`) with a shared bars-f
         return out
 ```
 
-- [ ] **Step 4: Wire the maps into `__init__` and the scan read**
+- [ ] **Step 4: Wire the cadence map into `__init__` and the scan read**
 
-In `Scanner.__init__`, replace `self._recent_returns_n = self._required_returns_n(cfg)` (`:115`) with:
+In `Scanner.__init__`, KEEP `self._recent_returns_n = self._required_returns_n(cfg)` (`:115`) and add right after it:
 
 ```python
-        self._default_cadence = self.default_cadence(cfg)        # (dt, n)
-        self._cadence_by_class = self.cadence_by_class(cfg)       # klass -> (dt, n)
+        # Per-class cadence overrides (dt, n) for question classes whose theta
+        # override changes vol_sampling_dt_seconds. Classes absent here use the
+        # default dt-less read below — bit-identical to pre-refactor behaviour.
+        self._cadence_by_class = self.cadence_by_class(cfg)
 ```
 
-In `scan()` (`:264-279`), resolve per question then read at that cadence:
+In `scan()` (`:264-279`), resolve per question: default classes keep the exact dt-less read; only dt-overriding classes pass an explicit `(dt, n)`:
 
 ```python
-            dt_s, ret_n = self._cadence_by_class.get(q.klass, self._default_cadence)
+            cadence = self._cadence_by_class.get(q.klass)
+            if cadence is None:
+                # Default path — byte-identical to pre-refactor (dt-less read,
+                # resolves to the symbol's first registered cadence).
+                recent_returns = self.ms.recent_returns(
+                    self.ref_symbol, n=self._recent_returns_n,
+                )
+                recent_hl_bars = self.ms.recent_hl_bars(
+                    self.ref_symbol, n=self._recent_returns_n,
+                )
+            else:
+                dt_s, ret_n = cadence
+                recent_returns = self.ms.recent_returns(
+                    self.ref_symbol, n=ret_n, dt=dt_s,
+                )
+                recent_hl_bars = self.ms.recent_hl_bars(
+                    self.ref_symbol, n=ret_n, dt=dt_s,
+                )
             decision = self.strategy.evaluate(
                 question=q,
                 books=books,
                 reference_price=ref,
-                recent_returns=self.ms.recent_returns(
-                    self.ref_symbol, n=ret_n, dt=dt_s,
-                ),
-                recent_hl_bars=self.ms.recent_hl_bars(
-                    self.ref_symbol, n=ret_n, dt=dt_s,
-                ),
+                recent_returns=recent_returns,
+                recent_hl_bars=recent_hl_bars,
                 recent_volume_usd=volume_total,
                 position=strat_pos,
                 now_ns=now_ns,
@@ -443,7 +480,7 @@ In `scan()` (`:264-279`), resolve per question then read at that cadence:
 - [ ] **Step 5: Run the new test + scanner suite**
 
 Run: `uv run python -m pytest tests/unit/test_scanner_per_class_cadence.py tests/unit/test_scanner.py -q`
-Expected: PASS. If any existing scanner test referenced `_required_returns_n` or `_recent_returns_n` by name, update it to `default_cadence(cfg)` (returns `(dt, n)`); the `n` is the second element.
+Expected: PASS. `_required_returns_n` keeps its name and exact output, and `self._recent_returns_n` is unchanged, so existing scanner tests referencing them keep working. If one fails, it's a real regression in the refactor — investigate, don't paper over it.
 
 - [ ] **Step 6: Commit**
 
@@ -478,16 +515,18 @@ def test_per_class_override_registers_extra_cadence(tmp_path) -> None:
     })
     rt = _runtime([cfg], tmp_path)
     rt._register_reference_cadences(rt.slots)
-    assert rt.market_state.mark_bucket_ns_for("BTC", dt=5) == 5_000_000_000
-    assert rt.market_state.mark_bucket_ns_for("BTC", dt=2) == 2_000_000_000
+    # Assert BOTH cadences are actually REGISTERED on the shared symbol. Do NOT
+    # assert via mark_bucket_ns_for(sym, dt=2) — that returns dt*1e9 for any
+    # explicit dt regardless of registration, so it would pass vacuously.
+    assert rt.market_state._cadences_by_symbol["BTC"] == [5 * _NS, 2 * _NS]
 ```
 
-(Confirm `_runtime(...)` exposes `.slots` and `.market_state`; if the helper builds slots differently, register via the same path `_register_reference_cadences` consumes. `_theta_cfg` already exists in this file at `:51`.)
+(Confirm `_runtime(...)` exposes `.slots` and `.market_state`; if the helper builds slots differently, register via the same path `_register_reference_cadences` consumes. `_theta_cfg` already exists in this file at `:51`; `_NS = 1_000_000_000` is defined at the top of the file.)
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run python -m pytest tests/unit/test_engine_runtime_cadence.py::test_per_class_override_registers_extra_cadence -q`
-Expected: FAIL — only dt=5 is registered; `mark_bucket_ns_for("BTC", dt=2)` returns the dt-less default (5s), not 2s.
+Expected: FAIL — only dt=5 is registered, so `_cadences_by_symbol["BTC"]` is `[5 * _NS]`, missing the dt=2 override cadence.
 
 - [ ] **Step 3: Register per-class cadences**
 
