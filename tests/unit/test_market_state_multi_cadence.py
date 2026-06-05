@@ -66,3 +66,4 @@ def test_same_cadence_reregistration_is_idempotent() -> None:
     ms.set_reference_cadence("BTC", sampling_dt_seconds=5, lookback_seconds=1800)
     ms.set_reference_cadence("BTC", sampling_dt_seconds=5, lookback_seconds=3600)
     assert ms.mark_bucket_ns_for("BTC", dt=5) == 5 * 1_000_000_000
+    assert ms._mark_history_by_key[("BTC", 5 * 1_000_000_000)] >= 3600 // 5 + 2

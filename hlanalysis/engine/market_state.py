@@ -70,6 +70,7 @@ class MarketState:
         self._mark_history: int = mark_history  # default deque maxlen (legacy)
         self._mark_history_by_key: dict[tuple[str, int], int] = {}
         self._mark_bucket_ns: int = mark_bucket_ns  # default (60s) for unregistered symbols
+        self._default_cadences: tuple[int, ...] = (self._mark_bucket_ns,)
         # Cadences registered per symbol, in registration order. The FIRST
         # registered cadence is the symbol's default (what a dt-less read
         # resolves to), preserving single-cadence bit-identity.
@@ -112,8 +113,8 @@ class MarketState:
         its history sizing (never shrinks, never raises). The first cadence
         registered for a symbol is its default, returned by dt-less reads.
 
-        ``lookback_seconds`` sizes the (symbol, dt) history deque to hold
-        ``ceil(lookback/dt)`` returns; never shrinks below the default maxlen.
+        ``lookback_seconds`` sizes the (symbol, dt) history deque to hold at
+        least ``lookback//dt + 2`` bars; never shrinks below the default maxlen.
         """
         if sampling_dt_seconds <= 0:
             raise ValueError(
@@ -125,6 +126,8 @@ class MarketState:
             cadences.append(ns)
         key = (symbol, ns)
         if lookback_seconds is not None:
+            # floor + 2: +1 for the n+1 prices needed to form n returns, +1
+            # margin so the oldest bar isn't evicted before the window fills.
             needed = int(lookback_seconds) // int(sampling_dt_seconds) + 2
             prev = self._mark_history_by_key.get(key, self._mark_history)
             self._mark_history_by_key[key] = max(prev, needed)
@@ -152,10 +155,13 @@ class MarketState:
         """Register which feed sources ``symbol``'s σ/OHLC reference.
 
         ``"mark"`` (default) reads the venue MarkEvent; ``"bbo"`` reads the
-        dense BBO mid. Like ``set_reference_cadence`` this couples a per-symbol
-        choice to the shared MarketState, so two slots reading the same
-        reference symbol must agree — a conflicting re-registration raises
-        rather than silently feeding the shared history two ways.
+        dense BBO mid. The shared OHLC history for a symbol can only be fed
+        one way, so two slots reading the same reference symbol must agree on
+        the source — a conflicting re-registration raises (fail-fast) rather
+        than silently feeding the shared history two ways. Note: unlike
+        ``set_reference_source``, ``set_reference_cadence`` does NOT raise on
+        a second distinct cadence; multiple cadences per symbol are accepted
+        and bucketed independently.
         """
         if source not in ("mark", "bbo"):
             raise ValueError(
@@ -248,7 +254,7 @@ class MarketState:
         self._last_mark_ts[symbol] = ts
         # An unregistered symbol still gets the legacy single default bucket so
         # pre-registration ticks are not dropped (matches old behaviour).
-        cadences = self._cadences_by_symbol.get(symbol) or [self._mark_bucket_ns]
+        cadences = self._cadences_by_symbol.get(symbol) or self._default_cadences
         for bucket_ns in cadences:
             key = (symbol, bucket_ns)
             hist = self._marks.get(key)

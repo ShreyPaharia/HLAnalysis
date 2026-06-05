@@ -611,9 +611,12 @@ class EngineRuntime:
     def _register_reference_cadences(self, slots: list[AccountSlot]) -> None:
         """Register each slot's (reference_symbol → vol_sampling_dt_seconds)
         on the shared MarketState so marks are bucketed at exactly the cadence
-        the strategy's σ formula assumes (no train/serve skew). Raises on
-        conflicting cadences for the same reference_symbol (see
-        MarketState.set_reference_cadence)."""
+        the strategy's σ formula assumes (no train/serve skew). Multiple
+        cadences per reference_symbol are accepted — each is bucketed
+        independently from the shared feed (e.g. dt=2 for v31 buckets and
+        dt=5 for v31 binary both reading BTC). Conflicting σ sources for the
+        same reference_symbol still raise (see
+        MarketState.set_reference_source)."""
         for slot in slots:
             self.market_state.set_reference_cadence(
                 slot.cfg.reference_symbol,

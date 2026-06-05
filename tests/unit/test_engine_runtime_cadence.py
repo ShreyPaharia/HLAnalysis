@@ -197,10 +197,11 @@ def test_hl_pm_independent(tmp_path):
     assert rt.market_state.mark_bucket_ns_for("BTCUSDT") == 60 * _NS
 
 
-def test_conflicting_cadence_same_symbol_raises(tmp_path):
-    """Two slots reading the SAME reference symbol with different dt is an
-    unsatisfiable request (one shared mark history) — must fail fast at startup
-    rather than silently skew one of them."""
+def test_same_symbol_different_cadence_coexist(tmp_path):
+    """Two slots reading the SAME reference symbol with different dt both
+    register successfully — each cadence is bucketed independently from the
+    shared feed (the old single-cadence conflict-guard was removed by the
+    (symbol, dt) refactor)."""
     rt = _runtime(
         [
             _theta_cfg(alias="v31", reference_symbol="BTC", dt=5),
@@ -208,8 +209,12 @@ def test_conflicting_cadence_same_symbol_raises(tmp_path):
         ],
         tmp_path,
     )
-    with pytest.raises(ValueError, match="conflicting mark-bucket cadence"):
-        rt._register_reference_cadences(rt.slots)
+    rt._register_reference_cadences(rt.slots)  # no raise
+    # Both cadences are actually registered on the shared symbol (not just
+    # resolvable by explicit dt, which holds unconditionally). The first
+    # registered cadence (dt=5) is the symbol's default for dt-less reads.
+    assert rt.market_state._cadences_by_symbol["BTC"] == [5 * _NS, 60 * _NS]
+    assert rt.market_state.mark_bucket_ns_for("BTC") == 5 * _NS
 
 
 # ---- per-symbol σ source: mark | bbo (Part B) ------------------------------
