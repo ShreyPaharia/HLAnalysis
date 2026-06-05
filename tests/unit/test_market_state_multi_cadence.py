@@ -65,5 +65,7 @@ def test_same_cadence_reregistration_is_idempotent() -> None:
     ms = MarketState()
     ms.set_reference_cadence("BTC", sampling_dt_seconds=5, lookback_seconds=1800)
     ms.set_reference_cadence("BTC", sampling_dt_seconds=5, lookback_seconds=3600)
-    assert ms.mark_bucket_ns_for("BTC", dt=5) == 5 * 1_000_000_000
+    # Registered exactly once (deduped), not appended twice.
+    assert ms._cadences_by_symbol["BTC"] == [5 * 1_000_000_000]
+    # ...and the history sizing grew to cover the larger lookback.
     assert ms._mark_history_by_key[("BTC", 5 * 1_000_000_000)] >= 3600 // 5 + 2

@@ -607,7 +607,6 @@ class EngineRuntime:
         cadences per reference_symbol are supported (each bucketed independently).
         Conflicting σ sources for the same reference_symbol still raise (see
         MarketState.set_reference_source)."""
-        from .scanner import Scanner
         for slot in slots:
             sym = slot.cfg.reference_symbol
             self.market_state.set_reference_cadence(

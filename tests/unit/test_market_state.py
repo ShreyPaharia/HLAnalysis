@@ -291,8 +291,10 @@ def test_set_reference_cadence_accumulates_multiple_cadences() -> None:
     ms = MarketState()
     ms.set_reference_cadence("BTC", sampling_dt_seconds=5)
     ms.set_reference_cadence("BTC", sampling_dt_seconds=2)  # no raise
-    assert ms.mark_bucket_ns_for("BTC", dt=5) == 5 * 1_000_000_000
-    assert ms.mark_bucket_ns_for("BTC", dt=2) == 2 * 1_000_000_000
+    # Both cadences are actually registered (not just resolvable by explicit dt,
+    # which holds unconditionally); first registered is the dt-less default.
+    assert ms._cadences_by_symbol["BTC"] == [5 * 1_000_000_000, 2 * 1_000_000_000]
+    assert ms.mark_bucket_ns_for("BTC") == 5 * 1_000_000_000
 
 
 def test_set_reference_cadence_sizes_history_for_sub_minute():

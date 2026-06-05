@@ -127,7 +127,15 @@ class Scanner:
     @staticmethod
     def _lookback_secs(cfg: StrategyConfig) -> int:
         """Largest σ/drift lookback (seconds) across defaults, allowlist, and the
-        theta block — identical inputs to the legacy _required_returns_n."""
+        theta block — identical inputs to the legacy _required_returns_n.
+
+        Deliberately EXCLUDES theta_overrides (so the default-path `n` stays
+        bit-identical). cadence_by_class folds in each class's own override
+        lookback on top of this base. The "full" lookback that also spans
+        overrides — used to size MarketState history — is
+        runtime.reference_vol_lookback_seconds; use that, not this, if you need
+        the per-class-inclusive maximum.
+        """
         secs = cfg.defaults.vol_lookback_seconds
         for entry in cfg.allowlist:
             secs = max(secs, entry.vol_lookback_seconds)
@@ -162,10 +170,11 @@ class Scanner:
         slot with no dt override is bit-identical to today. Empty for non-theta
         slots or slots with no dt override.
 
-        NOTE: until the per-class vol_sampling_dt_seconds guard is removed in
-        build_theta_harvester_configs_by_class (a later task of the (symbol, dt)
-        refactor), a live config cannot reach the override branch — the runtime
-        raises before Scanner is constructed. This is forward scaffolding.
+        Live: the guard in build_theta_harvester_configs_by_class that previously
+        rejected a per-class vol_sampling_dt_seconds was removed in the (symbol,
+        dt) refactor, and the runtime registers each override cadence on the
+        shared MarketState (see _register_reference_cadences), so the override
+        branch is reachable on a real config.
         """
         out: dict[str, tuple[int, int]] = {}
         base_secs = Scanner._lookback_secs(cfg)
