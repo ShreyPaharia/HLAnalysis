@@ -20,12 +20,19 @@ if [ ! -d "$DATA_ROOT" ]; then
   exit 1
 fi
 
-# Step 1: full sync first - cleanup must never delete unsynced data.
+# Step 1: sync first - cleanup must never delete unsynced data. Delegates to
+# sync-to-s3.sh so the same daily-compaction + hour=all upload path runs (a raw
+# `aws s3 sync $DATA_ROOT/` here would push un-compacted hour=HH minute-files
+# and re-explode the object count). DAYS_BACK spans the full retention window
+# so every partition about to be deleted has been compacted and uploaded; the
+# per-partition parity check below then naturally refuses to delete anything
+# that did not make it to S3.
 # Skip in test mode so unit tests don't require AWS credentials.
 if [ "${SKIP_SYNC:-0}" != "1" ]; then
-  echo "==> full sync to s3://$BUCKET/"
-  aws s3 sync "$DATA_ROOT/" "s3://$BUCKET/" \
-    --size-only --exclude 'logs/*' --no-progress
+  echo "==> sync (daily compaction) before cleanup"
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  ARCHIVE_BUCKET="$BUCKET" DATA_ROOT="$DATA_ROOT" DAYS_BACK="$((RETENTION_DAYS + 1))" \
+    "$SCRIPT_DIR/sync-to-s3.sh"
 fi
 
 # Step 2: walk date= partitions strictly older than RETENTION_DAYS.
