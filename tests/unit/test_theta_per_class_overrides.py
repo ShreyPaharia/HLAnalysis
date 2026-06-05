@@ -100,15 +100,38 @@ def test_no_overrides_yields_empty_by_class_map() -> None:
     assert build_theta_harvester_configs_by_class(cfg) == {}
 
 
-def test_live_strategy_yaml_has_no_overrides_today() -> None:
-    """Guard: the shipped config introduces no per-class divergence yet (this is
-    plumbing only). Every theta slot must build an empty by-class map so live
-    behavior is unchanged until the operator flips values."""
+def test_live_strategy_yaml_bucket_override_matches_tune() -> None:
+    """Guard the shipped HL v31 bucket override against the independent bucket
+    tune (v31_bucket_independent_tune_2026_06_05): priceBucket diverges to
+    fav0.80 / vlb2700 / dt2 / esd0.0 / eb0.005 while priceBinary keeps the shared
+    theta defaults. The PM (v31_pm) slot carries NO per-class override.
+
+    If someone edits config/strategy.yaml's bucket override, this pins the
+    intended live values so a typo/regression fails loudly."""
     cfgs = load_strategies_config(Path("config/strategy.yaml"))
-    theta_slots = [c for c in cfgs.strategies if c.strategy_type == "theta_harvester"]
-    assert theta_slots
-    for c in theta_slots:
-        assert build_theta_harvester_configs_by_class(c) == {}
+    theta = {c.account_alias: c for c in cfgs.strategies
+             if c.strategy_type == "theta_harvester"}
+
+    v31 = theta["v31"]
+    base = build_theta_harvester_config(v31)
+    bucket = build_theta_harvester_configs_by_class(v31)["priceBucket"]
+    # bucket diverges to the tune
+    assert bucket.favorite_threshold == 0.80
+    assert bucket.vol_lookback_seconds == 2700
+    assert bucket.vol_sampling_dt_seconds == 2
+    assert bucket.exit_safety_d == 0.0
+    assert bucket.edge_buffer == 0.005
+    # binary (the instance default) is untouched
+    assert base.favorite_threshold == 0.85
+    assert base.vol_lookback_seconds == 3600
+    assert base.vol_sampling_dt_seconds == 5
+    assert base.exit_safety_d == 1.0
+    assert base.edge_buffer == 0.02
+    # only priceBucket diverges; binary falls through to the default
+    assert set(build_theta_harvester_configs_by_class(v31)) == {"priceBucket"}
+
+    # PM slot carries no per-class override.
+    assert build_theta_harvester_configs_by_class(theta["v31_pm"]) == {}
 
 
 # --- per-class override applies, other classes keep defaults -----------------
