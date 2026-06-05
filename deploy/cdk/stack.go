@@ -101,6 +101,20 @@ func NewHLRecorderStack(scope constructs.Construct, id string, props *HLRecorder
 	// Grant the EC2 role read/write access to the archive bucket
 	archiveBucket.GrantReadWrite(role, nil)
 
+	// S3 gateway VPC endpoint: routes EC2<->S3 traffic privately instead of via
+	// the internet gateway. Free, and it eliminates the regional data-transfer
+	// charge on the recorder's hourly S3 sync (~$1.5/mo as of 2026-06). Gateway
+	// endpoints (unlike interface endpoints) cost nothing per-hour or per-GB.
+	//
+	// NOTE: the live endpoint (vpce-084039668356d2def) was created out-of-band
+	// via the AWS CLI on 2026-06-05 for immediate effect. Before the next
+	// `cdk deploy`, either delete that manual endpoint (CDK will recreate it) or
+	// `cdk import` it into this stack — otherwise CDK's create collides with the
+	// existing S3 prefix-list route on the main route table.
+	vpc.AddGatewayEndpoint(jsii.String("S3GatewayEndpoint"), &awsec2.GatewayVpcEndpointOptions{
+		Service: awsec2.GatewayVpcEndpointAwsService_S3(),
+	})
+
 	// User data script
 	userData := awsec2.UserData_ForLinux(&awsec2.LinuxUserDataOptions{
 		Shebang: jsii.String("#!/bin/bash -xe"),
