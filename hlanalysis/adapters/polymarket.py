@@ -37,7 +37,7 @@ from .._fastjson import decode as _json_decode
 import websockets
 
 from ..config import Subscription
-from ..events import NormalizedEvent, ProductType
+from ..events import Mechanism, NormalizedEvent, ProductType
 from ._ws_base import BaseWsAdapter
 from .polymarket_gamma import GammaClient
 from .polymarket_normalize import (

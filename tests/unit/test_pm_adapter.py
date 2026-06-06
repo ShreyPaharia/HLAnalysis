@@ -143,3 +143,15 @@ async def test_adapter_reconnects_on_ws_close():
     await asyncio.wait_for(_drain(), timeout=5.0)
     assert calls["n"] >= 2  # initial + at least one reconnect
     assert any(isinstance(e, BookSnapshotEvent) for e in events)
+
+
+def test_supports_capability_matrix():
+    """Recorder startup calls adapter.supports() to filter subscriptions
+    (runner.py). The body dereferences the Mechanism enum, so a missing import
+    here is a NameError that only surfaces live, never at import time
+    (`from __future__ import annotations` makes the type hint lazy). Exercise it
+    directly so the gap that took the recorder down can't recur."""
+    adapter = PolymarketAdapter()
+    assert adapter.supports(ProductType.PREDICTION_BINARY, Mechanism.CLOB) is True
+    assert adapter.supports(ProductType.PERP, Mechanism.CLOB) is False
+    assert adapter.supports(ProductType.PREDICTION_BINARY, Mechanism.RFQ) is False
