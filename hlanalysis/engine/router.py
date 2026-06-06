@@ -482,17 +482,34 @@ class Router:
         # the winning leg and 0.0 elsewhere, so the alert's PnL is
         # `qty * (payout - avg_entry) + prior_realized` — see render.
         self.dal.delete_position(question_idx)
-        from ..strategy.render import settlement_pnl_usd
-        realized = settlement_pnl_usd(
-            question, p.symbol, p.qty, p.avg_entry, prior_realized=p.realized_pnl,
-        )
-        # Persist the settlement PnL (SHR-53) BEFORE alerting so the daily-loss
-        # gate sees it. Idempotent per qidx — if the reconcile vanished-position
-        # path already recorded this settlement, this is a no-op (no double-book).
-        self.dal.record_settlement(
-            question_idx=question_idx, symbol=p.symbol,
-            realized_pnl=realized, ts_ns=now_ns,
-        )
+        if getattr(self.exec_client, "settlement_reported_as_fill", True):
+            # HL: settlement is a venue fill (dir="Settlement", closedPnl set),
+            # so source realized PnL from the venue — it matches HL exactly and
+            # avoids re-deriving a winning leg, which mislabels multi-leg
+            # buckets (a winner booked as a total loss). Do NOT persist:
+            # realized_pnl_since already counts this fill, so persisting would
+            # double-count it in the daily-loss gate.
+            from .scanner import Scanner
+            window_start_ns = Scanner._daily_window_start_ns(
+                now_ns, hour=self.strategy_cfg.global_.daily_window_start_hour_utc,
+            )
+            realized = self.exec_client.realized_pnl_for_symbol(
+                p.symbol, since_ts_ns=window_start_ns,
+            )
+        else:
+            # PM: the redeem is not a CLOB fill, so re-derive from the
+            # (price-sourced, venue-correct) winner and persist for the
+            # daily-loss gate. Idempotent per qidx — if the reconcile
+            # vanished-position path already recorded it, this overwrites.
+            from ..strategy.render import settlement_pnl_usd
+            realized = settlement_pnl_usd(
+                question, p.symbol, p.qty, p.avg_entry,
+                prior_realized=p.realized_pnl,
+            )
+            self.dal.record_settlement(
+                question_idx=question_idx, symbol=p.symbol,
+                realized_pnl=realized, ts_ns=now_ns,
+            )
         q_desc = question_description(question) if question else ""
         o_desc = outcome_description(question, p.symbol) if question else ""
         await self.bus.publish(Exit(

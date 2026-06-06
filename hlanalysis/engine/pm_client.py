@@ -131,9 +131,26 @@ class PMClient:
             return [f for f in self._paper_fills if f.ts_ns >= since_ts_ns]
         return self._live_user_fills(since_ts_ns=since_ts_ns)
 
+    # PM settles via on-chain redeem (CTF), which is NOT a CLOB fill, so the
+    # venue fill stream misses settlement PnL — it is tracked separately and
+    # the settlement Exit re-derives it from the (price-sourced) winner.
+    settlement_reported_as_fill = False
+
     def realized_pnl_since(self, since_ts_ns: int) -> float:
         fills = self.user_fills(since_ts_ns=since_ts_ns)
         return sum(f.closed_pnl - f.fee for f in fills)
+
+    def realized_pnl_for_symbol(
+        self, symbol: str, *, since_ts_ns: int = 0
+    ) -> float:
+        """Σ(closedPnl − fee) over this account's CLOB fills on `symbol`.
+        Excludes the redeem payout (not a fill); the settlement path does not
+        rely on this for PM."""
+        return sum(
+            f.closed_pnl - f.fee
+            for f in self.user_fills(since_ts_ns=since_ts_ns)
+            if f.symbol == symbol
+        )
 
     # ---- paper internals ----
 

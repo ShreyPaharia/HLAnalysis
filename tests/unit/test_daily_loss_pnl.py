@@ -1,12 +1,18 @@
-"""SHR-49: the daily-loss gate must see settlement PnL and fail safe on outage.
+"""The daily-loss gate must read venue-truth PnL without double-counting, and
+fail safe on outage.
 
-HL `realized_pnl_since` returns closedPnl from fills only — HIP-4 settlement
-payouts are not fills, so the cap was blind to the dominant PnL component of the
-binary strategy. And on any HL error the code fell back to a structurally-zero
-local PnL and kept trading, so a transient outage defeated the cap. The daily
-PnL must now add persisted settlement PnL (SHR-53) to the venue read, and a
-sustained venue-read outage must fail safe (halt the slot) rather than trade on
-an understated number.
+Venue settlement semantics differ:
+  * HL exposes HIP-4 / bucket settlement as a *fill* (``dir="Settlement"``,
+    ``closedPnl`` populated), so ``realized_pnl_since`` ALREADY includes the
+    settlement payout. Adding the separately-persisted settlement PnL on top
+    double-counts it — and historically mis-signed it for multi-leg buckets
+    (a winning leg booked as a total loss → spurious DAILY LOSS HALT). So for
+    HL the gate uses the venue read alone.
+  * PM settles via an on-chain redeem, which is NOT a CLOB fill, so PM's
+    ``realized_pnl_since`` misses it. PM still needs the persisted add-on.
+
+On a sustained venue-read outage the gate must fail safe (halt the slot)
+rather than trade on an understated number.
 """
 from __future__ import annotations
 
@@ -18,9 +24,26 @@ _NOW = 1_700_000_000_000_000_000
 
 
 @pytest.mark.asyncio
-async def test_daily_pnl_adds_settlement_to_venue_read(tmp_path):
+async def test_daily_pnl_hl_uses_venue_only(tmp_path):
+    # HL: settlement is already in the venue fills' closedPnl, so the gate must
+    # NOT add the persisted settlement again (no double-count, no mis-sign).
     rt, slot = _build_runtime_with_recording(tmp_path)
-    slot.exec_client.realized_pnl_since = lambda ns: -10.0  # HL fills pnl
+    assert rt._is_pm_slot(slot) is False  # default builder is an HL slot
+    slot.exec_client.realized_pnl_since = lambda ns: -10.0  # venue (incl. settle)
+    slot.dal.record_settlement(question_idx=1, symbol="@30",
+                               realized_pnl=-50.0, ts_ns=_NOW)
+
+    pnl = await rt._realized_pnl_today(slot, now_ns=_NOW)
+
+    assert pnl == pytest.approx(-10.0)  # venue only; persisted settle ignored
+
+
+@pytest.mark.asyncio
+async def test_daily_pnl_pm_adds_persisted_settlement(tmp_path, monkeypatch):
+    # PM: redeem is not a fill, so the persisted settlement must be added.
+    rt, slot = _build_runtime_with_recording(tmp_path)
+    monkeypatch.setattr(rt, "_is_pm_slot", lambda s: True)
+    slot.exec_client.realized_pnl_since = lambda ns: -10.0  # venue fills only
     slot.dal.record_settlement(question_idx=1, symbol="@30",
                                realized_pnl=-50.0, ts_ns=_NOW)
 

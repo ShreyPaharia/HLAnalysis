@@ -444,6 +444,24 @@ class HLClient:
             ))
         return out
 
+    # HL reports HIP-4 / bucket settlement as a fill (dir="Settlement",
+    # closedPnl populated), so realized_pnl_since already includes settlement.
+    settlement_reported_as_fill = True
+
+    def realized_pnl_for_symbol(
+        self, symbol: str, *, since_ts_ns: int = 0
+    ) -> float:
+        """Venue-truth realized PnL for one leg: Σ(closedPnl − fee) over this
+        account's fills on `symbol` since the cutoff. Because HIP-4 settlement
+        is a fill, this captures the settlement payout exactly — used to book
+        settlement Exits from HL truth instead of re-deriving a winning leg
+        (the latter mislabels multi-leg buckets, booking winners as losses)."""
+        return sum(
+            f.closed_pnl - f.fee
+            for f in self.user_fills(since_ts_ns=since_ts_ns)
+            if f.symbol == symbol
+        )
+
     def realized_pnl_since(self, since_ts_ns: int) -> float:
         """Sum (closedPnl - fee) across this account's fills since the cutoff.
 

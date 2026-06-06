@@ -649,15 +649,20 @@ async def test_cooldown_veto_uses_persisted_state_after_restart(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_close_settled_persists_settlement_pnl(tmp_path):
-    """SHR-53: settling a position must persist its realized PnL (not just emit
-    an Exit alert) so the daily-loss gate can see it."""
+async def test_close_settled_hl_books_venue_pnl_and_does_not_persist(tmp_path):
+    """HL settles as a fill (dir="Settlement", closedPnl set), so the settlement
+    Exit must source realized PnL from the venue (realized_pnl_for_symbol) and
+    must NOT persist it — realized_pnl_since already counts the settlement fill,
+    so persisting would double-count it in the daily-loss gate."""
+    from hlanalysis.engine.risk_events import Exit
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
+    sub = bus.subscribe()
     cfg = _strategy_cfg()
     client = HLClient(account_address="0x", api_secret_key="0x",
                       base_url="x", paper_mode=True)
+    client.realized_pnl_for_symbol = lambda sym, *, since_ts_ns=0: 4.0  # venue truth
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
                     strategy_cfg=cfg)
     dal.upsert_position(Position(
@@ -669,8 +674,46 @@ async def test_close_settled_persists_settlement_pnl(tmp_path):
     await router._close_settled(42, now_ns=100, question=settled_q)
 
     assert dal.get_position(42) is None
-    # Winning leg: 10 * (1.0 - 0.6) = +4.0, now persisted.
-    assert dal.settlement_pnl_since(0) == pytest.approx(4.0)
+    assert dal.settlement_pnl_since(0) == pytest.approx(0.0)  # HL: not persisted
+    ev = await asyncio.wait_for(sub.get(), timeout=0.5)
+    assert isinstance(ev, Exit) and ev.reason == "settlement"
+    assert ev.realized_pnl == pytest.approx(4.0)  # from venue, not re-derived
+
+
+@pytest.mark.asyncio
+async def test_close_settled_hl_winning_leg_survives_wrong_settled_symbol(tmp_path):
+    """Regression (bucket #1610, 2026-06-06): the polled HL settlement path
+    stamps `settled_symbol` to a hardcoded YES leg, which for a multi-leg bucket
+    is often NOT the leg we hold. Re-deriving payout from settled_symbol then
+    booked a *winning* held leg as a total loss (alert said −$299 when HL paid
+    +$5). Sourcing from the venue must ignore settled_symbol entirely and report
+    the real closedPnl."""
+    from hlanalysis.engine.risk_events import Exit
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    sub = bus.subscribe()
+    cfg = _strategy_cfg()
+    client = HLClient(account_address="0x", api_secret_key="0x",
+                      base_url="x", paper_mode=True)
+    # Venue: the leg we hold ("@30") actually won → +5.34. settled_symbol below
+    # points at a DIFFERENT leg, which the old derivation would treat as a loss.
+    client.realized_pnl_for_symbol = lambda sym, *, since_ts_ns=0: (
+        5.34 if sym == "@30" else 0.0
+    )
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
+                    strategy_cfg=cfg)
+    dal.upsert_position(Position(
+        question_idx=42, symbol="@30", qty=305.0, avg_entry=0.98248,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=0.0,
+    ))
+    settled_q = replace(_q(), settled=True, settled_symbol="@31")  # wrong leg
+
+    await router._close_settled(42, now_ns=100, question=settled_q)
+
+    ev = await asyncio.wait_for(sub.get(), timeout=0.5)
+    assert isinstance(ev, Exit)
+    assert ev.realized_pnl == pytest.approx(5.34)  # venue truth, not −$299 loss
 
 
 class _CountingExec:

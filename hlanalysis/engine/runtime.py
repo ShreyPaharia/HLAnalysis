@@ -1158,25 +1158,31 @@ class EngineRuntime:
         """Realized PnL since the slot's daily window start, for both the Scanner
         daily-loss read and the continuous-checks cap.
 
-        Settlement-inclusive (SHR-49/53): HL `realized_pnl_since` returns
-        closedPnl from fills only — HIP-4 binaries close via settlement payouts,
-        which are NOT fills — so persisted settlement PnL is added on top. On a
-        venue-read failure we fall back to the DAL value (now also
-        settlement-inclusive, no longer structurally zero) and count the
+        Venue-truth, no double-count: HL exposes HIP-4 / bucket settlement as a
+        *fill* (`dir="Settlement"`, `closedPnl` populated), so `realized_pnl_since`
+        ALREADY includes the settlement payout — adding the separately-persisted
+        settlement PnL on top double-counts it (and historically mis-signed it
+        for multi-leg buckets: a winning leg booked as a total loss tripped a
+        spurious DAILY LOSS HALT). PM settles via on-chain redeem, which is NOT a
+        CLOB fill, so PM's venue read misses it and the persisted settlement must
+        be added back. On a venue-read failure we fall back to the DAL value (now
+        also settlement-inclusive, no longer structurally zero) and count the
         failure; after `daily_loss_venue_fail_halt` consecutive failures we latch
         the slot halted (fail-safe) rather than keep trading venue-blind."""
         window_start_ns = Scanner._daily_window_start_ns(
             now_ns, hour=slot.cfg.global_.daily_window_start_hour_utc,
-        )
-        settlement_pnl = await asyncio.to_thread(
-            slot.dal.settlement_pnl_since, window_start_ns,
         )
         try:
             venue_pnl = await asyncio.to_thread(
                 slot.exec_client.realized_pnl_since, window_start_ns,
             )
             self._venue_pnl_failures[slot.alias] = 0
-            return venue_pnl + settlement_pnl
+            if self._is_pm_slot(slot):
+                settlement_pnl = await asyncio.to_thread(
+                    slot.dal.settlement_pnl_since, window_start_ns,
+                )
+                return venue_pnl + settlement_pnl
+            return venue_pnl  # HL: settlement already in venue fills' closedPnl
         except Exception:
             n = self._venue_pnl_failures.get(slot.alias, 0) + 1
             self._venue_pnl_failures[slot.alias] = n
@@ -1249,27 +1255,43 @@ class EngineRuntime:
                     outcome_description, question_description,
                     settlement_pnl_usd,
                 )
+                is_pm = self._is_pm_slot(slot)
+                window_start_ns = Scanner._daily_window_start_ns(
+                    now, hour=slot.cfg.global_.daily_window_start_hour_utc,
+                )
                 for qidx, sym, lp in res.vanished_positions:
                     self.market_state.mark_question_settled(qidx)
                     qv = self.market_state.question(qidx)
-                    # When the position vanished before the settle event was
-                    # polled, `qv.settled_symbol` is still unset and
-                    # settlement_pnl_usd falls back to lp.realized_pnl. Once
-                    # the polled SettlementEvent lands the next vanish-style
-                    # alert (a re-emit on the same qidx) will carry the real
-                    # PnL.
-                    realized = settlement_pnl_usd(
-                        qv, sym, lp.qty, lp.avg_entry,
-                        prior_realized=lp.realized_pnl,
-                    )
-                    # Persist settlement PnL for the daily-loss gate (SHR-53).
-                    # Upsert keyed by qidx: if this is the pre-settle vanish
-                    # (incomplete PnL) the later authoritative re-emit overwrites
-                    # it; shared with router._close_settled, so no double-book.
-                    slot.dal.record_settlement(
-                        question_idx=qidx, symbol=sym,
-                        realized_pnl=realized, ts_ns=now,
-                    )
+                    if not is_pm:
+                        # HL: the position vanished because the venue settled it
+                        # — and HL books settlement as a fill (dir="Settlement",
+                        # closedPnl set), already present in `all_fills`. Sum the
+                        # venue's own per-leg closedPnl so our realized PnL ==
+                        # HL by construction. This replaces the old re-derivation
+                        # that hardcoded the YES leg as winner and booked winning
+                        # bucket legs as total losses. Not persisted:
+                        # realized_pnl_since already counts these fills.
+                        realized = sum(
+                            f.closed_pnl - f.fee
+                            for f in all_fills
+                            if f.symbol == sym and f.ts_ns >= window_start_ns
+                        )
+                    else:
+                        # PM: the redeem is not a CLOB fill, so re-derive from
+                        # the (price-sourced, venue-correct) winner and persist
+                        # for the daily-loss gate. When the position vanished
+                        # before the settle event was polled, `qv.settled_symbol`
+                        # is unset and settlement_pnl_usd falls back to
+                        # lp.realized_pnl; the later authoritative re-emit on the
+                        # same qidx overwrites it.
+                        realized = settlement_pnl_usd(
+                            qv, sym, lp.qty, lp.avg_entry,
+                            prior_realized=lp.realized_pnl,
+                        )
+                        slot.dal.record_settlement(
+                            question_idx=qidx, symbol=sym,
+                            realized_pnl=realized, ts_ns=now,
+                        )
                     await self.bus.publish(Exit(
                         ts_ns=now, account_alias=slot.alias,
                         question_idx=qidx, symbol=sym,
