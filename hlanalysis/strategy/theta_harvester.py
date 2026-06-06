@@ -620,8 +620,10 @@ class ThetaHarvesterStrategy(Strategy):
                     Diagnostic("info", "momentum_mr_gate", tuple(gate_diag_kv)),
                 ))
 
-        # Build a diagnostic preserving the binary schema (p_model/edge_yes/edge_no)
-        # so existing parquet writers and tests keep working unchanged.
+        # Build the edge diagnostic. Binary questions keep the p_model /
+        # edge_yes / edge_no schema (meaningful per-side); multi-leg buckets
+        # emit native chosen_leg / chosen_edge fields instead (see the bucket
+        # branch below).
         if is_binary:
             yes = books.get(question.yes_symbol)
             no_ = books.get(question.no_symbol)
@@ -658,17 +660,21 @@ class ThetaHarvesterStrategy(Strategy):
                 ("ln_sk", f"{ln_sk:.4f}"),
             ))
         else:
-            # Bucket diagnostic. We keep the schema column names so the parquet
-            # writer is uniform; edge_yes carries the chosen-leg edge, edge_no
-            # gets a sentinel that downstream selection (max) ignores.
+            # Bucket (multi-leg) diagnostic. Buckets have no binary YES/NO, so we
+            # emit NATIVE fields — chosen_leg / chosen_edge — for the chosen leg
+            # rather than abusing the binary schema with edge_no=-1e9 sentinels.
+            # edge_yes is retained as a back-compat MIRROR of chosen_edge so the
+            # fixed-schema diagnostics parquet (backtest/runner) and the entry
+            # fill-meta reader keep their populated value without an off-schema
+            # column; edge_no is intentionally omitted (no sentinel).
             diag = Diagnostic("info", "edge", (
                 ("p_model", f"{chosen_p:.4f}"),
+                ("chosen_leg", chosen_sym),
+                ("chosen_edge", f"{chosen_edge:.4f}"),
                 ("edge_yes", f"{chosen_edge:.4f}"),
-                ("edge_no", f"{-1e9:.4f}"),
                 ("sigma", f"{sigma:.4f}"),
                 ("tau_yr", f"{tau_yr:.12f}"),
                 ("ln_sk", "0.0000"),
-                ("chosen_leg", chosen_sym),
             ))
 
         # v3.5: momentum / MR tilt — scale the effective edge_buffer by

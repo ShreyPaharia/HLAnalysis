@@ -317,6 +317,69 @@ def test_bucket_entry_picks_leg_with_best_edge() -> None:
     assert decision.intents[0].symbol == "Y1"  # middle YES has the biggest edge
 
 
+def _edge_diag_fields(decision) -> dict[str, str]:
+    """Return the `edge` diagnostic's key→value-string mapping for a decision."""
+    for d in decision.diagnostics:
+        if d.message == "edge":
+            return dict(d.fields)
+    raise AssertionError("no 'edge' diagnostic found on decision")
+
+
+def test_bucket_edge_diagnostic_uses_native_chosen_fields() -> None:
+    """The multi-leg (bucket) edge diagnostic must carry NATIVE fields
+    (chosen_leg / chosen_edge) instead of the old binary-schema sentinel abuse:
+    no edge_no=-1e9 is emitted. edge_yes is retained as a back-compat mirror of
+    the chosen-leg edge so the fixed-schema parquet/fill-meta readers in the
+    backtest runner keep their populated value."""
+    strat = build_strategy("v3_theta_harvester", _params(
+        edge_buffer=0.02, edge_max=None, favorite_threshold=0.0,
+    ))
+    qv = _qv_bucket(expiry_ns=3600 * 10**9)
+    rets = tuple([0.0001] * 120)
+    books = {
+        "Y0": _book("Y0", bid=0.04, ask=0.05),
+        "N0": _book("N0", bid=0.94, ask=0.95),
+        "Y1": _book("Y1", bid=0.69, ask=0.70),  # middle YES — best edge
+        "N1": _book("N1", bid=0.30, ask=0.31),
+        "Y2": _book("Y2", bid=0.04, ask=0.05),
+        "N2": _book("N2", bid=0.94, ask=0.95),
+    }
+    decision = strat.evaluate(
+        question=qv, books=books,
+        reference_price=100_000.0, recent_returns=rets, recent_volume_usd=1000.0,
+        position=None, now_ns=0,
+    )
+    assert decision.action == Action.ENTER
+    fields = _edge_diag_fields(decision)
+    # Native multi-leg fields present and correct.
+    assert fields["chosen_leg"] == "Y1"
+    assert "chosen_edge" in fields
+    chosen_edge = float(fields["chosen_edge"])
+    # No sentinel abuse: edge_no is NOT emitted for the multi-leg case.
+    assert "edge_no" not in fields
+    # Back-compat mirror: edge_yes carries the chosen-leg edge for the
+    # fixed-schema backtest parquet/fill-meta readers.
+    assert float(fields["edge_yes"]) == chosen_edge
+
+
+def test_binary_edge_diagnostic_unchanged_no_chosen_fields() -> None:
+    """The binary edge diagnostic is unchanged: p_model / edge_yes / edge_no
+    are present and meaningful, and the multi-leg native fields are absent."""
+    strat = build_strategy("v3_theta_harvester", _params(favorite_threshold=0.0))
+    qv = _qv(expiry_ns=3600 * 10**9)
+    books = {"YES": _book("YES", bid=0.49, ask=0.50), "NO": _book("NO", bid=0.49, ask=0.50)}
+    rets = tuple([0.0001] * 120)
+    decision = strat.evaluate(
+        question=qv, books=books, reference_price=120_000.0,
+        recent_returns=rets, recent_volume_usd=1000.0, position=None, now_ns=0,
+    )
+    assert decision.action == Action.ENTER
+    fields = _edge_diag_fields(decision)
+    assert "p_model" in fields and "edge_yes" in fields and "edge_no" in fields
+    assert "chosen_leg" not in fields
+    assert "chosen_edge" not in fields
+
+
 def test_bucket_entry_skips_middle_no_leg() -> None:
     """N1 of a 3-outcome bucket has a non-contiguous winning region (BTC<90k or
     BTC≥110k). v3.1 must not enter it even when its ask looks cheap."""
