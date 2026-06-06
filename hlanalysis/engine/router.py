@@ -16,14 +16,9 @@ from .exec_types import PlaceRequest
 from .risk import RiskGate, RiskInputs
 from .risk_events import Entry, Exit, OrderRejected, RiskVeto
 from .state import Fill, OpenOrder, Position, StateDAL
+from ..marketdata.position_math import PositionState, apply_fill, stop_price
 from ..strategy.render import outcome_description, question_description
 from ..strategy.types import Action, Decision, OrderIntent, QuestionView
-
-
-# Mirrors hlanalysis.backtest.runner.hftbt_runner._STOP_DISABLED_SENTINEL — a
-# negative price the risk gate's stop-loss check (px <= stop_loss_price for
-# longs) can never trigger on, since real bid prices are ≥ 0.
-_STOP_DISABLED_SENTINEL = -1.0
 
 
 class Router:
@@ -315,8 +310,9 @@ class Router:
         """Resolve the per-trade stop loss from the matched allowlist entry.
 
         Returns the price at which the risk gate should trigger a stop-loss
-        exit, or _STOP_DISABLED_SENTINEL when the entry's `stop_loss_pct` is
-        None (or no entry matches — defaults catch this in practice).
+        exit, or the shared STOP_DISABLED_SENTINEL when the entry's
+        `stop_loss_pct` is None (or no entry matches — defaults catch this in
+        practice).
         """
         matched = None
         if question_fields:
@@ -326,10 +322,7 @@ class Router:
                 fields=question_fields,
             )
         entry = matched or self.strategy_cfg.defaults
-        pct = entry.stop_loss_pct
-        if pct is None:
-            return _STOP_DISABLED_SENTINEL
-        return max(0.0, fill_price * (1.0 - pct / 100.0))
+        return stop_price(fill_price, entry.stop_loss_pct)
 
     async def _book_fill(
         self, intent: OrderIntent, price: float, size: float, *, now_ns: int,
@@ -357,24 +350,24 @@ class Router:
             intent.cloid, intent.question_idx, intent.symbol, intent.side,
             size, price, _qty_before, _qty_before + signed,
         )
-        # Realized PnL on this fill (0 on opens, signed on reduces). Computed
-        # here so we can record it on the Fill row and the Exit event with one
-        # source of truth. For reduce/close legs, PnL = (close_px − avg_entry) × |closed_qty|
-        # with sign matching the direction of the position being reduced.
-        realized_this_fill = 0.0
-        if existing is not None and (
-            (existing.qty > 0 and intent.side == "sell")
-            or (existing.qty < 0 and intent.side == "buy")
-        ):
-            closed_qty = min(size, abs(existing.qty))
-            if existing.qty > 0:
-                realized_this_fill = (price - existing.avg_entry) * closed_qty
-            else:
-                realized_this_fill = (existing.avg_entry - price) * closed_qty
+        # Realized PnL + position update come from the shared, pure
+        # ``apply_fill`` (the single source of truth the backtest runner also
+        # calls, so live and sim accounting are bit-identical by construction).
+        # ``realized_this_fill`` is 0 on opens/add-ons and the closed-lot PnL on
+        # reduce/close legs, recorded on the Fill row and the Exit event.
+        prev_state = (
+            PositionState(existing.qty, existing.avg_entry, existing.realized_pnl)
+            if existing is not None
+            else None
+        )
+        new_state, realized_this_fill = apply_fill(
+            prev_state, intent.side, size, price,
+        )
         if existing is None:
+            assert new_state is not None
             self.dal.upsert_position(Position(
                 question_idx=intent.question_idx, symbol=intent.symbol,
-                qty=signed, avg_entry=price, realized_pnl=0.0,
+                qty=new_state.qty, avg_entry=new_state.avg_entry, realized_pnl=0.0,
                 last_update_ts_ns=now_ns,
                 stop_loss_price=self._stop_loss_price_for(
                     price, intent.question_idx, question_fields,
@@ -387,70 +380,55 @@ class Router:
                 side=intent.side, size=size, price=price,
                 question_description=q_desc, outcome_description=o_desc,
             ))
+        elif new_state is None:
+            # Closed. On a full close ``realized_this_fill == (price-avg)*qty``,
+            # so the trade's realized PnL is this fill's plus prior partials'.
+            self.dal.delete_position(intent.question_idx)
+            # Stamp the post-exit cooldown clock. Read in handle() before
+            # the next ENTER on the same question_idx is allowed through.
+            self._last_exit_ts[intent.question_idx] = now_ns
+            self._save_cooldowns()
+            # Use the strategy-supplied exit_reason when present so the
+            # Telegram alert distinguishes safety_d / edge / time_stop /
+            # true stop_loss exits. Legacy fallback: reduce_only without a
+            # reason was historically tagged "stop_loss" — preserved for
+            # callers that haven't been updated.
+            exit_reason = intent.exit_reason or (
+                "stop_loss" if intent.reduce_only else "manual"
+            )
+            await self.bus.publish(Exit(
+                ts_ns=now_ns, account_alias=self.account_alias,
+                question_idx=intent.question_idx,
+                symbol=intent.symbol, qty=existing.qty,
+                realized_pnl=realized_this_fill + existing.realized_pnl,
+                reason=exit_reason,
+                question_description=q_desc, outcome_description=o_desc,
+            ))
         else:
-            new_qty = existing.qty + signed
-            if abs(new_qty) < 1e-9:
-                # Closed
-                realized = (price - existing.avg_entry) * existing.qty
-                self.dal.delete_position(intent.question_idx)
-                # Stamp the post-exit cooldown clock. Read in handle() before
-                # the next ENTER on the same question_idx is allowed through.
-                self._last_exit_ts[intent.question_idx] = now_ns
-                self._save_cooldowns()
-                # Use the strategy-supplied exit_reason when present so the
-                # Telegram alert distinguishes safety_d / edge / time_stop /
-                # true stop_loss exits. Legacy fallback: reduce_only without a
-                # reason was historically tagged "stop_loss" — preserved for
-                # callers that haven't been updated.
-                exit_reason = intent.exit_reason or (
-                    "stop_loss" if intent.reduce_only else "manual"
-                )
-                await self.bus.publish(Exit(
+            # Reduce-only partial or add-on. ``apply_fill`` carried realized PnL
+            # forward (add-on weighted-averages the basis; partial reduce leaves
+            # it unchanged) so later closes don't lose this partial's PnL. The
+            # stop price is preserved from the original entry on add-ons.
+            is_addon = (
+                (existing.qty > 0 and intent.side == "buy")
+                or (existing.qty < 0 and intent.side == "sell")
+            )
+            self.dal.upsert_position(Position(
+                question_idx=intent.question_idx, symbol=intent.symbol,
+                qty=new_state.qty, avg_entry=new_state.avg_entry,
+                realized_pnl=new_state.realized_pnl,
+                last_update_ts_ns=now_ns, stop_loss_price=existing.stop_loss_price,
+            ))
+            # Topups / add-on buys reuse the ENTRY Telegram alert so operators
+            # see every size-increasing fill, not just the initial open.
+            if is_addon:
+                await self.bus.publish(Entry(
                     ts_ns=now_ns, account_alias=self.account_alias,
-                    question_idx=intent.question_idx,
-                    symbol=intent.symbol, qty=existing.qty,
-                    realized_pnl=realized + existing.realized_pnl,
-                    reason=exit_reason,
+                    cloid=intent.cloid,
+                    question_idx=intent.question_idx, symbol=intent.symbol,
+                    side=intent.side, size=size, price=price,
                     question_description=q_desc, outcome_description=o_desc,
                 ))
-            else:
-                # Reduce-only partial or add-on. Carry realized PnL forward on
-                # the position so later closes don't lose this partial's PnL.
-                is_addon = (
-                    (existing.qty > 0 and intent.side == "buy")
-                    or (existing.qty < 0 and intent.side == "sell")
-                )
-                # On an add-on (same-direction fill) the cost basis is the
-                # qty-weighted average of the prior position and this fill.
-                # On a partial reduce the cost basis MUST stay unchanged —
-                # the closed lot's PnL is already captured in
-                # realized_this_fill above. Recomputing avg by treating the
-                # opposite-side fill as a position update inflates avg_entry
-                # on every subsequent reduce (a sell at 0.72 on a 0.89-cost
-                # long pushes avg toward 0.93, then the next sell's
-                # closed_pnl uses the inflated basis, etc.) and produces
-                # nonsensical reported losses when a position is closed via
-                # multiple partial reduces.
-                if is_addon:
-                    avg = (existing.qty * existing.avg_entry + signed * price) / new_qty
-                else:
-                    avg = existing.avg_entry
-                self.dal.upsert_position(Position(
-                    question_idx=intent.question_idx, symbol=intent.symbol,
-                    qty=new_qty, avg_entry=avg,
-                    realized_pnl=existing.realized_pnl + realized_this_fill,
-                    last_update_ts_ns=now_ns, stop_loss_price=existing.stop_loss_price,
-                ))
-                # Topups / add-on buys reuse the ENTRY Telegram alert so operators
-                # see every size-increasing fill, not just the initial open.
-                if is_addon:
-                    await self.bus.publish(Entry(
-                        ts_ns=now_ns, account_alias=self.account_alias,
-                        cloid=intent.cloid,
-                        question_idx=intent.question_idx, symbol=intent.symbol,
-                        side=intent.side, size=size, price=price,
-                        question_description=q_desc, outcome_description=o_desc,
-                    ))
         # Persist a Fill row regardless of branch so the local DB has a
         # coherent trade history for diagnostics. fill_id is derived from the
         # cloid + timestamp to be unique per actual venue fill even when one

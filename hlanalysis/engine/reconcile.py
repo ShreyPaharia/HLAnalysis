@@ -12,6 +12,7 @@ from .hl_client import (
 )
 from .risk_events import ReconcileDrift
 from .state import Fill, OpenOrder, Position, StateDAL
+from ..marketdata.position_math import STOP_DISABLED_SENTINEL
 
 
 CLOID_PREFIX = "hla-"
@@ -298,7 +299,6 @@ class Reconciler:
         # alert-only mode (PM live) we don't adopt from the laggy data-api —
         # re-adopting a just-closed position would resurrect it — so we only
         # alert. Stop-loss is disabled on adopted rows (no entry context).
-        _STOP_DISABLED_SENTINEL = -1.0
         for sym, vp in venue_by_symbol.items():
             qidx = self.symbol_to_question.get(sym)
             if qidx is None:
@@ -319,7 +319,7 @@ class Reconciler:
                     question_idx=qidx, symbol=sym, qty=vp.qty,
                     avg_entry=vp.avg_entry, realized_pnl=0.0,
                     last_update_ts_ns=now_ns,
-                    stop_loss_price=_STOP_DISABLED_SENTINEL,
+                    stop_loss_price=STOP_DISABLED_SENTINEL,
                 ))
             drift.append(ReconcileDrift(
                 ts_ns=now_ns, account_alias=self.account_alias, case="position_mismatch", question_idx=qidx,

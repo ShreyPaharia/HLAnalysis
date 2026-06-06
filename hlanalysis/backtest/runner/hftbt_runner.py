@@ -56,6 +56,12 @@ from hftbacktest.types import (
     event_dtype,
 )
 
+from hlanalysis.marketdata.position_math import (
+    STOP_DISABLED_SENTINEL,
+    PositionState,
+    apply_fill,
+    stop_price,
+)
 from hlanalysis.strategy.base import Strategy
 from hlanalysis.strategy.types import Action, BookState, Position
 
@@ -118,7 +124,9 @@ def _binary_fee(px: float, qty: float, cfg: RunConfig) -> float:
 # Helpers
 # ---------------------------------------------------------------------------
 
-_STOP_DISABLED_SENTINEL = -1.0
+# Re-exported from the shared position-math module so the runner and the live
+# router/reconcile share ONE sentinel definition (no copy to drift).
+_STOP_DISABLED_SENTINEL = STOP_DISABLED_SENTINEL
 
 
 def _strategy_stop_loss_pct(strategy: Strategy) -> float | None:
@@ -135,9 +143,9 @@ def _strategy_stop_loss_pct(strategy: Strategy) -> float | None:
 
 
 def _stop_price(fill_price: float, stop_pct: float | None) -> float:
-    if stop_pct is None:
-        return _STOP_DISABLED_SENTINEL
-    return max(0.0, fill_price * (1.0 - stop_pct / 100.0))
+    """Thin alias over the shared ``position_math.stop_price`` (single source of
+    truth shared with the live router)."""
+    return stop_price(fill_price, stop_pct)
 
 
 def _build_leg_event_array(
@@ -804,32 +812,24 @@ def run_one_question(
                             "entry_sigma": current_diag.sigma,
                             "entry_tau_yr": current_diag.tau_yr,
                         }
-                    if pos is None:
-                        pos = Position(
-                            question_idx=q.question_idx,
-                            symbol=intent.symbol,
-                            qty=fill.size,
-                            avg_entry=fill.price,
-                            stop_loss_price=_stop_price(fill.price, stop_pct),
-                            last_update_ts_ns=now_ns,
-                        )
-                    else:
-                        # Topup: aggregate qty and weighted-average entry price.
-                        # Mirrors live router._book_fill's add-on branch so
-                        # backtest accounting matches production.
-                        new_qty = pos.qty + fill.size
-                        new_avg = (
-                            (pos.qty * pos.avg_entry + fill.size * fill.price)
-                            / new_qty if new_qty > 0 else pos.avg_entry
-                        )
-                        pos = Position(
-                            question_idx=pos.question_idx,
-                            symbol=pos.symbol,
-                            qty=new_qty,
-                            avg_entry=new_avg,
-                            stop_loss_price=_stop_price(new_avg, stop_pct),
-                            last_update_ts_ns=now_ns,
-                        )
+                    # Open or topup (add-on) via the shared position math — the
+                    # SAME ``apply_fill`` the live router calls, so add-on
+                    # weighted-average entry is bit-identical to production. On a
+                    # buy-to-open or same-direction add-on the result is never a
+                    # close. The stop is (re)stamped at the resulting basis: the
+                    # fill price on open, the new weighted average on a topup —
+                    # both reproduce the prior inline behaviour exactly.
+                    prev = PositionState(pos.qty, pos.avg_entry) if pos is not None else None
+                    new_pos, _ = apply_fill(prev, "buy", fill.size, fill.price)
+                    assert new_pos is not None
+                    pos = Position(
+                        question_idx=pos.question_idx if pos is not None else q.question_idx,
+                        symbol=intent.symbol,
+                        qty=new_pos.qty,
+                        avg_entry=new_pos.avg_entry,
+                        stop_loss_price=_stop_price(new_pos.avg_entry, stop_pct),
+                        last_update_ts_ns=now_ns,
+                    )
         elif decision.action == Action.EXIT and decision.intents and pos is not None:
             intent = decision.intents[0]
             # Skip hedge intents for binary position management.
@@ -864,25 +864,27 @@ def run_one_question(
                     result.fills.append(fill)
                     fill_ts[fill.cloid] = now_ns
                     fill_question_idx[fill.cloid] = q.question_idx
-                    # Partial exit: when fill.size is capped below abs(pos.qty)
-                    # by book_depth_assumption, keep the residual position open
-                    # so settlement (or a subsequent exit) closes the remainder.
-                    # Pre-topup this branch was always a full close because
-                    # entry was also depth-capped; topup can grow pos > depth,
-                    # so the partial-exit case now matters.
-                    # Threshold: anything below one lot is unfillable; treat
-                    # as closed to avoid an infinite-exit loop where each
-                    # tick sells <lot and the residual never goes to zero.
-                    remaining = abs(pos.qty) - fill.size
-                    if remaining < cfg.lot_size:
+                    # Reduce via the shared position math (the same ``apply_fill``
+                    # the live router calls). ``close_atol=cfg.lot_size`` reproduces
+                    # the runner's close rule: when fill.size is capped below
+                    # abs(pos.qty) by book_depth_assumption, keep the residual open
+                    # so settlement (or a later exit) closes it — but anything
+                    # below one lot is unfillable, so treat it as closed to avoid an
+                    # infinite-exit loop. The cost basis is preserved on a partial
+                    # reduce, and the exit keeps the original entry's stop.
+                    new_pos, _ = apply_fill(
+                        PositionState(pos.qty, pos.avg_entry),
+                        fill.side, fill.size, fill.price,
+                        close_atol=cfg.lot_size,
+                    )
+                    if new_pos is None:
                         pos = None
                     else:
-                        new_qty = pos.qty - fill.size if pos.qty > 0 else pos.qty + fill.size
                         pos = Position(
                             question_idx=pos.question_idx,
                             symbol=pos.symbol,
-                            qty=new_qty,
-                            avg_entry=pos.avg_entry,
+                            qty=new_pos.qty,
+                            avg_entry=new_pos.avg_entry,
                             stop_loss_price=pos.stop_loss_price,
                             last_update_ts_ns=now_ns,
                         )
