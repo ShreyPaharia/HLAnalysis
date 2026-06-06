@@ -259,7 +259,7 @@ class HyperliquidAdapter(BaseWsAdapter):
         ones from sym_to_sub, but don't try to subscribe (no live ws yet)."""
         active_now: dict[str, Subscription] = {}
         for tmpl in templates:
-            for expanded in self._expand_wildcard(tmpl):
+            for expanded in await self._expand_wildcard(tmpl):
                 active_now[expanded.symbol] = expanded
         if not active_now:
             return  # outcomeMeta fetch failed; keep prior state
@@ -283,21 +283,15 @@ class HyperliquidAdapter(BaseWsAdapter):
 
         if new_syms:
             new_subs = [active_now[s] for s in new_syms]
-            for ev in self._fetch_outcome_meta_events(new_subs, meta_seen):
+            for ev in await self._fetch_outcome_meta_events(new_subs, meta_seen):
                 yield ev
 
         if not hasattr(self, "_meta_seen_questions"):
             self._meta_seen_questions: dict[int, tuple[int, ...]] = {}
         # Re-fetch once and reuse for both meta + settlement diffing to avoid
         # double-fetching against HL's info endpoint.
-        try:
-            r = requests.post(HL_INFO_URL, json={"type": "outcomeMeta"}, timeout=5)
-            r.raise_for_status()
-            payload = r.json()
-        except Exception as e:
-            log.warning("outcomeMeta fetch failed (settle-diff): %s", e)
-            payload = None
-        for ev in self._fetch_question_meta_events(
+        payload = await self._fetch_outcome_meta()
+        for ev in await self._fetch_question_meta_events(
             templates, self._meta_seen_questions, meta_payload=payload
         ):
             yield ev
@@ -316,7 +310,7 @@ class HyperliquidAdapter(BaseWsAdapter):
         # Compute the full current set of active HIP-4 outcomes.
         active_now: dict[str, Subscription] = {}
         for tmpl in templates:
-            for expanded in self._expand_wildcard(tmpl):
+            for expanded in await self._expand_wildcard(tmpl):
                 active_now[expanded.symbol] = expanded
         if not active_now:
             return  # outcomeMeta fetch failed; keep prior state
@@ -339,19 +333,13 @@ class HyperliquidAdapter(BaseWsAdapter):
 
         if new_syms:
             new_subs = [active_now[s] for s in new_syms]
-            for ev in self._fetch_outcome_meta_events(new_subs, meta_seen):
+            for ev in await self._fetch_outcome_meta_events(new_subs, meta_seen):
                 yield ev
 
         if not hasattr(self, "_meta_seen_questions"):
             self._meta_seen_questions: dict[int, tuple[int, ...]] = {}
-        try:
-            r = requests.post(HL_INFO_URL, json={"type": "outcomeMeta"}, timeout=5)
-            r.raise_for_status()
-            payload = r.json()
-        except Exception as e:
-            log.warning("outcomeMeta fetch failed (settle-diff refresh): %s", e)
-            payload = None
-        for ev in self._fetch_question_meta_events(
+        payload = await self._fetch_outcome_meta()
+        for ev in await self._fetch_question_meta_events(
             templates, self._meta_seen_questions, meta_payload=payload
         ):
             yield ev
@@ -359,13 +347,29 @@ class HyperliquidAdapter(BaseWsAdapter):
             for ev in self._detect_polled_settlements(templates, payload):
                 yield ev
 
-    def _expand_wildcard(self, template: Subscription) -> list[Subscription]:
-        try:
+    async def _fetch_outcome_meta(self) -> dict | None:
+        """Fetch the HL ``outcomeMeta`` payload off the event loop.
+
+        Only the blocking ``requests.post`` (timeout=5) is offloaded to a worker
+        thread — every caller processes the returned payload (and mutates the
+        meta_seen / meta_seen_questions / meta_snapshot caches) back on the
+        event-loop thread, so there are no data races. Returns ``None`` on any
+        network error so callers keep their prior state. Each poll cycle awaits
+        these sequentially (no concurrent fan-out at the HL info endpoint)."""
+        def _post() -> dict:
             r = requests.post(HL_INFO_URL, json={"type": "outcomeMeta"}, timeout=5)
             r.raise_for_status()
-            data = r.json()
+            return r.json()
+
+        try:
+            return await asyncio.to_thread(_post)
         except Exception as e:
             log.warning("outcomeMeta fetch failed: %s", e)
+            return None
+
+    async def _expand_wildcard(self, template: Subscription) -> list[Subscription]:
+        data = await self._fetch_outcome_meta()
+        if data is None:
             return []
         out: list[Subscription] = []
         # HIP-4 multi-outcome (priceBucket) questions put `class:`/`underlying:`
@@ -407,18 +411,18 @@ class HyperliquidAdapter(BaseWsAdapter):
 
         if kind == "outcomeCreated":
             for tmpl in templates:
-                for expanded in self._expand_wildcard(tmpl):
+                for expanded in await self._expand_wildcard(tmpl):
                     if expanded.symbol in sym_to_sub:
                         continue
                     sym_to_sub[expanded.symbol] = expanded
                     yield self._health("outcome-discovered", expanded.symbol)
                     await self._subscribe_for(ws, expanded, ws_subscribed)
             new_subs = [s for s in sym_to_sub.values() if s.product_type == ProductType.PREDICTION_BINARY]
-            for ev in self._fetch_outcome_meta_events(new_subs, meta_seen):
+            for ev in await self._fetch_outcome_meta_events(new_subs, meta_seen):
                 yield ev
             if not hasattr(self, "_meta_seen_questions"):
                 self._meta_seen_questions = {}
-            for ev in self._fetch_question_meta_events(templates, self._meta_seen_questions):
+            for ev in await self._fetch_question_meta_events(templates, self._meta_seen_questions):
                 yield ev
 
         elif kind == "outcomeSettled":
@@ -440,7 +444,7 @@ class HyperliquidAdapter(BaseWsAdapter):
                 yield self._health("outcome-rolled", coin)
             if not hasattr(self, "_meta_seen_questions"):
                 self._meta_seen_questions = {}
-            for ev in self._fetch_question_meta_events(templates, self._meta_seen_questions):
+            for ev in await self._fetch_question_meta_events(templates, self._meta_seen_questions):
                 yield ev
 
     def _handle(
@@ -605,7 +609,7 @@ class HyperliquidAdapter(BaseWsAdapter):
 
         return out
 
-    def _fetch_outcome_meta_events(
+    async def _fetch_outcome_meta_events(
         self, outcome_subs: list[Subscription], meta_seen: set[str]
     ) -> list[NormalizedEvent]:
         """Fetch HIP-4 outcome metadata; emit one MarketMetaEvent per *newly seen* coin id.
@@ -617,12 +621,8 @@ class HyperliquidAdapter(BaseWsAdapter):
 
         Coin identifier convention: encoding = 10 * outcome + side_index, written as `#<encoding>`.
         """
-        try:
-            r = requests.post(HL_INFO_URL, json={"type": "outcomeMeta"}, timeout=5)
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            log.warning("outcomeMeta fetch failed: %s", e)
+        data = await self._fetch_outcome_meta()
+        if data is None:
             return []
 
         sub_by_coin = {s.symbol: s for s in outcome_subs}
@@ -774,7 +774,7 @@ class HyperliquidAdapter(BaseWsAdapter):
 
         return out
 
-    def _fetch_question_meta_events(
+    async def _fetch_question_meta_events(
         self,
         templates: list[Subscription],
         meta_seen_questions: dict[int, tuple[int, ...]],
@@ -788,12 +788,8 @@ class HyperliquidAdapter(BaseWsAdapter):
         double-fetch in the same poll cycle.
         """
         if meta_payload is None:
-            try:
-                r = requests.post(HL_INFO_URL, json={"type": "outcomeMeta"}, timeout=5)
-                r.raise_for_status()
-                meta_payload = r.json()
-            except Exception as e:
-                log.warning("outcomeMeta fetch failed (questions): %s", e)
+            meta_payload = await self._fetch_outcome_meta()
+            if meta_payload is None:
                 return []
 
         if not templates:

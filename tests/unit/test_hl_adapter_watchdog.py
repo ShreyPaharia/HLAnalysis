@@ -77,11 +77,12 @@ async def test_hl_wildcard_run_labels_health_prediction_binary(monkeypatch):
 
     ws = _SilentWS()
     monkeypatch.setattr(adapter, "_connect", lambda url: ws)
-    # Wildcard sync hits the HL info REST; stub it to return nothing so the
-    # loop proceeds straight to connect without network.
-    monkeypatch.setattr(adapter, "_expand_wildcard", lambda *_a, **_k: [])
-    monkeypatch.setattr(adapter, "_fetch_question_meta_events", lambda *_a, **_k: [])
-    monkeypatch.setattr(adapter, "_detect_polled_settlements", lambda *_a, **_k: [])
+    # Wildcard sync hits the HL info REST; stub the (now async, offloaded)
+    # network helper to return nothing so the loop proceeds to connect with no
+    # network. _expand_wildcard / _sync_wildcards then early-return.
+    async def _no_meta():
+        return None
+    monkeypatch.setattr(adapter, "_fetch_outcome_meta", _no_meta)
 
     sub = Subscription(
         venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,

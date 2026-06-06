@@ -97,7 +97,11 @@ class PolymarketAdapter(BaseWsAdapter):
                 underlying = (sub.match or {}).get("underlying", "BTC")
                 if not isinstance(underlying, str):
                     underlying = underlying[0] if underlying else "BTC"
-                events = self._gamma.fetch_events(
+                # Offload ONLY the blocking 30s requests.get to a worker thread;
+                # all cache mutation (known_conditions / active_tokens) and
+                # queue puts below stay on the event-loop thread to avoid races.
+                events = await asyncio.to_thread(
+                    self._gamma.fetch_events,
                     series_slug=series_str, closed=False,
                 )
                 for mk in self._gamma.iter_binary_markets(events):
