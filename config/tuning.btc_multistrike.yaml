@@ -1,0 +1,24 @@
+# BTC multi-strike (bucket, weekly) theta grid — seeded from prior HL bucket
+# region (buckets historically want lower favorite_threshold / shorter tte /
+# tighter edge_buffer than binaries). Schema: grids.<strategy_id> + run.*.
+# Broad sweep on 1m klines (vol_sampling_dt_seconds=60); dt=5 live-parity is a
+# separate winner re-run on 1s klines. Weekly cadence → few events; smaller
+# walk-forward windows (see thin-history risk in the spec).
+grids:
+  theta_harvester:
+    favorite_threshold: [0.75, 0.80, 0.85]
+    edge_buffer: [0.005, 0.01, 0.02]
+    vol_lookback_seconds: [1800, 2700, 3600]
+    exit_safety_d: [0.0, 0.5]
+    exit_edge_threshold: [0.0]
+    vol_estimator: [bipower]
+    vol_sampling_dt_seconds: [60]
+    tte_min_seconds: [0]
+    tte_max_seconds: [604800]
+    fee_model: [pm_binary]
+
+run:
+  train_markets: 30
+  test_markets: 8
+  step_markets: 8
+  max_workers: 8
