@@ -195,7 +195,7 @@ engine-status:
 	aws ssm send-command \
 		--instance-ids "$$INSTANCE_ID" \
 		--document-name "AWS-RunShellScript" \
-		--parameters 'commands=["systemctl status hl-engine.service --no-pager", "echo", "echo === restart_blocked flag ===", "ls -la /data/engine/restart_blocked 2>/dev/null || echo none", "echo", "echo === halt flag ===", "ls -la /data/engine/halt 2>/dev/null || echo none", "echo", "echo === recent journal ===", "journalctl -u hl-engine.service -n 30 --no-pager"]' \
+		--parameters 'commands=["systemctl status hl-engine.service --no-pager", "echo", "echo === restart_blocked flags (per-slot) ===", "find /opt/hl-recorder/data/engine -name restart_blocked 2>/dev/null | grep . || echo none", "echo", "echo === halt flags (per-slot) ===", "find /opt/hl-recorder/data/engine -name halt 2>/dev/null | grep . || echo none", "echo", "echo === recent journal ===", "journalctl -u hl-engine.service -n 30 --no-pager"]' \
 		--query "Command.CommandId" \
 		--output text | xargs -I {} sh -c \
 		'sleep 3 && aws ssm get-command-invocation --command-id {} --instance-id '"$$INSTANCE_ID"' --query "StandardOutputContent" --output text'
@@ -260,7 +260,7 @@ engine-events:
 	CMD_ID=$$(aws ssm send-command \
 		--instance-ids "$$INSTANCE_ID" \
 		--document-name "AWS-RunShellScript" \
-		--parameters "commands=[\"for db in /opt/hl-recorder/data/engine/*/state.db /opt/hl-recorder/data/engine/state.db; do [ -f \\\"\\$$db\\\" ] && sqlite3 \\\"\\$$db\\\" \\\"SELECT ts_ns, alias, kind, reason, payload_json FROM events WHERE question_idx=$$Q ORDER BY ts_ns ASC\\\" || true; done\"]" \
+		--parameters "commands=[\"/opt/hl-recorder/.venv/bin/python /opt/hl-recorder/scripts/engine_events.py $$Q\"]" \
 		--query "Command.CommandId" --output text) && \
 	sleep 5 && \
 	aws ssm get-command-invocation --command-id "$$CMD_ID" --instance-id "$$INSTANCE_ID" \
