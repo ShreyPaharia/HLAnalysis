@@ -7,7 +7,7 @@ from typing import Literal, NoReturn
 from loguru import logger
 from tenacity import (
     retry, retry_if_exception_type, stop_after_attempt, stop_after_delay,
-    wait_exponential,
+    wait_exponential, wait_random,
 )
 
 from .exec_types import (
@@ -50,10 +50,14 @@ def _reraise_rest(e: Exception) -> NoReturn:
 # the reconcile pass (it previously propagated immediately — only ConnectionError
 # was retried, and only on the write path). Bounded in both attempts and elapsed
 # time (SHR-41 discipline) so a sustained outage can't pin the worker thread.
+# The +wait_random jitter desynchronises the two HL slots: they reconcile on the
+# same cadence from one IP, so without jitter their retries collide in lockstep
+# and re-trigger HL's 429 rate limit on every backoff. A small random offset
+# spreads the retries so one slot's backoff usually clears before the other's.
 _read_retry = retry(
     retry=retry_if_exception_type((ConnectionError, RateLimitError)),
     stop=stop_after_attempt(4) | stop_after_delay(8.0),
-    wait=wait_exponential(multiplier=0.2, max=2.0),
+    wait=wait_exponential(multiplier=0.2, max=2.0) + wait_random(0, 0.3),
     reraise=True,
 )
 

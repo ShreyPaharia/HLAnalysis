@@ -119,6 +119,13 @@ def main() -> None:
     # into loguru. Without this, adapter INFO logs are silently dropped and
     # only WARNING+ leaks to stderr via Python's lastResort handler.
     logging.basicConfig(handlers=[_InterceptHandler()], level=args.log_level.upper(), force=True)
+    # httpx logs one INFO line per HTTP request. The PM clients poll the CLOB /
+    # data-api several times a second per slot, so at INFO this floods journald
+    # (thousands of "HTTP Request: GET ..." lines/min) and buries real events.
+    # Pin httpx/httpcore to WARNING so request spam is silenced but transport
+    # errors still surface. (hyperliquid SDK uses `requests`, unaffected.)
+    for _noisy in ("httpx", "httpcore"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
 
     strategies_cfg = load_strategies_config(args.strategy_config)
     deploy_cfg = load_deploy_config(args.deploy_config)

@@ -90,6 +90,24 @@ from .events_sink import events_persist_loop
 _SPOT_REF_SYMBOL = "BTCUSDT_SPOT"
 
 
+def _is_transient_venue_error(exc: BaseException) -> bool:
+    """True for expected, self-recovering venue read failures the client's
+    read-retry already exhausted — HL 429 rate limits, connection blips, 5xx.
+
+    The reconcile loop uses this to log such failures concisely and retry next
+    cycle, rather than emitting a full ``reconcile crashed`` traceback for
+    routine venue flakiness (e.g. HL 429 bursts when two slots poll /info from
+    one IP). Genuine, non-transient errors still surface with a full traceback.
+
+    Covers both venues: HL's RateLimitError plus the PM client's own
+    transient classifier (requests/builtin conn+timeout, HTTP 5xx and 429)."""
+    from .hl_client import RateLimitError
+    from .pm_client import _pm_is_transient
+    if isinstance(exc, (RateLimitError, ConnectionError, TimeoutError)):
+        return True
+    return _pm_is_transient(exc)
+
+
 def _remap_reference_symbol(ev: NormalizedEvent) -> NormalizedEvent:
     """Rename Binance SPOT BTCUSDT events to BTCUSDT_SPOT so the PM slots'
     ``reference_symbol: BTCUSDT_SPOT`` resolves to the spot feed (not any
@@ -885,8 +903,19 @@ class EngineRuntime:
                         slot.exec_client.cancel, cloid=cloid, symbol=symbol,
                     )
                 slot.last_reconcile_ns = now
-            except Exception:
-                logger.exception("reconcile crashed alias={}", slot.alias)
+            except Exception as exc:
+                # An expected, self-recovering venue read failure (HL 429 burst,
+                # connection blip, 5xx) that the client's read-retry already
+                # exhausted is NOT a crash — the loop retries next cycle. Log it
+                # concisely instead of dumping a multi-frame "reconcile crashed"
+                # traceback that reads like a bug and buries real ones.
+                if _is_transient_venue_error(exc):
+                    logger.warning(
+                        "reconcile skipped alias={} — transient venue error "
+                        "(retried next cycle): {}", slot.alias, exc,
+                    )
+                else:
+                    logger.exception("reconcile crashed alias={}", slot.alias)
 
     async def _continuous_checks_loop(self, slot: AccountSlot) -> None:
         kill_path = slot.kill_switch_path
