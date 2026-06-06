@@ -70,6 +70,7 @@ class SourceConfig:
     pm_reference_source: str = "klines"
     pm_book_source: str = "synthetic"
     pm_binance_bbo_product_type: str = "perp"
+    pm_liquidity_profile_path: str | None = None
     # Shared reference-resample cadence (HL + PM). The CLI couples this to the
     # strategy's ``vol_sampling_dt_seconds``; ``tune`` overrides it per grid cell
     # via :meth:`with_reference_resample` because dt is a sweepable param.
@@ -105,6 +106,7 @@ class SourceConfig:
                 reference_resample_seconds=self.reference_resample_seconds,
                 book_source=self.pm_book_source,  # type: ignore[arg-type]
                 binance_bbo_product_type=self.pm_binance_bbo_product_type,  # type: ignore[arg-type]
+                liquidity_profile_path=self.pm_liquidity_profile_path,
                 **PM_FLAVORS[self.pm_flavor],
             )
         if self.kind == "hl_hip4":

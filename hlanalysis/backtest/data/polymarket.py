@@ -345,6 +345,7 @@ class PolymarketDataSource:
         binance_bbo_product_type: Literal["perp", "spot"] = "perp",
         book_source: Literal["synthetic", "recorded"] = "synthetic",
         pm_book_root: Path | str | None = None,
+        liquidity_profile_path: Path | str | None = None,
     ) -> None:
         self._cache_root = Path(cache_root)
         self._stream_cfg = _StreamCfg(half_spread=half_spread, depth=depth)
@@ -401,6 +402,22 @@ class PolymarketDataSource:
             Path(pm_book_root) if pm_book_root is not None
             else self._cache_root.parent
         )
+        # Optional per-bucket liquidity calibration for the synthetic book builder.
+        # When set, trade_to_l2() uses the profile's half_spread/depth per price
+        # bucket instead of the flat _StreamCfg constants.
+        self._liquidity_profile: "LiquidityProfile | None" = None
+        if liquidity_profile_path:
+            import json as _json
+            from ._synthetic_l2 import LiquidityProfile as _LiquidityProfile
+            with open(liquidity_profile_path) as _f:
+                _d = _json.load(_f)
+            self._liquidity_profile = _LiquidityProfile(
+                bucket_width=_d["bucket_width"],
+                half_spread=_d["half_spread"],
+                depth=_d["depth"],
+                global_half_spread=_d["global_half_spread"],
+                global_depth=_d["global_depth"],
+            )
         # Lazy caches populated on first read. Significant for tuning workers
         # that backtest dozens of markets per cell — without caches each
         # market would re-parse the manifest + the (large) BTC klines JSON.
@@ -934,6 +951,7 @@ class PolymarketDataSource:
                     snap = trade_to_l2(
                         ts_ns=t.ts_ns, token_id=t.token_id, price=t.price,
                         half_spread=cfg.half_spread, depth=cfg.depth,
+                        profile=self._liquidity_profile,
                     )
                     leg_events.append(_book_from_l2(snap))
                 leg_events.append(TradeEvent(
@@ -951,6 +969,7 @@ class PolymarketDataSource:
                         comp_snap = trade_to_l2(
                             ts_ns=t.ts_ns, token_id=other, price=comp_price,
                             half_spread=cfg.half_spread, depth=cfg.depth,
+                            profile=self._liquidity_profile,
                         )
                         leg_events.append(_book_from_l2(comp_snap))
         leg_event_streams.append(iter(leg_events))

@@ -74,6 +74,7 @@ def _source_config_from_args(
             pm_binance_bbo_product_type=(
                 getattr(args, "pm_binance_bbo_product_type", None) or "perp"
             ),
+            pm_liquidity_profile_path=getattr(args, "pm_liquidity_profile", None),
             reference_resample_seconds=reference_resample_seconds,
         )
     if name == "hl_hip4":
@@ -598,6 +599,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "the real multi-level L2 `book_snapshot` parquet per leg (HL parity; "
         "coverage from 2026-05-27).",
     )
+    pr.add_argument(
+        "--pm-liquidity-profile",
+        default=None,
+        dest="pm_liquidity_profile",
+        help="(polymarket synthetic mode only) Path to a JSON liquidity-profile "
+        "produced by scripts/calibrate_pm_liquidity.py. When supplied, the "
+        "synthetic book builder uses per-price-bucket half_spread/depth from "
+        "the profile instead of the flat 0.005/10000 defaults.",
+    )
     pr.add_argument("--workers", type=int, default=1,
                     help="Parallel worker processes for independent markets "
                          "(default 1 = serial). Use up to #cores for big runs.")
@@ -677,6 +687,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="both",
         help="(polymarket) Filter discovery to this question kind. "
         "Avoids mixing binary and bucket markets in one walk-forward.",
+    )
+    pt.add_argument(
+        "--pm-liquidity-profile",
+        default=None,
+        dest="pm_liquidity_profile",
+        help="(polymarket synthetic mode only) Path to a JSON liquidity-profile "
+        "produced by scripts/calibrate_pm_liquidity.py. When supplied, the "
+        "synthetic book builder uses per-price-bucket half_spread/depth from "
+        "the profile instead of the flat 0.005/10000 defaults.",
     )
     # Hedge leg flags (v5_delta_hedged only; safe to pass for other strategies
     # since hedge_enabled defaults to False when --hedge-data-path is omitted).
