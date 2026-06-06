@@ -28,183 +28,69 @@ from loguru import logger
 # populates the registry before any `build()` call.
 import hlanalysis.strategy  # noqa: F401
 
-from .core.data_source import DataSource, QuestionDescriptor
-from .core.registry import build as build_strategy
+from .core.data_source import QuestionDescriptor
 from .core.registry import ids as registry_ids
+from .core.source_config import PM_FLAVORS, SourceConfig
 from .report import write_single_run_report, write_tuning_report
 from .runner.hftbt_runner import RunConfig, run_one_question
 from .runner.parallel import run_questions_parallel
 from .runner.result import summarise_run
 
-# Environment knobs read by the data-source factories. Workers spawned by
-# `hl-bt tune` reach the same caches through the same env vars.
+# Cache/data-root location defaults. These are user-facing "where is my data"
+# knobs (documented on --cache-root): the parent resolves them once and bakes
+# the concrete path into the SourceConfig, so workers read NO environment. They
+# are NOT the source-construction side-channel — every construction knob now
+# travels inside the picklable SourceConfig in the work tuple.
 _ENV_PM_CACHE = "HLBT_PM_CACHE_ROOT"
 _ENV_HL_DATA = "HLBT_HL_DATA_ROOT"
-_ENV_PM_FLAVOR = "HLBT_PM_FLAVOR"  # propagated to tune workers via env
-# PM construction knobs propagated to spawn workers (run + tune) so worker
-# sources match the parent exactly — otherwise --workers>1 silently reverts to
-# defaults (e.g. synthetic book) and diverges from the serial path.
-_ENV_PM_BOOK_SOURCE = "HLBT_PM_BOOK_SOURCE"
-_ENV_PM_REF_SOURCE = "HLBT_PM_REFERENCE_SOURCE"
-_ENV_PM_RESAMPLE_S = "HLBT_PM_RESAMPLE_SECONDS"
-_ENV_PM_BBO_PRODUCT = "HLBT_PM_BBO_PRODUCT_TYPE"
-# HL construction knobs for subprocess workers (--workers>1 / tune). The HL
-# reference resample period MUST track the strategy's vol_sampling_dt_seconds —
-# otherwise sigma annualization and the reference feed disagree and every tick
-# gets gated (the dt=5-vs-default-60 regression).
-_ENV_HL_RESAMPLE_S = "HLBT_HL_RESAMPLE_SECONDS"
-_ENV_HL_REF_SOURCE = "HLBT_HL_REF_SOURCE"
-
-
-def _set_hl_worker_env(args: argparse.Namespace, params: dict) -> None:
-    """Persist HL construction knobs to the environment so spawned worker
-    factories (`make_hl_hip4_source`) rebuild an identical source."""
-    if getattr(args, "data_source", None) != "hl_hip4":
-        return
-    os.environ[_ENV_HL_RESAMPLE_S] = str(int(params.get("vol_sampling_dt_seconds", 60)))
-    os.environ[_ENV_HL_REF_SOURCE] = getattr(args, "ref_source", None) or "hl_perp"
-
-
-def _set_pm_worker_env(args: argparse.Namespace) -> None:
-    """Persist PM construction knobs to the environment so spawned worker
-    factories (`make_polymarket_source`) rebuild an identical source."""
-    if getattr(args, "data_source", None) != "polymarket":
-        return
-    os.environ[_ENV_PM_FLAVOR] = getattr(args, "pm_flavor", None) or "btc_updown"
-    os.environ[_ENV_PM_BOOK_SOURCE] = getattr(args, "pm_book_source", None) or "synthetic"
-    os.environ[_ENV_PM_REF_SOURCE] = getattr(args, "pm_reference_source", None) or "klines"
-    rrs = getattr(args, "pm_reference_resample_seconds", None)
-    os.environ[_ENV_PM_RESAMPLE_S] = str(int(rrs)) if rrs else "60"
-    os.environ[_ENV_PM_BBO_PRODUCT] = getattr(args, "pm_binance_bbo_product_type", None) or "perp"
-
-_PM_FLAVORS: dict[str, dict[str, str]] = {
-    "btc_updown": {
-        "reference_symbol": "BTC",
-        "series_slug": "btc-up-or-down-daily",
-        "klines_subdir": "btc_klines",
-    },
-    "wti_updown": {
-        "reference_symbol": "WTI",
-        "series_slug": "oil-daily-up-or-down",
-        "klines_subdir": "wti_klines",
-    },
-}
+_ENV_PM_NBA_CACHE = "HLBT_PM_NBA_CACHE_ROOT"
 
 
 # ---------------------------------------------------------------------------
 # Data source resolution
 # ---------------------------------------------------------------------------
 
-def _resolve_data_source(
-    name: str,
+def _source_config_from_args(
+    args: argparse.Namespace,
     *,
-    cache_root: str | None = None,
-    ref_source: str | None = None,
-    pm_flavor: str | None = None,
-    hl_reference_resample_seconds: int | None = None,
-    pm_reference_source: str | None = None,
-    pm_reference_resample_seconds: int | None = None,
-    pm_book_source: str | None = None,
-    pm_binance_bbo_product_type: str | None = None,
-) -> DataSource:
-    """Map a CLI data-source name to a concrete DataSource instance.
+    reference_resample_seconds: int = 60,
+) -> SourceConfig:
+    """Build the picklable :class:`SourceConfig` from parsed CLI args.
 
-    Sources live behind lazy imports so a missing dependency in one source
-    (e.g. PM's requests-based client) doesn't take down the CLI. `cache_root`
-    overrides the env-var default for PM (`HLBT_PM_CACHE_ROOT`) and the
-    data-root default for HL HIP-4 (`HLBT_HL_DATA_ROOT`).
+    ``cache_root`` keeps its documented env default (resolved HERE in the
+    parent); every other construction knob is read straight off ``args``. The
+    resulting config is used both to build the in-process source and to ship to
+    spawn workers — one construction path, no env side-channel.
     """
-    if name == "synthetic":
-        from .data.synthetic import (
-            SyntheticDataSource,
-            make_default_binary_question,
-        )
-
-        ds = SyntheticDataSource()
-        ds.add_question(make_default_binary_question())
-        return ds
+    name = args.data_source
+    cache_root = getattr(args, "cache_root", None)
     if name == "polymarket":
-        from .data.polymarket import PolymarketDataSource
-
-        root = cache_root or os.environ.get(_ENV_PM_CACHE, "data/sim")
-        flavor = pm_flavor or os.environ.get(_ENV_PM_FLAVOR, "btc_updown")
-        if flavor not in _PM_FLAVORS:
-            raise SystemExit(f"Unknown --pm-flavor: {flavor!r}. Choices: {sorted(_PM_FLAVORS)}")
-        # Optional cadence-sweep knobs. Default preserves the 1m-klines path
-        # used by the 12-month tune — only the BBO-overlap window probe sets
-        # these to "binance_bbo" + sub-minute dt.
-        prs = pm_reference_source or "klines"
-        prrs = int(pm_reference_resample_seconds) if pm_reference_resample_seconds else 60
-        pbs = pm_book_source or "synthetic"
-        pbpt = pm_binance_bbo_product_type or "perp"
-        return PolymarketDataSource(
-            cache_root=Path(root),
-            reference_source=prs,  # type: ignore[arg-type]
-            reference_resample_seconds=prrs,
-            book_source=pbs,  # type: ignore[arg-type]
-            binance_bbo_product_type=pbpt,  # type: ignore[arg-type]
-            **_PM_FLAVORS[flavor],
+        return SourceConfig(
+            kind="polymarket",
+            cache_root=cache_root or os.environ.get(_ENV_PM_CACHE),
+            pm_flavor=getattr(args, "pm_flavor", None) or "btc_updown",
+            pm_reference_source=getattr(args, "pm_reference_source", None) or "klines",
+            pm_book_source=getattr(args, "pm_book_source", None) or "synthetic",
+            pm_binance_bbo_product_type=(
+                getattr(args, "pm_binance_bbo_product_type", None) or "perp"
+            ),
+            reference_resample_seconds=reference_resample_seconds,
         )
     if name == "hl_hip4":
-        from .data.hl_hip4 import HLHip4DataSource
-
-        root = cache_root or os.environ.get(_ENV_HL_DATA, "data")
-        rs = ref_source or "hl_perp"
-        # Keep the loader's reference resample period coupled to the strategy's
-        # vol_sampling_dt_seconds (passed via the run config). Defaults to 60s.
-        rrs = int(hl_reference_resample_seconds) if hl_reference_resample_seconds else 60
-        return HLHip4DataSource(
-            data_root=Path(root),
-            ref_source=rs,  # type: ignore[arg-type]
-            reference_resample_seconds=rrs,
+        return SourceConfig(
+            kind="hl_hip4",
+            cache_root=cache_root or os.environ.get(_ENV_HL_DATA),
+            hl_ref_source=getattr(args, "ref_source", None) or "hl_perp",
+            reference_resample_seconds=reference_resample_seconds,
         )
     if name == "pm_nba":
-        from .data.pm_nba import PolymarketNBADataSource
-
-        root = cache_root or os.environ.get("HLBT_PM_NBA_CACHE_ROOT", "data/sim/pm_nba")
-        return PolymarketNBADataSource(cache_root=Path(root))
+        return SourceConfig(
+            kind="pm_nba",
+            cache_root=cache_root or os.environ.get(_ENV_PM_NBA_CACHE),
+        )
+    if name == "synthetic":
+        return SourceConfig(kind="synthetic", cache_root=cache_root)
     raise SystemExit(f"Unknown --data-source: {name}")
-
-
-# Module-level zero-arg factories used by `hl-bt tune` workers. The dotted name
-# is passed through ProcessPoolExecutor and the worker re-imports + calls.
-# Cache locations come from env vars set by the parent process before spawn.
-
-def make_polymarket_source() -> "DataSource":
-    from .data.polymarket import PolymarketDataSource
-
-    root = os.environ.get(_ENV_PM_CACHE, "data/sim")
-    flavor = os.environ.get(_ENV_PM_FLAVOR, "btc_updown")
-    return PolymarketDataSource(
-        cache_root=Path(root),
-        reference_source=os.environ.get(_ENV_PM_REF_SOURCE, "klines"),  # type: ignore[arg-type]
-        reference_resample_seconds=int(os.environ.get(_ENV_PM_RESAMPLE_S, "60")),
-        book_source=os.environ.get(_ENV_PM_BOOK_SOURCE, "synthetic"),  # type: ignore[arg-type]
-        binance_bbo_product_type=os.environ.get(_ENV_PM_BBO_PRODUCT, "perp"),  # type: ignore[arg-type]
-        **_PM_FLAVORS[flavor],
-    )
-
-
-def make_hl_hip4_source() -> "DataSource":
-    from .data.hl_hip4 import HLHip4DataSource
-
-    root = os.environ.get(_ENV_HL_DATA, "data")
-    # reference_resample_seconds MUST match the strategy's vol_sampling_dt_seconds
-    # (propagated via env by _set_hl_worker_env); defaulting to 60 here while the
-    # strategy annualizes at a different dt inflates sigma and gates every tick.
-    return HLHip4DataSource(
-        data_root=Path(root),
-        ref_source=os.environ.get(_ENV_HL_REF_SOURCE, "hl_perp"),  # type: ignore[arg-type]
-        reference_resample_seconds=int(os.environ.get(_ENV_HL_RESAMPLE_S, "60")),
-    )
-
-
-def _factory_dotted_for(name: str) -> str:
-    if name == "polymarket":
-        return "hlanalysis.backtest.cli.make_polymarket_source"
-    if name == "hl_hip4":
-        return "hlanalysis.backtest.cli.make_hl_hip4_source"
-    raise SystemExit(f"--data-source {name!r} not supported by `tune`")
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +157,36 @@ def _extract_hedge_config(params: dict) -> tuple[dict, dict | None]:
     )
 
 
+def _run_config_from_args(
+    args: argparse.Namespace, hedge_cfg: dict | None
+) -> RunConfig:
+    """Assemble a :class:`RunConfig` from the shared run-config CLI args.
+
+    Single builder used by both ``run`` and ``tune`` (they declare the same
+    fee/tick/lot/slippage args via :func:`_add_run_config_args`). ``hedge_cfg``
+    is the hedge dict produced by ``_extract_hedge_config`` (``run``) or the
+    ``--hedge-*`` flags (``tune``); ``None`` means hedging is off.
+    """
+    kwargs: dict = dict(
+        scanner_interval_seconds=args.scanner_interval_seconds,
+        tick_size=args.tick_size,
+        lot_size=args.lot_size,
+        slippage_bps=args.slippage_bps,
+        fee_taker=args.fee_taker,
+        fee_model=args.fee_model,
+        fee_rate=args.fee_rate,
+        book_depth_assumption=args.depth,
+    )
+    if hedge_cfg is not None:
+        kwargs["hedge_enabled"] = hedge_cfg["hedge_enabled"]
+        kwargs["hedge_symbol"] = hedge_cfg["hedge_symbol"]
+        kwargs["hedge_tick_size"] = hedge_cfg["hedge_tick_size"]
+        kwargs["hedge_lot_size"] = hedge_cfg["hedge_lot_size"]
+        kwargs["hedge_slippage_bps"] = hedge_cfg["hedge_slippage_bps"]
+        kwargs["hedge_fee_bps"] = hedge_cfg["hedge_fee_bps"]
+    return RunConfig(**kwargs)
+
+
 def _build_hedge_source(hedge_data_path: str | None, hedge_cfg: dict | None):
     """Build a BinancePerpKlinesSource if hedge is enabled and a path is given."""
     if hedge_cfg is None or not hedge_data_path:
@@ -284,25 +200,6 @@ def _build_hedge_source(hedge_data_path: str | None, hedge_cfg: dict | None):
     )
 
 
-def _data_source_dotted(name: str) -> str:
-    """Return the zero-arg factory dotted path for a data source name.
-
-    Reuses the same resolver as `_factory_dotted_for` (used by tune), extended
-    to support sources that only `run` needs (synthetic, pm_nba).
-    """
-    if name in ("polymarket", "hl_hip4"):
-        return _factory_dotted_for(name)
-    # For synthetic / pm_nba — fall back to a dotted path that the worker can
-    # reconstruct.  Synthetic is rarely used in multi-worker runs but must not
-    # crash the arg-path.  Workers re-discover via wide date windows so synthetic
-    # rebuilds an identical question set.
-    if name == "pm_nba":
-        return "hlanalysis.backtest.cli.make_pm_nba_source"
-    # synthetic: not parallelisable in practice (in-memory source), but still
-    # needs a path so workers can reconstruct it.
-    return "hlanalysis.backtest.cli.make_synthetic_source"
-
-
 def _hedge_data_path_for(args: argparse.Namespace) -> str | None:
     """Extract the hedge data path from parsed CLI args (None when not provided)."""
     return getattr(args, "hedge_data_path", None) or None
@@ -313,30 +210,14 @@ def _hedge_half_spread_for(args: argparse.Namespace) -> float:
     return float(getattr(args, "hedge_half_spread_bps", 1.0))
 
 
-# Zero-arg factories for additional data sources (used by parallel workers).
-def make_pm_nba_source() -> "DataSource":
-    import os
-    from .data.pm_nba import PolymarketNBADataSource
-
-    root = os.environ.get("HLBT_PM_NBA_CACHE_ROOT", "data/sim/pm_nba")
-    return PolymarketNBADataSource(cache_root=Path(root))
-
-
-def make_synthetic_source() -> "DataSource":
-    from .data.synthetic import SyntheticDataSource, make_default_binary_question
-
-    ds = SyntheticDataSource()
-    ds.add_question(make_default_binary_question())
-    return ds
-
-
 def cmd_run(args: argparse.Namespace) -> int:
     params = json.loads(Path(args.config).read_text())
 
     # Event-array cache is default-ON. --fresh/--no-cache disables it for this
     # invocation; --rebuild-cache forces a one-time rebuild (still repopulates).
-    # --cache-event-arrays is now a no-op (kept for back-compat). All propagate
-    # to spawn workers via the environment.
+    # --cache-event-arrays is now a no-op (kept for back-compat). These are
+    # genuine runtime toggles (not source-construction), so they still ride to
+    # spawn workers via the inherited environment.
     if getattr(args, "no_cache", False):
         os.environ["HLBT_NO_CACHE"] = "1"
     if getattr(args, "rebuild_cache", False):
@@ -346,32 +227,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     # This keeps the strategy factory clean (it only sees binary knobs).
     params, hedge_cfg = _extract_hedge_config(params)
 
-    # Propagate cache/data-root to workers via env (mirrors cmd_tune so spawned
-    # worker factories pick up the same root as the parent process).
-    if args.cache_root:
-        if args.data_source == "polymarket":
-            os.environ[_ENV_PM_CACHE] = str(args.cache_root)
-        elif args.data_source == "hl_hip4":
-            os.environ[_ENV_HL_DATA] = str(args.cache_root)
-    _set_pm_worker_env(args)
-
-    strategy = _build_strategy_for_cli(args.strategy, params)
-
     hedge_source = _build_hedge_source(args.hedge_data_path, hedge_cfg)
 
-    data_source = _resolve_data_source(
-        args.data_source,
-        cache_root=args.cache_root,
-        ref_source=getattr(args, "ref_source", None),
-        pm_flavor=getattr(args, "pm_flavor", None),
-        # Keep the HL reference downsampler in lockstep with the strategy's
-        # vol_sampling_dt_seconds — same param, same source-of-truth.
-        hl_reference_resample_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
-        pm_reference_source=getattr(args, "pm_reference_source", None),
-        pm_reference_resample_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
-        pm_book_source=getattr(args, "pm_book_source", None),
-        pm_binance_bbo_product_type=getattr(args, "pm_binance_bbo_product_type", None),
+    # ONE source-construction path: the SourceConfig is used to build the
+    # in-process source here AND shipped (picklable) to subprocess workers, so
+    # both build identically. Couple the reference downsampler to the strategy's
+    # vol_sampling_dt_seconds — same param, same source-of-truth.
+    source_config = _source_config_from_args(
+        args,
+        reference_resample_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
     )
+    data_source = source_config.build()
     start = args.start or ""
     end = args.end or ""
     discover_kwargs: dict = {}
@@ -398,25 +264,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         f"from data source '{args.data_source}'"
     )
 
-    # Build RunConfig — include hedge fields when enabled.
-    run_cfg_kwargs: dict = dict(
-        scanner_interval_seconds=args.scanner_interval_seconds,
-        tick_size=args.tick_size,
-        lot_size=args.lot_size,
-        slippage_bps=args.slippage_bps,
-        fee_taker=args.fee_taker,
-        fee_model=args.fee_model,
-        fee_rate=args.fee_rate,
-        book_depth_assumption=args.depth,
-    )
-    if hedge_cfg is not None:
-        run_cfg_kwargs["hedge_enabled"] = hedge_cfg["hedge_enabled"]
-        run_cfg_kwargs["hedge_symbol"] = hedge_cfg["hedge_symbol"]
-        run_cfg_kwargs["hedge_tick_size"] = hedge_cfg["hedge_tick_size"]
-        run_cfg_kwargs["hedge_lot_size"] = hedge_cfg["hedge_lot_size"]
-        run_cfg_kwargs["hedge_slippage_bps"] = hedge_cfg["hedge_slippage_bps"]
-        run_cfg_kwargs["hedge_fee_bps"] = hedge_cfg["hedge_fee_bps"]
-    run_cfg = RunConfig(**run_cfg_kwargs)
+    run_cfg = _run_config_from_args(args, hedge_cfg)
 
     strike_fn = _strike_for_data_source(args.data_source)
 
@@ -426,19 +274,16 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     n_workers = max(1, int(getattr(args, "workers", 1)))
     # Build the strategy once; the in-process path uses this + the already-built
-    # `data_source` (which carries config-derived knobs like the dt=5 reference
-    # resample) DIRECTLY, instead of reconstructing them from the zero-arg
-    # worker factory (which would silently revert those knobs to defaults).
+    # `data_source` DIRECTLY. Subprocess workers (--workers>1) rebuild the source
+    # from the SAME ``source_config`` — no env side-channel can drift the two
+    # apart (closes the worker-factory config-drop bug class).
     strategy = _build_strategy_for_cli(args.strategy, params)
-    # For the subprocess path (--workers>1) workers DO reconstruct via the
-    # factory, so propagate the HL construction knobs to them via env.
-    _set_hl_worker_env(args, params)
     results = run_questions_parallel(
         descriptors=descriptors,
         strategy_id=args.strategy,
         params=params,
         run_cfg=run_cfg,
-        data_source_dotted=_data_source_dotted(args.data_source),
+        source_config=source_config,
         diagnostics_dir=diag_dir,
         fills_dir=fills_dir,
         strike_for=strike_fn,
@@ -498,7 +343,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     from .data.polymarket import PolymarketDataSource
 
     cache_root = Path(args.cache_root or os.environ.get(_ENV_PM_CACHE, "data/sim"))
-    fcfg = _PM_FLAVORS[args.pm_flavor]
+    fcfg = PM_FLAVORS[args.pm_flavor]
     ds = PolymarketDataSource(cache_root=cache_root, **fcfg)
     descs = ds.fetch_and_cache(
         start=args.start,
@@ -525,27 +370,19 @@ def cmd_tune(args: argparse.Namespace) -> int:
         )
 
     # Event-array cache is opt-in (default OFF). --rebuild-cache implies it.
-    # Spawn workers inherit these via the environment.
+    # These are genuine runtime toggles (not source-construction), so spawn
+    # workers still inherit them via the environment.
     if getattr(args, "cache_event_arrays", False) or getattr(args, "rebuild_cache", False):
         os.environ["HLBT_CACHE_EVENT_ARRAYS"] = "1"
     if getattr(args, "rebuild_cache", False):
         os.environ["HLBT_REBUILD_CACHE"] = "1"
 
-    # Pass cache locations to workers via env (ProcessPoolExecutor inherits env).
-    if args.cache_root:
-        if args.data_source == "polymarket":
-            os.environ[_ENV_PM_CACHE] = str(args.cache_root)
-        elif args.data_source == "hl_hip4":
-            os.environ[_ENV_HL_DATA] = str(args.cache_root)
-
-    _set_pm_worker_env(args)
-
-    data_source = _resolve_data_source(
-        args.data_source,
-        cache_root=args.cache_root,
-        ref_source=getattr(args, "ref_source", None),
-        pm_flavor=getattr(args, "pm_flavor", None),
-    )
+    # ONE source-construction path: build the discover source here and ship the
+    # SAME picklable SourceConfig to workers. The reference-resample cadence is a
+    # sweepable param (vol_sampling_dt_seconds), so workers override it per cell;
+    # the discover pass here doesn't depend on the cadence, so 60 is fine.
+    source_config = _source_config_from_args(args, reference_resample_seconds=60)
+    data_source = source_config.build()
     discover_kwargs: dict = {}
     if args.data_source == "polymarket" and args.kind != "both":
         discover_kwargs["kind"] = args.kind
@@ -577,34 +414,15 @@ def cmd_tune(args: argparse.Namespace) -> int:
             hedge_fee_bps=args.hedge_fee_bps,
             _half_spread_bps=args.hedge_half_spread_bps,
         )
-        # Pass hedge data path to workers via env so they can rebuild the source.
-        os.environ["HLBT_HEDGE_DATA_PATH"] = str(args.hedge_data_path)
 
-    run_cfg_kwargs: dict = dict(
-        scanner_interval_seconds=args.scanner_interval_seconds,
-        tick_size=args.tick_size,
-        lot_size=args.lot_size,
-        slippage_bps=args.slippage_bps,
-        fee_taker=args.fee_taker,
-        fee_model=args.fee_model,
-        fee_rate=args.fee_rate,
-        book_depth_assumption=args.depth,
-    )
-    if hedge_cfg_dict is not None:
-        run_cfg_kwargs["hedge_enabled"] = True
-        run_cfg_kwargs["hedge_symbol"] = hedge_cfg_dict["hedge_symbol"]
-        run_cfg_kwargs["hedge_tick_size"] = hedge_cfg_dict["hedge_tick_size"]
-        run_cfg_kwargs["hedge_lot_size"] = hedge_cfg_dict["hedge_lot_size"]
-        run_cfg_kwargs["hedge_slippage_bps"] = hedge_cfg_dict["hedge_slippage_bps"]
-        run_cfg_kwargs["hedge_fee_bps"] = hedge_cfg_dict["hedge_fee_bps"]
-    run_cfg = RunConfig(**run_cfg_kwargs)
+    run_cfg = _run_config_from_args(args, hedge_cfg_dict)
 
     out_dir = Path(args.out_dir) / args.run_id
     run_meta = tcfg.run if isinstance(tcfg.run, dict) else {}
     rows = list(run_tuning_parallel(
         strategy_id=args.strategy,
         grid=grid,
-        data_source_factory_dotted=_factory_dotted_for(args.data_source),
+        source_config=source_config,
         descriptors=descriptors,
         run_cfg=run_cfg,
         train=int(run_meta.get("train_markets", 60)),
@@ -667,6 +485,33 @@ def _concat_parquets(in_dir: Path, out_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _add_run_config_args(parser: argparse.ArgumentParser) -> None:
+    """Declare the run-config args shared verbatim by ``run`` and ``tune``
+    (fee / tick / lot / slippage / scan-cadence). Consumed by
+    :func:`_run_config_from_args`."""
+    parser.add_argument("--scanner-interval-seconds", type=int, default=60)
+    parser.add_argument("--slippage-bps", type=float, default=5.0)
+    parser.add_argument("--fee-taker", type=float, default=0.0)
+    parser.add_argument(
+        "--fee-model",
+        choices=["flat", "pm_binary"],
+        default="flat",
+        help="Binary-leg fee model. 'flat' uses --fee-taker as constant %% of "
+        "notional (HL/synthetic). 'pm_binary' uses Polymarket's curve "
+        "fee = qty * --fee-rate * p * (1-p).",
+    )
+    parser.add_argument(
+        "--fee-rate",
+        type=float,
+        default=0.07,
+        help="feeRate for --fee-model pm_binary. PM crypto = 0.07; sports = 0.03; "
+        "politics/tech/finance/mentions = 0.04; econ/culture/weather = 0.05.",
+    )
+    parser.add_argument("--tick-size", type=float, default=0.001)
+    parser.add_argument("--lot-size", type=float, default=1.0)
+    parser.add_argument("--depth", type=float, default=10_000.0)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="hl-bt")
     sp = p.add_subparsers(dest="cmd", required=True)
@@ -685,27 +530,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     pr.add_argument("--out-dir", required=True)
     pr.add_argument("--start", default=None)
     pr.add_argument("--end", default=None)
-    pr.add_argument("--scanner-interval-seconds", type=int, default=60)
-    pr.add_argument("--slippage-bps", type=float, default=5.0)
-    pr.add_argument("--fee-taker", type=float, default=0.0)
-    pr.add_argument(
-        "--fee-model",
-        choices=["flat", "pm_binary"],
-        default="flat",
-        help="Binary-leg fee model. 'flat' uses --fee-taker as constant %% of "
-        "notional (HL/synthetic). 'pm_binary' uses Polymarket's curve "
-        "fee = qty * --fee-rate * p * (1-p).",
-    )
-    pr.add_argument(
-        "--fee-rate",
-        type=float,
-        default=0.07,
-        help="feeRate for --fee-model pm_binary. PM crypto = 0.07; sports = 0.03; "
-        "politics/tech/finance/mentions = 0.04; econ/culture/weather = 0.05.",
-    )
-    pr.add_argument("--tick-size", type=float, default=0.001)
-    pr.add_argument("--lot-size", type=float, default=1.0)
-    pr.add_argument("--depth", type=float, default=10_000.0)
+    _add_run_config_args(pr)
     pr.add_argument("--skip-markets", type=int, default=0)
     pr.add_argument("--max-markets", type=int, default=None)
     pr.add_argument(
@@ -836,19 +661,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     pt.add_argument("--start", default=None)
     pt.add_argument("--end", default=None)
-    pt.add_argument("--scanner-interval-seconds", type=int, default=60)
-    pt.add_argument("--slippage-bps", type=float, default=5.0)
-    pt.add_argument("--fee-taker", type=float, default=0.0)
-    pt.add_argument(
-        "--fee-model",
-        choices=["flat", "pm_binary"],
-        default="flat",
-        help="Binary-leg fee model. See `run` help for details.",
-    )
-    pt.add_argument("--fee-rate", type=float, default=0.07)
-    pt.add_argument("--tick-size", type=float, default=0.001)
-    pt.add_argument("--lot-size", type=float, default=1.0)
-    pt.add_argument("--depth", type=float, default=10_000.0)
+    _add_run_config_args(pt)
     pt.add_argument("--skip-markets", type=int, default=0)
     pt.add_argument("--max-markets", type=int, default=None)
     pt.add_argument("--top-k", type=int, default=10)

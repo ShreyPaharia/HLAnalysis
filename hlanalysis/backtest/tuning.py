@@ -30,6 +30,7 @@ import yaml
 
 from .core.data_source import DataSource, QuestionDescriptor
 from .core.registry import build as build_strategy
+from .core.source_config import SourceConfig
 from .runner.hftbt_runner import RunConfig, run_one_question
 from .runner.result import RunSummary, summarise_run
 from .runner.walkforward import walk_forward_splits
@@ -186,21 +187,21 @@ def _run_one_cell(args: tuple) -> dict:
         tr_ids,
         te_ids_with_strikes,
         run_cfg_kwargs,
-        data_source_dotted,
+        source_config,
         hedge_data_path,
         hedge_half_spread_bps,
     ) = args
 
-    from .runner.parallel import reconstruct_source, build_hedge_source
+    from .runner.parallel import build_hedge_source
 
     # The reference resample period MUST track this cell's vol_sampling_dt_seconds
-    # (a per-cell grid param). The zero-arg source factory reads it from the env,
-    # so set it from THIS cell's params before reconstructing — otherwise the
-    # source reverts to the default 60s while the strategy annualizes at the
-    # cell's dt, inflating sigma and gating every tick (the dt=5 regression).
-    _dt = str(int(params.get("vol_sampling_dt_seconds", 60)))
-    os.environ["HLBT_HL_RESAMPLE_SECONDS"] = _dt
-    os.environ["HLBT_PM_RESAMPLE_SECONDS"] = _dt
+    # (a per-cell grid param) — otherwise the source reverts to the default 60s
+    # while the strategy annualizes at the cell's dt, inflating sigma and gating
+    # every tick (the dt=5 regression). The picklable SourceConfig carries every
+    # other construction knob already; only the cadence is per-cell, so override
+    # it here from THIS cell's params before building.
+    _dt = int(params.get("vol_sampling_dt_seconds", 60))
+    source_config = source_config.with_reference_resample(_dt)
 
     # A sweep replays each question across many param cells; the built
     # event-array bundle is param-independent, so memoize it in-process to skip
@@ -208,7 +209,7 @@ def _run_one_cell(args: tuple) -> dict:
     # setdefault so an operator can still force it off with HLBT_INPROC_BUNDLE_MEMO=0.
     os.environ.setdefault("HLBT_INPROC_BUNDLE_MEMO", "1")
 
-    data_source = reconstruct_source(data_source_dotted)
+    data_source = source_config.build()
 
     strategy = build_strategy(strategy_id, params)
     run_cfg = RunConfig(**run_cfg_kwargs)
@@ -260,7 +261,7 @@ def run_tuning_parallel(
     *,
     strategy_id: str,
     grid: dict[str, list[Any]],
-    data_source_factory_dotted: str,
+    source_config: SourceConfig,
     descriptors: list[QuestionDescriptor],
     run_cfg: RunConfig,
     train: int,
@@ -296,7 +297,7 @@ def run_tuning_parallel(
                     tuple(q.question_id for q in tr),
                     tuple(te_with_strikes),
                     run_cfg_kwargs,
-                    data_source_factory_dotted,
+                    source_config,
                     hedge_data_path,
                     hedge_half_spread_bps,
                 )

@@ -5,13 +5,14 @@ zero-arg factory.
 Regression for the HL reference-resample bug: cmd_run builds an HLHip4DataSource
 with reference_resample_seconds = config.vol_sampling_dt_seconds (e.g. 5), but
 the refactor routed even serial runs through run_questions_parallel ->
-make_hl_hip4_source(), which dropped reference_resample_seconds (reverting to
+source_config.build(), which would drop reference_resample_seconds (reverting to
 60s) -> inflated sigma -> every tick gated -> 0 trades.
 """
 from __future__ import annotations
 
 from types import SimpleNamespace
 
+from hlanalysis.backtest.core.source_config import SourceConfig
 from hlanalysis.backtest.runner import parallel as P
 from hlanalysis.backtest.runner.hftbt_runner import RunConfig
 
@@ -37,7 +38,9 @@ def test_in_process_path_uses_provided_source_and_strategy(monkeypatch):
         strategy_id="unused",
         params={},
         run_cfg=RunConfig(),
-        data_source_dotted="should.not.be.imported.in.process",
+        # A config whose build() would raise — proves the in-process path never
+        # reconstructs the source (it uses the provided one directly).
+        source_config=SourceConfig(kind="should_not_build"),
         diagnostics_dir=None,
         fills_dir=None,
         strike_for=lambda _q: 0.0,

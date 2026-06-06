@@ -1,12 +1,13 @@
 """Shared process-pool helpers for backtests.
 
 `run_questions_parallel` fans independent questions across worker processes;
-`reconstruct_source` / `build_hedge_source` are the worker-side builders shared
-with the tuning driver so the reconstruction logic lives in one place.
+`build_hedge_source` is the worker-side hedge builder shared with the tuning
+driver so the reconstruction logic lives in one place. Workers rebuild the data
+source from the picklable ``SourceConfig`` carried in the work tuple, so the
+in-process and subprocess paths share ONE construction path.
 """
 from __future__ import annotations
 
-import importlib
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, asdict
@@ -15,12 +16,7 @@ from typing import Any, Callable
 
 from .hftbt_runner import RunConfig, run_one_question
 from ..core.data_source import QuestionDescriptor
-
-
-def reconstruct_source(data_source_dotted: str):
-    """Re-import + call a zero-arg factory named by a dotted path (worker side)."""
-    mod_name, _, attr = data_source_dotted.rpartition(".")
-    return getattr(importlib.import_module(mod_name), attr)()
+from ..core.source_config import SourceConfig
 
 
 def build_hedge_source(run_cfg: RunConfig, hedge_data_path: str | None,
@@ -66,10 +62,10 @@ def build_strategy_for_run(strategy_id: str, params: dict):
 
 
 def _run_question_worker(args: tuple) -> QResult:
-    (idx, q_id, strike, strategy_id, params, run_cfg_kwargs, data_source_dotted,
+    (idx, q_id, strike, strategy_id, params, run_cfg_kwargs, source_config,
      diag_dir, fills_dir, hedge_data_path, hedge_half_spread_bps) = args
 
-    data_source = reconstruct_source(data_source_dotted)
+    data_source = source_config.build()
     run_cfg = RunConfig(**run_cfg_kwargs)
     strategy = build_strategy_for_run(strategy_id, params)
 
@@ -106,7 +102,7 @@ def run_questions_parallel(
     strategy_id: str,
     params: dict,
     run_cfg: RunConfig,
-    data_source_dotted: str,
+    source_config: SourceConfig,
     diagnostics_dir: Path | None,
     fills_dir: Path | None,
     strike_for: Callable[[QuestionDescriptor], float],
@@ -122,10 +118,10 @@ def run_questions_parallel(
     ``data_source`` + ``strategy``, the in-process path uses them DIRECTLY.
     This is load-bearing: the source carries config-derived construction params
     (e.g. ``reference_resample_seconds`` coupled to ``vol_sampling_dt_seconds``)
-    that the zero-arg worker factory does NOT reconstruct — reconstructing the
-    source in-process would silently revert those to defaults and change fills.
-    Only true subprocess workers (``n_workers > 1``) reconstruct from the dotted
-    factory (env-propagated), because the source/strategy may not pickle.
+    that a fresh build must reproduce exactly. Only true subprocess workers
+    (``n_workers > 1``) rebuild from the picklable ``source_config``, because the
+    built source/strategy may not pickle. Both paths now construct via the SAME
+    ``SourceConfig.build`` — no env side-channel can drift them apart.
     """
     if n_workers <= 1 and data_source is not None and strategy is not None:
         results: list[QResult] = []
@@ -147,7 +143,7 @@ def run_questions_parallel(
     run_cfg_kwargs = asdict(run_cfg)
     work = [
         (i, q.question_id, strike_for(q), strategy_id, params, run_cfg_kwargs,
-         data_source_dotted, str(diagnostics_dir) if diagnostics_dir else None,
+         source_config, str(diagnostics_dir) if diagnostics_dir else None,
          str(fills_dir) if fills_dir else None, hedge_data_path, hedge_half_spread_bps)
         for i, q in enumerate(descriptors)
     ]
@@ -161,7 +157,7 @@ def run_questions_parallel(
 
 __all__ = [
     "QResult",
-    "reconstruct_source",
     "build_hedge_source",
+    "build_strategy_for_run",
     "run_questions_parallel",
 ]
