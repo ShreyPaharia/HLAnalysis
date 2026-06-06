@@ -44,8 +44,18 @@ def dal(tmp_path):
 # Migration
 # ---------------------------------------------------------------------------
 
-def test_migration_0006_applied(dal):
-    assert "0006_events" in dal.applied_versions()
+def test_events_table_created_by_baseline(dal):
+    # The events table (formerly migration 0006) is now part of the Alembic
+    # baseline; confirm the baseline is applied and the table exists.
+    assert "0001_baseline" in dal.applied_versions()
+    import sqlite3
+    with sqlite3.connect(dal.db_path) as conn:
+        names = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    assert "events" in names
 
 
 # ---------------------------------------------------------------------------

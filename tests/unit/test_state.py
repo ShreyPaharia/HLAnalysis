@@ -17,7 +17,7 @@ def dal(tmp_path):
 
 def test_migrations_creates_tables(dal):
     info = dal.applied_versions()
-    assert "0001_initial" in info
+    assert "0001_baseline" in info
 
 
 def test_pm_strike_round_trip_and_upsert(dal):

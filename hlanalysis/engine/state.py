@@ -5,6 +5,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from alembic import command
+from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
 from sqlmodel import Field, Session as _Session, SQLModel, create_engine, select
 
 
@@ -109,15 +112,24 @@ class Event(SQLModel, table=True):
 Session = Session_  # noqa: F811
 
 
-_MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+# Alembic migration environment (programmatic — no CLI step at runtime).
+_ALEMBIC_DIR = Path(__file__).parent / "migrations_alembic"
+# The single revision capturing the full pre-Alembic schema. Existing DBs are
+# stamped here; fresh DBs upgrade to it (and beyond) from scratch.
+_BASELINE_REVISION = "0001_baseline"
+# Presence of this table without `alembic_version` marks a pre-Alembic DB
+# created by the old hand-written SQL runner (0001 always creates it first).
+_LEGACY_SENTINEL_TABLE = "openorder"
 
 
 class StateDAL:
-    """Thin DAL over sqlite via sqlmodel + raw sqlite3 for migrations.
+    """Thin DAL over sqlite via sqlmodel, with schema managed by Alembic.
 
-    We do NOT use SQLModel.metadata.create_all() — the spec calls for explicit
-    SQL migration files even in Phase 1, with versions tracked in `schema_migrations`.
-    Alembic adopted in Phase 2 (spec §5.1).
+    Migrations live in ``migrations_alembic/`` and are applied programmatically
+    by ``run_migrations`` (no CLI step). A pre-existing (pre-Alembic) DB is
+    STAMPED at the baseline rather than re-run, so live data and on-disk schema
+    are left untouched; a fresh DB runs every revision from scratch and ends at
+    the identical schema (see tests/unit/test_state_alembic_migrations.py).
     """
 
     def __init__(self, db_path: Path) -> None:
@@ -131,32 +143,46 @@ class StateDAL:
 
     # ---- migrations ----
 
-    def run_migrations(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations "
-                "(version TEXT PRIMARY KEY, applied_at_ns INTEGER NOT NULL)"
-            )
-            conn.commit()
-            applied = {
-                r[0] for r in conn.execute("SELECT version FROM schema_migrations").fetchall()
-            }
-            for sql_path in sorted(_MIGRATIONS_DIR.glob("*.sql")):
-                version = sql_path.stem
-                if version in applied:
-                    continue
-                conn.executescript(sql_path.read_text())
-                conn.execute(
-                    "INSERT INTO schema_migrations(version, applied_at_ns) VALUES (?, ?)",
-                    (version, time.time_ns()),
-                )
-                conn.commit()
+    def _alembic_config(self) -> Config:
+        cfg = Config()
+        cfg.set_main_option("script_location", str(_ALEMBIC_DIR))
+        cfg.set_main_option("sqlalchemy.url", f"sqlite:///{self.db_path}")
+        return cfg
 
-    def applied_versions(self) -> set[str]:
+    def _existing_tables(self) -> set[str]:
         with sqlite3.connect(self.db_path) as conn:
             return {
-                r[0] for r in conn.execute("SELECT version FROM schema_migrations").fetchall()
+                r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
             }
+
+    def run_migrations(self) -> None:
+        """Bring the DB to the Alembic head. Three cases:
+
+        * already Alembic-managed (`alembic_version` present) → upgrade to head;
+        * pre-Alembic production DB (old SQL runner left app tables but no
+          `alembic_version`) → STAMP the baseline (its schema already equals the
+          baseline; re-running DDL would error on existing tables and risk data),
+          then upgrade to head for any post-baseline revisions;
+        * fresh DB → run every revision from scratch.
+        """
+        cfg = self._alembic_config()
+        tables = self._existing_tables()
+        if "alembic_version" in tables:
+            command.upgrade(cfg, "head")
+        elif _LEGACY_SENTINEL_TABLE in tables:
+            command.stamp(cfg, _BASELINE_REVISION)
+            command.upgrade(cfg, "head")
+        else:
+            command.upgrade(cfg, "head")
+
+    def applied_versions(self) -> set[str]:
+        """Current Alembic head revision(s) recorded in the DB (empty before
+        any migration runs)."""
+        with self._engine.connect() as conn:
+            ctx = MigrationContext.configure(conn)
+            return set(ctx.get_current_heads())
 
     # ---- orders ----
 
