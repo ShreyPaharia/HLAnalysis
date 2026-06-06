@@ -411,13 +411,20 @@ class PolymarketDataSource:
             from ._synthetic_l2 import LiquidityProfile as _LiquidityProfile
             with open(liquidity_profile_path) as _f:
                 _d = _json.load(_f)
-            self._liquidity_profile = _LiquidityProfile(
-                bucket_width=_d["bucket_width"],
-                half_spread=_d["half_spread"],
-                depth=_d["depth"],
-                global_half_spread=_d["global_half_spread"],
-                global_depth=_d["global_depth"],
-            )
+            try:
+                self._liquidity_profile = _LiquidityProfile(
+                    bucket_width=_d["bucket_width"],
+                    half_spread=_d["half_spread"],
+                    depth=_d["depth"],
+                    global_half_spread=_d["global_half_spread"],
+                    global_depth=_d["global_depth"],
+                )
+            except KeyError as _e:
+                raise ValueError(
+                    f"liquidity profile {liquidity_profile_path} is missing "
+                    f"required key {_e}; expected bucket_width, half_spread, "
+                    f"depth, global_half_spread, global_depth"
+                ) from _e
         # Lazy caches populated on first read. Significant for tuning workers
         # that backtest dozens of markets per cell — without caches each
         # market would re-parse the manifest + the (large) BTC klines JSON.

@@ -196,13 +196,15 @@ def _iter_snapshots(
             if not bids or not asks:
                 continue
             best_bid_px, best_bid_sz = bids[0]
-            best_ask_px, _ = asks[0]
+            best_ask_px, best_ask_sz = asks[0]
             if best_ask_px <= best_bid_px:
                 continue
             mid = (best_bid_px + best_ask_px) / 2.0
             half_spread = (best_ask_px - best_bid_px) / 2.0
-            # Use best-bid size as the representative top-of-book depth.
-            depth = best_bid_sz
+            # The synthetic book is symmetric (bid_sz == ask_sz == depth) and a
+            # taker walks it from either side, so use the conservative min of the
+            # two top-of-book sizes as the representative depth (N2).
+            depth = min(best_bid_sz, best_ask_sz)
             yield {"p": mid, "half_spread": half_spread, "depth": depth}
 
 
