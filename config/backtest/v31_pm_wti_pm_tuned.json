@@ -1,5 +1,5 @@
 {
-  "_comment_": "v3.1 PM-tuned knobs (favorite_threshold=0.90, edge_buffer=0.03). Source: config/tuning.v3-1-final-pm.yaml.",
+  "_comment_": "v3.1 PM-tuned knobs (favorite_threshold=0.90, edge_buffer=0.03). Source: experiments/config/tuning.v3-1-final-pm.yaml.",
   "vol_lookback_seconds": 3600,
   "vol_sampling_dt_seconds": 60,
   "vol_clip_min": 0.0,

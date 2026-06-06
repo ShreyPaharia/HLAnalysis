@@ -1,5 +1,5 @@
 {
-  "_comment_": "v3.1 HL-prod knobs (favorite_threshold=0.85, edge_buffer=0.02). Source: config/tuning.v3-1-final-baseline.yaml. Used as-is on PM WTI for v3.1 stack portability test — NOT retuned.",
+  "_comment_": "v3.1 HL-prod knobs (favorite_threshold=0.85, edge_buffer=0.02). Source: experiments/config/tuning.v3-1-final-baseline.yaml. Used as-is on PM WTI for v3.1 stack portability test — NOT retuned.",
   "vol_lookback_seconds": 3600,
   "vol_sampling_dt_seconds": 60,
   "vol_clip_min": 0.05,
