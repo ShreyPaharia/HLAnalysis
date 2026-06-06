@@ -14,6 +14,10 @@ import uuid
 from collections.abc import Callable
 
 import requests
+from tenacity import (
+    retry, retry_if_exception, stop_after_attempt, stop_after_delay,
+    wait_exponential,
+)
 
 from .exec_types import (
     ClearinghouseState,
@@ -50,6 +54,52 @@ def _round_down_2(x: float) -> float:
     """Floor to 2 decimal places (cents). PM caps a market BUY's USDC (maker)
     amount at 2 decimals; rounding *down* never spends more than intended."""
     return math.floor(x * 100.0) / 100.0
+
+
+def _pm_is_transient(exc: BaseException) -> bool:
+    """Retry predicate mirroring hl_client's transient/business split.
+
+    Retry only known-transient failures so a momentary data-api / CLOB blip
+    backs off and recovers instead of being silently soft-failed to an empty
+    book / rejected order (which historically caused reconcile false-settles).
+    Everything else — genuine business rejections, malformed requests, 4xx —
+    fails fast so a real error is surfaced immediately, not after pointless
+    retries.
+
+    Transient:
+      - connection drops / timeouts (requests + builtin)
+      - HTTP 5xx (server-side) and 429 (rate limit)
+    """
+    if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+        return True
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    if isinstance(exc, requests.exceptions.HTTPError):
+        resp = getattr(exc, "response", None)
+        code = getattr(resp, "status_code", None)
+        return code is not None and (code >= 500 or code == 429)
+    return False
+
+
+# READ-path retry (open_orders / clearinghouse_state / data-api positions /
+# user_fills). Mirrors hl_client._read_retry: bounded in BOTH attempts and total
+# elapsed time so a sustained outage can't pin the worker thread.
+_PM_READ_RETRY = retry(
+    retry=retry_if_exception(_pm_is_transient),
+    stop=stop_after_attempt(4) | stop_after_delay(8.0),
+    wait=wait_exponential(multiplier=0.2, max=2.0),
+    reraise=True,
+)
+
+# WRITE-path retry (place / cancel). Mirrors hl_client._WRITE_RETRY — slightly
+# tighter bound than the read path so a flapping connection can't keep an order
+# submission alive indefinitely.
+_PM_WRITE_RETRY = retry(
+    retry=retry_if_exception(_pm_is_transient),
+    stop=stop_after_attempt(3) | stop_after_delay(5.0),
+    wait=wait_exponential(multiplier=0.2, max=2.0),
+    reraise=True,
+)
 
 
 class PMClient:
@@ -224,7 +274,12 @@ class PMClient:
         self._sdk = ClobClient(**kwargs)
         return self._sdk
 
-    def _live_place(self, req: PlaceRequest) -> OrderAck:
+    @_PM_WRITE_RETRY
+    def _post_order_raw(self, req: PlaceRequest, price: float) -> dict:
+        """Submit the order via the SDK, retrying transient network/5xx blips.
+        A genuine business rejection (non-transient exception) fails fast and
+        the caller converts it to a rejected ack. Returns the raw SDK response.
+        """
         from py_clob_client_v2 import (
             MarketOrderArgs,
             OrderArgs,
@@ -234,50 +289,52 @@ class PMClient:
         )
         side = Side.BUY if req.side == "buy" else Side.SELL
         opts = PartialCreateOrderOptions(tick_size="0.01")
+        sdk = self._ensure_sdk()
+        if req.time_in_force == "ioc":
+            # Marketable (FAK) orders must go through PM's market-order
+            # endpoint, which enforces market-order precision: the USDC
+            # (maker) amount of a BUY is capped at 2 decimals and the share
+            # (taker) amount at 4. The limit path (create_and_post_order)
+            # rounds the USDC amount to 4 decimals (tick-0.01 amount=4), so
+            # PM rejected every buy with "invalid amounts ... max accuracy
+            # of 2 decimals". For a BUY the market `amount` is the USDC to
+            # spend (price·size); for a SELL it is the share count. Round
+            # down to 2 dp so the maker amount is always within PM's cap.
+            amount = (
+                _round_down_2(price * req.size)
+                if req.side == "buy"
+                else _round_down_2(req.size)
+            )
+            return sdk.create_and_post_market_order(
+                order_args=MarketOrderArgs(
+                    token_id=req.symbol,
+                    amount=amount,
+                    side=side,
+                    price=price,
+                    order_type=OrderType.FAK,
+                ),
+                options=opts,
+                order_type=OrderType.FAK,
+            )
+        return sdk.create_and_post_order(
+            order_args=OrderArgs(
+                token_id=req.symbol,
+                price=price,
+                side=side,
+                size=req.size,
+            ),
+            options=opts,
+            order_type=OrderType.GTC,
+        )
+
+    def _live_place(self, req: PlaceRequest) -> OrderAck:
         # Clamp to PM's [0.01, 0.99] tick band before the venue sees it. An
         # exit priced at the favorite's bid_px (>0.99 near resolution) would
         # otherwise auto-reject every tick. Affects the order price and the
         # BUY's USDC `amount` (price·size); the SELL amount is share-count.
         price = _clamp_pm_price(req.price)
         try:
-            sdk = self._ensure_sdk()
-            if req.time_in_force == "ioc":
-                # Marketable (FAK) orders must go through PM's market-order
-                # endpoint, which enforces market-order precision: the USDC
-                # (maker) amount of a BUY is capped at 2 decimals and the share
-                # (taker) amount at 4. The limit path (create_and_post_order)
-                # rounds the USDC amount to 4 decimals (tick-0.01 amount=4), so
-                # PM rejected every buy with "invalid amounts ... max accuracy
-                # of 2 decimals". For a BUY the market `amount` is the USDC to
-                # spend (price·size); for a SELL it is the share count. Round
-                # down to 2 dp so the maker amount is always within PM's cap.
-                amount = (
-                    _round_down_2(price * req.size)
-                    if req.side == "buy"
-                    else _round_down_2(req.size)
-                )
-                resp = sdk.create_and_post_market_order(
-                    order_args=MarketOrderArgs(
-                        token_id=req.symbol,
-                        amount=amount,
-                        side=side,
-                        price=price,
-                        order_type=OrderType.FAK,
-                    ),
-                    options=opts,
-                    order_type=OrderType.FAK,
-                )
-            else:
-                resp = sdk.create_and_post_order(
-                    order_args=OrderArgs(
-                        token_id=req.symbol,
-                        price=price,
-                        side=side,
-                        size=req.size,
-                    ),
-                    options=opts,
-                    order_type=OrderType.GTC,
-                )
+            resp = self._post_order_raw(req, price)
         except Exception as e:
             return OrderAck(
                 cloid=req.cloid, venue_oid="", status="rejected",
@@ -313,16 +370,21 @@ class PMClient:
             status=status, fill_price=fill_price, fill_size=fill_size,
         )
 
+    @_PM_WRITE_RETRY
+    def _cancel_raw(self, oid: str):
+        """Cancel by orderID via the SDK, retrying transient blips."""
+        from py_clob_client_v2 import OrderPayload
+        sdk = self._ensure_sdk()
+        return sdk.cancel_order(OrderPayload(orderID=oid))
+
     def _live_cancel(self, *, cloid: str, symbol: str) -> bool:
         # PM cancels by orderID, not cloid. We track cloid→orderID locally in
         # _live_place. Orphans (no mapping) fail-soft to False.
         oid = self._cloid_to_oid.get(cloid)
         if not oid:
             return False
-        from py_clob_client_v2 import OrderPayload
         try:
-            sdk = self._ensure_sdk()
-            resp = sdk.cancel_order(OrderPayload(orderID=oid))
+            resp = self._cancel_raw(oid)
         except Exception:
             return False
         if isinstance(resp, dict):
@@ -337,10 +399,14 @@ class PMClient:
             return False
         return bool(resp)
 
+    @_PM_READ_RETRY
+    def _open_orders_raw(self):
+        sdk = self._ensure_sdk()
+        return sdk.get_open_orders()
+
     def _live_open_orders(self) -> list[OpenOrderRow]:
         try:
-            sdk = self._ensure_sdk()
-            rows = sdk.get_open_orders()
+            rows = self._open_orders_raw()
         except Exception:
             return []
         oid_to_cloid = {v: k for k, v in self._cloid_to_oid.items()}
@@ -373,13 +439,17 @@ class PMClient:
             ))
         return out
 
-    def _live_clearinghouse_state(self) -> ClearinghouseState:
+    @_PM_READ_RETRY
+    def _balance_allowance_raw(self):
         from py_clob_client_v2 import AssetType, BalanceAllowanceParams
+        sdk = self._ensure_sdk()
+        return sdk.get_balance_allowance(
+            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL),
+        )
+
+    def _live_clearinghouse_state(self) -> ClearinghouseState:
         try:
-            sdk = self._ensure_sdk()
-            resp = sdk.get_balance_allowance(
-                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL),
-            )
+            resp = self._balance_allowance_raw()
         except Exception:
             return ClearinghouseState(positions=(), account_value_usd=0.0)
         try:
@@ -400,6 +470,13 @@ class PMClient:
             positions_known=positions_known,
         )
 
+    @_PM_READ_RETRY
+    def _data_api_get_retrying(self, url: str) -> list[dict]:
+        """Call the injected data-api getter, retrying transient blips. A
+        sustained outage still soft-fails to positions_known=False at the
+        caller (so the reconciler skips rather than vanishing positions)."""
+        return self._data_api_get(url)
+
     def _fetch_pm_positions(self) -> tuple[tuple[VenuePosition, ...], bool]:
         """Return (positions, positions_known) from the PM data-api.
 
@@ -419,7 +496,7 @@ class PMClient:
             "&sizeThreshold=0.01&limit=500"
         )
         try:
-            rows = self._data_api_get(url)
+            rows = self._data_api_get_retrying(url)
         except Exception:
             return (), False
         out: list[VenuePosition] = []
@@ -444,13 +521,17 @@ class PMClient:
             ))
         return tuple(out), True
 
-    def _live_user_fills(self, *, since_ts_ns: int = 0) -> list[UserFillRow]:
+    @_PM_READ_RETRY
+    def _trades_raw(self, after_s: int):
         from py_clob_client_v2 import TradeParams
+        sdk = self._ensure_sdk()
+        params = TradeParams(after=after_s) if after_s else None
+        return sdk.get_trades(params=params)
+
+    def _live_user_fills(self, *, since_ts_ns: int = 0) -> list[UserFillRow]:
         after_s = since_ts_ns // 1_000_000_000 if since_ts_ns else 0
         try:
-            sdk = self._ensure_sdk()
-            params = TradeParams(after=after_s) if after_s else None
-            trades = sdk.get_trades(params=params)
+            trades = self._trades_raw(after_s)
         except Exception:
             return []
         oid_to_cloid = {v: k for k, v in self._cloid_to_oid.items()}

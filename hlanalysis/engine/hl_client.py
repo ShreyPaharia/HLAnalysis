@@ -58,6 +58,21 @@ _read_retry = retry(
 )
 
 
+# Shared retry policy for the WRITE path (_live_place / _live_cancel). A flapping
+# connection retries with bounded backoff rather than propagating immediately.
+# Bound BOTH the attempt count and total elapsed retry time (SHR-41) so a
+# flapping connection can't keep the call alive indefinitely. The call is
+# offloaded off the event loop by the runtime, so this guards the worker thread /
+# order-resolution latency rather than the loop. Consolidated from two
+# copy-pasted inline decorators so the policy lives in exactly one place.
+_WRITE_RETRY = retry(
+    retry=retry_if_exception_type(ConnectionError),
+    stop=stop_after_attempt(3) | stop_after_delay(5.0),
+    wait=wait_exponential(multiplier=0.2, max=2.0),
+    reraise=True,
+)
+
+
 _HEX_CHARS = set("0123456789abcdefABCDEF")
 
 
@@ -234,16 +249,7 @@ class HLClient:
         except ConnectionError as e:
             raise RestError(str(e)) from e
 
-    @retry(
-        retry=retry_if_exception_type(ConnectionError),
-        # Bound BOTH the attempt count and total elapsed retry time (SHR-41) so
-        # a flapping connection can't keep this call alive indefinitely. The
-        # call is offloaded off the event loop by the runtime, so this guards
-        # the worker thread / order-resolution latency rather than the loop.
-        stop=stop_after_attempt(3) | stop_after_delay(5.0),
-        wait=wait_exponential(multiplier=0.2, max=2.0),
-        reraise=True,
-    )
+    @_WRITE_RETRY
     def _live_place(self, req: PlaceRequest) -> OrderAck:
         try:
             assert self._exchange is not None
@@ -311,16 +317,7 @@ class HLClient:
             )
         return OrderAck(cloid=req.cloid, venue_oid="", status="rejected", error="unknown_response")
 
-    @retry(
-        retry=retry_if_exception_type(ConnectionError),
-        # Bound BOTH the attempt count and total elapsed retry time (SHR-41) so
-        # a flapping connection can't keep this call alive indefinitely. The
-        # call is offloaded off the event loop by the runtime, so this guards
-        # the worker thread / order-resolution latency rather than the loop.
-        stop=stop_after_attempt(3) | stop_after_delay(5.0),
-        wait=wait_exponential(multiplier=0.2, max=2.0),
-        reraise=True,
-    )
+    @_WRITE_RETRY
     def _live_cancel(self, *, cloid: str, symbol: str) -> bool:
         assert self._exchange is not None
         from hyperliquid.utils.types import Cloid  # type: ignore[import-not-found]
