@@ -44,3 +44,24 @@ def test_cli_run_help_lists_new_flavors():
     )
     assert "eth_updown" in out.stdout
     assert "eth_multistrike" in out.stdout
+
+
+def test_kline_coverage_includes_bucket_windows(tmp_path, monkeypatch):
+    ds = PolymarketDataSource(cache_root=tmp_path, reference_symbol="ETH",
+                              klines_subdir="eth_klines",
+                              bucket_series_slug="ethereum-multi-strikes-weekly")
+    fake_manifest = {
+        "evt-slug": {"kind": "bucket",
+                     "bucket": {"start_ts_ns": 1_700_000_000_000_000_000,
+                                "end_ts_ns": 1_700_600_000_000_000_000}},
+    }
+    monkeypatch.setattr(ds, "_load_manifest", lambda: fake_manifest)
+    monkeypatch.setattr(ds, "_fetch_and_cache_binary", lambda *a, **k: None)
+    monkeypatch.setattr(ds, "_fetch_and_cache_bucket", lambda *a, **k: None)
+    monkeypatch.setattr(ds, "_write_manifest", lambda m: None)
+    monkeypatch.setattr(ds, "discover", lambda **k: [])
+    seen = {}
+    monkeypatch.setattr(ds, "_ensure_kline_coverage",
+                        lambda s, e: seen.update(start=s, end=e))
+    ds.fetch_and_cache(start="2023-11-01", end="2023-12-01", kind="bucket")
+    assert seen == {"start": 1_700_000_000_000_000_000, "end": 1_700_600_000_000_000_000}

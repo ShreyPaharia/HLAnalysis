@@ -697,16 +697,21 @@ class PolymarketDataSource:
         # SHR-54: keep the kline series advancing in lockstep with the PM market
         # cache. Without this the klines froze behind newly-cached markets and
         # their strikes silently resolved to a stale close.
-        starts = [
-            int(e["market"]["start_ts_ns"])
-            for e in manifest.values()
-            if e.get("kind") == "binary" and (e.get("market") or {}).get("start_ts_ns")
-        ]
-        ends = [
-            int(e["market"]["end_ts_ns"])
-            for e in manifest.values()
-            if e.get("kind") == "binary" and (e.get("market") or {}).get("end_ts_ns")
-        ]
+        starts: list[int] = []
+        ends: list[int] = []
+        for e in manifest.values():
+            if e.get("kind") == "binary":
+                mk = e.get("market") or {}
+                if mk.get("start_ts_ns"):
+                    starts.append(int(mk["start_ts_ns"]))
+                if mk.get("end_ts_ns"):
+                    ends.append(int(mk["end_ts_ns"]))
+            elif e.get("kind") == "bucket":
+                b = e.get("bucket") or {}
+                if b.get("start_ts_ns"):
+                    starts.append(int(b["start_ts_ns"]))
+                if b.get("end_ts_ns"):
+                    ends.append(int(b["end_ts_ns"]))
         if starts and ends:
             self._ensure_kline_coverage(min(starts), max(ends))
         return self.discover(start=start, end=end, kind=kind)
