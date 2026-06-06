@@ -101,12 +101,15 @@ def test_no_overrides_yields_empty_by_class_map() -> None:
 
 
 def test_live_strategy_yaml_bucket_override_matches_tune() -> None:
-    """Guard the shipped HL v31 per-class config against the independent tunes:
-    priceBucket diverges to fav0.80 / vlb2700 / dt2 / esd0.0 / eb0.005
-    (v31_bucket_independent_tune_2026_06_05); priceBinary keeps the shared theta
-    defaults EXCEPT vol_lookback_seconds=900 (binary @dt5, fav0.85/eb0.02/esd1.0
-    unchanged — v31_binary_independent_tune_2026_06_05). The PM (v31_pm) slot
-    carries NO per-class override.
+    """Guard the shipped HL v31 per-class config (C3, 2026-06-06 overfit
+    rollback): priceBucket keeps only the mechanical σ/timing tilt
+    (vol_lookback 2700 / dt 2; tte 8h on the allowlist) and RESTORES the three
+    risk gates to the binary baseline (fav 0.85 / eb 0.02 / esd 1.0). The
+    2026-06-05 "best sim" (fav0.80/eb0.005/esd0) was overfit to a zero-loss
+    sample — a loss-injection stress collapsed it to ~$0 expected / 50% chance of
+    a net loss; C3 is strictly better risk-adjusted. priceBinary keeps the shared
+    theta defaults EXCEPT vol_lookback_seconds=900 (binary @dt5). The PM (v31_pm)
+    slot carries NO per-class override.
 
     If someone edits config/strategy.yaml's theta config, this pins the
     intended live values so a typo/regression fails loudly."""
@@ -117,12 +120,12 @@ def test_live_strategy_yaml_bucket_override_matches_tune() -> None:
     v31 = theta["v31"]
     base = build_theta_harvester_config(v31)
     bucket = build_theta_harvester_configs_by_class(v31)["priceBucket"]
-    # bucket diverges to the tune
-    assert bucket.favorite_threshold == 0.80
+    # bucket: mechanical tilt only; risk gates restored to the binary baseline
     assert bucket.vol_lookback_seconds == 2700
     assert bucket.vol_sampling_dt_seconds == 2
-    assert bucket.exit_safety_d == 0.0
-    assert bucket.edge_buffer == 0.005
+    assert bucket.favorite_threshold == 0.85   # restored (was 0.80 overfit)
+    assert bucket.edge_buffer == 0.02          # restored (was 0.005 overfit)
+    assert bucket.exit_safety_d == 1.0         # restored (was 0.0 overfit)
     # binary (the instance default): only vol_lookback diverges to the binary
     # tune (3600→900 @dt5); fav/dt/esd/eb stay at prod (eb=0 does not stack).
     assert base.favorite_threshold == 0.85
@@ -135,6 +138,35 @@ def test_live_strategy_yaml_bucket_override_matches_tune() -> None:
 
     # PM slot carries no per-class override.
     assert build_theta_harvester_configs_by_class(theta["v31_pm"]) == {}
+
+
+def test_bucket_override_risk_gates_not_below_binary() -> None:
+    """Guardrail (2026-06-06): a per-class override must NEVER loosen a defensive
+    risk gate below the binary baseline. The 2026-06-05 bucket tune did exactly
+    that (favorite_threshold 0.85→0.80, edge_buffer 0.02→0.005, exit_safety_d
+    1.0→0.0) and a loss-injection stress showed it was overfit to a tailless
+    sample. A looser gate is only justified by out-of-sample evidence with
+    adverse settlements; until then, gates track binary. This makes "kill the
+    safety gate because the backtest said so" fail CI.
+
+    Higher = more protective for all three: favorite_threshold (more extreme
+    favorites only), edge_buffer (wider entry margin), exit_safety_d (mid-hold
+    stop-out engaged)."""
+    cfgs = load_strategies_config(Path("config/strategy.yaml"))
+    theta = {c.account_alias: c for c in cfgs.strategies
+             if c.strategy_type == "theta_harvester"}
+    for alias, cfg in theta.items():
+        base = build_theta_harvester_config(cfg)
+        for klass, override in build_theta_harvester_configs_by_class(cfg).items():
+            assert override.favorite_threshold >= base.favorite_threshold, (
+                f"{alias}/{klass} favorite_threshold "
+                f"{override.favorite_threshold} < binary {base.favorite_threshold}")
+            assert override.edge_buffer >= base.edge_buffer, (
+                f"{alias}/{klass} edge_buffer "
+                f"{override.edge_buffer} < binary {base.edge_buffer}")
+            assert override.exit_safety_d >= base.exit_safety_d, (
+                f"{alias}/{klass} exit_safety_d "
+                f"{override.exit_safety_d} < binary {base.exit_safety_d}")
 
 
 # --- per-class override applies, other classes keep defaults -----------------

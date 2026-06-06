@@ -210,12 +210,11 @@ strategies:
         max_position_usd: 500             # bumped 300→500 2026-05-24
         stop_loss_pct: null
         tte_min_seconds: 0
-        # 2026-06-05: 43200 → 28800 (12h → 8h). Independent bucket tune
-        # (v31_bucket_independent_tune_2026_06_05) found buckets want 8h: the
-        # short hold avoids the late-resolution reversals that drove prod DD.
-        # 24h is catastrophic; DD bifurcates 8h→~$0 vs 10h→~$120. Part of the
-        # bucket "best sim" (fav0.80/tte8h/vlb2700/dt2/esd0/eb0.005 → $1135.72,
-        # Sharpe 26.94, maxDD $0); the other axes live in theta_overrides below.
+        # 2026-06-05: 43200 → 28800 (12h → 8h). The short hold avoids the
+        # late-resolution reversals that drove prod DD (24h is catastrophic; DD
+        # bifurcates 8h→low vs 10h→higher). 8h is RETAINED as part of the
+        # mechanical σ/timing tilt after the 2026-06-06 overfit rollback (C3) —
+        # see theta_overrides below; the tail-for-yield axes were reverted.
         tte_max_seconds: 28800
         price_extreme_threshold: 0.0
         price_extreme_max: 1.0
@@ -341,27 +340,32 @@ strategies:
     # cadence_by_class), so buckets can run dt=2 while binary + v1 stay dt=5.
     # Omitting this block is bit-identical to today.
     #
-    # 2026-06-05: the independent HL bucket tune
-    # (v31_bucket_independent_tune_2026_06_05) found buckets want the OPPOSITE of
-    # binary on these axes. This is the bucket "best sim" config
-    # (fav0.80/tte8h/vlb2700/dt2/esd0/eb0.005 → backtest $1135.72, Sharpe 26.94,
-    # maxDD $0 on n=27; tte8h lives on the priceBucket allowlist above). dt=2 is
-    # applied PER-CLASS (bucket only) so binary + v1 stay on the dt=5 feed
-    # untouched. ⚠️ NOT yet burn-in-validated live: n=27 corpus and the mixed
-    # dt=5-binary / dt=2-bucket config has not been backtested as one run (the
-    # tuner is single-cadence) — watch the first live bucket entries. Binary's
-    # own free wins (vlb 3600→900, eb 0.02→0.0) and the shared dt=2 win ($872)
-    # were separate, gated decisions: vlb 3600→900 IS now applied in the shared
-    # `theta:` block above (binary at dt=5, 2026-06-05 tune); eb 0.02→0.0 and the
-    # shared dt=2 win stay UNAPPLIED (eb=0 doesn't stack with vlb=900; dt=2 is a
-    # binary worst-half regression).
+    # 2026-06-06: the 2026-06-05 "best sim" bucket tune
+    # (v31_bucket_independent_tune_2026_06_05: fav0.80/eb0.005/esd0/dt2/tte8h/
+    # vlb2700 → backtest $1135.72, Sharpe 26.94, maxDD $0 on n=27) was OVERFIT to
+    # a zero-loss sample and is rolled back here to a prod-anchored tilt (C3).
+    # Evidence (artifacts/recon/): the corpus had ZERO favorites lose at
+    # settlement, so maxDD=$0 was tail-blind. A loss-injection stress (each
+    # favorite loses with its implied prob 1−entry) collapsed the "best sim" to
+    # ~$0 expected / 50% chance of a net loss (5th-pct −$1198). Decomposing the
+    # +$723 vs prod: +$435 came from the mechanical σ/timing tilt
+    # (vol_lookback 2700 / dt 2; tte 8h on the allowlist above) and only +$289
+    # from the tail-for-yield knobs (fav 0.85→0.80, eb 0.02→0.005);
+    # exit_safety_d was inert ($847 esd1.0 ≈ $874 esd0). So C3 = KEEP the
+    # mechanical tilt, RESTORE the three risk gates to the binary baseline. C3 is
+    # strictly better risk-adjusted under the stress: median +$203, P(net<0) 41%
+    # (vs the overfit's 50%). dt=2 is applied PER-CLASS (bucket only) so binary +
+    # v1 stay on the dt=5 feed untouched. The risk gates below MUST stay ≥ the
+    # binary baseline (guarded by
+    # test_bucket_override_risk_gates_not_below_binary); re-tune only at n≥50 with
+    # adverse settlements in a TRUE holdout, selecting on a tail-aware metric.
     theta_overrides:
       priceBucket:
-        favorite_threshold: 0.80       # vs binary 0.85
-        vol_lookback_seconds: 2700     # vs binary 3600
-        vol_sampling_dt_seconds: 2     # per-class; binary + v1 stay dt=5
-        exit_safety_d: 0.0             # vs binary 1.0 (mid-hold exit off for buckets)
-        edge_buffer: 0.005             # vs binary 0.02
+        favorite_threshold: 0.85       # C3: restored to binary (was 0.80 overfit)
+        edge_buffer: 0.02              # C3: restored to binary (was 0.005 overfit)
+        exit_safety_d: 1.0             # C3: restored mid-hold exit (was 0.0; inert but defensive)
+        vol_lookback_seconds: 2700     # mechanical tilt (vs binary 900)
+        vol_sampling_dt_seconds: 2     # per-class mechanical tilt; binary + v1 stay dt=5
 
   # --- v3.1 Polymarket ---
   # PM ablation knobs: post-2026-05-23 walk-forward (see Appendix C of
