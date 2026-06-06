@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .hl_client import ClearinghouseState, OpenOrderRow, UserFillRow
+from .exec_types import ClearinghouseState, OpenOrderRow, UserFillRow
 from .reconcile import Reconciler
 from .risk_events import ReconcileDrift
 from .state import StateDAL

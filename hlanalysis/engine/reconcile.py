@@ -7,9 +7,8 @@ from dataclasses import dataclass, field
 
 from loguru import logger
 
-from .hl_client import (
-    ClearinghouseState, OpenOrderRow, UserFillRow, _extract_cloid_hex32,
-)
+from .exec_types import ClearinghouseState, OpenOrderRow, UserFillRow
+from .hl_client import _extract_cloid_hex32
 from .risk_events import ReconcileDrift
 from .state import Fill, OpenOrder, Position, StateDAL
 from ..marketdata.position_math import DUST_QTY_ABS_TOL, STOP_DISABLED_SENTINEL
