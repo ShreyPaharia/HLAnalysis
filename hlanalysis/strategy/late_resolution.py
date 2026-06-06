@@ -144,17 +144,6 @@ class LateResolutionConfig:
     # scale as 1m close-to-close std). Both entry and exit safety_d gates use
     # the same estimator.
     vol_estimator: str = "stdev"
-    # Position-size scaling by safety_d. Applied AFTER the entry gate passes
-    # (safety_d already ≥ min_safety_d); only modulates the size, never the
-    # gate decision. Maps safety_d ∈ [min_safety_d, 3.0+] → scale ∈
-    # [size_min_fraction, 1.0]. Final size = floor(max_position_usd * scale / ask).
-    #   "fixed"          → no scaling (legacy; scale = 1.0).
-    #   "linear_safety"  → scale = (d − min_safety_d) / (3.0 − min_safety_d).
-    #   "sqrt_safety"    → scale = sqrt of the above (less aggressive ramp).
-    # Both clamped to [size_min_fraction, 1.0]. size_min_fraction floors the
-    # smallest bet so we don't trade ~0 size on borderline-safe entries.
-    size_scaling: str = "fixed"
-    size_min_fraction: float = 0.25
     # Targeted size cap for catastrophic near-strike low-ask entries. When non-zero
     # AND chosen leg ask < size_cap_min_ask AND BTC is within
     # size_cap_max_dist_pct% of the chosen leg's nearest adverse boundary
@@ -203,21 +192,6 @@ class LateResolutionConfig:
     # bit-identical (flat, fee_taker=0).
     fee_model: str = "flat"
     fee_rate: float = 0.0
-    # Vol-scaled (variable) TTE entry window. When enabled, the upper TTE bound
-    # is no longer the fixed `tte_max_seconds`; it scales with the entry σ:
-    #   tte_max_eff = tte_max_seconds * (vol_scaled_tte_ref_sigma / σ) ** exp,
-    #   clamped to [0, vol_scaled_tte_ceiling_seconds].
-    # Low vol → ratio > 1 → wider window (enter earlier in the day); high vol →
-    # ratio < 1 → narrower window (require closer to resolution). This is the
-    # explicit form of the "joint (TTE, vol, distance)" entry idea — note the
-    # existing min_safety_d gate already imposes an implicit vol-scaled cap
-    # (safety_d ≥ d ⟺ τ ≤ dt·(ln(S/K)/(d·σ))²); this knob lets the window be
-    # swept independently of the distance term. Default OFF → the step-1 gate
-    # uses the fixed `tte_max_seconds` and this path is bit-identical to legacy.
-    vol_scaled_tte_enabled: bool = False
-    vol_scaled_tte_ref_sigma: float = 0.0      # reference per-bar σ (ratio = ref/σ)
-    vol_scaled_tte_exponent: float = 1.0       # k in (ref/σ)**k
-    vol_scaled_tte_ceiling_seconds: int = 0    # hard upper bound on the widened window
 
 
 class LateResolutionStrategy(Strategy):
@@ -559,17 +533,9 @@ class LateResolutionStrategy(Strategy):
         """
         diags: list[Diagnostic] = []
 
-        # 1) TTE. With the vol-scaled window enabled, the static upper bound is
-        # relaxed to the ceiling here; the σ-dependent cap is applied in 6a once
-        # vol is known. With the flag off (default) the fixed cap applies and
-        # this path is bit-identical to legacy.
+        # 1) TTE — fixed [tte_min_seconds, tte_max_seconds] entry window.
         tte_s = (question.expiry_ns - now_ns) / 1e9
-        tte_upper = (
-            float(self.cfg.vol_scaled_tte_ceiling_seconds)
-            if self.cfg.vol_scaled_tte_enabled
-            else float(self.cfg.tte_max_seconds)
-        )
-        if not (self.cfg.tte_min_seconds <= tte_s <= tte_upper):
+        if not (self.cfg.tte_min_seconds <= tte_s <= float(self.cfg.tte_max_seconds)):
             return Decision(action=Action.HOLD, diagnostics=(
                 Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tte_s:.0f}"),)),
             ))
@@ -664,32 +630,12 @@ class LateResolutionStrategy(Strategy):
                 Diagnostic("info", "vol_above_cap", (("vol", f"{vol:.4f}"),)),
             ))
 
-        # 6a) Vol-scaled (variable) TTE window. Now that σ is known, derive the
-        # effective entry horizon: low vol widens it (enter earlier), high vol
-        # narrows it (require closer to resolution). No-op when disabled.
-        if self.cfg.vol_scaled_tte_enabled:
-            sigma_eff = max(vol, 1e-9)
-            tte_max_eff = self.cfg.tte_max_seconds * (
-                self.cfg.vol_scaled_tte_ref_sigma / sigma_eff
-            ) ** self.cfg.vol_scaled_tte_exponent
-            tte_max_eff = min(tte_max_eff, float(self.cfg.vol_scaled_tte_ceiling_seconds))
-            if tte_s > tte_max_eff:
-                return Decision(action=Action.HOLD, diagnostics=(
-                    Diagnostic("info", "vol_scaled_tte_exceeded", (
-                        ("tte_s", f"{tte_s:.0f}"),
-                        ("tte_max_eff", f"{tte_max_eff:.0f}"),
-                        ("sigma", f"{vol:.5f}"),
-                    )),
-                ))
-
         # 6b) Joint safety gate: how many σ from the leg's winning region is BTC
         # given remaining time? For binary YES leg the region is (strike, +∞)
         # and d collapses to ln(BTC/strike) / (σ * sqrt(tte_min)) — the legacy
         # binary formula. For priceBucket legs the region is the bucket's
         # (lo, hi); d uses the nearer adverse boundary. None = no leg-level
         # gate available (rare); treat as skip.
-        # Side effect: when computed, `safety_d_entry` is retained for size scaling.
-        safety_d_entry: float | None = None
         if self.cfg.min_safety_d > 0.0 and reference_price > 0:
             tte_min = max(tte_s / dt, 1.0)
             sigma_window = vol * math.sqrt(tte_min)
@@ -699,13 +645,11 @@ class LateResolutionStrategy(Strategy):
                 sigma_window=sigma_window, returns_window=returns_window,
                 tte_min=tte_min,
             )
-            if safety_d is not None:
-                if safety_d < self.cfg.min_safety_d:
-                    return Decision(action=Action.HOLD, diagnostics=(
-                        Diagnostic("info", "safety_d_below_min",
-                                   (("d", f"{safety_d:.3f}"),)),
-                    ))
-                safety_d_entry = safety_d
+            if safety_d is not None and safety_d < self.cfg.min_safety_d:
+                return Decision(action=Action.HOLD, diagnostics=(
+                    Diagnostic("info", "safety_d_below_min",
+                               (("d", f"{safety_d:.3f}"),)),
+                ))
 
         # 7) Recent-volume sanity (avoid dead questions)
         if recent_volume_usd < self.cfg.min_recent_volume_usd:
@@ -717,25 +661,10 @@ class LateResolutionStrategy(Strategy):
         # risk gate computes notional = size * limit_price; with limit_price set
         # to price_extreme_max (typically 1.0) and ask < 1.0, dividing by ask
         # alone overshoots the cap by cents and the gate vetoes every order.
-        # Optional safety_d-aware scaling: bigger size on safer setups, floor
-        # at size_min_fraction so we never effectively trade zero. Only applies
-        # when min_safety_d > 0 (so safety_d_entry is available) and scaling != "fixed".
         scale = 1.0
-        if (
-            self.cfg.size_scaling != "fixed"
-            and safety_d_entry is not None
-            and self.cfg.min_safety_d > 0.0
-        ):
-            d_span = 3.0 - self.cfg.min_safety_d
-            if d_span > 0:
-                raw = (safety_d_entry - self.cfg.min_safety_d) / d_span
-                if self.cfg.size_scaling == "sqrt_safety":
-                    raw = math.sqrt(max(raw, 0.0))
-                # else "linear_safety" uses raw as-is.
-                scale = min(1.0, max(self.cfg.size_min_fraction, raw))
 
         # Targeted size cap for catastrophic near-strike low-ask entries. Applied
-        # AFTER safety_d-based scaling so it stacks multiplicatively. Only fires
+        # multiplicatively to the base size. Only fires
         # when ALL three conditions hold: cap enabled (pct > 0), chosen leg's
         # ask is below the favorite ceiling, AND BTC is within the configured
         # % of the leg's nearest adverse boundary. Bucket NO legs of the middle
@@ -866,8 +795,6 @@ def build_v1_late_resolution(params: dict) -> LateResolutionStrategy:
         exit_safety_d_5m=float(params.get("exit_safety_d_5m", 0.0)),
         exit_vol_lookback_5m_seconds=int(params.get("exit_vol_lookback_5m_seconds", 300)),
         vol_estimator=str(params.get("vol_estimator", "stdev")),
-        size_scaling=str(params.get("size_scaling", "fixed")),
-        size_min_fraction=float(params.get("size_min_fraction", 0.25)),
         size_cap_near_strike_pct=float(params.get("size_cap_near_strike_pct", 0.0)),
         size_cap_max_dist_pct=float(params.get("size_cap_max_dist_pct", 1.5)),
         size_cap_min_ask=float(params.get("size_cap_min_ask", 0.88)),
@@ -878,9 +805,5 @@ def build_v1_late_resolution(params: dict) -> LateResolutionStrategy:
         topup_min_notional_usd=float(params.get("topup_min_notional_usd", 11.0)),
         fee_model=str(params.get("fee_model", "flat")),
         fee_rate=float(params.get("fee_rate", 0.0)),
-        vol_scaled_tte_enabled=bool(params.get("vol_scaled_tte_enabled", False)),
-        vol_scaled_tte_ref_sigma=float(params.get("vol_scaled_tte_ref_sigma", 0.0)),
-        vol_scaled_tte_exponent=float(params.get("vol_scaled_tte_exponent", 1.0)),
-        vol_scaled_tte_ceiling_seconds=int(params.get("vol_scaled_tte_ceiling_seconds", 0)),
     )
     return LateResolutionStrategy(cfg)

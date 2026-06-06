@@ -128,15 +128,6 @@ class AllowlistEntry(BaseModel):
     # Auxiliary fast-σ mid-hold exit and its lookback (0 = disabled).
     exit_safety_d_5m: float = 0.0
     exit_vol_lookback_5m_seconds: int = 300
-    # safety_d-scaled position sizing ("fixed" = no scaling) and its floor.
-    size_scaling: str = "fixed"
-    size_min_fraction: float = 0.25
-    # Vol-scaled (variable) TTE entry window (disabled by default → fixed
-    # tte_max_seconds applies, bit-identical to legacy).
-    vol_scaled_tte_enabled: bool = False
-    vol_scaled_tte_ref_sigma: float = 0.0
-    vol_scaled_tte_exponent: float = 1.0
-    vol_scaled_tte_ceiling_seconds: int = 0
 
 
 class GlobalRiskConfig(BaseModel):
@@ -251,12 +242,6 @@ class ThetaParams(BaseModel):
     momentum_mr_tau_gate: float = 1.0
     momentum_mr_alpha_tilt: float = 0.5
     momentum_mr_jr_trust_weight: bool = False
-    # See ThetaHarvesterConfig.vol_scaled_tte_* — vol-scaled (variable) TTE
-    # entry window. Disabled by default (fixed tte_max applies).
-    vol_scaled_tte_enabled: bool = False
-    vol_scaled_tte_ref_sigma: float = 0.0
-    vol_scaled_tte_exponent: float = 1.0
-    vol_scaled_tte_ceiling_seconds: int = 0
 
 
 class StrategyConfig(BaseModel):

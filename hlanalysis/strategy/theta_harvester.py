@@ -281,19 +281,6 @@ class ThetaHarvesterConfig:
     # jump fraction over the same lookback as the indicator. Throttles the tilt
     # when the underlying is gapping (BPV diverges from RV). Default off.
     momentum_mr_jr_trust_weight: bool = False
-    # Vol-scaled (variable) TTE entry window. Mirrors late_resolution: when
-    # enabled, the upper TTE bound scales with the (annualized) entry σ instead
-    # of the fixed tte_max_seconds:
-    #   tte_max_eff = tte_max_seconds * (vol_scaled_tte_ref_sigma / σ) ** exp,
-    #   clamped to [0, vol_scaled_tte_ceiling_seconds].
-    # Low vol → wider window (enter earlier); high vol → narrower window. σ here
-    # is the same annualized vol the GBM edge uses, so vol_scaled_tte_ref_sigma
-    # is on the annualized scale (~0.3–1.5 for BTC). Default OFF → the fixed cap
-    # applies and this path is bit-identical to v3.1.
-    vol_scaled_tte_enabled: bool = False
-    vol_scaled_tte_ref_sigma: float = 0.0
-    vol_scaled_tte_exponent: float = 1.0
-    vol_scaled_tte_ceiling_seconds: int = 0
 
 
 class ThetaHarvesterStrategy(Strategy):
@@ -449,36 +436,12 @@ class ThetaHarvesterStrategy(Strategy):
         reference_price: float, sigma: float, mu_eff: float, tau_yr: float,
         recent_returns: tuple[float, ...] = (),
     ) -> Decision:
-        # TTE entry window. With the vol-scaled window enabled, the static upper
-        # bound is relaxed to the ceiling and the σ-dependent cap is applied
-        # immediately below (σ is already known here). Flag off (default) → the
-        # fixed cap applies and this path is bit-identical to v3.1.
+        # TTE entry window — fixed [tte_min_seconds, tte_max_seconds] bound.
         tau_s = tau_yr * _ANNUAL_SECONDS
-        tte_upper = (
-            float(self.cfg.vol_scaled_tte_ceiling_seconds)
-            if self.cfg.vol_scaled_tte_enabled
-            else float(self.cfg.tte_max_seconds)
-        )
-        if not (self.cfg.tte_min_seconds <= tau_s <= tte_upper):
+        if not (self.cfg.tte_min_seconds <= tau_s <= float(self.cfg.tte_max_seconds)):
             return Decision(action=Action.HOLD, diagnostics=(
                 Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tau_s:.0f}"),)),
             ))
-        if self.cfg.vol_scaled_tte_enabled:
-            sigma_eff = max(sigma, 1e-9)
-            tte_max_eff = min(
-                self.cfg.tte_max_seconds * (
-                    self.cfg.vol_scaled_tte_ref_sigma / sigma_eff
-                ) ** self.cfg.vol_scaled_tte_exponent,
-                float(self.cfg.vol_scaled_tte_ceiling_seconds),
-            )
-            if tau_s > tte_max_eff:
-                return Decision(action=Action.HOLD, diagnostics=(
-                    Diagnostic("info", "vol_scaled_tte_exceeded", (
-                        ("tte_s", f"{tau_s:.0f}"),
-                        ("tte_max_eff", f"{tte_max_eff:.0f}"),
-                        ("sigma", f"{sigma:.5f}"),
-                    )),
-                ))
 
         # Near-strike hover veto. PM corpus shows entries below 0.20% lose
         # -$7.68/entry on average across 57 entries, while the 0.20-0.50%
@@ -1022,10 +985,6 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         momentum_mr_tau_gate=float(params.get("momentum_mr_tau_gate", 1.0)),
         momentum_mr_alpha_tilt=float(params.get("momentum_mr_alpha_tilt", 0.5)),
         momentum_mr_jr_trust_weight=bool(params.get("momentum_mr_jr_trust_weight", False)),
-        vol_scaled_tte_enabled=bool(params.get("vol_scaled_tte_enabled", False)),
-        vol_scaled_tte_ref_sigma=float(params.get("vol_scaled_tte_ref_sigma", 0.0)),
-        vol_scaled_tte_exponent=float(params.get("vol_scaled_tte_exponent", 1.0)),
-        vol_scaled_tte_ceiling_seconds=int(params.get("vol_scaled_tte_ceiling_seconds", 0)),
     )
     return ThetaHarvesterStrategy(cfg)
 

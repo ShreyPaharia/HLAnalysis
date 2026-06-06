@@ -5,9 +5,8 @@ The same SHR-65 failure mode the theta path had: the live builder
 ``_late_resolution_config_from_entry`` was a hand-maintained ``getattr`` subset
 that DROPPED fields the backtest builder ``build_v1_late_resolution`` forwards
 (``drift_aware_d``, ``exit_bid_floor``, ``exit_safety_d_5m``,
-``exit_vol_lookback_5m_seconds``, ``size_scaling``, ``size_min_fraction`` and the
-``vol_scaled_tte_*`` family). A knob set in the live YAML silently fell back to
-the dataclass default → the live engine ran a *different* strategy than the
+``exit_vol_lookback_5m_seconds``). A knob set in the live YAML silently fell back
+to the dataclass default → the live engine ran a *different* strategy than the
 backtest that justified it. These tests pin ``AllowlistEntry`` and
 ``LateResolutionConfig`` together and assert reflection-based forwarding.
 """
@@ -36,12 +35,6 @@ _PREVIOUSLY_DROPPED = {
     "exit_bid_floor",
     "exit_safety_d_5m",
     "exit_vol_lookback_5m_seconds",
-    "size_scaling",
-    "size_min_fraction",
-    "vol_scaled_tte_enabled",
-    "vol_scaled_tte_ref_sigma",
-    "vol_scaled_tte_exponent",
-    "vol_scaled_tte_ceiling_seconds",
 }
 
 
@@ -102,24 +95,12 @@ def test_builder_forwards_previously_dropped_fields_when_set() -> None:
         exit_bid_floor=0.05,
         exit_safety_d_5m=0.7,
         exit_vol_lookback_5m_seconds=600,
-        size_scaling="sqrt_safety",
-        size_min_fraction=0.4,
-        vol_scaled_tte_enabled=True,
-        vol_scaled_tte_ref_sigma=0.01,
-        vol_scaled_tte_exponent=2.0,
-        vol_scaled_tte_ceiling_seconds=43200,
     )
     cfg = _late_resolution_config_from_entry(entry, global_=_global())
     assert cfg.drift_aware_d is True
     assert cfg.exit_bid_floor == 0.05
     assert cfg.exit_safety_d_5m == 0.7
     assert cfg.exit_vol_lookback_5m_seconds == 600
-    assert cfg.size_scaling == "sqrt_safety"
-    assert cfg.size_min_fraction == 0.4
-    assert cfg.vol_scaled_tte_enabled is True
-    assert cfg.vol_scaled_tte_ref_sigma == 0.01
-    assert cfg.vol_scaled_tte_exponent == 2.0
-    assert cfg.vol_scaled_tte_ceiling_seconds == 43200
 
 
 def test_builder_forwards_all_shared_fields() -> None:
@@ -176,6 +157,3 @@ def test_defaults_unchanged_when_knobs_unset() -> None:
     assert cfg.exit_bid_floor == 0.0
     assert cfg.exit_safety_d_5m == 0.0
     assert cfg.exit_vol_lookback_5m_seconds == 300
-    assert cfg.size_scaling == "fixed"
-    assert cfg.size_min_fraction == 0.25
-    assert cfg.vol_scaled_tte_enabled is False

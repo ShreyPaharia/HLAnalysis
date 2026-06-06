@@ -46,8 +46,7 @@ def _late_resolution_config_from_entry(
     also exists on AllowlistEntry is forwarded straight through — no
     hand-maintained subset, so a tuned knob can never be silently dropped (the
     old getattr-subset dropped drift_aware_d / exit_bid_floor / exit_safety_d_5m
-    / exit_vol_lookback_5m_seconds / size_scaling / size_min_fraction /
-    vol_scaled_tte_*, diverging live from the backtest builder
+    / exit_vol_lookback_5m_seconds, diverging live from the backtest builder
     build_v1_late_resolution). The GLOBAL-sourced fields come from ``global_``;
     stop_loss_pct maps None -> the ≥1e8 "disabled" sentinel the strategy expects
     (matches build_v1_late_resolution). Defaults on AllowlistEntry mirror the
