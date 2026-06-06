@@ -32,3 +32,15 @@ def test_each_flavor_builds(tmp_path):
         cfg = SourceConfig(kind="polymarket", cache_root=str(tmp_path), pm_flavor=flavor)
         ds = cfg.build()
         assert ds is not None
+
+
+import subprocess, sys
+
+
+def test_cli_run_help_lists_new_flavors():
+    out = subprocess.run(
+        [sys.executable, "-m", "hlanalysis.backtest.cli", "run", "--help"],
+        capture_output=True, text=True,
+    )
+    assert "eth_updown" in out.stdout
+    assert "eth_multistrike" in out.stdout

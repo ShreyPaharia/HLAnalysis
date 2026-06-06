@@ -540,11 +540,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     pr.add_argument(
         "--pm-flavor",
-        choices=["btc_updown", "wti_updown"],
+        choices=sorted(PM_FLAVORS),
         default="btc_updown",
-        help="(polymarket only) Which PM series + reference asset. "
-        "btc_updown: BTC 'Up or Down Daily' (default). "
-        "wti_updown: WTI 'Oil Daily Up or Down'.",
+        help="(polymarket only) Which PM series + reference asset to load. "
+        "Default: btc_updown.",
     )
     pr.add_argument(
         "--hedge-data-path",
@@ -627,11 +626,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     pf.add_argument("--cache-root", default=None, help="Override env HLBT_PM_CACHE_ROOT")
     pf.add_argument(
         "--pm-flavor",
-        choices=["btc_updown", "wti_updown"],
+        choices=sorted(PM_FLAVORS),
         default="btc_updown",
-        help="(polymarket only) Which PM series + reference asset. "
-        "btc_updown: BTC 'Up or Down Daily' (default). "
-        "wti_updown: WTI 'Oil Daily Up or Down'.",
+        help="(polymarket only) Which PM series + reference asset to load. "
+        "Default: btc_updown.",
     )
     pf.add_argument("--min-trades", type=int, default=30)
     pf.add_argument("--min-volume-usd", type=float, default=1000.0)
@@ -653,11 +651,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     pt.add_argument("--cache-root", default=None)
     pt.add_argument(
         "--pm-flavor",
-        choices=["btc_updown", "wti_updown"],
+        choices=sorted(PM_FLAVORS),
         default="btc_updown",
-        help="(polymarket only) Which PM series + reference asset. "
-        "btc_updown: BTC 'Up or Down Daily' (default). "
-        "wti_updown: WTI 'Oil Daily Up or Down'.",
+        help="(polymarket only) Which PM series + reference asset to load. "
+        "Default: btc_updown.",
     )
     pt.add_argument("--start", default=None)
     pt.add_argument("--end", default=None)
