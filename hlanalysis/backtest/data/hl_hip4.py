@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 import duckdb
 
+from hlanalysis.marketdata.ohlc import resample_ohlc
 from hlanalysis.strategy.types import QuestionView
 
 from ..core.data_source import DataSource, QuestionDescriptor
@@ -85,34 +86,24 @@ def _resample_reference(
     emitting one bar per bucket restores the assumed contract — high/low
     track the bucket extremes, close is the bucket's last tick, ts is the
     bucket's last-tick timestamp so monotone ordering is preserved.
+
+    Thin adapter over the canonical ``marketdata.ohlc.resample_ohlc`` (the
+    single source of truth shared with the live engine and the fast path).
+    The reference stream carries one symbol throughout (always ``"BTC"`` from
+    the raw generators), captured from the first event for the output bars.
     """
-    cur_bucket: int | None = None
-    h: float = 0.0
-    l: float = 0.0
-    c: float = 0.0
-    last_ts: int = 0
-    sym: str = "BTC"
-    for ts, ev in inner:
-        bucket = ts // resample_ns
-        if cur_bucket is None:
-            cur_bucket = bucket
-            h, l, c = ev.high, ev.low, ev.close
-            last_ts = ts
-            sym = ev.symbol
-        elif bucket != cur_bucket:
-            yield last_ts, ReferenceEvent(last_ts, sym, h, l, c)
-            cur_bucket = bucket
-            h, l, c = ev.high, ev.low, ev.close
-            last_ts = ts
-            sym = ev.symbol
-        else:
-            if ev.high > h:
-                h = ev.high
-            if ev.low < l:
-                l = ev.low
-            c = ev.close
-            last_ts = ts
-    if cur_bucket is not None:
+    sym = "BTC"
+    seen_first = False
+
+    def _samples() -> Iterator[tuple[int, float, float, float]]:
+        nonlocal sym, seen_first
+        for ts, ev in inner:
+            if not seen_first:
+                sym = ev.symbol
+                seen_first = True
+            yield ts, ev.high, ev.low, ev.close
+
+    for last_ts, h, l, c in resample_ohlc(_samples(), bucket_ns=resample_ns):
         yield last_ts, ReferenceEvent(last_ts, sym, h, l, c)
 
 

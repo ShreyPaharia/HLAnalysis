@@ -15,6 +15,7 @@ from ..events import (
     SettlementEvent,
     TradeEvent,
 )
+from ..marketdata.ohlc import bucket_index, update_bar
 from ..strategy.types import BookState, QuestionView
 
 
@@ -262,14 +263,15 @@ class MarketState:
                 maxlen = self._mark_history_by_key.get(key, self._mark_history)
                 hist = deque(maxlen=maxlen)
                 self._marks[key] = hist
-            bucket = ts // bucket_ns
+            bucket = bucket_index(ts, bucket_ns)
             last_bucket = self._last_mark_bucket.get(key)
             if last_bucket is None or bucket != last_bucket or not hist:
                 hist.append((price, price, price))
                 self._last_mark_bucket[key] = bucket
             else:
-                h, l, _c = hist[-1]
-                hist[-1] = (h if h >= price else price, l if l <= price else price, price)
+                # Same merge rule as the batch ``resample_ohlc`` loaders use: a
+                # scalar tick is a degenerate (price, price, price) bar.
+                hist[-1] = update_bar(hist[-1], price, price, price)
 
     def _evict_old_trades(self, dq: "deque[TradeEvent]", *, now: int) -> None:
         cutoff = now - self._volume_window_ns

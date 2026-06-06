@@ -36,6 +36,8 @@ from hftbacktest.types import (
     event_dtype,
 )
 
+from hlanalysis.marketdata.ohlc import resample_ohlc
+
 from ..core.events import ReferenceEvent, SettlementEvent
 
 log = logging.getLogger(__name__)
@@ -96,37 +98,20 @@ def _resample_reference_rows(
 ) -> list[ReferenceEvent]:
     """List-input twin of ``hl_hip4._resample_reference``. Aggregates
     consecutive ReferenceEvents into OHLC bars of width ``resample_ns``.
-    See that function for rationale.
+
+    Thin adapter over the canonical ``marketdata.ohlc.resample_ohlc`` (shared
+    with the live engine and the generator path) so the three formerly-separate
+    bucketers can no longer drift. The reference stream carries one symbol
+    throughout (always ``"BTC"``), captured from the first event.
     """
-    out: list[ReferenceEvent] = []
     if not events:
-        return out
-    cur_bucket: int | None = None
-    h = l = c = 0.0
-    last_ts = 0
-    sym = "BTC"
-    for ev in events:
-        bucket = ev.ts_ns // resample_ns
-        if cur_bucket is None:
-            cur_bucket = bucket
-            h, l, c = ev.high, ev.low, ev.close
-            last_ts = ev.ts_ns
-            sym = ev.symbol
-        elif bucket != cur_bucket:
-            out.append(ReferenceEvent(last_ts, sym, h, l, c))
-            cur_bucket = bucket
-            h, l, c = ev.high, ev.low, ev.close
-            last_ts = ev.ts_ns
-            sym = ev.symbol
-        else:
-            if ev.high > h:
-                h = ev.high
-            if ev.low < l:
-                l = ev.low
-            c = ev.close
-            last_ts = ev.ts_ns
-    out.append(ReferenceEvent(last_ts, sym, h, l, c))
-    return out
+        return []
+    sym = events[0].symbol
+    bars = resample_ohlc(
+        ((ev.ts_ns, ev.high, ev.low, ev.close) for ev in events),
+        bucket_ns=resample_ns,
+    )
+    return [ReferenceEvent(last_ts, sym, h, l, c) for last_ts, h, l, c in bars]
 
 
 @dataclass(frozen=True, slots=True)
