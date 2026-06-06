@@ -21,6 +21,20 @@ def _enable_caching(monkeypatch):
     _cache_mod._inproc_clear()
     yield
     _cache_mod._inproc_clear()
+    # diskcache.Cache objects are reused via a module-global registry; close and
+    # clear them so SQLite handles don't leak across tests (each test uses a
+    # fresh tmp_path, so there is never legitimate cross-test reuse).
+    for _c in _cache_mod._CACHES.values():
+        try:
+            _c.close()
+        except Exception:
+            pass
+    _cache_mod._CACHES.clear()
+
+
+def _val_files(cache_dir):
+    """diskcache stores each value as a ``*.val`` file under a ``v{N}`` shard."""
+    return list(cache_dir.rglob("*.val"))
 
 
 def _bundle():
@@ -160,8 +174,8 @@ def test_corrupt_cache_file_rebuilds(tmp_path):
     def build():
         calls["n"] += 1; return _bundle()
     cached_bundle(cdir, "q1", [src], build)
-    # Corrupt every cached npz.
-    for f in cdir.glob("*.npz"):
+    # Corrupt every stored value file.
+    for f in _val_files(cdir):
         f.write_bytes(b"not-an-npz")
     cached_bundle(cdir, "q1", [src], build)
     assert calls["n"] == 2  # corruption treated as miss
@@ -179,26 +193,26 @@ def test_saved_bundle_is_compressed(tmp_path):
     src = tmp_path / "a.parquet"; src.write_bytes(b"x")
     cdir = tmp_path / "cache"
     cached_bundle(cdir, "q1", [src], lambda: bundle)
-    npz = next(cdir.glob("*.npz"))
+    npz = next(iter(_val_files(cdir)))
     raw = big.nbytes + n * 8
     assert npz.stat().st_size < raw * 0.1  # compresses to well under 10% of raw
 
 
 def test_stale_build_version_entries_evicted(tmp_path, monkeypatch):
     """Entries from a superseded BUILD_VERSION are orphaned (unreachable) — a
-    later cache op must delete them so the dir doesn't grow without bound."""
+    later cache op must delete them so the dir doesn't grow without bound. Each
+    version lives in its own ``v{N}`` shard; opening a new version prunes the
+    stale shard wholesale."""
     import hlanalysis.backtest.data._event_array_cache as m
     cdir = tmp_path / "cache"
     src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
     monkeypatch.setattr(m, "_BUILD_VERSION", 1)
     cached_bundle(cdir, "q1", [src], _bundle)
-    old = {p.name for p in cdir.glob("*.npz")}
-    assert old  # an entry was written under v1
+    assert (cdir / "v1").is_dir() and _val_files(cdir / "v1")  # written under v1
     monkeypatch.setattr(m, "_BUILD_VERSION", 2)
     cached_bundle(cdir, "q2", [src], _bundle)
-    now = {p.name for p in cdir.glob("*.npz")}
-    assert now.isdisjoint(old)  # stale v1 files evicted
-    assert all(n.startswith("v2_") for n in now)
+    assert not (cdir / "v1").exists()  # stale v1 shard evicted
+    assert (cdir / "v2").is_dir() and _val_files(cdir / "v2")
 
 
 def test_config_variants_under_same_version_kept(tmp_path):
@@ -208,7 +222,7 @@ def test_config_variants_under_same_version_kept(tmp_path):
     src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
     cached_bundle(cdir, "q1", [src], _bundle, config_sig="rrs=5")
     cached_bundle(cdir, "q1", [src], _bundle, config_sig="rrs=60")
-    assert len(list(cdir.glob("*.npz"))) == 2  # both kept
+    assert len(_val_files(cdir)) == 2  # both kept
 
 
 def test_roundtrip_preserves_realistic_data(tmp_path):
@@ -220,6 +234,27 @@ def test_roundtrip_preserves_realistic_data(tmp_path):
     def _no_build():
         raise AssertionError("should have hit the cache, not rebuilt")
     got = cached_bundle(cdir, "q", [src], _no_build)  # warm: loads from disk
+    la0, la1 = b.leg_arrays["#0"], got.leg_arrays["#0"]
+    assert la1.events.dtype == event_dtype
+    assert la0.events.tobytes() == la1.events.tobytes()  # every field exact
+    assert np.array_equal(la0.book_ts, la1.book_ts)
+    assert [(r.ts_ns, r.symbol, r.high, r.low, r.close, r.open) for r in got.reference_events] \
+        == [(r.ts_ns, r.symbol, r.high, r.low, r.close, r.open) for r in b.reference_events]
+    assert [(s.ts_ns, s.question_idx, s.outcome, s.symbol) for s in got.settlement_events] \
+        == [(s.ts_ns, s.question_idx, s.outcome, s.symbol) for s in b.settlement_events]
+
+
+def test_npz_disk_serializer_roundtrip(tmp_path):
+    """The custom diskcache ``Disk`` (the npz column-split serializer plugged
+    into diskcache) must round-trip a bundle exactly: ``fetch(store(x)) == x``
+    for every event-array field, book_ts, and the ref/settle event lists."""
+    import diskcache
+    from hlanalysis.backtest.data._event_array_cache import _NpzDisk
+
+    b = _realistic_bundle()
+    with diskcache.Cache(str(tmp_path / "dc"), disk=_NpzDisk) as cache:
+        cache["k"] = b  # store -> npz file
+        got = cache["k"]  # fetch -> _load
     la0, la1 = b.leg_arrays["#0"], got.leg_arrays["#0"]
     assert la1.events.dtype == event_dtype
     assert la0.events.tobytes() == la1.events.tobytes()  # every field exact
@@ -242,7 +277,7 @@ def test_column_split_smaller_than_struct_layout(tmp_path):
     struct_size = buf.getbuffer().nbytes
     cdir = tmp_path / "cache"; src = tmp_path / "a"; src.write_bytes(b"x")
     cached_bundle(cdir, "q", [src], lambda: b)
-    got = next(cdir.glob("*.npz")).stat().st_size
+    got = next(iter(_val_files(cdir))).stat().st_size
     assert got < struct_size * 0.92  # meaningfully smaller than struct layout
 
 
@@ -358,12 +393,21 @@ def test_inproc_explicit_max_bytes_overrides_worker_division(monkeypatch):
 
 
 def test_size_cap_evicts_oldest(tmp_path, monkeypatch):
-    """A configured byte cap evicts least-recently-written entries so the cache
-    cannot grow without bound under default-on."""
+    """A configured byte cap keeps the cache bounded and evicts the
+    least-recently-stored entry first, so it cannot grow without bound under
+    default-on. (Exact retained count is left to diskcache's soft cap + batch
+    culling; the contract is bounded growth + oldest-first eviction.)"""
     cdir = tmp_path / "cache"; src = tmp_path / "a"; src.write_bytes(b"x")
-    cached_bundle(cdir, "q1", [src], _realistic_bundle, config_sig="a")
-    one = next(cdir.glob("*.npz")).stat().st_size
-    monkeypatch.setenv("HLBT_CACHE_MAX_BYTES", str(int(one * 1.5)))  # holds ~1 entry
-    cached_bundle(cdir, "q2", [src], _realistic_bundle, config_sig="b")
-    names = sorted(p.name for p in cdir.glob("*.npz"))
-    assert len(names) == 1  # oldest evicted under the cap
+    cached_bundle(cdir, "q0", [src], _realistic_bundle, config_sig="s0")
+    one = next(iter(_val_files(cdir))).stat().st_size
+    monkeypatch.setenv("HLBT_CACHE_MAX_BYTES", str(int(one * 2)))  # ~2 entries
+    for i in range(1, 8):
+        cached_bundle(cdir, f"q{i}", [src], _realistic_bundle, config_sig=f"s{i}")
+    assert len(_val_files(cdir)) < 8  # bounded — not all 8 retained
+    # The oldest entry (q0) was evicted first → re-requesting it rebuilds.
+    calls = {"n": 0}
+    def _rebuild():
+        calls["n"] += 1
+        return _realistic_bundle()
+    cached_bundle(cdir, "q0", [src], _rebuild, config_sig="s0")
+    assert calls["n"] == 1

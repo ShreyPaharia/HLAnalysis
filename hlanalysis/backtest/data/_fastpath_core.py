@@ -18,7 +18,12 @@ from __future__ import annotations
 # v3: on-disk format is column-split + delta-encoded timestamps (was the raw
 #     64-byte interleaved struct); deflate compresses homogeneous columns far
 #     better. Old v2 .npz are a different layout → orphaned + evicted.
-BUILD_VERSION = 3
+# v4: assembler now orders events by (exch_ts, snapshot_index) instead of
+#     exch_ts alone, fixing the per-timestamp final depth when a leg has
+#     duplicate exchange timestamps (a price set then cleared within one ts).
+#     Bit-identical for unique-ts feeds; bumped so any dup-ts bundle cached
+#     under the old order is rebuilt.
+BUILD_VERSION = 4
 
 import logging
 from dataclasses import dataclass
@@ -48,13 +53,15 @@ def _diff_clears(
     ts: np.ndarray,
     px_flat: np.ndarray,
     offsets: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Per-snapshot, return (out_ts, out_px) of stale-level clear events.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-snapshot, return (out_ts, out_px, out_snap) of stale-level clears.
 
     For each snapshot i, finds prices in ``px_flat[offsets[i-1]:offsets[i]]``
     that are absent from ``px_flat[offsets[i]:offsets[i+1]]`` (linear search
     — book depth is ≤20 levels). Emits one clear per stale price at the
-    new snapshot's timestamp ``ts[i]``.
+    new snapshot's timestamp ``ts[i]``; ``out_snap`` carries the snapshot
+    index ``i`` so the assembler can order a clear AFTER same-timestamp sets
+    from earlier snapshots (the legacy per-snapshot ordering).
 
     Inputs are the flat numpy column arrays from Arrow. JIT-compiled because
     the Python equivalent (set diffs on 160k snapshots) was 4 s / leg.
@@ -65,6 +72,7 @@ def _diff_clears(
     capacity = int(offsets[-1])  # total levels across all snapshots
     out_ts = np.empty(capacity, dtype=np.int64)
     out_px = np.empty(capacity, dtype=np.float64)
+    out_snap = np.empty(capacity, dtype=np.int64)
     n_out = 0
     prev_start = 0
     prev_end = 0
@@ -82,10 +90,11 @@ def _diff_clears(
             if not found:
                 out_ts[n_out] = snap_ts
                 out_px[n_out] = p
+                out_snap[n_out] = i
                 n_out += 1
         prev_start = new_start
         prev_end = new_end
-    return out_ts[:n_out], out_px[:n_out]
+    return out_ts[:n_out], out_px[:n_out], out_snap[:n_out]
 
 
 _DEFAULT_REFERENCE_RESAMPLE_NS = 60 * 1_000_000_000
@@ -153,7 +162,14 @@ def build_leg_event_array_from_columns(
     - Per snapshot, in order: stale-bid clears (qty=0), stale-ask clears
       (qty=0), new-bid sets, new-ask sets. Identical to legacy.
     - Trades follow as ``TRADE_EVENT`` with BUY/SELL side flag.
-    - Final ``np.argsort`` is stable by ``exch_ts``.
+    - Final ordering is by ``(exch_ts, snapshot_index)``: events from an earlier
+      snapshot precede those of a later one at the SAME timestamp, so a price
+      set by one snapshot and cleared by a later same-ts snapshot ends cleared
+      (the legacy per-snapshot order). A plain ``argsort(exch_ts)`` would batch
+      all clears ahead of all sets and corrupt the per-timestamp final depth
+      when timestamps repeat (the in-memory sources emit sub-tick duplicates).
+      For unique timestamps the ``snapshot_index`` is monotone with ``exch_ts``,
+      so this is bit-identical to the old layout (HL/PM fast paths unchanged).
     """
     flag = EXCH_EVENT | LOCAL_EVENT
     bid_set_ev = DEPTH_EVENT | flag | BUY_EVENT
@@ -163,6 +179,11 @@ def build_leg_event_array_from_columns(
     ev_chunks: list[np.ndarray] = []
     px_chunks: list[np.ndarray] = []
     qty_chunks: list[np.ndarray] = []
+    # Secondary sort key: the index of the snapshot that produced each event
+    # (trades get a sentinel past the last snapshot so they sort after all book
+    # events at the same timestamp, matching legacy's append-trades-last order).
+    order_chunks: list[np.ndarray] = []
+    n_snaps = 0
 
     if book_cols is not None and len(book_cols["ts"]) > 0:
         ts = book_cols["ts"]
@@ -172,34 +193,40 @@ def build_leg_event_array_from_columns(
         ask_px = book_cols["ask_px"]
         ask_sz = book_cols["ask_sz"]
         ask_off = book_cols["ask_offsets"]
+        n_snaps = len(ts)
 
         # --- Stale-level clear events: numba-JIT'd per-snapshot diff.
         # Operates on flat numpy column arrays; linear search across ≤20-level
         # books is fast under nopython.
-        bid_clear_ts, bid_clear_px = _diff_clears(ts, bid_px, bid_off)
-        ask_clear_ts, ask_clear_px = _diff_clears(ts, ask_px, ask_off)
+        bid_clear_ts, bid_clear_px, bid_clear_snap = _diff_clears(ts, bid_px, bid_off)
+        ask_clear_ts, ask_clear_px, ask_clear_snap = _diff_clears(ts, ask_px, ask_off)
         if len(bid_clear_ts) > 0:
             ts_chunks.append(bid_clear_ts)
             ev_chunks.append(np.full(len(bid_clear_ts), bid_set_ev, dtype=np.uint64))
             px_chunks.append(bid_clear_px)
             qty_chunks.append(np.zeros(len(bid_clear_ts), dtype=np.float64))
+            order_chunks.append(bid_clear_snap)
         if len(ask_clear_ts) > 0:
             ts_chunks.append(ask_clear_ts)
             ev_chunks.append(np.full(len(ask_clear_ts), ask_set_ev, dtype=np.uint64))
             px_chunks.append(ask_clear_px)
             qty_chunks.append(np.zeros(len(ask_clear_ts), dtype=np.float64))
+            order_chunks.append(ask_clear_snap)
 
         # --- Per-level SET events: fully vectorised via np.repeat.
         bid_lens = np.diff(bid_off)
         ask_lens = np.diff(ask_off)
+        snap_idx = np.arange(n_snaps, dtype=np.int64)
         ts_chunks.append(np.repeat(ts, bid_lens))
         ev_chunks.append(np.full(len(bid_px), bid_set_ev, dtype=np.uint64))
         px_chunks.append(bid_px)
         qty_chunks.append(bid_sz)
+        order_chunks.append(np.repeat(snap_idx, bid_lens))
         ts_chunks.append(np.repeat(ts, ask_lens))
         ev_chunks.append(np.full(len(ask_px), ask_set_ev, dtype=np.uint64))
         px_chunks.append(ask_px)
         qty_chunks.append(ask_sz)
+        order_chunks.append(np.repeat(snap_idx, ask_lens))
 
     if trade_cols is not None and len(trade_cols["ts"]) > 0:
         trade_ts = trade_cols["ts"]
@@ -215,6 +242,9 @@ def build_leg_event_array_from_columns(
         ev_chunks.append(trade_ev)
         px_chunks.append(trade_px)
         qty_chunks.append(trade_sz)
+        # Sentinel order past the last snapshot → trades sort after all
+        # same-timestamp book events (legacy appended trades last).
+        order_chunks.append(np.full(len(trade_ts), n_snaps, dtype=np.int64))
 
     if not ts_chunks:
         return np.zeros(0, dtype=event_dtype)
@@ -223,6 +253,7 @@ def build_leg_event_array_from_columns(
     out_ev = np.concatenate(ev_chunks)
     out_px = np.concatenate(px_chunks)
     out_qty = np.concatenate(qty_chunks)
+    out_order = np.concatenate(order_chunks)
 
     arr = np.zeros(len(out_ts), dtype=event_dtype)
     arr["exch_ts"] = out_ts
@@ -230,7 +261,8 @@ def build_leg_event_array_from_columns(
     arr["ev"] = out_ev
     arr["px"] = out_px
     arr["qty"] = out_qty
-    arr = arr[np.argsort(arr["exch_ts"], kind="stable")]
+    # lexsort is stable: primary key exch_ts, secondary key snapshot order.
+    arr = arr[np.lexsort((out_order, out_ts))]
     return arr
 
 

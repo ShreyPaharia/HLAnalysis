@@ -3,7 +3,12 @@
 Key = sha256(question_id + sorted[(path,size,mtime_ns)] + BUILD_VERSION). Any
 re-record (size/mtime change) or assembly-logic change (BUILD_VERSION bump in
 _fastpath_core) misses → rebuild. Stat-only keying (never reads file bytes) so
-it preserves the speedup. Stored as one .npz per key; load failure = miss.
+it preserves the speedup.
+
+The cache *management* (concurrency-safe atomic writes, LRU/size-cap eviction,
+key→file indexing) is delegated to :mod:`diskcache`; this module keeps only the
+domain-specific serializer — the column-split, delta-encoded npz, a ~5.7x
+compression no generic cache offers — plugged in as a custom ``Disk`` subclass.
 """
 from __future__ import annotations
 
@@ -15,7 +20,9 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Callable
 
+import diskcache
 import numpy as np
+from diskcache.core import MODE_BINARY, UNKNOWN
 
 from ._fastpath_core import BUILD_VERSION as _BUILD_VERSION
 from ._fastpath_core import FastPathBundle, LegArrays, event_dtype
@@ -179,41 +186,87 @@ def _load(path: Path) -> FastPathBundle:
     )
 
 
-_pruned: set[tuple[str, int]] = set()
+class _NpzDisk(diskcache.Disk):
+    """diskcache ``Disk`` that (de)serializes ``FastPathBundle`` values via the
+    column-split delta-encoded npz serializer (``_save`` / ``_load``).
 
-
-def _version_prefix() -> str:
-    """Filename prefix encoding the current BUILD_VERSION (e.g. ``v2_``).
-
-    Folding the version into the *filename* (not just the key hash) lets eviction
-    identify stale-version orphans with a cheap glob — no need to open each .npz.
-    A config_sig change keeps the same prefix (different hash), so legitimate
-    config variants (dt=5 vs dt=60) are NOT mistaken for orphans.
+    A bundle is written as one npz file by ``_save`` (its private-tmp + atomic
+    rename retained, harmless under diskcache's per-write random filenames) and
+    read back by ``_load`` straight from the stored path — no extra in-memory
+    copy. Non-bundle values (diskcache stores none here) fall back to default
+    pickle handling.
     """
-    import hlanalysis.backtest.data._event_array_cache as _self
-    return f"v{_self._BUILD_VERSION}_"
+
+    def store(self, value, read, key=UNKNOWN):
+        if isinstance(value, FastPathBundle):
+            filename, full_path = self.filename(key, value)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            _save(Path(full_path), value)
+            return os.path.getsize(full_path), MODE_BINARY, filename, None
+        return super().store(value, read, key)
+
+    def fetch(self, mode, filename, value, read):
+        if mode == MODE_BINARY and not read and filename is not None:
+            return _load(Path(os.path.join(self._directory, filename)))
+        return super().fetch(mode, filename, value, read)
 
 
-def _prune_stale_versions(cache_dir: Path) -> None:
-    """Delete cached .npz files from a superseded BUILD_VERSION.
+# Per-(root, BUILD_VERSION) open Cache objects, reused across calls — each holds
+# a SQLite connection; reuse is diskcache's recommended pattern and avoids
+# re-opening on every question.
+_CACHES: "dict[tuple[str, int], diskcache.Cache]" = {}
+_MISS = object()
 
-    Such entries are unreachable (the key hash and filename prefix both fold in
-    BUILD_VERSION) but were never removed, so the dir grew without bound across
-    assembly-logic changes. Runs at most once per (dir, version) per process.
-    Best-effort: a concurrent spawn worker may unlink the same file first.
+
+def _prune_stale_versions(root: Path, version: int) -> None:
+    """Remove cache shards from a superseded BUILD_VERSION.
+
+    Each BUILD_VERSION lives in its own ``v{N}`` subdir; entries from an old
+    version are unreachable (the key folds in BUILD_VERSION) so the whole stale
+    subdir is removed, preserving the old version-orphan eviction. Any open
+    Cache handle for a pruned shard is closed first. Best-effort.
     """
-    import hlanalysis.backtest.data._event_array_cache as _self
-    guard = (str(cache_dir), _self._BUILD_VERSION)
-    if guard in _pruned:
-        return
-    _pruned.add(guard)
-    prefix = _version_prefix()
-    for f in cache_dir.glob("*.npz"):
-        if not f.name.startswith(prefix):
+    import shutil
+    for child in root.glob("v*"):
+        if not child.is_dir() or child.name == f"v{version}":
+            continue
+        try:
+            other = int(child.name[1:])
+        except ValueError:
+            continue
+        cached = _CACHES.pop((str(root), other), None)
+        if cached is not None:
             try:
-                f.unlink()
-            except OSError:
+                cached.close()
+            except Exception:
                 pass
+        shutil.rmtree(child, ignore_errors=True)
+
+
+def _get_cache(cache_dir: Path) -> diskcache.Cache:
+    """Return the (reused) ``diskcache.Cache`` for ``cache_dir`` at the current
+    BUILD_VERSION, pruning stale-version shards and re-applying the size cap."""
+    import hlanalysis.backtest.data._event_array_cache as _self
+    version = _self._BUILD_VERSION
+    root = Path(cache_dir)
+    ckey = (str(root), version)
+    cache = _CACHES.get(ckey)
+    if cache is None:
+        root.mkdir(parents=True, exist_ok=True)
+        _prune_stale_versions(root, version)
+        cache = diskcache.Cache(
+            str(root / f"v{version}"),
+            disk=_NpzDisk,
+            size_limit=_cache_max_bytes(),
+            # Match the old write-time LRU (least-recently-WRITTEN) eviction and
+            # avoid mutating the SQLite index on the hot read path.
+            eviction_policy="least-recently-stored",
+        )
+        _CACHES[ckey] = cache
+    else:
+        # Honour a size cap changed (e.g. via env) since the cache was opened.
+        cache.reset("size_limit", _cache_max_bytes())
+    return cache
 
 
 def caching_enabled() -> bool:
@@ -249,34 +302,6 @@ def _cache_max_bytes() -> int:
         return int(b)
     gb = float(os.environ.get("HLBT_CACHE_MAX_GB", "20"))
     return int(gb * 1024 ** 3)
-
-
-def _enforce_size_cap(cache_dir: Path) -> None:
-    """Evict least-recently-written entries until the dir is under the cap.
-
-    LRU by mtime. Best-effort (a concurrent worker may unlink first). Keeps the
-    cache from growing without bound now that it is default-on.
-    """
-    max_bytes = _cache_max_bytes()
-    files = list(cache_dir.glob("*.npz"))
-    sized = []
-    total = 0
-    for f in files:
-        try:
-            st = f.stat()
-        except OSError:
-            continue
-        sized.append((st.st_mtime_ns, st.st_size, f))
-        total += st.st_size
-    sized.sort()  # oldest first
-    for _mtime, size, f in sized:
-        if total <= max_bytes:
-            break
-        try:
-            f.unlink()
-            total -= size
-        except OSError:
-            pass
 
 
 # --- Opt-in process-level bundle memo --------------------------------------
@@ -445,20 +470,19 @@ def _cached_bundle_disk(
     # HLBT_REBUILD_CACHE=1 forces a rebuild process-wide; set by the CLI's
     # --rebuild-cache flag and inherited by spawn workers via the environment.
     force_rebuild = force_rebuild or bool(os.environ.get("HLBT_REBUILD_CACHE"))
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    _prune_stale_versions(cache_dir)
+    cache = _get_cache(cache_dir)
     key = cache_key(question_id, source_files, config_sig)
-    path = cache_dir / f"{_version_prefix()}{key}.npz"
-    if path.exists() and not force_rebuild:
+    if not force_rebuild:
         try:
-            return _load(path)
-        except Exception as e:  # corruption / version skew → rebuild
+            cached = cache.get(key, default=_MISS)
+        except Exception as e:  # corruption / unreadable value → rebuild
             log.warning("event-array cache load failed (%s); rebuilding", e)
+            cached = _MISS
+        if cached is not _MISS:
+            return cached
     bundle = build_fn()
     try:
-        _save(path, bundle)
-        _enforce_size_cap(cache_dir)
+        cache.set(key, bundle)  # diskcache: atomic write + LRU/size-cap eviction
     except Exception as e:
         log.warning("event-array cache write failed (%s); continuing uncached", e)
     return bundle

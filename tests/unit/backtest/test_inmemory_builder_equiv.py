@@ -153,6 +153,42 @@ def test_unified_builder_trades_only() -> None:
     assert list(arr["qty"]) == [20.0, 5.0, 10.0]
 
 
+def test_unified_builder_duplicate_timestamp_final_depth() -> None:
+    """Multiple snapshots sharing one timestamp: a price SET by an earlier
+    snapshot and CLEARED by a later same-ts snapshot must end CLEARED (the later
+    snapshot is the newer book state). The legacy per-cell builder applied
+    set-then-clear per snapshot; the unified builder must reproduce that, not
+    batch all clears ahead of all sets. Regression for the PM-synthetic fill
+    drift the dedup exposed.
+    """
+    snaps = [
+        BookSnapshot(ts_ns=10, symbol="#1", bids=((0.50, 100.0),), asks=((0.55, 100.0),)),
+        # Same ts as the next: price 0.50 still present here...
+        BookSnapshot(ts_ns=20, symbol="#1", bids=((0.50, 100.0), (0.49, 50.0)), asks=((0.55, 100.0),)),
+        # ...removed here at the SAME ts → 0.50 and 0.49 must end cleared.
+        BookSnapshot(ts_ns=20, symbol="#1", bids=((0.48, 70.0),), asks=((0.55, 100.0),)),
+    ]
+    unified = build_leg_event_array_from_snapshots(snaps, [])
+    naive = _naive_build_leg_event_array(snaps, [])
+    assert _multiset(unified) == _multiset(naive)
+    # Reconstruct the final bid depth at ts=20 the way hftbacktest would: apply
+    # every event in array order, last write per price wins.
+    def final_bids(arr):
+        depth: dict[float, float] = {}
+        from hftbacktest.types import BUY_EVENT
+        for r in arr:
+            if int(r["ev"]) & BUY_EVENT:
+                px, qty = float(r["px"]), float(r["qty"])
+                if qty == 0.0:
+                    depth.pop(px, None)
+                else:
+                    depth[px] = qty
+        return depth
+    assert final_bids(unified) == final_bids(naive)
+    # Concretely: only 0.48 survives at ts=20.
+    assert final_bids(unified) == {0.48: 70.0}
+
+
 def test_unified_builder_clears_match_naive_multiset() -> None:
     """Multi-level shrinking book exercises stale-level clears; the unified
     builder must match the naive oracle as a multiset (clear ordering within a
