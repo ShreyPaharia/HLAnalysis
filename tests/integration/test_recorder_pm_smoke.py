@@ -14,6 +14,7 @@ from hlanalysis.events import (
     Mechanism,
     ProductType,
     TradeEvent,
+    to_record,
 )
 from hlanalysis.recorder.writer import ParquetWriter
 
@@ -69,7 +70,7 @@ async def test_recorder_writes_pm_book_and_trade(tmp_path):
         channels=("trades", "book"),
     )
     async for ev in adapter.stream([sub]):
-        writer.write(ev.model_dump(mode="python"))
+        writer.write(to_record(ev))
     writer.flush_all()
 
     parquet_files = list(tmp_path.rglob("*.parquet"))

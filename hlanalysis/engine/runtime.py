@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Awaitable
 
 import aiohttp
+import msgspec
 from loguru import logger
 
 from ..adapters.base import VenueAdapter
@@ -80,7 +81,7 @@ def _remap_reference_symbol(ev: NormalizedEvent) -> NormalizedEvent:
         and ev.product_type == ProductType.SPOT
         and ev.symbol == "BTCUSDT"
     ):
-        return ev.model_copy(update={"symbol": _SPOT_REF_SYMBOL})
+        return msgspec.structs.replace(ev, symbol=_SPOT_REF_SYMBOL)
     return ev
 
 

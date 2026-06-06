@@ -11,6 +11,7 @@ from ..adapters.binance import BinanceAdapter
 from ..adapters.hyperliquid import HyperliquidAdapter
 from ..adapters.polymarket import PolymarketAdapter
 from ..config import Subscription, load_config
+from ..events import to_record
 from .writer import ParquetWriter
 
 log = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ async def _run_adapter(
         async for event in adapter.stream(subs):
             if stop.is_set():
                 return
-            writer.write(event.model_dump(mode="python"))
+            writer.write(to_record(event))
     except asyncio.CancelledError:
         raise
     except Exception:

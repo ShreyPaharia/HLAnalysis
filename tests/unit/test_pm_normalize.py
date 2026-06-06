@@ -10,7 +10,12 @@ from hlanalysis.adapters.polymarket_normalize import (
     parse_price_change_message,
     parse_trade_message,
 )
-from hlanalysis.events import BookSnapshotEvent, TradeEvent
+from hlanalysis.events import (
+    BookSnapshotEvent,
+    QuestionMetaEvent,
+    SettlementEvent,
+    TradeEvent,
+)
 
 
 def _qid_in_subprocess(condition_id: str, *, hashseed: str) -> int:
@@ -200,7 +205,7 @@ def test_parse_gamma_market_to_question_meta_binary():
         series_slug="btc-up-or-down-daily",
         local_recv_ts=1716545000000_000_000,
     )
-    assert ev.event_type == "question_meta"
+    assert isinstance(ev, QuestionMetaEvent)
     assert ev.venue == "polymarket"
     assert ev.symbol == "71321...992563"
     assert ev.named_outcome_idxs == [0, 1]
@@ -256,7 +261,7 @@ def test_parse_gamma_market_to_settlement_when_resolved_yes():
         local_recv_ts=_AFTER_ENDDATE_NS,
     )
     assert ev is not None
-    assert ev.event_type == "settlement"
+    assert isinstance(ev, SettlementEvent)
     assert ev.settled_side_idx == 0  # YES won
     assert ev.symbol == "71321...992563"
     assert ev.settle_price == 1.0
