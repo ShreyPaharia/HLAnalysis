@@ -82,7 +82,7 @@ _PM_BOOK_DATA_SUBPATH = (
 _PM_SETTLEMENT_DATA_SUBPATH = (
     "venue=polymarket/product_type=prediction_binary/mechanism=clob/event=settlement"
 )
-_BTC_BUCKET_SERIES_SLUG = "bitcoin-multi-strikes-hourly"
+_DEFAULT_BUCKET_SERIES_SLUG = "btc-multi-strikes-weekly"
 _SERIES_PAGE_LIMIT = 100  # Gamma /events caps responses at 100 even when limit > 100;
 # requesting 500 silently truncates and we mistake the short response for "end of data".
 _TRADES_PAGE_SIZE = 500
@@ -336,6 +336,7 @@ class PolymarketDataSource:
         depth: float = _DEPTH_DEFAULT,
         reference_symbol: str = _DEFAULT_REF_SYMBOL,
         series_slug: str = _DEFAULT_BINARY_SERIES_SLUG,
+        bucket_series_slug: str = _DEFAULT_BUCKET_SERIES_SLUG,
         klines_subdir: str = _DEFAULT_KLINES_SUBDIR,
         klines_1s_subdir: str = _DEFAULT_KLINES_1S_SUBDIR,
         reference_source: Literal["klines", "binance_bbo", "klines_1s"] = "klines",
@@ -349,6 +350,7 @@ class PolymarketDataSource:
         self._stream_cfg = _StreamCfg(half_spread=half_spread, depth=depth)
         self._reference_symbol = reference_symbol
         self._series_slug = series_slug
+        self._bucket_series_slug = bucket_series_slug
         self._klines_subdir = klines_subdir
         self._klines_1s_subdir = klines_1s_subdir
         # Reference-feed mode.
@@ -1417,7 +1419,7 @@ class PolymarketDataSource:
     def _fetch_and_cache_bucket(
         self, manifest: dict, *, start_iso: str, end_iso: str, refresh: bool,
     ) -> None:
-        raw = _fetch_series_events(_BTC_BUCKET_SERIES_SLUG)
+        raw = _fetch_series_events(self._bucket_series_slug)
         in_window = [ev for ev in raw if _event_in_window(ev, start_iso, end_iso)]
         for ev in in_window:
             parsed = _parse_bucket_event(ev)
