@@ -15,10 +15,56 @@ from pathlib import Path
 from typing import Iterable
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_ROOT = REPO_ROOT / "data"
+
+
+def asof_locf(
+    query_ts: np.ndarray,
+    source_ts: np.ndarray,
+    source_val: np.ndarray,
+) -> np.ndarray:
+    """Vectorized last-observation-carried-forward (as-of) join.
+
+    For each timestamp in ``query_ts``, return the value in ``source_val`` whose
+    ``source_ts`` is the largest value ``<=`` the query timestamp.  Query
+    timestamps with no source row at or before them yield ``NaN``.
+
+    This is the single shared implementation of the LOCF / backward as-of join
+    used across the analysis subsystem (trade markouts, resampled mid paths,
+    resampled quoted spreads).
+
+    Parameters
+    ----------
+    query_ts:
+        Timestamps to look up, sorted ascending.
+    source_ts:
+        Source timestamps, sorted ascending.
+    source_val:
+        Values parallel to ``source_ts``.
+
+    Returns
+    -------
+    ``np.ndarray`` of dtype ``float64`` and length ``len(query_ts)``.  Positions
+    with no preceding source row are ``NaN``.
+    """
+    query = np.asarray(query_ts)
+    src_ts = np.asarray(source_ts)
+    src_val = np.asarray(source_val, dtype="float64")
+
+    out = np.full(query.shape[0], np.nan, dtype="float64")
+    if src_ts.shape[0] == 0:
+        return out
+
+    # searchsorted(..., side='right') - 1 gives the index of the last source_ts
+    # element that is <= the query timestamp; -1 means none precedes it.
+    idxs = np.searchsorted(src_ts, query, side="right") - 1
+    valid = idxs >= 0
+    out[valid] = src_val[idxs[valid]]
+    return out
 
 
 def glob_for(

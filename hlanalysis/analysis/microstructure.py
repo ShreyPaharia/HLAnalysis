@@ -10,14 +10,13 @@ epoch, captured by ``time.time_ns()`` on the recording host).  Venue-provided
 """
 from __future__ import annotations
 
-import math
-
 import duckdb
 import numpy as np
 import pandas as pd
+from scipy.signal import correlate
 
 from hlanalysis.analysis.book import mid_path
-from hlanalysis.analysis.helpers import glob_for
+from hlanalysis.analysis.helpers import asof_locf, glob_for
 
 _NS_PER_S = 1_000_000_000
 _NS_PER_MS = 1_000_000
@@ -84,34 +83,16 @@ def quoted_spread_bps(
     raw["spread_bps"] = raw["spread_bps"].astype("float64")
 
     step_ns = resample_s * _NS_PER_S
-    grid = list(range(start_ns, end_ns + 1, step_ns))
-
-    if raw.empty:
-        return pd.DataFrame(
-            {
-                "ts_ns": pd.array(grid, dtype="int64"),
-                "spread_bps": pd.array([float("nan")] * len(grid), dtype="float64"),
-            }
-        )
-
+    # Build the grid and LOCF the spread onto it via the shared as-of join.
+    grid = np.arange(start_ns, end_ns + 1, step_ns, dtype="int64")
     raw_ts = raw["ts_ns"].to_numpy()
     raw_spread = raw["spread_bps"].to_numpy()
-
-    result_ts: list[int] = []
-    result_spread: list[float] = []
-    for g in grid:
-        idx = int(np.searchsorted(raw_ts, g, side="right")) - 1
-        if idx < 0:
-            result_ts.append(g)
-            result_spread.append(float("nan"))
-        else:
-            result_ts.append(g)
-            result_spread.append(float(raw_spread[idx]))
+    spread = asof_locf(grid, raw_ts, raw_spread)
 
     return pd.DataFrame(
         {
-            "ts_ns": pd.array(result_ts, dtype="int64"),
-            "spread_bps": pd.array(result_spread, dtype="float64"),
+            "ts_ns": pd.array(grid, dtype="int64"),
+            "spread_bps": pd.array(spread, dtype="float64"),
         }
     )
 
@@ -183,25 +164,24 @@ def book_imbalance(
             }
         )
 
-    ts_list: list[int] = []
-    imb_list: list[float] = []
+    ts = raw["ts_ns"].to_numpy(dtype="int64")
 
-    for _, row in raw.iterrows():
-        ts_list.append(int(row["ts_ns"]))
-        bid_szs = row["bid_sz"]  # list[float]
-        ask_szs = row["ask_sz"]  # list[float]
-        bid_sum = sum(float(x) for x in bid_szs[:levels])
-        ask_sum = sum(float(x) for x in ask_szs[:levels])
-        total = bid_sum + ask_sum
-        if total == 0.0:
-            imb_list.append(float("nan"))
-        else:
-            imb_list.append((bid_sum - ask_sum) / total)
+    # bid_sz / ask_sz are ragged per-row level arrays; sum the top ``levels``
+    # of each, then do the imbalance arithmetic as vectorized column ops.
+    bid_col = raw["bid_sz"].to_numpy()
+    ask_col = raw["ask_sz"].to_numpy()
+    bid_sum = np.array([float(np.sum(b[:levels])) for b in bid_col], dtype="float64")
+    ask_sum = np.array([float(np.sum(a[:levels])) for a in ask_col], dtype="float64")
+
+    total = bid_sum + ask_sum
+    imbalance = np.full(total.shape[0], np.nan, dtype="float64")
+    # NaN where total == 0 (divide-by-zero guard); ``out`` stays NaN there.
+    np.divide(bid_sum - ask_sum, total, out=imbalance, where=total != 0.0)
 
     return pd.DataFrame(
         {
-            "ts_ns": pd.array(ts_list, dtype="int64"),
-            "imbalance": pd.array(imb_list, dtype="float64"),
+            "ts_ns": pd.array(ts, dtype="int64"),
+            "imbalance": pd.array(imbalance, dtype="float64"),
         }
     )
 
@@ -335,13 +315,13 @@ def returns_resampled(
     )
 
     mid_vals = mids["mid"].to_numpy(dtype="float64")
-    # Compute log-return: NaN for first row and any NaN mid values.
-    log_ret = np.full(len(mid_vals), float("nan"), dtype="float64")
-    for i in range(1, len(mid_vals)):
-        prev = mid_vals[i - 1]
-        curr = mid_vals[i]
-        if not (math.isnan(prev) or math.isnan(curr)) and prev > 0.0:
-            log_ret[i] = math.log(curr / prev)
+    # log_return[i] = log(mid[i] / mid[i-1]) = diff(log(mid)).  First row is NaN,
+    # and NaN mids propagate (log(NaN)=NaN, and a NaN in either operand of the
+    # diff yields NaN) — matching the original element-wise NaN handling.
+    log_ret = np.full(len(mid_vals), np.nan, dtype="float64")
+    if len(mid_vals) > 1:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_ret[1:] = np.diff(np.log(mid_vals))
 
     return pd.DataFrame(
         {
@@ -395,19 +375,46 @@ def cross_correlation(
             "Reduce max_lag or provide a longer series."
         )
 
-    x_arr = x.reset_index(drop=True)
-    y_arr = y.reset_index(drop=True)
+    xv = x.reset_index(drop=True).to_numpy(dtype="float64")
+    yv = y.reset_index(drop=True).to_numpy(dtype="float64")
 
-    lags: list[int] = []
-    ccfs: list[float] = []
+    # Pairwise-complete Pearson at each lag, computed for all lags at once via
+    # cross-correlations.  ``corr(x, y.shift(lag))`` pairs (x[i], y[i-lag]) and
+    # drops pairs where either value is NaN, then takes Pearson over the rest.
+    # Masking NaN to 0 and counting valid pairs lets us assemble every per-lag
+    # sum (Σx, Σy, Σxy, Σx², Σy², count) as displacement-``lag`` taps of a full
+    # correlation; ``correlate(a, b)[n - 1 + lag]`` == Σ_j a[j+lag]·b[j].
+    mask_x = np.isfinite(xv).astype("float64")
+    mask_y = np.isfinite(yv).astype("float64")
+    xz = np.where(mask_x > 0.0, xv, 0.0)
+    yz = np.where(mask_y > 0.0, yv, 0.0)
 
-    for lag in range(-max_lag, max_lag + 1):
-        lags.append(lag)
-        ccfs.append(float(x_arr.corr(y_arr.shift(lag))))
+    sum_xy = correlate(xz, yz, mode="full", method="direct")
+    sum_x = correlate(xz, mask_y, mode="full", method="direct")
+    sum_y = correlate(mask_x, yz, mode="full", method="direct")
+    sum_xx = correlate(xz * xz, mask_y, mode="full", method="direct")
+    sum_yy = correlate(mask_x, yz * yz, mode="full", method="direct")
+    count = correlate(mask_x, mask_y, mode="full", method="direct")
+
+    lags = np.arange(-max_lag, max_lag + 1)
+    idx = (n - 1) + lags
+    cnt = count[idx]
+    sxy = sum_xy[idx]
+    sx = sum_x[idx]
+    sy = sum_y[idx]
+    sxx = sum_xx[idx]
+    syy = sum_yy[idx]
+
+    num = cnt * sxy - sx * sy
+    var_x = cnt * sxx - sx * sx
+    var_y = cnt * syy - sy * sy
+    with np.errstate(invalid="ignore", divide="ignore"):
+        den = np.sqrt(var_x * var_y)
+        ccf = np.where((cnt >= 2) & (den > 0.0), num / den, np.nan)
 
     return pd.DataFrame(
         {
             "lag": pd.array(lags, dtype="int64"),
-            "ccf": pd.array(ccfs, dtype="float64"),
+            "ccf": pd.array(ccf, dtype="float64"),
         }
     )

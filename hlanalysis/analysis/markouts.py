@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from hlanalysis.analysis.book import trades_in_window
-from hlanalysis.analysis.helpers import glob_for
+from hlanalysis.analysis.helpers import asof_locf, glob_for
 
 _NS_PER_S = 1_000_000_000
 
@@ -65,9 +65,10 @@ def _asof_mid(
 ) -> np.ndarray:
     """Return the last-known mid for each trade timestamp.
 
-    For each element in ``trade_ts``, find the largest value in ``bbo_ts`` that
-    is <= the trade timestamp and return the corresponding mid.  If no such BBO
-    exists, return NaN.
+    Thin wrapper over the shared :func:`hlanalysis.analysis.helpers.asof_locf`
+    LOCF as-of join: for each element in ``trade_ts``, find the largest value in
+    ``bbo_ts`` that is ``<=`` the trade timestamp and return the corresponding
+    mid (NaN if no such BBO exists).
 
     Parameters
     ----------
@@ -78,11 +79,7 @@ def _asof_mid(
     bbo_mid:
         float64 array of mid values parallel to bbo_ts.
     """
-    # np.searchsorted(bbo_ts, t, side='right') - 1 gives the index of the last
-    # bbo_ts element that is <= t.  If the result is -1, no BBO precedes t.
-    idxs = np.searchsorted(bbo_ts, trade_ts, side="right") - 1
-    result = np.where(idxs >= 0, bbo_mid[idxs], np.nan)
-    return result
+    return asof_locf(trade_ts, bbo_ts, bbo_mid)
 
 
 def trade_markouts(

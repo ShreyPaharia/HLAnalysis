@@ -23,7 +23,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from hlanalysis.analysis.helpers import glob_for
+from hlanalysis.analysis.helpers import asof_locf, glob_for
 
 
 def best_quotes_at(
@@ -127,32 +127,16 @@ def mid_path(
         # No parquet files exist for this partition at all.
         raw = pd.DataFrame({"ts_ns": pd.Series([], dtype="int64"), "mid": pd.Series([], dtype="float64")})
 
-    # Build the grid.
-    grid = list(range(start_ns, end_ns + 1, step_ns))
-    result_ts: list[int] = []
-    result_mid: list[float | None] = []
-
-    if raw.empty:
-        return pd.DataFrame({"ts_ns": pd.array(grid, dtype="int64"), "mid": [None] * len(grid)})
-
+    # Build the grid and LOCF the mid onto it via the shared as-of join.
+    grid = np.arange(start_ns, end_ns + 1, step_ns, dtype="int64")
     raw_ts = raw["ts_ns"].to_numpy()
     raw_mid = raw["mid"].to_numpy()
-
-    for g in grid:
-        # Find the index of the last raw row with ts_ns <= g.
-        # np.searchsorted returns the insertion point; we want the last element <=g.
-        idx = int(np.searchsorted(raw_ts, g, side="right")) - 1
-        if idx < 0:
-            result_ts.append(g)
-            result_mid.append(None)
-        else:
-            result_ts.append(g)
-            result_mid.append(float(raw_mid[idx]))
+    mids = asof_locf(grid, raw_ts, raw_mid)
 
     return pd.DataFrame(
         {
-            "ts_ns": pd.array(result_ts, dtype="int64"),
-            "mid": pd.array(result_mid, dtype="float64"),
+            "ts_ns": pd.array(grid, dtype="int64"),
+            "mid": pd.array(mids, dtype="float64"),
         }
     )
 
