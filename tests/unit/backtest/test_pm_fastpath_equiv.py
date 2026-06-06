@@ -33,7 +33,12 @@ import pytest
 
 from hlanalysis.backtest.core.events import BookSnapshot, TradeEvent
 from hlanalysis.backtest.data.polymarket import PolymarketDataSource
-from hlanalysis.backtest.runner.hftbt_runner import _build_leg_event_array
+# The legacy runner helper ``_build_leg_event_array`` was collapsed into the
+# shared assembler; the in-memory snapshot→column adapter is its drop-in
+# replacement and the legacy reference these equivalence tests compare against.
+from hlanalysis.backtest.data._fastpath_core import (
+    build_leg_event_array_from_snapshots as _build_leg_event_array,
+)
 
 # ── shared constants ─────────────────────────────────────────────────────────
 

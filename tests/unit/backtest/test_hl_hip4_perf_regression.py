@@ -20,7 +20,12 @@ from hlanalysis.backtest.data.hl_hip4 import HLHip4DataSource
 from hlanalysis.backtest.data._hl_hip4_fastpath import (
     build_leg_event_array_from_columns,
 )
-from hlanalysis.backtest.runner.hftbt_runner import _build_leg_event_array
+# The legacy runner helper ``_build_leg_event_array`` was collapsed into the
+# shared assembler; the in-memory snapshot→column adapter is its drop-in
+# replacement and is what these equivalence tests now exercise.
+from hlanalysis.backtest.data._fastpath_core import (
+    build_leg_event_array_from_snapshots as _build_leg_event_array,
+)
 
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "fixtures" / "hl_hip4"

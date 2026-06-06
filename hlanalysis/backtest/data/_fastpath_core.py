@@ -38,7 +38,7 @@ from hftbacktest.types import (
 
 from hlanalysis.marketdata.ohlc import resample_ohlc
 
-from ..core.events import ReferenceEvent, SettlementEvent
+from ..core.events import BookSnapshot, ReferenceEvent, SettlementEvent, TradeEvent
 
 log = logging.getLogger(__name__)
 
@@ -234,8 +234,76 @@ def build_leg_event_array_from_columns(
     return arr
 
 
+def _snapshots_to_columns(snapshots: list[BookSnapshot]) -> dict[str, np.ndarray]:
+    """Flatten in-memory ``BookSnapshot`` dataclasses into the variable-length
+    flat-column layout ``build_leg_event_array_from_columns`` consumes.
+
+    Level order is preserved exactly as the snapshots carry it (no re-sort): the
+    in-memory sources already emit levels in the canonical order (synthetic =
+    top-of-book; pm_nba / binance_perp = best-first), so funnelling through the
+    shared assembler reproduces the legacy per-cell builder's output.
+    """
+    ts: list[int] = []
+    bid_px: list[float] = []
+    bid_sz: list[float] = []
+    bid_off: list[int] = [0]
+    ask_px: list[float] = []
+    ask_sz: list[float] = []
+    ask_off: list[int] = [0]
+    for snap in snapshots:
+        ts.append(snap.ts_ns)
+        for px, sz in snap.bids:
+            bid_px.append(px)
+            bid_sz.append(sz)
+        bid_off.append(len(bid_px))
+        for px, sz in snap.asks:
+            ask_px.append(px)
+            ask_sz.append(sz)
+        ask_off.append(len(ask_px))
+    return {
+        "ts": np.asarray(ts, dtype=np.int64),
+        "bid_px": np.asarray(bid_px, dtype=np.float64),
+        "bid_sz": np.asarray(bid_sz, dtype=np.float64),
+        "bid_offsets": np.asarray(bid_off, dtype=np.int64),
+        "ask_px": np.asarray(ask_px, dtype=np.float64),
+        "ask_sz": np.asarray(ask_sz, dtype=np.float64),
+        "ask_offsets": np.asarray(ask_off, dtype=np.int64),
+    }
+
+
+def _trades_to_columns(trades: list[TradeEvent]) -> dict[str, np.ndarray]:
+    """Flatten in-memory ``TradeEvent`` dataclasses into trade columns."""
+    return {
+        "ts": np.asarray([t.ts_ns for t in trades], dtype=np.int64),
+        "px": np.asarray([t.price for t in trades], dtype=np.float64),
+        "sz": np.asarray([t.size for t in trades], dtype=np.float64),
+        "side": np.asarray([t.side for t in trades], dtype=object),
+    }
+
+
+def build_leg_event_array_from_snapshots(
+    snapshots: list[BookSnapshot], trades: list[TradeEvent]
+) -> np.ndarray:
+    """Assemble an hftbacktest ``event_dtype`` array from in-memory
+    ``BookSnapshot`` / ``TradeEvent`` lists.
+
+    The single entry point for the in-memory sources (synthetic, pm_nba,
+    binance_perp) and the hedge leg: it adapts the dataclass lists into flat
+    columns and funnels them through :func:`build_leg_event_array_from_columns`
+    — the same vectorised assembler the HL/PM fast paths use. Replaces the
+    formerly-duplicated per-cell ``_build_leg_event_array`` in the runner.
+
+    Output is byte-for-byte identical to the legacy builder for single-level
+    books and multiset-equivalent (fill-identical) in general — see
+    ``build_leg_event_array_from_columns`` for the clear-ordering note.
+    """
+    book_cols = _snapshots_to_columns(snapshots) if snapshots else None
+    trade_cols = _trades_to_columns(trades) if trades else None
+    return build_leg_event_array_from_columns(book_cols, trade_cols)
+
+
 __all__ = [
     "BUILD_VERSION", "LegArrays", "FastPathBundle",
-    "build_leg_event_array_from_columns", "_diff_clears",
-    "_resample_reference_rows", "event_dtype",
+    "build_leg_event_array_from_columns", "build_leg_event_array_from_snapshots",
+    "_diff_clears", "_resample_reference_rows", "event_dtype",
 ]

@@ -48,11 +48,9 @@ from hftbacktest import order as hb_order
 from hftbacktest.types import (
     BUY_EVENT,
     DEPTH_CLEAR_EVENT,
-    DEPTH_EVENT,
     EXCH_EVENT,
     LOCAL_EVENT,
     SELL_EVENT,
-    TRADE_EVENT,
     event_dtype,
 )
 
@@ -68,6 +66,7 @@ from hlanalysis.strategy.types import Action, BookState, Position
 from ..core.data_source import DataSource, QuestionDescriptor
 from ..core.events import BookSnapshot, ReferenceEvent, SettlementEvent, TradeEvent
 from ..core.question import build_question_view
+from ..data._fastpath_core import build_leg_event_array_from_snapshots
 from .market_state import MarketState
 from .result import (
     DiagnosticRow,
@@ -146,87 +145,6 @@ def _stop_price(fill_price: float, stop_pct: float | None) -> float:
     """Thin alias over the shared ``position_math.stop_price`` (single source of
     truth shared with the live router)."""
     return stop_price(fill_price, stop_pct)
-
-
-def _build_leg_event_array(
-    snapshots: list[BookSnapshot], trades: list[TradeEvent]
-) -> np.ndarray:
-    """Convert per-leg book + trade events into an hftbacktest event array.
-
-    Depth events are emitted as incremental updates: ``qty=0`` clears any prior
-    level whose price no longer appears in the snapshot, then ``qty=N`` events
-    set the new levels. This keeps the engine's depth coherent even for
-    multi-level snapshots while remaining cheap for synthetic top-of-book.
-
-    Implementation: accumulate per-event tuples in plain Python lists, then
-    bulk-assign into the structured numpy array at the end. Bulk per-field
-    assignment is ~5-10x faster than per-cell ``arr[idx]["field"] = ...``
-    writes on structured dtypes, which dominated wall time for large bucket
-    markets (60%+ of total backtest time).
-    """
-    flag_local_exch = EXCH_EVENT | LOCAL_EVENT
-    bid_set_ev = DEPTH_EVENT | flag_local_exch | BUY_EVENT
-    ask_set_ev = DEPTH_EVENT | flag_local_exch | SELL_EVENT
-
-    ts_list: list[int] = []
-    px_list: list[float] = []
-    qty_list: list[float] = []
-    ev_list: list[int] = []
-
-    prev_bids: set[float] = set()
-    prev_asks: set[float] = set()
-    for snap in snapshots:
-        ts = snap.ts_ns
-        new_bid_set = {b[0] for b in snap.bids}
-        new_ask_set = {a[0] for a in snap.asks}
-        # Removals: levels in prev not in new (qty=0).
-        for px in prev_bids - new_bid_set:
-            ts_list.append(ts)
-            px_list.append(px)
-            qty_list.append(0.0)
-            ev_list.append(bid_set_ev)
-        for px in prev_asks - new_ask_set:
-            ts_list.append(ts)
-            px_list.append(px)
-            qty_list.append(0.0)
-            ev_list.append(ask_set_ev)
-        # Additions / size-updates: every level in new.
-        for px, qty in snap.bids:
-            ts_list.append(ts)
-            px_list.append(px)
-            qty_list.append(qty)
-            ev_list.append(bid_set_ev)
-        for px, qty in snap.asks:
-            ts_list.append(ts)
-            px_list.append(px)
-            qty_list.append(qty)
-            ev_list.append(ask_set_ev)
-        prev_bids = new_bid_set
-        prev_asks = new_ask_set
-
-    for trade in trades:
-        side_flag = BUY_EVENT if trade.side == "buy" else SELL_EVENT
-        ts_list.append(trade.ts_ns)
-        px_list.append(trade.price)
-        qty_list.append(trade.size)
-        ev_list.append(TRADE_EVENT | flag_local_exch | side_flag)
-
-    n = len(ts_list)
-    if n == 0:
-        return np.zeros(0, dtype=event_dtype)
-
-    arr = np.zeros(n, dtype=event_dtype)
-    # Bulk per-field assignment: one C-level pass per column.
-    ts_np = np.asarray(ts_list, dtype=np.int64)
-    arr["ev"] = np.asarray(ev_list, dtype=np.uint64)
-    arr["exch_ts"] = ts_np
-    arr["local_ts"] = ts_np
-    arr["px"] = np.asarray(px_list, dtype=np.float64)
-    arr["qty"] = np.asarray(qty_list, dtype=np.float64)
-
-    # Sort ascending by exch_ts so hftbacktest's feed is monotone.
-    arr = arr[np.argsort(arr["exch_ts"], kind="stable")]
-    return arr
 
 
 def _initial_clear_array(start_ts_ns: int) -> np.ndarray:
@@ -676,8 +594,9 @@ def run_one_question(
     #      round-trip and lets the data source build the hftbacktest event
     #      array fully vectorised. HL HIP-4 implements this.
     #   2. Legacy path: iterate ``events(q)`` and build per-leg arrays here via
-    #      the per-cell ``_build_leg_event_array``. Synthetic / polymarket
-    #      sources stay on this path.
+    #      ``build_leg_event_array_from_snapshots`` (the same shared assembler,
+    #      fed by an in-memory snapshot→column adapter). Synthetic / pm_nba /
+    #      binance_perp sources stay on this path.
     leg_event_arrays: dict[str, np.ndarray]
     book_ts_per_leg: dict[str, np.ndarray]
     ref_events: list[ReferenceEvent]
@@ -719,7 +638,7 @@ def run_one_question(
         leg_event_arrays = {}
         book_ts_per_leg = {}
         for sym in q.leg_symbols:
-            leg_event_arrays[sym] = _build_leg_event_array(
+            leg_event_arrays[sym] = build_leg_event_array_from_snapshots(
                 book_events[sym], trade_events[sym]
             )
             book_ts_per_leg[sym] = np.asarray(
@@ -758,7 +677,7 @@ def run_one_question(
     # Hedge leg: build a third BacktestAsset when hedge_enabled and events provided.
     hedge_asset_no: int | None = None
     if cfg.hedge_enabled and hedge_events is not None:
-        hedge_arr = _build_leg_event_array(hedge_events, [])
+        hedge_arr = build_leg_event_array_from_snapshots(hedge_events, [])
         hedge_clear = _initial_clear_array(q.start_ts_ns)
         hedge_full = (
             np.concatenate([hedge_clear, hedge_arr]) if len(hedge_arr) > 0 else hedge_clear
