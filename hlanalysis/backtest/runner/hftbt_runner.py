@@ -36,7 +36,7 @@ existing sim's IOC-against-synthetic-L2 semantics.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -318,6 +318,339 @@ def _slipped_sell_price(book: BookState, limit_price: float, slippage_bps: float
 
 
 # ---------------------------------------------------------------------------
+# Mutable run state + order-routing helpers
+# ---------------------------------------------------------------------------
+#
+# The scan loop's enter / exit / hedge / stop-loss / settlement blocks were
+# extracted into the helpers below to keep ``run_one_question`` legible. They
+# all mutate one ``_RunState``; the behaviour is identical to the prior inline
+# code — same submit order, same fill recording, same position math.
+
+
+@dataclass(slots=True)
+class _RunState:
+    """Mutable state threaded through one question's scan loop + settlement.
+
+    Carries the immutable per-run context (``hbt``, ``cfg``, ``q`` …), the
+    accumulated outputs (``result``, ``fill_ts`` …), the evolving binary/hedge
+    positions, and the per-tick view (``books``, ``now_ns``, ``current_diag``)
+    that the routing helpers read.
+    """
+
+    hbt: Any
+    cfg: RunConfig
+    q: QuestionDescriptor
+    data_source: DataSource
+    leg_to_asset: dict[str, int]
+    hedge_asset_no: int | None
+    stop_pct: float | None
+    fills_dir_active: bool
+    result: RunResult
+    pos: Position | None = None
+    hedge_positions: dict[str, Position] = field(default_factory=dict)
+    last_hedge_mid: float | None = None
+    fill_ts: dict[str, int] = field(default_factory=dict)
+    fill_question_idx: dict[str, int] = field(default_factory=dict)
+    fill_meta: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _next_oid_counter: int = 1
+    # Per-tick view, refreshed each scan before routing.
+    books: dict[str, BookState] = field(default_factory=dict)
+    now_ns: int = 0
+    current_diag: "DiagnosticRow | None" = None
+
+    def next_oid(self) -> int:
+        oid = self._next_oid_counter
+        self._next_oid_counter += 1
+        return oid
+
+    def record_fill_from_order(
+        self, oid: int, asset_no: int, symbol: str, side: str, cloid: str,
+        intent_size: float,
+    ) -> Fill | None:
+        order = self.hbt.orders(asset_no).get(oid)
+        if order is None:
+            return None
+        # FILLED=3, PARTIALLY_FILLED=5
+        if order.status not in (3, 5):
+            return None
+        exec_qty = float(order.exec_qty)
+        if exec_qty <= 0.0:
+            return None
+        exec_px = float(order.exec_price)
+        # Bound to [0, 1] for binary tokens.
+        exec_px = max(0.0, min(1.0, exec_px))
+        # Cap fill size by the strategy's intended size and the configured
+        # book-depth assumption (mirrors sim/fills.py semantics).
+        exec_qty = min(exec_qty, intent_size, self.cfg.book_depth_assumption)
+        fee = _binary_fee(exec_px, exec_qty, self.cfg)
+        return Fill(
+            cloid=cloid, symbol=symbol, side=side, price=exec_px, size=exec_qty,
+            fee=fee, partial=exec_qty < intent_size,
+        )
+
+    def record_hedge_fill_from_order(
+        self, oid: int, asset_no: int, symbol: str, side: str, cloid: str,
+        intent_size: float,
+    ) -> Fill | None:
+        """Like ``record_fill_from_order`` but for the hedge leg: no [0, 1] price
+        clamp (BTC perp is ~100k), uses ``cfg.hedge_fee_bps``, sets is_hedge."""
+        order = self.hbt.orders(asset_no).get(oid)
+        if order is None:
+            return None
+        if order.status not in (3, 5):
+            return None
+        exec_qty = float(order.exec_qty)
+        if exec_qty <= 0.0:
+            return None
+        exec_px = float(order.exec_price)
+        exec_qty = min(exec_qty, intent_size)
+        fee_rate = self.cfg.hedge_fee_bps / 1e4
+        fee = exec_px * exec_qty * fee_rate
+        return Fill(
+            cloid=cloid, symbol=symbol, side=side, price=exec_px, size=exec_qty,
+            fee=fee, partial=exec_qty < intent_size, is_hedge=True,
+        )
+
+
+def _route_stop_loss(st: _RunState) -> None:
+    """Force an exit when the held leg's bid has fallen through the stop price,
+    before evaluating the strategy's intent."""
+    pos = st.pos
+    if pos is None or st.stop_pct is None or pos.symbol not in st.books:
+        return
+    held_bid = st.books[pos.symbol].bid_px
+    if held_bid is None or held_bid > pos.stop_loss_price:
+        return
+    asset_no = st.leg_to_asset[pos.symbol]
+    oid = st.next_oid()
+    st.hbt.submit_sell_order(
+        asset_no, oid, held_bid, abs(pos.qty), hb_order.IOC, hb_order.LIMIT, True,
+    )
+    cloid = f"stop-{oid}"
+    stop_book = st.books[pos.symbol]
+    px = _slipped_sell_price(stop_book, held_bid, st.cfg.slippage_bps)
+    # Read the actual exec from hftbacktest; fall back to the slipped price if
+    # no fill recorded (e.g. zero-bid).
+    fill = st.record_fill_from_order(oid, asset_no, pos.symbol, "sell", cloid, abs(pos.qty))
+    if fill is None:
+        fill = Fill(
+            cloid=cloid, symbol=pos.symbol, side="sell", price=px,
+            size=abs(pos.qty), fee=_binary_fee(px, abs(pos.qty), st.cfg), partial=False,
+        )
+    st.result.fills.append(fill)
+    st.fill_ts[cloid] = st.now_ns
+    st.fill_question_idx[cloid] = st.q.question_idx
+    st.pos = None
+
+
+def _route_hedge(st: _RunState, decision: Any) -> None:
+    """Route hedge intents (independent of binary action / pos state)."""
+    cfg = st.cfg
+    if st.hedge_asset_no is None or not cfg.hedge_symbol or not decision.intents:
+        return
+    for h_intent in decision.intents:
+        if h_intent.symbol != cfg.hedge_symbol:
+            continue
+        if cfg.hedge_symbol not in st.books:
+            continue
+        h_book = st.books[cfg.hedge_symbol]
+        if h_intent.side == "buy":
+            h_slipped = (
+                h_book.ask_px * (1.0 + cfg.hedge_slippage_bps / 1e4)
+                if h_book.ask_px is not None else 0.0
+            )
+            h_oid = st.next_oid()
+            st.hbt.submit_buy_order(
+                st.hedge_asset_no, h_oid, h_slipped, h_intent.size,
+                hb_order.IOC, hb_order.LIMIT, True,
+            )
+            h_side = "buy"
+        else:
+            h_slipped = (
+                h_book.bid_px * (1.0 - cfg.hedge_slippage_bps / 1e4)
+                if h_book.bid_px is not None else 0.0
+            )
+            h_oid = st.next_oid()
+            st.hbt.submit_sell_order(
+                st.hedge_asset_no, h_oid, h_slipped, h_intent.size,
+                hb_order.IOC, hb_order.LIMIT, True,
+            )
+            h_side = "sell"
+        h_fill = st.record_hedge_fill_from_order(
+            h_oid, st.hedge_asset_no, cfg.hedge_symbol, h_side, h_intent.cloid, h_intent.size,
+        )
+        if h_fill is not None:
+            st.result.fills.append(h_fill)
+            st.fill_ts[h_fill.cloid] = st.now_ns
+            st.fill_question_idx[h_fill.cloid] = st.q.question_idx
+            # Track hedge position independently. Qty-weighted cost basis across
+            # fills (SHR-55) — avg_entry was previously clobbered with the latest
+            # fill price on every top-up.
+            h_pos = st.hedge_positions.get(cfg.hedge_symbol)
+            prev_qty = h_pos.qty if h_pos is not None else 0.0
+            prev_avg = h_pos.avg_entry if h_pos is not None else 0.0
+            new_qty, new_avg = _hedge_avg_entry(
+                prev_qty, prev_avg, h_fill.side, h_fill.size, h_fill.price,
+            )
+            st.hedge_positions[cfg.hedge_symbol] = Position(
+                question_idx=st.q.question_idx, symbol=cfg.hedge_symbol, qty=new_qty,
+                avg_entry=new_avg, stop_loss_price=0.0, last_update_ts_ns=st.now_ns,
+            )
+
+
+def _route_enter(st: _RunState, decision: Any) -> None:
+    """Route an ENTER decision: open or top-up the binary position."""
+    cfg = st.cfg
+    q = st.q
+    intent = decision.intents[0]
+    # Skip hedge intents for binary position management.
+    if cfg.hedge_enabled and intent.symbol == cfg.hedge_symbol:
+        intent = next(
+            (i for i in decision.intents if i.symbol != cfg.hedge_symbol), None
+        )
+    # Topup intents target the held position's symbol; reject any other.
+    if intent is not None and st.pos is not None and intent.symbol != st.pos.symbol:
+        intent = None
+    asset_no = None
+    if intent is not None:
+        asset_no = st.leg_to_asset.get(intent.symbol)
+    if intent is None or asset_no is None or intent.symbol not in st.books:
+        return
+    book = st.books[intent.symbol]
+    slipped = _slipped_buy_price(book, intent.limit_price, cfg.slippage_bps)
+    # Submit IOC limit at the slipped/limit price.
+    oid = st.next_oid()
+    st.hbt.submit_buy_order(
+        asset_no, oid, slipped, intent.size, hb_order.IOC, hb_order.LIMIT, True,
+    )
+    fill = st.record_fill_from_order(oid, asset_no, intent.symbol, "buy", intent.cloid, intent.size)
+    if fill is None:
+        return
+    st.result.fills.append(fill)
+    st.fill_ts[fill.cloid] = st.now_ns
+    st.fill_question_idx[fill.cloid] = q.question_idx
+    if st.fills_dir_active and st.current_diag is not None and st.pos is None:
+        edge_chosen = (
+            st.current_diag.edge_yes
+            if intent.symbol == (q.leg_symbols[0] if q.leg_symbols else "")
+            else st.current_diag.edge_no
+        )
+        st.fill_meta[fill.cloid] = {
+            "entry_p_model": st.current_diag.p_model,
+            "entry_edge_chosen_side": edge_chosen,
+            "entry_sigma": st.current_diag.sigma,
+            "entry_tau_yr": st.current_diag.tau_yr,
+        }
+    # Open or topup (add-on) via the shared position math — the SAME
+    # ``apply_fill`` the live router calls, so add-on weighted-average entry is
+    # bit-identical to production. The stop is (re)stamped at the resulting
+    # basis: the fill price on open, the new weighted average on a topup.
+    prev = PositionState(st.pos.qty, st.pos.avg_entry) if st.pos is not None else None
+    new_pos, _ = apply_fill(prev, "buy", fill.size, fill.price)
+    assert new_pos is not None
+    st.pos = Position(
+        question_idx=st.pos.question_idx if st.pos is not None else q.question_idx,
+        symbol=intent.symbol, qty=new_pos.qty, avg_entry=new_pos.avg_entry,
+        stop_loss_price=_stop_price(new_pos.avg_entry, st.stop_pct),
+        last_update_ts_ns=st.now_ns,
+    )
+
+
+def _route_exit(st: _RunState, decision: Any) -> None:
+    """Route an EXIT decision: reduce / close the held binary position.
+
+    Caller guarantees ``st.pos is not None``.
+    """
+    cfg = st.cfg
+    pos = st.pos
+    intent = decision.intents[0]
+    # Skip hedge intents for binary position management.
+    if cfg.hedge_enabled and intent.symbol == cfg.hedge_symbol:
+        intent = next(
+            (i for i in decision.intents if i.symbol != cfg.hedge_symbol), None
+        )
+    if intent is None or st.leg_to_asset.get(intent.symbol) is None or intent.symbol not in st.books:
+        return
+    exit_asset_no = st.leg_to_asset[intent.symbol]
+    book = st.books[intent.symbol]
+    size = min(intent.size, abs(pos.qty))
+    slipped = _slipped_sell_price(book, intent.limit_price, cfg.slippage_bps)
+    oid = st.next_oid()
+    st.hbt.submit_sell_order(
+        exit_asset_no, oid, slipped, size, hb_order.IOC, hb_order.LIMIT, True,
+    )
+    fill = st.record_fill_from_order(oid, exit_asset_no, intent.symbol, "sell", intent.cloid, size)
+    if fill is None:
+        return
+    st.result.fills.append(fill)
+    st.fill_ts[fill.cloid] = st.now_ns
+    st.fill_question_idx[fill.cloid] = st.q.question_idx
+    # Reduce via the shared position math. ``close_atol=cfg.lot_size`` reproduces
+    # the runner's close rule: when fill.size is capped below abs(pos.qty) by
+    # book_depth_assumption, keep the residual open so settlement (or a later
+    # exit) closes it — but anything below one lot is unfillable, so treat it as
+    # closed to avoid an infinite-exit loop.
+    new_pos, _ = apply_fill(
+        PositionState(pos.qty, pos.avg_entry), fill.side, fill.size, fill.price,
+        close_atol=cfg.lot_size,
+    )
+    if new_pos is None:
+        st.pos = None
+    else:
+        st.pos = Position(
+            question_idx=pos.question_idx, symbol=pos.symbol, qty=new_pos.qty,
+            avg_entry=new_pos.avg_entry, stop_loss_price=pos.stop_loss_price,
+            last_update_ts_ns=st.now_ns,
+        )
+
+
+def _settle(st: _RunState) -> None:
+    """End-of-data settlement: close any open binary position at its leg payoff
+    and mark any open hedge residual to the last observed hedge mid (SHR-55)."""
+    q = st.q
+    if st.pos is not None:
+        pos = st.pos
+        outcome = st.data_source.resolved_outcome(q)
+        # Prefer the data source's per-leg payoff when it provides one (HL HIP-4
+        # handles bucket markets here). Fall back to the binary-only
+        # leg_symbols[0]/[1] lookup when the source doesn't expose it.
+        leg_payoff = getattr(st.data_source, "leg_payoff", None)
+        if leg_payoff is not None:
+            settle_px = float(leg_payoff(q, pos.symbol))
+        else:
+            settle_px = _settle_px_for_outcome(pos, q, outcome)
+        settle_fill = Fill(
+            cloid="settle", symbol=pos.symbol,
+            side="sell" if pos.qty > 0 else "buy",
+            price=settle_px, size=abs(pos.qty), fee=0.0, partial=False,
+        )
+        st.result.fills.append(settle_fill)
+        st.fill_ts["settle"] = q.end_ts_ns
+        st.fill_question_idx["settle"] = pos.question_idx
+        if st.fills_dir_active:
+            st.fill_meta["settle"] = {"resolved_outcome": outcome}
+        st.pos = None
+
+    # Mark any open hedge residual to the last observed hedge mid and book a
+    # closing fill. Without this only the OPENING hedge leg lands in
+    # result.fills, so realized PnL omits the entire hedge value.
+    for h_sym, h_pos in st.hedge_positions.items():
+        if h_pos.qty == 0.0:
+            continue
+        if st.last_hedge_mid is None:
+            logger.warning(
+                f"hedge {h_sym} qty={h_pos.qty} held to expiry but no hedge mid "
+                f"was observed; cannot mark-to-market (PnL excludes this leg)"
+            )
+            continue
+        mtm_fill = _hedge_mtm_fill(h_sym, h_pos.qty, st.last_hedge_mid)
+        st.result.fills.append(mtm_fill)
+        st.fill_ts[mtm_fill.cloid] = q.end_ts_ns
+        st.fill_question_idx[mtm_fill.cloid] = h_pos.question_idx
+    st.hedge_positions.clear()
+
+
+# ---------------------------------------------------------------------------
 # Per-question runner
 # ---------------------------------------------------------------------------
 
@@ -437,15 +770,6 @@ def run_one_question(
     hbt = hb.HashMapMarketDepthBacktest(assets)
 
     state = MarketState()
-    result = RunResult()
-    pos: Position | None = None
-    # Hedge positions are tracked independently; they do NOT affect binary pos.
-    hedge_positions: dict[str, Position] = {}
-    last_hedge_mid: float | None = None  # last observed hedge mid for SHR-55 MTM
-    diag_rows: list[DiagnosticRow] = []
-    fill_meta: dict[str, dict[str, Any]] = {}
-    fill_ts: dict[str, int] = {}
-    fill_question_idx: dict[str, int] = {}
     stop_pct = _strategy_stop_loss_pct(strategy)
     scan_interval_ns = cfg.scanner_interval_seconds * 1_000_000_000
 
@@ -455,85 +779,22 @@ def run_one_question(
     settle_events.sort(key=lambda s: s.ts_ns)
 
     need_diag = (diagnostics_dir is not None) or (fills_dir is not None)
-    next_oid = 1
+    diag_rows: list[DiagnosticRow] = []
 
-    def _next_oid() -> int:
-        nonlocal next_oid
-        oid = next_oid
-        next_oid += 1
-        return oid
-
-    def _record_fill_from_order(
-        oid: int,
-        asset_no: int,
-        symbol: str,
-        side: str,
-        cloid: str,
-        intent_size: float,
-    ) -> Fill | None:
-        order = hbt.orders(asset_no).get(oid)
-        if order is None:
-            return None
-        # FILLED=3, PARTIALLY_FILLED=5
-        if order.status not in (3, 5):
-            return None
-        exec_qty = float(order.exec_qty)
-        if exec_qty <= 0.0:
-            return None
-        exec_px = float(order.exec_price)
-        # Bound to [0, 1] for binary tokens.
-        exec_px = max(0.0, min(1.0, exec_px))
-        # Cap fill size by the strategy's intended size and the configured
-        # book-depth assumption (mirrors sim/fills.py semantics).
-        exec_qty = min(exec_qty, intent_size, cfg.book_depth_assumption)
-        fee = _binary_fee(exec_px, exec_qty, cfg)
-        return Fill(
-            cloid=cloid,
-            symbol=symbol,
-            side=side,
-            price=exec_px,
-            size=exec_qty,
-            fee=fee,
-            partial=exec_qty < intent_size,
-        )
-
-    def _record_hedge_fill_from_order(
-        oid: int,
-        asset_no: int,
-        symbol: str,
-        side: str,
-        cloid: str,
-        intent_size: float,
-    ) -> Fill | None:
-        """Like _record_fill_from_order but for hedge leg.
-
-        Differences vs binary recorder:
-        - No [0, 1] price clamp (BTC perp is ~100k).
-        - Uses cfg.hedge_fee_bps for fee rate.
-        - Sets is_hedge=True on the returned Fill.
-        """
-        order = hbt.orders(asset_no).get(oid)
-        if order is None:
-            return None
-        if order.status not in (3, 5):
-            return None
-        exec_qty = float(order.exec_qty)
-        if exec_qty <= 0.0:
-            return None
-        exec_px = float(order.exec_price)
-        exec_qty = min(exec_qty, intent_size)
-        fee_rate = cfg.hedge_fee_bps / 1e4
-        fee = exec_px * exec_qty * fee_rate
-        return Fill(
-            cloid=cloid,
-            symbol=symbol,
-            side=side,
-            price=exec_px,
-            size=exec_qty,
-            fee=fee,
-            partial=exec_qty < intent_size,
-            is_hedge=True,
-        )
+    # All mutable position/fill bookkeeping lives in one struct so the routing
+    # helpers (_route_enter/_route_exit/_route_hedge/_route_stop_loss/_settle)
+    # can mutate it without a forest of nonlocal closures.
+    st = _RunState(
+        hbt=hbt,
+        cfg=cfg,
+        q=q,
+        data_source=data_source,
+        leg_to_asset=leg_to_asset,
+        hedge_asset_no=hedge_asset_no,
+        stop_pct=stop_pct,
+        fills_dir_active=fills_dir is not None,
+        result=RunResult(),
+    )
 
     # --- Scan loop ---------------------------------------------------------
     # Fixed 60s grid (mirrors `hl-sim`'s scan cadence in spirit; legacy
@@ -601,11 +862,11 @@ def run_one_question(
                 # Track the last observed hedge mid for end-of-data MTM (SHR-55).
                 # `books` is rebuilt every tick, so a dedicated var is needed.
                 if hbs.bid_px is not None and hbs.ask_px is not None:
-                    last_hedge_mid = (hbs.bid_px + hbs.ask_px) / 2.0
+                    st.last_hedge_mid = (hbs.bid_px + hbs.ask_px) / 2.0
 
-        # Update last_scan_ns BEFORE the `continue` so we don't loop forever
-        # re-targeting the same ts when books are missing.
-        last_scan_ns = now_ns
+        # Publish the per-tick view into the run state for the routing helpers.
+        st.books = books
+        st.now_ns = now_ns
 
         if not books:
             continue
@@ -632,11 +893,11 @@ def run_one_question(
             reference_price=float(ref_close),
             recent_returns=recent_returns,
             recent_volume_usd=0.0,
-            position=pos,
+            position=st.pos,
             now_ns=now_ns,
             recent_hl_bars=recent_hl,
         )
-        result.n_decisions += 1
+        st.result.n_decisions += 1
 
         current_diag: DiagnosticRow | None = None
         if need_diag:
@@ -658,282 +919,26 @@ def run_one_question(
             )
             if diagnostics_dir is not None:
                 diag_rows.append(current_diag)
+        st.current_diag = current_diag
 
-        # Stop-loss handling: if held position's leg bid has fallen through
-        # the stop price, force an exit before evaluating the strategy's intent.
-        if pos is not None and stop_pct is not None and pos.symbol in books:
-            held_bid = books[pos.symbol].bid_px
-            if held_bid is not None and held_bid <= pos.stop_loss_price:
-                asset_no = leg_to_asset[pos.symbol]
-                oid = _next_oid()
-                hbt.submit_sell_order(
-                    asset_no,
-                    oid,
-                    held_bid,
-                    abs(pos.qty),
-                    hb_order.IOC,
-                    hb_order.LIMIT,
-                    True,
-                )
-                cloid = f"stop-{oid}"
-                stop_book = books[pos.symbol]
-                px = _slipped_sell_price(stop_book, held_bid, cfg.slippage_bps)
-                # Read the actual exec from hftbacktest; fall back to the
-                # slipped price if no fill recorded (e.g. zero-bid).
-                fill = _record_fill_from_order(
-                    oid,
-                    asset_no,
-                    pos.symbol,
-                    "sell",
-                    cloid,
-                    abs(pos.qty),
-                )
-                if fill is None:
-                    fill = Fill(
-                        cloid=cloid,
-                        symbol=pos.symbol,
-                        side="sell",
-                        price=px,
-                        size=abs(pos.qty),
-                        fee=_binary_fee(px, abs(pos.qty), cfg),
-                        partial=False,
-                    )
-                result.fills.append(fill)
-                fill_ts[cloid] = now_ns
-                fill_question_idx[cloid] = q.question_idx
-                pos = None
-
-        # Route hedge intents first (independent of binary action / pos state).
-        if hedge_asset_no is not None and cfg.hedge_symbol and decision.intents:
-            for h_intent in decision.intents:
-                if h_intent.symbol != cfg.hedge_symbol:
-                    continue
-                if cfg.hedge_symbol not in books:
-                    continue
-                h_book = books[cfg.hedge_symbol]
-                if h_intent.side == "buy":
-                    h_slipped = h_book.ask_px * (1.0 + cfg.hedge_slippage_bps / 1e4) if h_book.ask_px is not None else 0.0
-                    h_oid = _next_oid()
-                    hbt.submit_buy_order(
-                        hedge_asset_no,
-                        h_oid,
-                        h_slipped,
-                        h_intent.size,
-                        hb_order.IOC,
-                        hb_order.LIMIT,
-                        True,
-                    )
-                    h_side = "buy"
-                else:
-                    h_slipped = h_book.bid_px * (1.0 - cfg.hedge_slippage_bps / 1e4) if h_book.bid_px is not None else 0.0
-                    h_oid = _next_oid()
-                    hbt.submit_sell_order(
-                        hedge_asset_no,
-                        h_oid,
-                        h_slipped,
-                        h_intent.size,
-                        hb_order.IOC,
-                        hb_order.LIMIT,
-                        True,
-                    )
-                    h_side = "sell"
-                h_fill = _record_hedge_fill_from_order(
-                    h_oid, hedge_asset_no, cfg.hedge_symbol, h_side, h_intent.cloid, h_intent.size,
-                )
-                if h_fill is not None:
-                    result.fills.append(h_fill)
-                    fill_ts[h_fill.cloid] = now_ns
-                    fill_question_idx[h_fill.cloid] = q.question_idx
-                    # Track hedge position independently. Qty-weighted cost basis
-                    # across fills (SHR-55) — avg_entry was previously clobbered
-                    # with the latest fill price on every top-up.
-                    h_pos = hedge_positions.get(cfg.hedge_symbol)
-                    prev_qty = h_pos.qty if h_pos is not None else 0.0
-                    prev_avg = h_pos.avg_entry if h_pos is not None else 0.0
-                    new_qty, new_avg = _hedge_avg_entry(
-                        prev_qty, prev_avg, h_fill.side, h_fill.size, h_fill.price,
-                    )
-                    hedge_positions[cfg.hedge_symbol] = Position(
-                        question_idx=q.question_idx,
-                        symbol=cfg.hedge_symbol,
-                        qty=new_qty,
-                        avg_entry=new_avg,
-                        stop_loss_price=0.0,
-                        last_update_ts_ns=now_ns,
-                    )
-
+        # Stop-loss first: if the held leg's bid has fallen through the stop,
+        # force an exit before evaluating the strategy's intent. Then route the
+        # hedge intents (independent of binary action / pos state), then the
+        # binary ENTER / EXIT. Mutually-exclusive action branches preserved.
+        _route_stop_loss(st)
+        _route_hedge(st, decision)
         if decision.action == Action.ENTER and decision.intents:
-            intent = decision.intents[0]
-            # Skip hedge intents for binary position management.
-            if cfg.hedge_enabled and intent.symbol == cfg.hedge_symbol:
-                intent = next(
-                    (i for i in decision.intents if i.symbol != cfg.hedge_symbol), None
-                )
-            # Topup intents target the held position's symbol; reject any other.
-            if intent is not None and pos is not None and intent.symbol != pos.symbol:
-                intent = None
-            if intent is not None:
-                asset_no = leg_to_asset.get(intent.symbol)
-            if intent is not None and asset_no is not None and intent.symbol in books:
-                book = books[intent.symbol]
-                slipped = _slipped_buy_price(book, intent.limit_price, cfg.slippage_bps)
-                # Submit IOC limit at the slipped/limit price.
-                oid = _next_oid()
-                hbt.submit_buy_order(
-                    asset_no,
-                    oid,
-                    slipped,
-                    intent.size,
-                    hb_order.IOC,
-                    hb_order.LIMIT,
-                    True,
-                )
-                fill = _record_fill_from_order(
-                    oid,
-                    asset_no,
-                    intent.symbol,
-                    "buy",
-                    intent.cloid,
-                    intent.size,
-                )
-                if fill is not None:
-                    result.fills.append(fill)
-                    fill_ts[fill.cloid] = now_ns
-                    fill_question_idx[fill.cloid] = q.question_idx
-                    if fills_dir is not None and current_diag is not None and pos is None:
-                        edge_chosen = (
-                            current_diag.edge_yes
-                            if intent.symbol == (q.leg_symbols[0] if q.leg_symbols else "")
-                            else current_diag.edge_no
-                        )
-                        fill_meta[fill.cloid] = {
-                            "entry_p_model": current_diag.p_model,
-                            "entry_edge_chosen_side": edge_chosen,
-                            "entry_sigma": current_diag.sigma,
-                            "entry_tau_yr": current_diag.tau_yr,
-                        }
-                    # Open or topup (add-on) via the shared position math — the
-                    # SAME ``apply_fill`` the live router calls, so add-on
-                    # weighted-average entry is bit-identical to production. On a
-                    # buy-to-open or same-direction add-on the result is never a
-                    # close. The stop is (re)stamped at the resulting basis: the
-                    # fill price on open, the new weighted average on a topup —
-                    # both reproduce the prior inline behaviour exactly.
-                    prev = PositionState(pos.qty, pos.avg_entry) if pos is not None else None
-                    new_pos, _ = apply_fill(prev, "buy", fill.size, fill.price)
-                    assert new_pos is not None
-                    pos = Position(
-                        question_idx=pos.question_idx if pos is not None else q.question_idx,
-                        symbol=intent.symbol,
-                        qty=new_pos.qty,
-                        avg_entry=new_pos.avg_entry,
-                        stop_loss_price=_stop_price(new_pos.avg_entry, stop_pct),
-                        last_update_ts_ns=now_ns,
-                    )
-        elif decision.action == Action.EXIT and decision.intents and pos is not None:
-            intent = decision.intents[0]
-            # Skip hedge intents for binary position management.
-            if cfg.hedge_enabled and intent.symbol == cfg.hedge_symbol:
-                intent = next(
-                    (i for i in decision.intents if i.symbol != cfg.hedge_symbol), None
-                )
-            if intent is not None and leg_to_asset.get(intent.symbol) is not None and intent.symbol in books:
-                exit_asset_no = leg_to_asset[intent.symbol]
-                book = books[intent.symbol]
-                size = min(intent.size, abs(pos.qty))
-                slipped = _slipped_sell_price(book, intent.limit_price, cfg.slippage_bps)
-                oid = _next_oid()
-                hbt.submit_sell_order(
-                    exit_asset_no,
-                    oid,
-                    slipped,
-                    size,
-                    hb_order.IOC,
-                    hb_order.LIMIT,
-                    True,
-                )
-                fill = _record_fill_from_order(
-                    oid,
-                    exit_asset_no,
-                    intent.symbol,
-                    "sell",
-                    intent.cloid,
-                    size,
-                )
-                if fill is not None:
-                    result.fills.append(fill)
-                    fill_ts[fill.cloid] = now_ns
-                    fill_question_idx[fill.cloid] = q.question_idx
-                    # Reduce via the shared position math (the same ``apply_fill``
-                    # the live router calls). ``close_atol=cfg.lot_size`` reproduces
-                    # the runner's close rule: when fill.size is capped below
-                    # abs(pos.qty) by book_depth_assumption, keep the residual open
-                    # so settlement (or a later exit) closes it — but anything
-                    # below one lot is unfillable, so treat it as closed to avoid an
-                    # infinite-exit loop. The cost basis is preserved on a partial
-                    # reduce, and the exit keeps the original entry's stop.
-                    new_pos, _ = apply_fill(
-                        PositionState(pos.qty, pos.avg_entry),
-                        fill.side, fill.size, fill.price,
-                        close_atol=cfg.lot_size,
-                    )
-                    if new_pos is None:
-                        pos = None
-                    else:
-                        pos = Position(
-                            question_idx=pos.question_idx,
-                            symbol=pos.symbol,
-                            qty=new_pos.qty,
-                            avg_entry=new_pos.avg_entry,
-                            stop_loss_price=pos.stop_loss_price,
-                            last_update_ts_ns=now_ns,
-                        )
+            _route_enter(st, decision)
+        elif decision.action == Action.EXIT and decision.intents and st.pos is not None:
+            _route_exit(st, decision)
 
     # --- Settlement -------------------------------------------------------
-    if pos is not None:
-        outcome = data_source.resolved_outcome(q)
-        # Prefer the data source's per-leg payoff when it provides one (HL
-        # HIP-4 handles bucket markets here). Fall back to the binary-only
-        # leg_symbols[0]/[1] lookup when the source doesn't expose it.
-        leg_payoff = getattr(data_source, "leg_payoff", None)
-        if leg_payoff is not None:
-            settle_px = float(leg_payoff(q, pos.symbol))
-        else:
-            settle_px = _settle_px_for_outcome(pos, q, outcome)
-        settle_fill = Fill(
-            cloid="settle",
-            symbol=pos.symbol,
-            side="sell" if pos.qty > 0 else "buy",
-            price=settle_px,
-            size=abs(pos.qty),
-            fee=0.0,
-            partial=False,
-        )
-        result.fills.append(settle_fill)
-        fill_ts["settle"] = q.end_ts_ns
-        fill_question_idx["settle"] = pos.question_idx
-        if fills_dir is not None:
-            fill_meta["settle"] = {"resolved_outcome": outcome}
-        pos = None
+    _settle(st)
 
-    # SHR-55: mark any open hedge residual to the last observed hedge mid and
-    # book a closing fill. Without this only the OPENING hedge leg lands in
-    # result.fills, so realized PnL omits the entire hedge value and the
-    # backtest can't tell whether the hedge protects or destroys PnL.
-    for h_sym, h_pos in hedge_positions.items():
-        if h_pos.qty == 0.0:
-            continue
-        if last_hedge_mid is None:
-            logger.warning(
-                f"hedge {h_sym} qty={h_pos.qty} held to expiry but no hedge mid "
-                f"was observed; cannot mark-to-market (PnL excludes this leg)"
-            )
-            continue
-        mtm_fill = _hedge_mtm_fill(h_sym, h_pos.qty, last_hedge_mid)
-        result.fills.append(mtm_fill)
-        fill_ts[mtm_fill.cloid] = q.end_ts_ns
-        fill_question_idx[mtm_fill.cloid] = h_pos.question_idx
-    hedge_positions.clear()
+    result = st.result
+    fill_ts = st.fill_ts
+    fill_question_idx = st.fill_question_idx
+    fill_meta = st.fill_meta
 
     try:
         hbt.close()
