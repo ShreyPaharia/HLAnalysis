@@ -51,7 +51,7 @@ async def test_watchdog_emits_feed_stale_and_returns_on_silent_stream():
     q: asyncio.Queue = asyncio.Queue()
 
     await asyncio.wait_for(
-        adapter._recv_until_stale(_SilentWS(), {}, "perp", q), timeout=1.0,
+        adapter._recv_until_stale(_SilentWS(), lambda m, t: [], "perp", q), timeout=1.0,
     )
 
     kinds = await _drain_kinds(q)
@@ -65,7 +65,7 @@ async def test_watchdog_fires_after_a_frame_then_silence():
     q: asyncio.Queue = asyncio.Queue()
 
     await asyncio.wait_for(
-        adapter._recv_until_stale(_OneFrameThenSilentWS(), {}, "perp", q),
+        adapter._recv_until_stale(_OneFrameThenSilentWS(), lambda m, t: [], "perp", q),
         timeout=1.0,
     )
 

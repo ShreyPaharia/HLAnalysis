@@ -35,11 +35,10 @@ from typing import Any
 from .._fastjson import decode as _json_decode
 
 import websockets
-import websockets.exceptions
 
 from ..config import Subscription
-from ..events import HealthEvent, Mechanism, NormalizedEvent, ProductType
-from .base import VenueAdapter
+from ..events import NormalizedEvent, ProductType
+from ._ws_base import BaseWsAdapter
 from .polymarket_gamma import GammaClient
 from .polymarket_normalize import (
     parse_book_message,
@@ -55,8 +54,9 @@ _WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 _GAMMA_POLL_S = 60
 
 
-class PolymarketAdapter(VenueAdapter):
+class PolymarketAdapter(BaseWsAdapter):
     venue = "polymarket"
+    health_product_type = ProductType.PREDICTION_BINARY
 
     def __init__(
         self,
@@ -128,6 +128,15 @@ class PolymarketAdapter(VenueAdapter):
                     log.exception("gamma poll crashed")
                 await asyncio.sleep(_GAMMA_POLL_S)
 
+        async def _subscribe(ws) -> None:
+            await ws.send(json.dumps({
+                "type": "market",
+                "assets_ids": sorted(active_tokens),
+            }))
+            await queue.put(self._health(
+                "subscribed", f"{len(active_tokens)} tokens",
+            ))
+
         async def _ws_loop() -> None:
             await _gamma_poll_once()
             if not active_tokens:
@@ -136,34 +145,16 @@ class PolymarketAdapter(VenueAdapter):
                                  "Gamma returned 0 active markets")
                 )
                 return
-            backoff = 1.0
-            while True:
-                try:
-                    ws_ctx = self._ws_factory(_WS_URL)
-                    async with ws_ctx as ws:
-                        await ws.send(json.dumps({
-                            "type": "market",
-                            "assets_ids": sorted(active_tokens),
-                        }))
-                        await queue.put(self._health(
-                            "subscribed", f"{len(active_tokens)} tokens",
-                        ))
-                        backoff = 1.0  # reset on successful (re)connect
-                        while True:
-                            raw = await ws.recv()
-                            self._dispatch_frame(raw, queue)
-                except asyncio.CancelledError:
-                    raise
-                except (
-                    websockets.exceptions.ConnectionClosed,
-                    OSError,
-                    asyncio.IncompleteReadError,
-                ) as e:
-                    await queue.put(
-                        self._health("reconnect", str(e)[:200])
-                    )
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, 30.0)
+            # BaseWsAdapter owns connect/backoff/circuit-breaker and the
+            # per-frame staleness watchdog — PM previously used a bare recv()
+            # with NO half-open-socket detection (SHR-60 was binance-only).
+            await self._run_ws(
+                url=_WS_URL,
+                subscribe=_subscribe,
+                handle=self._handle,
+                queue=queue,
+                connect=self._ws_factory,
+            )
 
         tasks = [
             asyncio.create_task(_ws_loop()),
@@ -178,47 +169,29 @@ class PolymarketAdapter(VenueAdapter):
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _dispatch_frame(
-        self, raw: str | bytes, queue: asyncio.Queue,
-    ) -> None:
-        if isinstance(raw, bytes):
-            try:
-                raw = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                log.warning("pm ws: undecodable bytes discarded")
-                return
-        try:
-            payloads = _json_decode(raw)
-        except (ValueError, TypeError):
-            # PM sends literal "PONG" keepalives between bursts; not JSON.
-            log.debug("pm ws: non-json frame discarded (%r)", raw[:40])
-            return
-        items = payloads if isinstance(payloads, list) else [payloads]
-        now = time.time_ns()
+    def _handle(self, msg: Any, recv_ns: int) -> list[NormalizedEvent]:
+        """Normalize one decoded PM frame into events.
+
+        A single PM WS message often carries an *array* of payloads (e.g. one
+        `book` snapshot per asset_id on initial connect); we unwrap that
+        transparently. The base receive loop already JSON-decodes the frame and
+        drops non-JSON keepalives ("PONG"), so we only see parsed structures.
+        """
+        items = msg if isinstance(msg, list) else [msg]
+        out: list[NormalizedEvent] = []
         for p in items:
             t = p.get("event_type")
             try:
                 if t == "book":
-                    queue.put_nowait(parse_book_message(p, local_recv_ts=now))
+                    out.append(parse_book_message(p, local_recv_ts=recv_ns))
                 elif t == "price_change":
-                    ev = parse_price_change_message(p, local_recv_ts=now)
+                    ev = parse_price_change_message(p, local_recv_ts=recv_ns)
                     if ev is not None:
-                        queue.put_nowait(ev)
+                        out.append(ev)
                 elif t == "last_trade_price":
-                    queue.put_nowait(parse_trade_message(p, local_recv_ts=now))
+                    out.append(parse_trade_message(p, local_recv_ts=recv_ns))
                 # Unknown event_types (e.g. tick_size_change) ignored — not
                 # needed by the strategy or recorder.
             except (KeyError, ValueError, TypeError) as e:
                 log.warning("pm ws: malformed %s frame discarded: %s", t, e)
-
-    def _health(self, kind: str, detail: str) -> HealthEvent:
-        return HealthEvent(
-            venue=self.venue,
-            product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB,
-            symbol="*",
-            exchange_ts=time.time_ns(),
-            local_recv_ts=time.time_ns(),
-            kind=kind,
-            detail=detail,
-        )
+        return out

@@ -4,19 +4,16 @@ import asyncio
 import json
 import logging
 import time
-from collections import deque
 from collections.abc import AsyncIterator
 
 import requests
 import websockets
 
-from .._fastjson import decode as _json_decode
 from ..config import Subscription
 from ..events import (
     BboEvent,
     BookSnapshotEvent,
     FundingEvent,
-    HealthEvent,
     MarketMetaEvent,
     MarkEvent,
     Mechanism,
@@ -28,7 +25,7 @@ from ..events import (
     SettlementEvent,
     TradeEvent,
 )
-from .base import VenueAdapter
+from ._ws_base import BaseWsAdapter
 
 log = logging.getLogger(__name__)
 
@@ -45,13 +42,9 @@ _STD_TO_HL: dict[str, str] = {
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 OUTCOME_REFRESH_INTERVAL_S = 60.0
 
-# Reconnect circuit-breaker: if we see this many reconnects within the window,
-# sleep a long cooldown instead of thrashing. Tripped during the 2026-05-06
-# 06:00 UTC HIP-4 settlement, where 478 reconnects in 30 min produced a 12-min
-# blackout right across the most-informative moment of the day.
-RECONNECT_WINDOW_S = 60.0
-RECONNECT_THRESHOLD = 8
-RECONNECT_COOLDOWN_S = 300.0
+# Reconnect circuit-breaker (window/threshold/cooldown) is owned by
+# BaseWsAdapter; its defaults (8 reconnects / 60s → 300s cooldown) match the
+# values tuned during the 2026-05-06 06:00 UTC HIP-4 settlement blackout.
 
 
 def _parse_description(desc: str) -> dict[str, str]:
@@ -97,9 +90,15 @@ def _matches(rule: dict[str, object], fields: dict[str, str]) -> bool:
     return True
 
 
-class HyperliquidAdapter(VenueAdapter):
+class HyperliquidAdapter(BaseWsAdapter):
     venue = "hyperliquid"
     WS_URL = "wss://api.hyperliquid.xyz/ws"
+    # Staleness watchdog window. Longer than binance's 30s because HIP-4 binary
+    # markets can be legitimately quiet for tens of seconds, and websockets'
+    # ping_interval/ping_timeout already force-reconnects a truly-dead TCP layer.
+    # This window only needs to catch the "subscribed but silent" outage (a live
+    # socket delivering no data frames across ALL multiplexed subscriptions).
+    stale_timeout_s: float = 120.0
 
     def supports(self, product_type: ProductType, mechanism: Mechanism) -> bool:
         if mechanism != Mechanism.CLOB:
@@ -123,98 +122,105 @@ class HyperliquidAdapter(VenueAdapter):
             else:
                 sym_to_sub[s.symbol] = s
 
+        # Health events on this (single, multiplexed) connection should reflect
+        # what this run is actually subscribed to rather than a hardcoded PERP.
+        self.health_product_type = self._connection_product_type(
+            subscriptions, wildcard_templates
+        )
+
         meta_seen: set[str] = set()
         last_meta_refresh = 0.0  # force expansion on first iteration
-        backoff = 1.0
-        reconnect_times: deque[float] = deque(maxlen=RECONNECT_THRESHOLD + 1)
+        # Per-connection (coin, native-channel) subscribe set; reset on each
+        # (re)connect by `_subscribe` and mutated by the outcome-update hook.
+        ws_subscribed: set[tuple[str, str]] = set()
 
-        while True:
-            # Re-expand wildcards before each (re)connect. Catches HIP-4 rolls that happened
-            # while we were disconnected: at the 06:00 UTC settlement boundary, the old
-            # outcomes (#30/#31) become invalid and new ones (#40/#41) activate, but the
-            # in-loop refresh only runs *after* a message arrives — and a stale subscription
-            # to a dead outcome may starve the loop entirely.
+        queue: asyncio.Queue[NormalizedEvent] = asyncio.Queue(maxsize=10000)
+
+        async def _before_connect() -> None:
+            # Re-expand wildcards before each (re)connect. Catches HIP-4 rolls that
+            # happened while disconnected: at the settlement boundary the old
+            # outcomes become invalid and new ones activate, but the in-loop refresh
+            # only runs *after* a message arrives — and a stale subscription to a
+            # dead outcome may starve the loop entirely.
+            nonlocal last_meta_refresh
             if wildcard_templates:
                 async for ev in self._sync_wildcards(
                     wildcard_templates, sym_to_sub, meta_seen
                 ):
-                    yield ev
+                    await queue.put(ev)
                 last_meta_refresh = time.monotonic()
 
-            try:
-                async with websockets.connect(
-                    self.WS_URL, ping_interval=20, ping_timeout=20, max_size=2**24
-                ) as ws:
-                    backoff = 1.0
-                    yield self._health("connected", "ws open")
-                    ws_subscribed: set[tuple[str, str]] = set()
-                    for sub in sym_to_sub.values():
-                        await self._subscribe_for(ws, sub, ws_subscribed)
+        async def _subscribe(ws) -> None:
+            ws_subscribed.clear()
+            for sub in sym_to_sub.values():
+                await self._subscribe_for(ws, sub, ws_subscribed)
+            # HIP-4 outcome lifecycle stream. Replaces the 60s REST poll for
+            # creation/settlement events. The _before_connect snapshot sync still
+            # runs to cover events missed during the disconnect.
+            if wildcard_templates:
+                await ws.send(
+                    json.dumps({"method": "subscribe", "subscription": {"type": "outcomeMetaUpdates"}})
+                )
 
-                    # HIP-4 outcome lifecycle stream. Replaces the 60s REST poll for
-                    # creation/settlement events. The startup _sync_wildcards above the
-                    # `async with` block still runs as a snapshot sync (covers events
-                    # missed during the disconnect).
-                    if wildcard_templates:
-                        await ws.send(
-                            json.dumps({"method": "subscribe", "subscription": {"type": "outcomeMetaUpdates"}})
-                        )
+        def _handle(msg: dict, recv_ns: int) -> list[NormalizedEvent]:
+            return self._handle(msg, recv_ns, sym_to_sub)
 
-                    async for raw in ws:
-                        recv_ns = time.time_ns()
-                        try:
-                            msg = _json_decode(raw)
-                        except (ValueError, TypeError):
-                            continue
-                        for ev in self._handle(msg, recv_ns, sym_to_sub):
-                            yield ev
-
-                        if (
-                            wildcard_templates
-                            and msg.get("channel") == "outcomeMetaUpdates"
-                            and isinstance(msg.get("data"), dict)
-                        ):
-                            async for ev in self._apply_outcome_update(
-                                ws, msg["data"], wildcard_templates, sym_to_sub, ws_subscribed, meta_seen
-                            ):
-                                yield ev
-
-                        # Keep the periodic poll as a safety net.
-                        if (
-                            wildcard_templates
-                            and time.monotonic() - last_meta_refresh > OUTCOME_REFRESH_INTERVAL_S
-                        ):
-                            last_meta_refresh = time.monotonic()
-                            async for ev in self._refresh_wildcards(
-                                ws, wildcard_templates, sym_to_sub, ws_subscribed, meta_seen
-                            ):
-                                yield ev
-            except Exception as e:
-                now = time.monotonic()
-                reconnect_times.append(now)
-                yield self._health("reconnect", str(e))
-                # Circuit-breaker: too many reconnects in a sliding window → long cooldown.
-                if (
-                    len(reconnect_times) >= RECONNECT_THRESHOLD
-                    and (now - reconnect_times[0]) < RECONNECT_WINDOW_S
+        async def _after_message(ws, msg: dict) -> None:
+            nonlocal last_meta_refresh
+            if (
+                wildcard_templates
+                and msg.get("channel") == "outcomeMetaUpdates"
+                and isinstance(msg.get("data"), dict)
+            ):
+                async for ev in self._apply_outcome_update(
+                    ws, msg["data"], wildcard_templates, sym_to_sub, ws_subscribed, meta_seen
                 ):
-                    log.critical(
-                        "hyperliquid: %d reconnects in %.0fs — cooling down %.0fs",
-                        len(reconnect_times),
-                        now - reconnect_times[0],
-                        RECONNECT_COOLDOWN_S,
-                    )
-                    yield self._health(
-                        "circuit-breaker",
-                        f"{len(reconnect_times)} reconnects in {now - reconnect_times[0]:.0f}s",
-                    )
-                    await asyncio.sleep(RECONNECT_COOLDOWN_S)
-                    reconnect_times.clear()
-                    backoff = 1.0
-                else:
-                    log.warning("hyperliquid ws error: %s; backoff=%.1fs", e, backoff)
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, 30.0)
+                    await queue.put(ev)
+            # Keep the periodic poll as a safety net.
+            if (
+                wildcard_templates
+                and time.monotonic() - last_meta_refresh > OUTCOME_REFRESH_INTERVAL_S
+            ):
+                last_meta_refresh = time.monotonic()
+                async for ev in self._refresh_wildcards(
+                    ws, wildcard_templates, sym_to_sub, ws_subscribed, meta_seen
+                ):
+                    await queue.put(ev)
+
+        # BaseWsAdapter owns connect/backoff/circuit-breaker and — NEW for HL —
+        # the per-frame staleness watchdog (SHR-60): HL previously used a bare
+        # `async for raw in ws` with no half-open-socket detection.
+        run_task = asyncio.create_task(
+            self._run_ws(
+                url=self.WS_URL,
+                subscribe=_subscribe,
+                handle=_handle,
+                queue=queue,
+                before_connect=_before_connect,
+                after_message=_after_message,
+            )
+        )
+        try:
+            while True:
+                yield await queue.get()
+        finally:
+            run_task.cancel()
+            await asyncio.gather(run_task, return_exceptions=True)
+
+    @staticmethod
+    def _connection_product_type(
+        subscriptions: list[Subscription],
+        wildcard_templates: list[Subscription],
+    ) -> ProductType:
+        """Pick the product type to stamp on connection-level health events.
+
+        HL multiplexes everything over one socket. HIP-4 wildcard runs are
+        prediction_binary; otherwise fall back to the single shared product type
+        of the concrete subs (or PERP if mixed/empty)."""
+        if wildcard_templates:
+            return ProductType.PREDICTION_BINARY
+        pts = {s.product_type for s in subscriptions}
+        return next(iter(pts)) if len(pts) == 1 else ProductType.PERP
 
     async def _subscribe_for(
         self,
@@ -904,16 +910,3 @@ class HyperliquidAdapter(VenueAdapter):
                 )
             )
         return out
-
-    def _health(self, kind: str, detail: str) -> HealthEvent:
-        now = time.time_ns()
-        return HealthEvent(
-            venue=self.venue,
-            product_type=ProductType.PERP,
-            mechanism=Mechanism.CLOB,
-            symbol="*",
-            exchange_ts=now,
-            local_recv_ts=now,
-            kind=kind,
-            detail=detail,
-        )

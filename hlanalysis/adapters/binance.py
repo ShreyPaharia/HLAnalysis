@@ -7,15 +7,12 @@ import time
 from collections.abc import AsyncIterator
 
 import requests
-import websockets
 
-from .._fastjson import decode as _json_decode
 from ..config import Subscription
 from ..events import (
     BboEvent,
     BookSnapshotEvent,
     FundingEvent,
-    HealthEvent,
     LiquidationEvent,
     MarkEvent,
     Mechanism,
@@ -23,9 +20,14 @@ from ..events import (
     ProductType,
     TradeEvent,
 )
-from .base import VenueAdapter
+from ._ws_base import BaseWsAdapter
 
 log = logging.getLogger(__name__)
+
+
+def _label_product_type(label: str) -> ProductType:
+    """Health events for the spot connection must not be mislabelled PERP."""
+    return ProductType.SPOT if label == "spot" else ProductType.PERP
 
 SPOT_WS = "wss://stream.binance.com:9443/ws"
 PERP_WS = "wss://fstream.binance.com/ws"
@@ -50,14 +52,12 @@ _STREAMS_SPOT: dict[str, str] = {
 _PERP_REST_CHANNELS = {"mark", "funding"}
 
 
-class BinanceAdapter(VenueAdapter):
+class BinanceAdapter(BaseWsAdapter):
     venue = "binance"
-    # Per-frame staleness watchdog (SHR-60). If no frame arrives within this
-    # window the stream is force-closed (→ reconnect). Binance BBO/trade frames
-    # arrive multiple times per second, so a frameless 30s is unambiguously a
-    # dead/half-open stream — not a quiet market. Also acts as the first-data
-    # deadline ("subscribed but silent").
-    stale_timeout_s: float = 30.0
+    # Per-frame staleness watchdog (SHR-60) and reconnect/backoff live in
+    # BaseWsAdapter. Binance BBO/trade frames arrive multiple times per second,
+    # so the base's 30s frameless window is unambiguously a dead/half-open
+    # stream — not a quiet market.
 
     def supports(self, product_type: ProductType, mechanism: Mechanism) -> bool:
         return mechanism == Mechanism.CLOB and product_type in {
@@ -123,63 +123,27 @@ class BinanceAdapter(VenueAdapter):
         # Dedup while preserving order (same stream listed multiple times = duplicate frames).
         streams = list(dict.fromkeys(streams))
 
-        backoff = 1.0
-        while True:
-            try:
-                async with websockets.connect(
-                    ws_url, ping_interval=20, ping_timeout=20, max_size=2**24
-                ) as ws:
-                    backoff = 1.0
-                    await queue.put(self._health(f"connected/{label}", ""))
-                    await ws.send(
-                        json.dumps({"method": "SUBSCRIBE", "params": streams, "id": 1})
-                    )
-                    # Returns (exits the `async with`, closing the socket) when
-                    # the watchdog trips, so the outer loop reconnects.
-                    await self._recv_until_stale(ws, sym_to_sub, label, queue)
-            except Exception as e:
-                log.warning("binance/%s ws error: %s; backoff=%.1fs", label, e, backoff)
-                await queue.put(self._health(f"reconnect/{label}", str(e)))
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
+        product_type = _label_product_type(label)
 
-    async def _recv_until_stale(
-        self,
-        ws,
-        sym_to_sub: dict[str, Subscription],
-        label: str,
-        queue: asyncio.Queue[NormalizedEvent],
-    ) -> None:
-        """Consume frames until the per-frame watchdog trips (SHR-60).
+        async def _subscribe(ws) -> None:
+            await ws.send(
+                json.dumps({"method": "SUBSCRIBE", "params": streams, "id": 1})
+            )
 
-        `ping_interval/timeout` only catch a dead TCP layer; a half-open or
-        silently-idle stream (the geo-blocked "subscribed but silent" case)
-        keeps the socket open and `recv()` blocks forever with no exception and
-        no reconnect. Bounding each `recv()` with `stale_timeout_s` detects that:
-        on timeout we emit a `feed_stale` health event and return, which exits
-        the caller's `async with websockets.connect(...)` and forces a
-        reconnect. The first `recv()` is bounded too, so "subscribed but never
-        delivered" is caught as a first-data deadline."""
-        while True:
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=self.stale_timeout_s)
-            except asyncio.TimeoutError:
-                log.warning(
-                    "binance/%s no frame in %.0fs; force-reconnecting",
-                    label, self.stale_timeout_s,
-                )
-                await queue.put(self._health(
-                    f"feed_stale/{label}",
-                    f"no frame in {self.stale_timeout_s:.0f}s",
-                ))
-                return
-            recv_ns = time.time_ns()
-            try:
-                msg = _json_decode(raw)
-            except (ValueError, TypeError):
-                continue
-            for ev in self._handle(msg, recv_ns, sym_to_sub, label):
-                await queue.put(ev)
+        def _handle(msg: dict, recv_ns: int) -> list[NormalizedEvent]:
+            return self._handle(msg, recv_ns, sym_to_sub, label, product_type)
+
+        # BaseWsAdapter owns connect/backoff/circuit-breaker and the SHR-60
+        # per-frame staleness watchdog (force-reconnect + feed_stale health on a
+        # silent/half-open socket, plus the first-data deadline).
+        await self._run_ws(
+            url=ws_url,
+            subscribe=_subscribe,
+            handle=_handle,
+            queue=queue,
+            label=label,
+            product_type=product_type,
+        )
 
     def _handle(
         self,
@@ -187,10 +151,11 @@ class BinanceAdapter(VenueAdapter):
         recv_ns: int,
         sym_to_sub: dict[str, Subscription],
         label: str,
+        product_type: ProductType = ProductType.PERP,
     ) -> list[NormalizedEvent]:
         # SUBSCRIBE response: {"result":null,"id":1}
         if "result" in msg and "id" in msg:
-            return [self._health(f"subscribed/{label}", json.dumps(msg))]
+            return [self._health(f"subscribed/{label}", json.dumps(msg), product_type)]
 
         e = msg.get("e")
         symbol = (msg.get("s") or "").upper()
@@ -384,16 +349,3 @@ class BinanceAdapter(VenueAdapter):
                         )
                     )
             await asyncio.sleep(PERP_MARK_POLL_INTERVAL_S)
-
-    def _health(self, kind: str, detail: str) -> HealthEvent:
-        now = time.time_ns()
-        return HealthEvent(
-            venue=self.venue,
-            product_type=ProductType.PERP,
-            mechanism=Mechanism.CLOB,
-            symbol="*",
-            exchange_ts=now,
-            local_recv_ts=now,
-            kind=kind,
-            detail=detail,
-        )
