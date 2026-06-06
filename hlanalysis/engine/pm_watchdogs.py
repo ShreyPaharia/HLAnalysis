@@ -37,7 +37,7 @@ def _pm_check_unconfirmed_orders(
 ) -> list[OrderUnconfirmed]:
     """Pure detector: scan slot.dal.live_orders() and return one
     OrderUnconfirmed for each open order older than threshold_s that hasn't
-    already alerted. Mutates `slot.pm_alerted_unconfirmed_cloids` to record
+    already alerted. Mutates `slot.pm.alerted_unconfirmed_cloids` to record
     new alerts and to evict cloids no longer live.
     """
     live = slot.dal.live_orders()
@@ -45,7 +45,7 @@ def _pm_check_unconfirmed_orders(
     # Garbage-collect alerted set so a re-placed order with the same cloid
     # would re-fire after its next stall. Without this, the set grows
     # unbounded over the process lifetime.
-    slot.pm_alerted_unconfirmed_cloids &= live_cloids
+    slot.pm.alerted_unconfirmed_cloids &= live_cloids
     out: list[OrderUnconfirmed] = []
     for o in live:
         if o.status != "open":
@@ -53,7 +53,7 @@ def _pm_check_unconfirmed_orders(
         age_s = (now_ns - o.last_update_ts_ns) / 1e9
         if age_s < threshold_s:
             continue
-        if o.cloid in slot.pm_alerted_unconfirmed_cloids:
+        if o.cloid in slot.pm.alerted_unconfirmed_cloids:
             continue
         out.append(OrderUnconfirmed(
             ts_ns=now_ns, account_alias=slot.alias,
@@ -61,7 +61,7 @@ def _pm_check_unconfirmed_orders(
             size=o.size, limit_price=o.price, age_seconds=age_s,
             venue_oid=o.venue_oid or "",
         ))
-        slot.pm_alerted_unconfirmed_cloids.add(o.cloid)
+        slot.pm.alerted_unconfirmed_cloids.add(o.cloid)
     return out
 
 
@@ -69,13 +69,13 @@ def _pm_check_redemption_timeouts(
     slot: "AccountSlot", now_ns: int, *,
     threshold_s: float = PM_REDEMPTION_TIMEOUT_S,
 ) -> list[RedemptionTimeout]:
-    """Pure detector: walk slot.pm_settlements and return one
+    """Pure detector: walk slot.pm.settlements and return one
     RedemptionTimeout per PM settlement older than threshold_s that hasn't
-    alerted. Mutates `slot.pm_alerted_redemption_qidxs`.
+    alerted. Mutates `slot.pm.alerted_redemption_qidxs`.
     """
     out: list[RedemptionTimeout] = []
-    for qidx, (settled_ts_ns, symbol, qty, realized_pnl) in slot.pm_settlements.items():
-        if qidx in slot.pm_alerted_redemption_qidxs:
+    for qidx, (settled_ts_ns, symbol, qty, realized_pnl) in slot.pm.settlements.items():
+        if qidx in slot.pm.alerted_redemption_qidxs:
             continue
         age_s = (now_ns - settled_ts_ns) / 1e9
         if age_s < threshold_s:
@@ -91,5 +91,5 @@ def _pm_check_redemption_timeouts(
             settled_ts_ns=settled_ts_ns, age_seconds=age_s,
             expected_payout_usd=expected_payout,
         ))
-        slot.pm_alerted_redemption_qidxs.add(qidx)
+        slot.pm.alerted_redemption_qidxs.add(qidx)
     return out

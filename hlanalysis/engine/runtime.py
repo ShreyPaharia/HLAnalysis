@@ -122,6 +122,34 @@ def _remap_reference_symbol(ev: NormalizedEvent) -> NormalizedEvent:
 
 
 @dataclass
+class PmSlotState:
+    """Polymarket-only mutable slot state. Present (non-None) on a slot iff its
+    venue is ``polymarket``; HL slots leave ``AccountSlot.pm`` as None. Grouping
+    these here keeps the PM-specific bookkeeping out of HL slots' way and gives
+    the PM watchdogs/loops a single object to read and mutate.
+    """
+    # cloids that have already triggered an OrderUnconfirmed alert. Cleared when
+    # the cloid drops out of live_orders (status flipped to
+    # filled/cancelled/rejected) so a future stall on a re-placed order with the
+    # same cloid would re-fire.
+    alerted_unconfirmed_cloids: set[str] = field(default_factory=set)
+    # (qidx -> (settled_ts_ns, symbol, qty, realized_pnl)) for PM settlement
+    # Exits, captured via the bus subscription in `_continuous_checks_loop`.
+    # Drives RedemptionTimeout.
+    settlements: dict[int, tuple[int, str, float, float]] = field(default_factory=dict)
+    # qidxs that have already fired RedemptionTimeout — prevents per-tick spam
+    # after the 6h threshold trips.
+    alerted_redemption_qidxs: set[int] = field(default_factory=set)
+    # Set True after the first reconcile pass that authoritatively synced
+    # positions from venue truth (the data-api). Until then the live reconcile
+    # APPLIES venue changes (to adopt positions missed while the engine was down
+    # — the restart gate runs before market data loads, so it can't); afterwards
+    # the live reconcile is alert-only and our fill ledger is the source of
+    # truth (PM data-api lags/flaps). HL ignores this (always applies).
+    startup_position_synced: bool = False
+
+
+@dataclass
 class AccountSlot:
     """One (strategy, account) pair. Owns its own DAL, HL client, risk gate,
     router, reconciler, and strategy instance. The only thing shared with
@@ -129,6 +157,11 @@ class AccountSlot:
     """
     cfg: StrategyConfig
     account_cfg: "HyperliquidAccount | PolymarketAccount"
+    # Venue discriminator, set once at build time from account_cfg.venue
+    # ("hyperliquid" | "polymarket"). The single source of truth for "is this a
+    # PM slot?" — read via the `is_pm` predicate, never via ad-hoc isinstance /
+    # deploy-lookup checks.
+    venue: str
     state_db_path: Path
     kill_switch_path: Path
     cloid_prefix: str           # e.g. "hla-v1-" or "hla-v31-"
@@ -145,39 +178,26 @@ class AccountSlot:
     scans_completed: int = 0
     decisions_emitted: int = 0
     halted: bool = False         # daily-loss / kill-switch latched
-    # PM-only alert tracking. Populated by `_continuous_checks_loop` for slots
-    # whose `account_cfg` is a PolymarketAccount; HL slots leave these empty.
-    # `pm_alerted_unconfirmed_cloids` lists cloids that have already triggered
-    # an OrderUnconfirmed alert. Cleared when the cloid drops out of
-    # live_orders (status flipped to filled/cancelled/rejected) so a future
-    # stall on a re-placed order with the same cloid would re-fire.
-    pm_alerted_unconfirmed_cloids: set[str] = field(default_factory=set)
-    # `pm_settlements` records (qidx -> (settled_ts_ns, symbol, qty,
-    # realized_pnl)) for PM settlement Exits, captured via the bus subscription
-    # in `_continuous_checks_loop`. Drives RedemptionTimeout.
-    # `pm_alerted_redemption_qidxs` tracks qidxs that have already fired
-    # RedemptionTimeout — prevents per-tick spam after the 6h threshold trips.
-    pm_settlements: dict[int, tuple[int, str, float, float]] = field(default_factory=dict)
-    pm_alerted_redemption_qidxs: set[int] = field(default_factory=set)
-    # PM only: set True after the first reconcile pass that authoritatively
-    # synced positions from venue truth (the data-api). Until then the live
-    # reconcile APPLIES venue changes (to adopt positions missed while the
-    # engine was down — the restart gate runs before market data loads, so it
-    # can't); afterwards the live reconcile is alert-only and our fill ledger is
-    # the source of truth (PM data-api lags/flaps). HL ignores this (always
-    # applies).
-    pm_startup_position_synced: bool = False
+    # PM-only mutable state. Non-None iff this is a Polymarket slot (set at build
+    # time); HL slots leave it None. Populated/mutated by the PM watchdogs and
+    # `_continuous_checks_loop`.
+    pm: PmSlotState | None = None
     # Symbols that have already fired a StaleDataHalt alert this stale episode.
-    # The continuous-checks loop runs every ~1s; without this a held position
-    # whose leg book goes quiet (PM books update in bursts, esp. near
-    # resolution) would re-publish the same StaleDataHalt every second. Evicted
-    # when the book recovers so a fresh episode re-alerts. Alert-only — the
-    # per-trade stale veto in risk/scanner is unaffected.
+    # NOT PM-only: the continuous-checks loop surfaces StaleDataHalt for any slot
+    # (HL or PM) holding a position whose leg book goes quiet, and dedups via
+    # this set so the ~1s loop doesn't re-publish every second. Evicted when the
+    # book recovers so a fresh episode re-alerts. Alert-only — the per-trade
+    # stale veto in risk/scanner is unaffected.
     stale_alerted_symbols: set[str] = field(default_factory=set)
 
     @property
     def alias(self) -> str:
         return self.cfg.account_alias
+
+    @property
+    def is_pm(self) -> bool:
+        """The single PM-slot predicate (venue discriminator)."""
+        return self.venue == "polymarket"
 
 
 @dataclass
@@ -284,12 +304,9 @@ class EngineRuntime:
             # are visually distinct on Telegram (e.g. `[HL:v31]` vs
             # `[PM:v31_pm]`). Tag picked off the venue-typed AccountConfig
             # discriminator so adding a new venue requires no rules.py edit.
-            venue_by_alias: dict[str, str] = {}
-            for s in slots:
-                if isinstance(s.account_cfg, PolymarketAccount):
-                    venue_by_alias[s.alias] = "PM"
-                elif isinstance(s.account_cfg, HyperliquidAccount):
-                    venue_by_alias[s.alias] = "HL"
+            venue_by_alias: dict[str, str] = {
+                s.alias: ("PM" if s.is_pm else "HL") for s in slots
+            }
             rules = AlertRules(
                 bus=self.bus, telegram=tg, venue_by_alias=venue_by_alias,
             )
@@ -351,11 +368,6 @@ class EngineRuntime:
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-
-    def _is_pm_slot(self, slot: "AccountSlot") -> bool:
-        """True for Polymarket slots (venue discriminator)."""
-        acct = self.deploy_cfg.accounts.get(slot.alias)
-        return getattr(acct, "venue", "") == "polymarket" if acct is not None else False
 
     # ---------- cadence registration ----------
 
@@ -438,7 +450,7 @@ class EngineRuntime:
         # reduce landing within that dust of flat as a full close (and suppress
         # un-sellable dust sells). HL fills the exact size, so it stays ~exact.
         reduce_close_atol = (
-            DUST_QTY_ABS_TOL if isinstance(acct, PolymarketAccount) else 1e-9
+            DUST_QTY_ABS_TOL if acct.venue == "polymarket" else 1e-9
         )
         router = Router(
             dal=dal, gate=risk, bus=self.bus, exec_client=exec_client,
@@ -466,11 +478,12 @@ class EngineRuntime:
             gate_log_path=gate_log_path,
         )
         return AccountSlot(
-            cfg=s_cfg, account_cfg=acct,
+            cfg=s_cfg, account_cfg=acct, venue=acct.venue,
             state_db_path=state_db_path, kill_switch_path=kill_switch_path,
             cloid_prefix=cloid_prefix,
             dal=dal, exec_client=exec_client, risk=risk, router=router,
             strategy=strategy, scanner=scanner,
+            pm=PmSlotState() if acct.venue == "polymarket" else None,
         )
 
     # ---------- task bodies ----------
@@ -773,7 +786,7 @@ class EngineRuntime:
                 slot.exec_client.realized_pnl_since, window_start_ns,
             )
             self._venue_pnl_failures[slot.alias] = 0
-            if self._is_pm_slot(slot):
+            if slot.is_pm:
                 settlement_pnl = await asyncio.to_thread(
                     slot.dal.settlement_pnl_since, window_start_ns,
                 )
@@ -814,8 +827,8 @@ class EngineRuntime:
                 #         gate runs before market data is loaded so it can't),
                 #         then alert-only. PM's data-api lags/flaps, so live we
                 #         trust our own fill ledger and only alert on diffs.
-                is_pm = self._is_pm_slot(slot)
-                apply_positions = (not is_pm) or (not slot.pm_startup_position_synced)
+                is_pm = slot.is_pm
+                apply_positions = (not is_pm) or (not slot.pm.startup_position_synced)
                 # Fetch venue open-orders, clearinghouse state, and fills off the
                 # event loop (SHR-41); the cached fills feed the Reconciler's
                 # fills_lookup for every cloid.
@@ -837,7 +850,7 @@ class EngineRuntime:
                 # authoritative (positions_known) pass — so a data-api outage at
                 # startup doesn't prematurely flip us to alert-only.
                 if is_pm and apply_positions and venue_state.positions_known:
-                    slot.pm_startup_position_synced = True
+                    slot.pm.startup_position_synced = True
                 # Translate "local position vanished from venue" into a
                 # settlement event before publishing any other drift. On HL
                 # HIP-4 the venue auto-closes positions at settlement and the
@@ -851,7 +864,7 @@ class EngineRuntime:
                     outcome_description, question_description,
                     settlement_pnl_usd,
                 )
-                is_pm = self._is_pm_slot(slot)
+                is_pm = slot.is_pm
                 window_start_ns = Scanner._daily_window_start_ns(
                     now, hour=slot.cfg.global_.daily_window_start_hour_utc,
                 )
@@ -921,9 +934,9 @@ class EngineRuntime:
         kill_path = slot.kill_switch_path
         # PM-only flag gating the OrderUnconfirmed + RedemptionTimeout
         # watchdogs so HL slots don't emit PM-specific alerts.
-        is_pm = isinstance(slot.account_cfg, PolymarketAccount)
+        is_pm = slot.is_pm
         # PM-only bus subscription. We capture settlement Exit events into
-        # `slot.pm_settlements` so the RedemptionTimeout watchdog has a
+        # `slot.pm.settlements` so the RedemptionTimeout watchdog has a
         # ts→qty record to scan 6h later. HL slots don't subscribe.
         pm_bus_sub: asyncio.Queue | None = self.bus.subscribe() if is_pm else None
         while not self.stop_event.is_set():
@@ -978,7 +991,7 @@ class EngineRuntime:
                     self._maybe_stop_all_halted(slot)
                     continue
 
-                # PM-only: drain bus subscription into pm_settlements so the
+                # PM-only: drain bus subscription into slot.pm.settlements so the
                 # RedemptionTimeout watchdog can fire 6h after a settlement
                 # Exit. We filter to settlement Exits matching this slot's
                 # alias — other slots' settlements / non-settlement events are
@@ -995,7 +1008,7 @@ class EngineRuntime:
                             and ev.reason == "settlement"
                             and ev.account_alias == slot.alias
                         ):
-                            slot.pm_settlements.setdefault(
+                            slot.pm.settlements.setdefault(
                                 ev.question_idx,
                                 (ev.ts_ns, ev.symbol, ev.qty, ev.realized_pnl),
                             )
