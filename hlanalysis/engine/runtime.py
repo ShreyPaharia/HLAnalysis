@@ -162,44 +162,52 @@ def _pm_check_redemption_timeouts(
     return out
 
 
+# LateResolutionConfig fields sourced from the strategy GLOBAL block, not the
+# allowlist entry. Everything else on the dataclass that also exists on
+# AllowlistEntry is forwarded by reflection (see below); stop_loss_pct is
+# special-cased (None -> disabled sentinel).
+_LR_GLOBAL_SOURCED = {
+    "max_strike_distance_pct",
+    "min_recent_volume_usd",
+    "stale_data_halt_seconds",
+}
+
+
 def _late_resolution_config_from_entry(
     entry, *, global_,
 ) -> LateResolutionConfig:
     """Build a LateResolutionConfig from a single AllowlistEntry plus the
-    strategy's global block. Cross-cutting fields (max_strike_distance_pct,
-    min_recent_volume_usd, stale_data_halt_seconds) come from `global_`;
-    everything else comes from `entry`. `getattr` defaults let older YAMLs
-    without the safety-gate fields keep loading.
+    strategy's global block.
+
+    Reflection-based forwarding (the SHR-65 pattern, mirroring
+    ``build_theta_harvester_config``): every LateResolutionConfig field that
+    also exists on AllowlistEntry is forwarded straight through — no
+    hand-maintained subset, so a tuned knob can never be silently dropped (the
+    old getattr-subset dropped drift_aware_d / exit_bid_floor / exit_safety_d_5m
+    / exit_vol_lookback_5m_seconds / size_scaling / size_min_fraction /
+    vol_scaled_tte_*, diverging live from the backtest builder
+    build_v1_late_resolution). The GLOBAL-sourced fields come from ``global_``;
+    stop_loss_pct maps None -> the ≥1e8 "disabled" sentinel the strategy expects
+    (matches build_v1_late_resolution). Defaults on AllowlistEntry mirror the
+    dataclass, so an entry that sets none of the optional knobs reproduces
+    today's effective live behavior exactly.
+    ``tests/unit/test_late_resolution_config_parity.py`` guards the mirror.
     """
+    dataclass_field_names = {f.name for f in dataclass_fields_of(LateResolutionConfig)}
+    entry_field_names = set(type(entry).model_fields)
+    forwarded = {
+        name: getattr(entry, name)
+        for name in dataclass_field_names & entry_field_names
+        if name not in _LR_GLOBAL_SOURCED and name != "stop_loss_pct"
+    }
     return LateResolutionConfig(
-        tte_min_seconds=entry.tte_min_seconds, tte_max_seconds=entry.tte_max_seconds,
-        price_extreme_threshold=entry.price_extreme_threshold,
-        distance_from_strike_usd_min=entry.distance_from_strike_usd_min,
-        vol_max=entry.vol_max, max_position_usd=entry.max_position_usd,
-        # LateResolutionConfig.stop_loss_pct is a non-Optional float; the
-        # strategy treats values ≥1e8 as "disabled" (matches build_v1_late_resolution
-        # in strategy/late_resolution.py). Map None -> sentinel here.
-        stop_loss_pct=1e9 if entry.stop_loss_pct is None else entry.stop_loss_pct,
         max_strike_distance_pct=global_.max_strike_distance_pct,
         min_recent_volume_usd=global_.min_recent_volume_usd,
         stale_data_halt_seconds=global_.stale_data_halt_seconds,
-        price_extreme_max=getattr(entry, "price_extreme_max", 1.0),
-        min_safety_d=getattr(entry, "min_safety_d", 0.0),
-        vol_lookback_seconds=getattr(entry, "vol_lookback_seconds", 1800),
-        exit_safety_d=getattr(entry, "exit_safety_d", 0.0),
-        vol_ewma_lambda=getattr(entry, "vol_ewma_lambda", 0.0),
-        vol_estimator=getattr(entry, "vol_estimator", "stdev"),
-        vol_sampling_dt_seconds=getattr(entry, "vol_sampling_dt_seconds", 60),
-        size_cap_near_strike_pct=getattr(entry, "size_cap_near_strike_pct", 0.0),
-        size_cap_max_dist_pct=getattr(entry, "size_cap_max_dist_pct", 1.5),
-        size_cap_min_ask=getattr(entry, "size_cap_min_ask", 0.88),
-        use_bid_for_entry_gate=getattr(entry, "use_bid_for_entry_gate", False),
-        min_bid_notional_usd=getattr(entry, "min_bid_notional_usd", 0.0),
-        topup_enabled=getattr(entry, "topup_enabled", True),
-        topup_threshold_pct=getattr(entry, "topup_threshold_pct", 0.2),
-        topup_min_notional_usd=getattr(entry, "topup_min_notional_usd", 11.0),
-        fee_model=getattr(entry, "fee_model", "flat"),
-        fee_rate=getattr(entry, "fee_rate", 0.0),
+        # LateResolutionConfig.stop_loss_pct is a non-Optional float; the
+        # strategy treats values ≥1e8 as "disabled". Map None -> sentinel here.
+        stop_loss_pct=1e9 if entry.stop_loss_pct is None else entry.stop_loss_pct,
+        **forwarded,
     )
 
 

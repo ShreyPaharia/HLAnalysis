@@ -33,7 +33,11 @@ def _substitute_env(raw: Any) -> Any:
 
 
 class AllowlistEntry(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    # extra='forbid' makes a typo'd or unsupported knob fail loudly at load
+    # instead of being silently dropped → train/serve skew (the SHR-65 pattern,
+    # extended to v1). `tests/unit/test_late_resolution_config_parity.py` pins
+    # this model to LateResolutionConfig so every strategy knob stays settable.
+    model_config = ConfigDict(frozen=True, extra="forbid")
     match: dict[str, str | list[str]]
     max_position_usd: float
     # Nullable: when None, the position carries a sentinel stop_loss_price that
@@ -109,6 +113,30 @@ class AllowlistEntry(BaseModel):
     # honest about what fee curve the slot expects.
     fee_model: Literal["flat", "pm_binary"] = "flat"
     fee_rate: float = 0.0
+    # --- Fields below were declared on LateResolutionConfig and forwarded by the
+    # backtest builder build_v1_late_resolution, but the live builder dropped
+    # them (it was a hand-maintained getattr subset) → live/sim divergence. Now
+    # declared here so they round-trip through YAML and the reflection-based
+    # live builder forwards them. Defaults mirror LateResolutionConfig so the
+    # effective live behavior is unchanged unless a knob is explicitly set. See
+    # LateResolutionConfig for each field's semantics.
+    #
+    # Hard bid-level stop (0 = disabled).
+    exit_bid_floor: float = 0.0
+    # Drift-corrected safety_d distance (False = symmetric |ln S/K|).
+    drift_aware_d: bool = False
+    # Auxiliary fast-σ mid-hold exit and its lookback (0 = disabled).
+    exit_safety_d_5m: float = 0.0
+    exit_vol_lookback_5m_seconds: int = 300
+    # safety_d-scaled position sizing ("fixed" = no scaling) and its floor.
+    size_scaling: str = "fixed"
+    size_min_fraction: float = 0.25
+    # Vol-scaled (variable) TTE entry window (disabled by default → fixed
+    # tte_max_seconds applies, bit-identical to legacy).
+    vol_scaled_tte_enabled: bool = False
+    vol_scaled_tte_ref_sigma: float = 0.0
+    vol_scaled_tte_exponent: float = 1.0
+    vol_scaled_tte_ceiling_seconds: int = 0
 
 
 class GlobalRiskConfig(BaseModel):
