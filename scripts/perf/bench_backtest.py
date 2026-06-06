@@ -7,7 +7,7 @@ report builder consumes.
 Usage:
     HLBT_HL_DATA_ROOT=/path/to/data \
     HLBT_PM_CACHE_ROOT=/path/to/data/sim \
-    python scripts/perf/bench_backtest.py --label baseline --out summeries/perf-bench-baseline.json
+    python scripts/perf/bench_backtest.py --label baseline --out data/perf-bench-baseline.json
 """
 from __future__ import annotations
 

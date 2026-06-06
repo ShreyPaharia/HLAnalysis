@@ -109,7 +109,7 @@ If no variant clears all five ⇒ write up the negative result and shelve, mirro
 - `hlanalysis/backtest/runner/pm_sweep_momentum_mr.py` — sweep orchestrator (192 runs, parallelizable).
 - `tests/strategy/test_momentum_mr.py` — unit tests for each indicator (deterministic inputs, expected scores).
 - `tests/strategy/test_delta_hedged_v35.py` — integration: default-off path is bit-identical to v3.1; gate skips correctly; tilt modulates `edge_min` correctly.
-- `summeries/v35_momentum_mr_2026_05_28.md` — sweep results, regime-bucket breakdown, decision.
+- `docs/research/v35_momentum_mr_2026_05_28.md` — sweep results, regime-bucket breakdown, decision.
 
 ## Out of scope
 

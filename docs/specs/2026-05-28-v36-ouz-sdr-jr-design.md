@@ -80,7 +80,7 @@ Plus a v3.6-specific criterion: **the new variant must strictly dominate the v3.
 - `tests/unit/test_momentum_mr.py` — extended with OU-Z and SDR tests (~6 tests).
 - `tests/unit/test_theta_harvester_v36_jr.py` — JR-trust-weight unit + integration tests.
 - `scripts/run_v36_sweep.py` — sweep driver mirroring v3.5 extension script.
-- `summeries/v36_ouz_sdr_jr_2026_05_28.md` — results writeup + ship decision.
+- `docs/research/v36_ouz_sdr_jr_2026_05_28.md` — results writeup + ship decision.
 
 ## Out of scope
 
@@ -91,6 +91,6 @@ Plus a v3.6-specific criterion: **the new variant must strictly dominate the v3.
 
 ## References
 
-- v3.5 sweep results: `summeries/v35_momentum_mr_2026_05_28.md`
+- v3.5 sweep results: `docs/research/v35_momentum_mr_2026_05_28.md`
 - Alternative-indicators research: `docs/research/alternative_momentum_mr_indicators.md`
 - BPV math: `hlanalysis/strategy/_numba/vol.py::bipower_variation_sigma`

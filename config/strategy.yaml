@@ -49,7 +49,7 @@ strategies:
         # 9.73 / DD $33 vs the dt=60 baseline $212. v1 + v31 share the BTC feed
         # and MUST move to dt=5 IN LOCKSTEP (engine conflict-guards a mismatch).
         # ⚠️ GATE: requires ≥1-week paper validation before live cutover.
-        # See summeries/v1_cadence_validation_2026_05_30.md.
+        # See docs/research/v1_cadence_validation_2026_05_30.md.
         vol_estimator: parkinson
         vol_sampling_dt_seconds: 5
         distance_from_strike_usd_min: 0
@@ -195,7 +195,7 @@ strategies:
         #   tte=4h:  PnL +$95.89, Sharpe 9.72,  maxDD $16.87
         #   tte=12h: PnL +$177.01, Sharpe 16.22, maxDD $15.07  ← ship
         #   tte=24h: PnL +$169.97, Sharpe 14.38, maxDD $18.15
-        # See summeries/2026-05-21-mid-hold-tte-stack.md.
+        # See docs/research/2026-05-21-mid-hold-tte-stack.md.
         tte_max_seconds: 43200
         price_extreme_threshold: 0.0     # theta_harvester enters off edge, not extreme price
         price_extreme_max: 1.0
@@ -257,7 +257,7 @@ strategies:
       # 2026-06-05: 3600 → 900 (binary only; buckets override to 2700 below).
       # Independent HL binary walk-forward tune
       # (v31_binary_independent_tune_2026_06_05 /
-      # summeries/2026-06-05-v31-hl-binary-tune.md, n=25, engine bit-identical
+      # docs/research/2026-06-05-v31-hl-binary-tune.md, n=25, engine bit-identical
       # to prod baseline $830.24). At dt=5, vol_lookback=900 is the worst-half
       # optimum AND lowers maxDD: full $863.51 (+$33), worst-half $385.52 (+$21),
       # maxDD $111.51 (−$13), Sharpe 12.94 vs prod $830.24 / $364.10 / $124.57.
@@ -275,7 +275,7 @@ strategies:
       # 2026-05-24: 0.05 → 0.0 (kill). Post-σ-fix (commit cc44bf6) the 1m
       # bar resampling makes σ_RV never approach the 0.05 floor. HL
       # binary+bucket kill-only ablation produced bit-identical
-      # PnL/Sharpe/maxDD/trades vs prod. See summeries/2026-05-23-v31-final-state.md.
+      # PnL/Sharpe/maxDD/trades vs prod. See docs/research/2026-05-23-v31-final-state.md.
       vol_clip_min: 0.0
       vol_clip_max: 5.0
       edge_buffer: 0.02
@@ -291,7 +291,7 @@ strategies:
       # 2026-05-24: 0.20 → null (kill). Upper-edge filter never binds on PM
       # (entries are gated well below 20% edge by edge_buffer + favorite_threshold)
       # and never binds on HL. Both PM walk-forward and HL kill-only ablation
-      # produced bit-identical results to prod. See summeries/2026-05-23-v31-final-state.md.
+      # produced bit-identical results to prod. See docs/research/2026-05-23-v31-final-state.md.
       edge_max: null
       exit_edge_threshold: 0.0
       time_stop_seconds: 0
