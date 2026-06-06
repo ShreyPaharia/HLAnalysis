@@ -31,6 +31,7 @@
 # Optional env: DATA_ROOT (default /data), DUCKDB_BIN (default /usr/local/bin/duckdb)
 #               LOOKBACK_DAYS (default 2 — bounds the walk so it stays fast as
 #               the EBS volume grows; covers the most recent date= partitions).
+#               DUCKDB_MEM_LIMIT (default 256MB), DUCKDB_THREADS (default 2).
 
 set -euo pipefail
 
@@ -38,6 +39,20 @@ DATA_ROOT="${DATA_ROOT:-/data}"
 DUCKDB_BIN="${DUCKDB_BIN:-/usr/local/bin/duckdb}"
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-2}"
 SENTINEL="hour=all"
+
+# DuckDB memory governance. The recorder box is a t4g.micro (~916MB RAM) shared
+# with the live engine; left unbounded, duckdb defaults its memory_limit to ~80%
+# of RAM (~730MB) and a rollup spikes to ~570MB RSS, which on top of the resident
+# engine triggers a GLOBAL OOM that kills hl-engine (OOMScoreAdjust=500) — the
+# hourly engine death this script caused once PM recording volume grew. Cap it so
+# the merge SPILLS to disk instead of OOM-competing with the engine — same 256MB
+# convention as tools/backfill_daily_compaction.py. preserve_insertion_order=false
+# lets the COPY stream (order is irrelevant for a compaction merge), slashing peak
+# memory; temp_directory gives it somewhere to spill once capped.
+DUCKDB_MEM_LIMIT="${DUCKDB_MEM_LIMIT:-256MB}"
+DUCKDB_THREADS="${DUCKDB_THREADS:-2}"
+DUCKDB_TMP="${DUCKDB_TMP:-$DATA_ROOT/.duckdb_tmp}"
+mkdir -p "$DUCKDB_TMP"
 
 if [ ! -d "$DATA_ROOT" ]; then
   echo "ERROR: $DATA_ROOT does not exist" >&2
@@ -66,7 +81,7 @@ merge_parquet() {
   # drifted between hours (e.g. a Polymarket column added/dropped mid-day) still
   # merges — the same promotion the readers do (read_recorded promote_options).
   if "$DUCKDB_BIN" -c \
-    "COPY (SELECT * FROM read_parquet('$glob', union_by_name=true)) TO '$tmp' (FORMAT 'PARQUET', COMPRESSION 'ZSTD');"
+    "SET memory_limit='$DUCKDB_MEM_LIMIT'; SET threads=$DUCKDB_THREADS; SET temp_directory='$DUCKDB_TMP'; SET preserve_insertion_order=false; COPY (SELECT * FROM read_parquet('$glob', union_by_name=true)) TO '$tmp' (FORMAT 'PARQUET', COMPRESSION 'ZSTD');"
   then
     if [ ! -s "$tmp" ]; then rm -f "$tmp"; return 1; fi
     mv -f "$tmp" "$out"
