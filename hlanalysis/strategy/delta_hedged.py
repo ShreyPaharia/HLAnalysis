@@ -18,6 +18,7 @@ from .theta_harvester import ThetaHarvesterConfig, ThetaHarvesterStrategy
 from .types import (
     Action, BookState, Decision, Diagnostic, OrderIntent, Position, QuestionView,
 )
+from .vol import ANNUAL_SECONDS
 
 
 def binary_delta(*, reference_price: float, strike: float, sigma: float, tau_yr: float, mu_eff: float) -> float:
@@ -152,7 +153,7 @@ class DeltaHedgedStrategy(Strategy):
         sigma = self._binary._sigma(recent_returns)
         if sigma is None:
             return 0.0
-        tau_yr = (question.expiry_ns - now_ns) / 1e9 / (365.25 * 86400.0)
+        tau_yr = (question.expiry_ns - now_ns) / 1e9 / ANNUAL_SECONDS
         if tau_yr <= 0:
             return 0.0
         mu_eff = self._binary._mu(recent_returns)

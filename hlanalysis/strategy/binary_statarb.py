@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import math
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Optional
 
 from .base import Strategy
+from .intents import make_entry_intent, make_exit_intent, round_size
 from .types import (
-    Action, BookState, Decision, Diagnostic, OrderIntent, Position, QuestionView,
+    Action, BookState, Decision, Diagnostic, Position, QuestionView,
 )
 
 
@@ -114,18 +114,12 @@ class BinaryStatArbStrategy(Strategy):
                 Diagnostic("info", "no_signal", (("z", f"{z:.3f}"),)),
             ))
 
-        size = max(0.0, math.floor((self.cfg.max_position_usd / target_book.ask_px) * 100) / 100)
+        size = max(0.0, round_size(self.cfg.max_position_usd, target_book.ask_px))
         if size <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"),))
 
-        intent = OrderIntent(
-            question_idx=question.question_idx,
-            symbol=target_symbol,
-            side="buy",
-            size=size,
-            limit_price=target_book.ask_px,
-            cloid=f"hla-{uuid.uuid4()}",
-            time_in_force="ioc",
+        intent = make_entry_intent(
+            question, symbol=target_symbol, size=size, limit_price=target_book.ask_px,
         )
         return Decision(
             action=Action.ENTER, intents=(intent,),
@@ -152,16 +146,9 @@ class BinaryStatArbStrategy(Strategy):
         self._state.sample_count += 1
 
     def _exit_intent(self, question: QuestionView, position: Position, held: BookState, *, reason: str) -> Decision:
-        intent = OrderIntent(
-            question_idx=question.question_idx,
-            symbol=position.symbol,
-            side="sell" if position.qty > 0 else "buy",
-            size=abs(position.qty),
-            limit_price=held.bid_px,
-            cloid=f"hla-{uuid.uuid4()}",
-            time_in_force="ioc",
-            reduce_only=True,
-        )
+        # NB: ``reason`` tags the diagnostic only — the intent keeps the legacy
+        # empty ``exit_reason`` (this strategy predates intent-level reasons).
+        intent = make_exit_intent(question, position, limit_price=held.bid_px)
         return Decision(
             action=Action.EXIT, intents=(intent,),
             diagnostics=(Diagnostic("info", reason),),

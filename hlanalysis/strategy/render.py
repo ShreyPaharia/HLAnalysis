@@ -8,14 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from .regions import kv_get as _kv
 from .types import QuestionView
-
-
-def _kv(qv: QuestionView, key: str, default: str = "") -> str:
-    for k, v in qv.kv:
-        if k == key:
-            return v
-    return default
 
 
 def _expiry_str(qv: QuestionView) -> str:

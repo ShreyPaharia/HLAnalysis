@@ -20,7 +20,6 @@ from hlanalysis.backtest.runner.market_state import MarketState
 from hlanalysis.strategy._numba.vol import (
     ewma_std,
     parkinson_sigma_window,
-    sample_std_returns,
 )
 from hlanalysis.strategy.late_resolution import (
     LateResolutionConfig,
@@ -175,7 +174,6 @@ def _replay(strat_cls, state) -> float:
 def _warmup_jits() -> None:
     arr = np.array([0.001, -0.001, 0.002], dtype=np.float64)
     ewma_std(arr, 0.94)
-    sample_std_returns(arr)
     parkinson_sigma_window(
         np.array([1.001, 1.002], dtype=np.float64),
         np.array([0.999, 0.998], dtype=np.float64),

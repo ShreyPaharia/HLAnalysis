@@ -2,18 +2,18 @@
 from __future__ import annotations
 
 import math
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
 from scipy.stats import norm  # type: ignore[import-untyped]
 
-from ._numba.vol import sample_std_returns as _nb_sample_std
 from .base import Strategy
+from .intents import make_entry_intent, make_exit_intent, round_size
 from .types import (
-    Action, BookState, Decision, Diagnostic, OrderIntent, Position, QuestionView,
+    Action, BookState, Decision, Diagnostic, Position, QuestionView,
 )
+from .vol import ANNUAL_SECONDS, annualized_sigma
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,9 +37,6 @@ class ModelEdgeConfig:
     # Defaults preserve previous behavior (no constraint).
     tte_min_seconds: int = 0           # skip entries when less than this remains
     tte_max_seconds: int = 10**9       # skip entries when more than this remains
-
-
-_ANNUAL_SECONDS = 365.25 * 86400.0
 
 
 class ModelEdgeStrategy(Strategy):
@@ -73,15 +70,8 @@ class ModelEdgeStrategy(Strategy):
         if position is not None:
             held = books.get(position.symbol)
             if held is not None and held.bid_px is not None and held.bid_px <= position.stop_loss_price:
-                intent = OrderIntent(
-                    question_idx=question.question_idx,
-                    symbol=position.symbol,
-                    side="sell" if position.qty > 0 else "buy",
-                    size=abs(position.qty),
-                    limit_price=held.bid_px,
-                    cloid=f"hla-{uuid.uuid4()}",
-                    time_in_force="ioc",
-                    reduce_only=True,
+                intent = make_exit_intent(
+                    question, position, limit_price=held.bid_px,
                 )
                 return Decision(
                     action=Action.EXIT,
@@ -98,16 +88,19 @@ class ModelEdgeStrategy(Strategy):
             return Decision(action=Action.HOLD, diagnostics=(
                 Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tau_s:.0f}"),)),
             ))
-        tau_yr = tau_s / _ANNUAL_SECONDS
+        tau_yr = tau_s / ANNUAL_SECONDS
 
         # 2) σ from recent_returns sliced to lookback; annualize and clip
         n_keep = max(2, self.cfg.vol_lookback_seconds // self.cfg.vol_sampling_dt_seconds)
         returns_window = recent_returns[-n_keep:]
         if len(returns_window) < 2:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "vol_insufficient_data"),))
-        sigma_raw = float(_nb_sample_std(np.asarray(returns_window, dtype=np.float64)))
-        ann_factor = math.sqrt(_ANNUAL_SECONDS / float(self.cfg.vol_sampling_dt_seconds))
-        sigma = max(self.cfg.vol_clip_min, min(self.cfg.vol_clip_max, sigma_raw * ann_factor))
+        sigma = annualized_sigma(
+            np.asarray(returns_window, dtype=np.float64),
+            dt_seconds=self.cfg.vol_sampling_dt_seconds,
+            estimator="sample_std",
+            clip_min=self.cfg.vol_clip_min, clip_max=self.cfg.vol_clip_max,
+        )
         if sigma <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "sigma_zero"),))
 
@@ -117,7 +110,7 @@ class ModelEdgeStrategy(Strategy):
             n_drift = max(1, self.cfg.drift_lookback_seconds // self.cfg.vol_sampling_dt_seconds)
             window = recent_returns[-n_drift:]
             mu_per_sample = float(np.mean(window))
-            mu_ann = mu_per_sample * (_ANNUAL_SECONDS / float(self.cfg.vol_sampling_dt_seconds))
+            mu_ann = mu_per_sample * (ANNUAL_SECONDS / float(self.cfg.vol_sampling_dt_seconds))
             mu_eff = self.cfg.drift_blend * mu_ann
 
         # 4) p_model under GBM with optional drift
@@ -170,18 +163,12 @@ class ModelEdgeStrategy(Strategy):
             target_book = no_
             target_symbol = question.no_symbol
 
-        size = max(0.0, math.floor((self.cfg.max_position_usd / target_book.ask_px) * 100) / 100)
+        size = max(0.0, round_size(self.cfg.max_position_usd, target_book.ask_px))
         if size <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"), diag_common))
 
-        intent = OrderIntent(
-            question_idx=question.question_idx,
-            symbol=target_symbol,
-            side="buy",
-            size=size,
-            limit_price=target_book.ask_px,
-            cloid=f"hla-{uuid.uuid4()}",
-            time_in_force="ioc",
+        intent = make_entry_intent(
+            question, symbol=target_symbol, size=size, limit_price=target_book.ask_px,
         )
         return Decision(
             action=Action.ENTER,

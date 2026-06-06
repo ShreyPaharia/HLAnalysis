@@ -50,9 +50,11 @@ def _cfg(**over) -> ThetaHarvesterConfig:
 def test_gate_mode_blocks_entry_when_mr_against_favorite() -> None:
     # Strong sustained DOWN move → z_ret against an UP favorite produces
     # regime="mr" and score=-1.0 (|z| >> 2.5, signed against favorite).
-    # z_ret is used here because a uniform down drift saturates its MR
-    # threshold reliably with ≥30 bars.
-    rets = tuple([-0.002] * 90)  # strong down drift
+    # z_ret is used here because a sustained down drift saturates its MR
+    # threshold reliably with ≥30 bars. A tiny per-bar variation keeps the
+    # realized σ strictly positive (a *perfectly* constant series has σ=0,
+    # which gates the entry as vol_insufficient before the MR gate runs).
+    rets = tuple((-0.002 if i % 2 == 0 else -0.0021) for i in range(90))
     cfg = _cfg(
         momentum_mr_enabled=True,
         momentum_mr_indicator="z_ret",

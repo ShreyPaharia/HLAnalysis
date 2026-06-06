@@ -26,14 +26,14 @@ when iterating on the NBA path).
 """
 from __future__ import annotations
 
-import math
-import uuid
 from collections.abc import Mapping
 
 from .base import Strategy
+from .fee import fee_per_share
+from .intents import make_entry_intent, make_exit_intent, round_size
 from .theta_harvester import ThetaHarvesterConfig
 from .types import (
-    Action, BookState, Decision, Diagnostic, OrderIntent, Position, QuestionView,
+    Action, BookState, Decision, Diagnostic, Position, QuestionView,
 )
 
 
@@ -101,9 +101,7 @@ class NBAWinProbStrategy(Strategy):
         return 0.0
 
     def _fee_per_share(self, p: float) -> float:
-        if self.cfg.fee_model == "pm_binary":
-            return self.cfg.fee_rate * p * (1.0 - p)
-        return self.cfg.fee_taker
+        return fee_per_share(self.cfg, p, side="entry")
 
     def _evaluate_entry(
         self, *, question: QuestionView, books: Mapping[str, BookState],
@@ -161,16 +159,12 @@ class NBAWinProbStrategy(Strategy):
                            (("edge", f"{chosen_edge:.4f}"),)), diag,
             ))
 
-        size = max(0.0, math.floor((self.cfg.max_position_usd / chosen_book.ask_px) * 100) / 100)
+        size = max(0.0, round_size(self.cfg.max_position_usd, chosen_book.ask_px))
         if size <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"), diag))
 
-        intent = OrderIntent(
-            question_idx=question.question_idx,
-            symbol=chosen_sym, side="buy",
-            size=size, limit_price=chosen_book.ask_px,
-            cloid=f"hla-{uuid.uuid4()}",
-            time_in_force="ioc",
+        intent = make_entry_intent(
+            question, symbol=chosen_sym, size=size, limit_price=chosen_book.ask_px,
         )
         return Decision(
             action=Action.ENTER, intents=(intent,),
@@ -203,12 +197,7 @@ class NBAWinProbStrategy(Strategy):
 
         # Edge-based exit.
         held_p = self._p_for_leg(question, position.symbol, p_yes_home)
-        if self.cfg.fee_model == "pm_binary":
-            exit_fee = self.cfg.fee_rate * held_p * (1.0 - held_p)
-        elif self.cfg.exit_take_profit_mode:
-            exit_fee = self.cfg.exit_fee
-        else:
-            exit_fee = self.cfg.fee_taker
+        exit_fee = fee_per_share(self.cfg, held_p, side="exit")
         if self.cfg.exit_take_profit_mode:
             edge_held = held.bid_px - held_p - exit_fee
             should_exit = edge_held > self.cfg.exit_edge_threshold
@@ -228,17 +217,7 @@ class NBAWinProbStrategy(Strategy):
         ))
 
     def _exit(self, q: QuestionView, pos: Position, held: BookState, *, reason: str) -> Decision:
-        intent = OrderIntent(
-            question_idx=q.question_idx,
-            symbol=pos.symbol,
-            side="sell" if pos.qty > 0 else "buy",
-            size=abs(pos.qty),
-            limit_price=held.bid_px,  # type: ignore[arg-type]
-            cloid=f"hla-{uuid.uuid4()}",
-            time_in_force="ioc",
-            reduce_only=True,
-            exit_reason=reason,
-        )
+        intent = make_exit_intent(q, pos, limit_price=held.bid_px, exit_reason=reason)
         return Decision(action=Action.EXIT, intents=(intent,),
                         diagnostics=(Diagnostic("info", reason),))
 

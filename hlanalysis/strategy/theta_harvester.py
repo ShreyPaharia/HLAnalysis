@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Optional
@@ -10,85 +9,17 @@ import numpy as np
 from loguru import logger
 from scipy.stats import norm  # type: ignore[import-untyped]
 
-from ._numba.vol import bipower_variation_sigma as _nb_bipower
-from ._numba.vol import sample_std_returns as _nb_sample_std
 from .base import Strategy
+from .fee import fee_per_share
+from .intents import make_entry_intent, make_exit_intent, round_size
+from .regions import winning_region as _winning_region
+from .topup import run_topup
 from .types import (
-    Action, BookState, Decision, Diagnostic, OrderIntent, Position, QuestionView,
+    Action, BookState, Decision, Diagnostic, Position, QuestionView,
 )
+from .vol import ANNUAL_SECONDS, annualized_sigma, bipower_variation_sigma
 
-_ANNUAL_SECONDS = 365.25 * 86400.0
-
-
-# ---------------------------------------------------------------------------
-# Leg-aware helpers — handle both priceBinary and priceBucket question classes
-# uniformly. Bucket layout mirrors v1 (late_resolution.py): for N thresholds we
-# get N+1 outcomes × 2 legs each, alternating [yes_o0, no_o0, yes_o1, no_o1, ...].
-# Helpers are intentionally duplicated rather than imported from v1 so the two
-# strategies stay decoupled and can diverge over time.
-# ---------------------------------------------------------------------------
-
-
-def _kv_get(qv: QuestionView, key: str) -> str:
-    for k, v in qv.kv:
-        if k == key:
-            return v
-    return ""
-
-
-def _winning_region(qv: QuestionView, symbol: str) -> tuple[Optional[float], Optional[float]]:
-    """Return (lo, hi) such that the leg `symbol` wins iff underlying ∈ [lo, hi]
-    at expiry. None on either side denotes ±∞.
-
-    Binary YES wins above strike → (strike, None); NO wins at-or-below → (None, strike).
-    Bucket (HL convention, YES at even leg index, NO at odd):
-      outcome 0       → YES wins below thr[0]
-      outcome 1..N-1  → YES wins inside (thr[i-1], thr[i])
-      outcome N       → YES wins above thr[-1]
-    NO of an edge bucket inverts to the opposite half-line. NO of a middle
-    bucket is the union of two half-lines (non-contiguous) and is signaled
-    by returning (None, None) — callers must skip such legs as no-edge.
-    """
-    if qv.klass == "priceBinary":
-        if symbol == qv.yes_symbol:
-            return (qv.strike, None)
-        if symbol == qv.no_symbol:
-            return (None, qv.strike)
-        return (None, None)
-
-    if qv.klass != "priceBucket" or not qv.leg_symbols or symbol not in qv.leg_symbols:
-        return (None, None)
-
-    thresholds_raw = _kv_get(qv, "priceThresholds")
-    thr = [float(t) for t in thresholds_raw.split(",") if t.strip()]
-    if not thr:
-        return (None, None)
-
-    idx = qv.leg_symbols.index(symbol)
-    outcome_pos = idx // 2
-    side_idx = idx % 2  # 0=YES, 1=NO
-
-    if outcome_pos == 0:
-        yes_lo: Optional[float] = None
-        yes_hi: Optional[float] = thr[0]
-    elif outcome_pos == len(thr):
-        yes_lo, yes_hi = thr[-1], None
-    elif 0 < outcome_pos < len(thr):
-        yes_lo, yes_hi = thr[outcome_pos - 1], thr[outcome_pos]
-    else:
-        return (None, None)
-
-    if side_idx == 0:
-        return (yes_lo, yes_hi)
-    # NO leg
-    if yes_lo is None:
-        return (yes_hi, None)
-    if yes_hi is None:
-        return (None, yes_lo)
-    # Middle-bucket NO = union of two half-lines (non-contiguous). Treat as
-    # ineligible for entry; v3 exit-side handling needs care here too — see
-    # _p_leg_win_prob which returns 0 in this case.
-    return (None, None)
+_ANNUAL_SECONDS = ANNUAL_SECONDS
 
 
 _INV_SQRT_2PI = 1.0 / math.sqrt(2.0 * math.pi)
@@ -496,14 +427,12 @@ class ThetaHarvesterStrategy(Strategy):
         if len(window) < 2:
             return None
         arr = np.asarray(window, dtype=np.float64)
-        if self.cfg.vol_estimator == "bipower":
-            raw = float(_nb_bipower(arr))
-        elif self.cfg.vol_estimator == "sample_std":
-            raw = float(_nb_sample_std(arr))
-        else:
-            raise ValueError(f"Unknown vol_estimator: {self.cfg.vol_estimator!r}")
-        ann = math.sqrt(_ANNUAL_SECONDS / float(self.cfg.vol_sampling_dt_seconds))
-        sigma = max(self.cfg.vol_clip_min, min(self.cfg.vol_clip_max, raw * ann))
+        sigma = annualized_sigma(
+            arr,
+            dt_seconds=self.cfg.vol_sampling_dt_seconds,
+            estimator=self.cfg.vol_estimator,
+            clip_min=self.cfg.vol_clip_min, clip_max=self.cfg.vol_clip_max,
+        )
         return sigma if sigma > 0 else None
 
     def _mu(self, recent_returns: tuple[float, ...]) -> float:
@@ -613,12 +542,8 @@ class ThetaHarvesterStrategy(Strategy):
             if pp is None:
                 continue  # NO leg of a middle bucket — no contiguous winning region
             p_win, phi_d = pp
-            fee_per_share = (
-                self.cfg.fee_rate * p_win * (1.0 - p_win)
-                if self.cfg.fee_model == "pm_binary"
-                else self.cfg.fee_taker
-            )
-            edge = p_win - book.ask_px - fee_per_share - self.cfg.half_spread_assumption
+            fee = fee_per_share(self.cfg, p_win, side="entry")
+            edge = p_win - book.ask_px - fee - self.cfg.half_spread_assumption
             per_leg.append((sym, p_win, edge, book, phi_d))
 
         if not per_leg:
@@ -706,16 +631,8 @@ class ThetaHarvesterStrategy(Strategy):
                 reference_price=reference_price, lo=question.strike, hi=None,
                 sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
             ) or 0.0
-            fee_yes = (
-                self.cfg.fee_rate * p_yes_view * (1.0 - p_yes_view)
-                if self.cfg.fee_model == "pm_binary"
-                else self.cfg.fee_taker
-            )
-            fee_no = (
-                self.cfg.fee_rate * (1.0 - p_yes_view) * p_yes_view
-                if self.cfg.fee_model == "pm_binary"
-                else self.cfg.fee_taker
-            )
+            fee_yes = fee_per_share(self.cfg, p_yes_view, side="entry")
+            fee_no = fee_per_share(self.cfg, 1.0 - p_yes_view, side="entry")
             edge_yes = (
                 p_yes_view - (yes.ask_px if yes and yes.ask_px is not None else 1.0)
                 - fee_yes - self.cfg.half_spread_assumption
@@ -828,7 +745,7 @@ class ThetaHarvesterStrategy(Strategy):
                     Diagnostic("info", "lm_no_returns"), diag,
                 ))
             arr = np.asarray(window, dtype=np.float64)
-            bv_per_sample = float(_nb_bipower(arr))
+            bv_per_sample = float(bipower_variation_sigma(arr))
             if bv_per_sample <= 0.0:
                 return Decision(action=Action.HOLD, diagnostics=(
                     Diagnostic("info", "lm_bv_zero"), diag,
@@ -843,18 +760,12 @@ class ThetaHarvesterStrategy(Strategy):
                     diag,
                 ))
 
-        size = max(0.0, math.floor((self.cfg.max_position_usd / chosen_book.ask_px) * 100) / 100)
+        size = max(0.0, round_size(self.cfg.max_position_usd, chosen_book.ask_px))
         if size <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"), diag))
 
-        intent = OrderIntent(
-            question_idx=question.question_idx,
-            symbol=chosen_sym,
-            side="buy",
-            size=size,
-            limit_price=chosen_book.ask_px,
-            cloid=f"hla-{uuid.uuid4()}",
-            time_in_force="ioc",
+        intent = make_entry_intent(
+            question, symbol=chosen_sym, size=size, limit_price=chosen_book.ask_px,
         )
         diags_out: tuple = (Diagnostic("info", "entry"), diag)
         if tilt_diag is not None:
@@ -904,15 +815,8 @@ class ThetaHarvesterStrategy(Strategy):
                 sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
             )
             if safety_d is not None and safety_d < self.cfg.exit_safety_d:
-                intent = OrderIntent(
-                    question_idx=question.question_idx,
-                    symbol=position.symbol,
-                    side="sell" if position.qty > 0 else "buy",
-                    size=abs(position.qty),
-                    limit_price=held.bid_px,
-                    cloid=f"hla-{uuid.uuid4()}",
-                    time_in_force="ioc",
-                    reduce_only=True,
+                intent = make_exit_intent(
+                    question, position, limit_price=held.bid_px,
                     exit_reason="exit_safety_d",
                 )
                 return Decision(
@@ -969,12 +873,7 @@ class ThetaHarvesterStrategy(Strategy):
         # `fee_taker` (the legacy formula models the gate as "if I
         # hypothetically rebought at the bid, what'd I pay?", so an entry
         # fee is the right comparable).
-        if self.cfg.fee_model == "pm_binary":
-            exit_fee_per_share = self.cfg.fee_rate * held_p * (1.0 - held_p)
-        elif self.cfg.exit_take_profit_mode:
-            exit_fee_per_share = self.cfg.exit_fee
-        else:
-            exit_fee_per_share = self.cfg.fee_taker
+        exit_fee_per_share = fee_per_share(self.cfg, held_p, side="exit")
         if self.cfg.exit_take_profit_mode:
             edge_held = held.bid_px - held_p - exit_fee_per_share
             exit_now = edge_held > self.cfg.exit_edge_threshold
@@ -1009,17 +908,17 @@ class ThetaHarvesterStrategy(Strategy):
         an order ≥ topup_min_notional_usd. Otherwise returns HOLD with a
         skip-reason diagnostic. The router's post-exit cooldown is bypassed
         naturally — `_last_exit_ts` is 0 while a position is open.
+
+        Shared body lives in ``strategy/topup.py``; theta supplies its entry
+        evaluator and the no_book / not_needed branches (which, unlike v1,
+        return HOLD ``topup_skip`` diagnostics rather than ``None``).
         """
-        held = books.get(position.symbol)
-        if held is None or held.ask_px is None or held.ask_px <= 0:
+        def _on_no_book() -> Decision:
             return Decision(action=Action.HOLD, diagnostics=(
                 Diagnostic("info", "topup_skip", (("reason", "no_book"),)),
             ))
-        ask = held.ask_px
-        current_ntl = abs(position.qty) * ask
-        target_ntl = self.cfg.max_position_usd
-        shortfall_ntl = target_ntl - current_ntl
-        if shortfall_ntl < target_ntl * self.cfg.topup_threshold_pct:
+
+        def _on_not_needed(current_ntl: float, target_ntl: float) -> Decision:
             # Demoted from info → debug 2026-05-22: fires every scan tick (~1/s)
             # while a position is held and the topup gate stays "not_needed",
             # drowning genuinely interesting events out of journalctl. The
@@ -1038,96 +937,23 @@ class ThetaHarvesterStrategy(Strategy):
                 )),
             ))
 
-        # Re-run ALL entry gates against the current state. _evaluate_entry
-        # already encodes every gate (TTE, near-strike, favorite, edge,
-        # edge_max, bid notional, etc.) so we delegate rather than duplicate.
-        entry_dec = self._evaluate_entry(
-            question=question, books=books, reference_price=reference_price,
-            sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
-            recent_returns=recent_returns,
-        )
-        if entry_dec.action != Action.ENTER or not entry_dec.intents:
-            failed_gate = (
-                entry_dec.diagnostics[0].message
-                if entry_dec.diagnostics else "unknown"
-            )
-            logger.debug(
-                "topup_skip q={} sym={} reason=gate_failed:{} current_ntl=${:.2f} target_ntl=${:.2f}",
-                question.question_idx, position.symbol, failed_gate,
-                current_ntl, target_ntl,
-            )
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "topup_skip", (
-                    ("reason", f"gate_failed:{failed_gate}"),
-                )),
-            ))
-        candidate = entry_dec.intents[0]
-        if candidate.symbol != position.symbol:
-            logger.debug(
-                "topup_skip q={} sym={} reason=leg_changed chosen={} current_ntl=${:.2f} target_ntl=${:.2f}",
-                question.question_idx, position.symbol, candidate.symbol,
-                current_ntl, target_ntl,
-            )
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "topup_skip", (
-                    ("reason", "leg_changed"),
-                    ("chosen", candidate.symbol),
-                )),
-            ))
-
-        topup_size = math.floor((shortfall_ntl / ask) * 100) / 100
-        topup_ntl = topup_size * ask
-        if topup_ntl < self.cfg.topup_min_notional_usd:
-            logger.debug(
-                "topup_skip q={} sym={} reason=below_min_notional topup_ntl=${:.2f} min=${:.2f}",
-                question.question_idx, position.symbol, topup_ntl,
-                self.cfg.topup_min_notional_usd,
-            )
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "topup_skip", (
-                    ("reason", "below_min_notional"),
-                    ("topup_ntl", f"{topup_ntl:.2f}"),
-                )),
-            ))
-
-        intent = OrderIntent(
-            question_idx=question.question_idx,
-            symbol=position.symbol,
-            side="buy",
-            size=topup_size,
-            limit_price=ask,
-            cloid=f"hla-{uuid.uuid4()}",
-            time_in_force="ioc",
-        )
-        logger.info(
-            "topup_emit q={} sym={} side=buy current_ntl=${:.2f} target_ntl=${:.2f} "
-            "topup_size={:.2f} ask={:.5f}",
-            question.question_idx, position.symbol, current_ntl, target_ntl,
-            topup_size, ask,
-        )
-        return Decision(
-            action=Action.ENTER, intents=(intent,),
-            diagnostics=(
-                Diagnostic("info", "topup_emit", (
-                    ("current_ntl", f"{current_ntl:.2f}"),
-                    ("target_ntl", f"{target_ntl:.2f}"),
-                    ("topup_size", f"{topup_size:.2f}"),
-                    ("ask", f"{ask:.5f}"),
-                )),
+        return run_topup(
+            question=question, books=books, position=position,
+            max_position_usd=self.cfg.max_position_usd,
+            topup_threshold_pct=self.cfg.topup_threshold_pct,
+            topup_min_notional_usd=self.cfg.topup_min_notional_usd,
+            run_entry=lambda: self._evaluate_entry(
+                question=question, books=books, reference_price=reference_price,
+                sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+                recent_returns=recent_returns,
             ),
+            on_no_book=_on_no_book,
+            on_not_needed=_on_not_needed,
         )
 
     def _exit_intent(self, question: QuestionView, position: Position, held: BookState, *, reason: str) -> Decision:
-        intent = OrderIntent(
-            question_idx=question.question_idx,
-            symbol=position.symbol,
-            side="sell" if position.qty > 0 else "buy",
-            size=abs(position.qty),
-            limit_price=held.bid_px,  # type: ignore[arg-type]
-            cloid=f"hla-{uuid.uuid4()}",
-            time_in_force="ioc",
-            reduce_only=True,
-            exit_reason=reason,
+        intent = make_exit_intent(
+            question, position, limit_price=held.bid_px, exit_reason=reason,
         )
         return Decision(
             action=Action.EXIT, intents=(intent,),

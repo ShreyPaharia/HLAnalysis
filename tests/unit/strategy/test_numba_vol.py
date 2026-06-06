@@ -6,9 +6,11 @@ import numpy as np
 import pytest
 
 from hlanalysis.strategy._numba.vol import (
-    bipower_variation_sigma,
     ewma_std,
     parkinson_sigma_window,
+)
+from hlanalysis.strategy.vol import (
+    bipower_variation_sigma,
     sample_std_returns,
 )
 

@@ -1,10 +1,13 @@
-"""JIT'd σ estimators used by LateResolutionStrategy and ModelEdgeStrategy.
+"""JIT'd recursive σ estimators used by LateResolutionStrategy.
 
-Reference Python implementations live in
-``hlanalysis/strategy/late_resolution.py::_ewma_std`` and
-``_parkinson_per_bar_var`` / ``_sigma_parkinson``. The functions here must
-match those references to 1e-12 relative (asserted in
-``tests/unit/strategy/test_numba_vol.py``).
+Only the estimators whose scalar recurrences don't vectorize cleanly stay
+JIT'd here: ``ewma_std`` (EWMA recursion) and ``parkinson_sigma_window``
+(per-bar filter + optional EWMA aggregation). The non-recursive per-sample
+estimators (sample stdev, bipower variation) moved to
+``hlanalysis/strategy/vol.py`` as plain numpy one-liners.
+
+These functions must match their reference Python implementations to 1e-12
+relative (asserted in ``tests/unit/strategy/test_numba_vol.py``).
 """
 from __future__ import annotations
 
@@ -27,50 +30,6 @@ def ewma_std(returns: np.ndarray, lam: float) -> float:
     for i in range(1, n):
         r = returns[i]
         var = lam * var + (1.0 - lam) * r * r
-    return math.sqrt(var)
-
-
-@njit(cache=True, fastmath=False)
-def sample_std_returns(returns: np.ndarray) -> float:
-    """Sample stdev (ddof=1). Matches ``np.std(arr, ddof=1)`` at 1e-12.
-
-    Caller must ensure ``returns`` has at least two elements.
-    """
-    n = returns.shape[0]
-    s = 0.0
-    for i in range(n):
-        s += returns[i]
-    mean = s / n
-    ss = 0.0
-    for i in range(n):
-        d = returns[i] - mean
-        ss += d * d
-    return math.sqrt(ss / (n - 1))
-
-
-@njit(cache=True, fastmath=False)
-def bipower_variation_sigma(returns: np.ndarray) -> float:
-    """Jump-robust per-sample σ via Barndorff-Nielsen & Shephard bipower variation.
-
-    σ²_BV = (π/2) · (1/(n−1)) · Σ_{i=0..n−2} |r_i|·|r_{i+1}|
-
-    A single large |r_k| only contributes to two consecutive products
-    (|r_{k−1}|·|r_k| and |r_k|·|r_{k+1}|) — the other factor is normal-sized,
-    so wicks do not inflate σ_BV the way they inflate sample-stdev (which
-    squares the wick). In the no-jump limit BV converges to the same per-
-    sample variance as ``sample_std_returns`` (assuming zero-mean returns).
-
-    Caller must ensure ``returns`` has at least two elements.
-    """
-    n = returns.shape[0]
-    if n < 2:
-        return 0.0
-    s = 0.0
-    for i in range(n - 1):
-        s += abs(returns[i]) * abs(returns[i + 1])
-    var = (math.pi / 2.0) * s / (n - 1)
-    if var <= 0.0:
-        return 0.0
     return math.sqrt(var)
 
 
@@ -102,8 +61,6 @@ def parkinson_sigma_window(
                     var = lam * var + (1.0 - lam) * pb
         if var < 0.0:
             return 0.0
-        if var < 0.0:
-            var = 0.0
         return math.sqrt(var)
     total = 0.0
     count = 0

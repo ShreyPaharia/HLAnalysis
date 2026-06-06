@@ -4,7 +4,8 @@ from __future__ import annotations
 from hlanalysis.strategy.types import (
     Action, BookState, Position, QuestionView,
 )
-from hlanalysis.strategy.model_edge import ModelEdgeConfig, ModelEdgeStrategy, _ANNUAL_SECONDS
+from hlanalysis.strategy.model_edge import ModelEdgeConfig, ModelEdgeStrategy
+from hlanalysis.strategy.vol import ANNUAL_SECONDS as _ANNUAL_SECONDS
 
 
 def _cfg(**overrides) -> ModelEdgeConfig:

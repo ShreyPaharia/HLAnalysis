@@ -1,29 +1,28 @@
 from __future__ import annotations
 
 import math
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
-from loguru import logger
 
-from ._numba.safety import safety_d_for_region_core as _nb_safety_d_core
 from ._numba.vol import (
     ewma_std as _nb_ewma_std,
     parkinson_sigma_window as _nb_parkinson_sigma_window,
-    sample_std_returns as _nb_sample_std,
 )
 from .base import Strategy
+from .intents import make_entry_intent, make_exit_intent, round_size
+from .regions import winning_region
+from .topup import run_topup
 from .types import (
     Action,
     BookState,
     Decision,
     Diagnostic,
-    OrderIntent,
     Position,
     QuestionView,
 )
+from .vol import sample_std_returns
 
 
 def _as_f64(x) -> np.ndarray:
@@ -32,76 +31,6 @@ def _as_f64(x) -> np.ndarray:
     if isinstance(x, np.ndarray) and x.dtype == np.float64 and x.flags["C_CONTIGUOUS"]:
         return x
     return np.asarray(x, dtype=np.float64)
-
-
-def _kv_get(qv: QuestionView, key: str) -> str:
-    for k, v in qv.kv:
-        if k == key:
-            return v
-    return ""
-
-
-def _winning_region(
-    qv: QuestionView, symbol: str
-) -> tuple[float | None, float | None]:
-    """Return (lo, hi) such that the leg `symbol` wins iff BTC ∈ [lo, hi] at
-    expiry. ``None`` denotes an unbounded side (-∞ for lo, +∞ for hi).
-
-    Binary YES wins above strike → (strike, None); NO wins at-or-below → (None, strike).
-    Bucket layout (HL convention, N thresholds yield N+1 outcomes, 2 legs each;
-    YES at even leg index, NO at odd):
-      outcome 0       (lowest)  → (None, thr[0])
-      outcome 1..N-1  (middle)  → (thr[i-1], thr[i])
-      outcome N       (highest) → (thr[-1], None)
-    NO legs invert the corresponding YES region (winning region splits into two
-    half-lines for middle buckets — collapse to whichever half-line a strict
-    inversion would yield; this helper instead returns the YES bucket bounds and
-    callers compute safety_d against the NEAREST adverse boundary, which is
-    correct for both YES and the half-line NO cases).
-    """
-    if qv.klass == "priceBinary":
-        if symbol == qv.yes_symbol:
-            return (qv.strike, None)
-        if symbol == qv.no_symbol:
-            return (None, qv.strike)
-        return (None, None)
-
-    if qv.klass != "priceBucket" or not qv.leg_symbols or symbol not in qv.leg_symbols:
-        return (None, None)
-
-    thresholds_raw = _kv_get(qv, "priceThresholds")
-    thr = [float(t) for t in thresholds_raw.split(",") if t.strip()]
-    if not thr:
-        return (None, None)
-
-    idx = qv.leg_symbols.index(symbol)
-    outcome_pos = idx // 2
-    side_idx = idx % 2  # 0=YES, 1=NO
-
-    # YES region for this outcome bucket.
-    if outcome_pos == 0:
-        yes_lo: float | None = None
-        yes_hi: float | None = thr[0]
-    elif outcome_pos == len(thr):
-        yes_lo, yes_hi = thr[-1], None
-    elif 0 < outcome_pos < len(thr):
-        yes_lo, yes_hi = thr[outcome_pos - 1], thr[outcome_pos]
-    else:
-        return (None, None)
-
-    if side_idx == 0:
-        return (yes_lo, yes_hi)
-
-    # NO of a single-sided bucket inverts to the opposite half-line.
-    if yes_lo is None:
-        return (yes_hi, None)
-    if yes_hi is None:
-        return (None, yes_lo)
-    # NO of a middle bucket is the union of two half-lines; not a contiguous
-    # winning region. Callers treat (None, None) as "no leg-level gate" and
-    # fall back to non-safety exits (stop-loss, settlement). Buying NO of a
-    # middle bucket is disallowed anyway by the YES-only entry path.
-    return (None, None)
 
 
 def _safety_d_for_region(
@@ -117,30 +46,28 @@ def _safety_d_for_region(
     """Signed safety distance (in σ-window units) from ``ref_price`` to the
     nearer adverse boundary of the leg's winning region.
 
-    Returns ``None`` when neither boundary is known (e.g. NO leg of a middle
-    bucket). Positive values mean BTC is safely inside the winning region;
-    negative means already on the losing side.
-
-    Thin Optional wrapper around the JIT'd
-    ``_numba.safety.safety_d_for_region_core``: encodes ``None`` bounds as
-    flag/value pairs, then maps the JIT's NaN sentinel back to ``None``.
+    Returns ``None`` when σ_window is non-positive or neither boundary is known
+    (e.g. NO leg of a middle bucket). Positive values mean BTC is safely inside
+    the winning region; negative means already on the losing side. Plain scalar
+    arithmetic — formerly a numba kernel with None→flag and None→NaN plumbing.
     """
-    has_lo = lo is not None
-    has_hi = hi is not None
-    val = _nb_safety_d_core(
-        float(ref_price),
-        has_lo,
-        float(lo) if has_lo else 0.0,
-        has_hi,
-        float(hi) if has_hi else 0.0,
-        float(sigma_window),
-        float(mu),
-        float(tte_min),
-        bool(drift_aware),
-    )
-    if math.isnan(val):
+    if sigma_window <= 0.0:
         return None
-    return float(val)
+    if lo is not None and hi is not None:
+        d_lo = math.log(ref_price / lo)
+        d_hi = math.log(hi / ref_price)
+        return (d_lo if d_lo < d_hi else d_hi) / sigma_window
+    if lo is not None:
+        d = math.log(ref_price / lo)
+        if drift_aware:
+            d += mu * tte_min
+        return d / sigma_window
+    if hi is not None:
+        d = math.log(hi / ref_price)
+        if drift_aware:
+            d -= mu * tte_min
+        return d / sigma_window
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,7 +270,7 @@ class LateResolutionStrategy(Strategy):
         arr = _as_f64(returns_window)
         if self.cfg.vol_ewma_lambda > 0.0:
             return float(_nb_ewma_std(arr, float(self.cfg.vol_ewma_lambda)))
-        return float(_nb_sample_std(arr))
+        return float(sample_std_returns(arr))
 
     def _sigma_parkinson(
         self, hl_window: tuple[tuple[float, float], ...] | np.ndarray
@@ -398,7 +325,7 @@ class LateResolutionStrategy(Strategy):
         winning region (e.g. NO of a middle bucket), σ_window is 0, or the
         helper inputs are non-positive — callers treat None as "gate skipped".
         """
-        lo, hi = _winning_region(question, leg_symbol)
+        lo, hi = winning_region(question, leg_symbol)
         if lo is None and hi is None:
             return None
         mu = float(np.mean(returns_window)) if len(returns_window) >= 2 else 0.0
@@ -475,15 +402,8 @@ class LateResolutionStrategy(Strategy):
                 and held_book.bid_px is not None
                 and held_book.bid_px <= self.cfg.exit_bid_floor
             ):
-                intent = OrderIntent(
-                    question_idx=question.question_idx,
-                    symbol=position.symbol,
-                    side="sell" if position.qty > 0 else "buy",
-                    size=abs(position.qty),
-                    limit_price=held_book.bid_px,
-                    cloid=f"hla-{uuid.uuid4()}",
-                    time_in_force="ioc",
-                    reduce_only=True,
+                intent = make_exit_intent(
+                    question, position, limit_price=held_book.bid_px,
                     exit_reason="exit_bid_below_floor",
                 )
                 return Decision(
@@ -531,15 +451,8 @@ class LateResolutionStrategy(Strategy):
                             tte_min=tte_s_now_5m / dt,
                         )
                         if safety_d_5m is not None and safety_d_5m < self.cfg.exit_safety_d_5m:
-                            intent = OrderIntent(
-                                question_idx=question.question_idx,
-                                symbol=position.symbol,
-                                side="sell" if position.qty > 0 else "buy",
-                                size=abs(position.qty),
-                                limit_price=held_book.bid_px,
-                                cloid=f"hla-{uuid.uuid4()}",
-                                time_in_force="ioc",
-                                reduce_only=True,
+                            intent = make_exit_intent(
+                                question, position, limit_price=held_book.bid_px,
                                 exit_reason="exit_safety_d_5m",
                             )
                             return Decision(
@@ -583,15 +496,8 @@ class LateResolutionStrategy(Strategy):
                             tte_min=tte_s_now / dt,
                         )
                         if safety_d_now is not None and safety_d_now < self.cfg.exit_safety_d:
-                            intent = OrderIntent(
-                                question_idx=question.question_idx,
-                                symbol=position.symbol,
-                                side="sell" if position.qty > 0 else "buy",
-                                size=abs(position.qty),
-                                limit_price=held_book.bid_px,
-                                cloid=f"hla-{uuid.uuid4()}",
-                                time_in_force="ioc",
-                                reduce_only=True,
+                            intent = make_exit_intent(
+                                question, position, limit_price=held_book.bid_px,
                                 exit_reason="exit_safety_d",
                             )
                             return Decision(
@@ -607,15 +513,8 @@ class LateResolutionStrategy(Strategy):
             # (Plan 1B); we mirror it here so logging/diagnostics line up.
             if held_book is not None and held_book.bid_px is not None:
                 if held_book.bid_px <= position.stop_loss_price:
-                    intent = OrderIntent(
-                        question_idx=question.question_idx,
-                        symbol=position.symbol,
-                        side="sell" if position.qty > 0 else "buy",
-                        size=abs(position.qty),
-                        limit_price=held_book.bid_px,
-                        cloid=f"hla-{uuid.uuid4()}",
-                        time_in_force="ioc",
-                        reduce_only=True,
+                    intent = make_exit_intent(
+                        question, position, limit_price=held_book.bid_px,
                         exit_reason="exit_stop_loss",
                     )
                     return Decision(
@@ -842,7 +741,7 @@ class LateResolutionStrategy(Strategy):
         # % of the leg's nearest adverse boundary. Bucket NO legs of the middle
         # outcome have no contiguous winning region (lo=hi=None) → skip.
         if self.cfg.size_cap_near_strike_pct > 0.0:
-            lo, hi = _winning_region(question, win_symbol)
+            lo, hi = winning_region(question, win_symbol)
             nearest: float | None = None
             denom: float | None = None
             if lo is not None and hi is not None:
@@ -886,18 +785,12 @@ class LateResolutionStrategy(Strategy):
         # any shortfall on the next tick. The stale-ask sanity cap inside the
         # gate loop above already rejects entries where ask > price_extreme_max,
         # so the protection that the old limit ceiling provided is preserved.
-        size = max(0.0, math.floor((size_usd / win.ask_px) * 100) / 100)
+        size = max(0.0, round_size(size_usd, win.ask_px))
         if size <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"),))
 
-        intent = OrderIntent(
-            question_idx=question.question_idx,
-            symbol=win_symbol,
-            side="buy",
-            size=size,
-            limit_price=win.ask_px,
-            cloid=f"hla-{uuid.uuid4()}",
-            time_in_force="ioc",
+        intent = make_entry_intent(
+            question, symbol=win_symbol, size=size, limit_price=win.ask_px,
         )
         return Decision(
             action=Action.ENTER,
@@ -927,92 +820,22 @@ class LateResolutionStrategy(Strategy):
           - None when no topup attempt was warranted (lets the caller fall
             through to its legacy "have_position" HOLD diagnostic so the
             scanner log shape is unchanged for non-topup ticks).
+
+        Shared body lives in ``strategy/topup.py``; v1 supplies its entry
+        evaluator plus the two ``None`` early-outs (no_book / not_needed).
         """
-        held = books.get(position.symbol)
-        if held is None or held.ask_px is None or held.ask_px <= 0:
-            return None
-        ask = held.ask_px
-        current_ntl = abs(position.qty) * ask
-        target_ntl = self.cfg.max_position_usd
-        shortfall_ntl = target_ntl - current_ntl
-        if shortfall_ntl < target_ntl * self.cfg.topup_threshold_pct:
-            return None  # routine "fully sized" tick — keep legacy diagnostic
-
-        # Re-run ALL entry gates against the current state.
-        entry_dec = self._evaluate_entry(
-            question=question, books=books, reference_price=reference_price,
-            recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
-            now_ns=now_ns, recent_hl_bars=recent_hl_bars,
-        )
-        if entry_dec.action != Action.ENTER or not entry_dec.intents:
-            failed_gate = (
-                entry_dec.diagnostics[0].message
-                if entry_dec.diagnostics else "unknown"
-            )
-            logger.debug(
-                "topup_skip q={} sym={} reason=gate_failed:{} current_ntl=${:.2f} target_ntl=${:.2f}",
-                question.question_idx, position.symbol, failed_gate,
-                current_ntl, target_ntl,
-            )
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "topup_skip", (
-                    ("reason", f"gate_failed:{failed_gate}"),
-                )),
-            ))
-        candidate = entry_dec.intents[0]
-        if candidate.symbol != position.symbol:
-            logger.debug(
-                "topup_skip q={} sym={} reason=leg_changed chosen={} current_ntl=${:.2f} target_ntl=${:.2f}",
-                question.question_idx, position.symbol, candidate.symbol,
-                current_ntl, target_ntl,
-            )
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "topup_skip", (
-                    ("reason", "leg_changed"),
-                    ("chosen", candidate.symbol),
-                )),
-            ))
-
-        topup_size = math.floor((shortfall_ntl / ask) * 100) / 100
-        topup_ntl = topup_size * ask
-        if topup_ntl < self.cfg.topup_min_notional_usd:
-            logger.debug(
-                "topup_skip q={} sym={} reason=below_min_notional topup_ntl=${:.2f} min=${:.2f}",
-                question.question_idx, position.symbol, topup_ntl,
-                self.cfg.topup_min_notional_usd,
-            )
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "topup_skip", (
-                    ("reason", "below_min_notional"),
-                    ("topup_ntl", f"{topup_ntl:.2f}"),
-                )),
-            ))
-
-        intent = OrderIntent(
-            question_idx=question.question_idx,
-            symbol=position.symbol,
-            side="buy",
-            size=topup_size,
-            limit_price=ask,
-            cloid=f"hla-{uuid.uuid4()}",
-            time_in_force="ioc",
-        )
-        logger.info(
-            "topup_emit q={} sym={} side=buy current_ntl=${:.2f} target_ntl=${:.2f} "
-            "topup_size={:.2f} ask={:.5f}",
-            question.question_idx, position.symbol, current_ntl, target_ntl,
-            topup_size, ask,
-        )
-        return Decision(
-            action=Action.ENTER, intents=(intent,),
-            diagnostics=(
-                Diagnostic("info", "topup_emit", (
-                    ("current_ntl", f"{current_ntl:.2f}"),
-                    ("target_ntl", f"{target_ntl:.2f}"),
-                    ("topup_size", f"{topup_size:.2f}"),
-                    ("ask", f"{ask:.5f}"),
-                )),
+        return run_topup(
+            question=question, books=books, position=position,
+            max_position_usd=self.cfg.max_position_usd,
+            topup_threshold_pct=self.cfg.topup_threshold_pct,
+            topup_min_notional_usd=self.cfg.topup_min_notional_usd,
+            run_entry=lambda: self._evaluate_entry(
+                question=question, books=books, reference_price=reference_price,
+                recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
+                now_ns=now_ns, recent_hl_bars=recent_hl_bars,
             ),
+            on_no_book=lambda: None,
+            on_not_needed=lambda current_ntl, target_ntl: None,
         )
 
 

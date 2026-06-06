@@ -20,6 +20,8 @@ import math
 
 import numpy as np
 
+from .vol import bipower_variation_sigma
+
 
 # Reference window for z-score variance — fixed at 240 minutes (4h) regardless
 # of indicator lookback. Long enough to be stable, short enough to track
@@ -228,18 +230,11 @@ def _sdr(
     n = len(window)
     cum_ret = float(np.sum(window))
 
-    # Bipower variation over the lookback window
-    abs_r = np.abs(window)
-    if n >= 2:
-        bpv_sum = float(np.sum(abs_r[1:] * abs_r[:-1]))
-        bpv_per_bar = (math.pi / 2.0) * bpv_sum / (n - 1)
-    else:
-        bpv_per_bar = 0.0
-
-    if bpv_per_bar <= 0.0:
+    # Bipower variation σ over the lookback window (jump-robust; shared kernel).
+    sigma_bpv = bipower_variation_sigma(window)
+    if sigma_bpv <= 0.0:
         return 0.0, "neutral"
 
-    sigma_bpv = math.sqrt(bpv_per_bar)
     z = cum_ret / (sigma_bpv * math.sqrt(n))
     signed_z = z * favorite_side
     score = float(np.clip(signed_z / _SDR_MR_THRESHOLD, -1.0, 1.0))

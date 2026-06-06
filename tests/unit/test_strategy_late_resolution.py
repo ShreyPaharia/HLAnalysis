@@ -326,7 +326,7 @@ def test_exit_intent_when_price_below_stop_loss():
 
 # --- _winning_region: per-leg (lo, hi) derivation for binary + bucket ---
 
-from hlanalysis.strategy.late_resolution import _winning_region  # noqa: E402
+from hlanalysis.strategy.regions import winning_region as _winning_region  # noqa: E402
 
 
 def _binary_qv() -> QuestionView:
