@@ -5,7 +5,7 @@ import signal
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
-from dataclasses import dataclass, field, fields as dataclass_fields_of, replace as dataclass_replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable
 
@@ -46,9 +46,8 @@ from .reconcile import Reconciler
 from .restart_drift import RestartDriftGate
 from .risk import RiskGate
 from .risk_events import (
-    BusEvent,
     DailyLossHalt, EngineHeartbeat, Exit, FeedDown, FeedRecovered, FeedStale,
-    KillSwitchActivated, NewQuestion, OrderUnconfirmed, RedemptionTimeout,
+    KillSwitchActivated, NewQuestion,
     StaleDataHalt, StopLossTriggered,
 )
 from .router import Router
@@ -58,12 +57,30 @@ from ..alerts.rules import AlertRules
 from ..alerts.telegram import TelegramClient
 from ..marketdata.position_math import DUST_QTY_ABS_TOL
 from ..strategy.base import Strategy
-from ..strategy.late_resolution import (
-    LateResolutionConfig, LateResolutionStrategy,
+
+# Config-building, watchdog, strike-capture, and event-sink helpers were split
+# out of this module (see each module's docstring). They are re-exported here so
+# the long-standing `from hlanalysis.engine.runtime import ...` paths (used by
+# replay.py and the engine test suite) keep working.
+from .config_builders import (  # noqa: F401  (re-exported for back-compat)
+    _LR_GLOBAL_SOURCED,
+    _build_strategy_for_slot,
+    _late_resolution_config_from_entry,
+    build_late_resolution_config,
+    build_late_resolution_configs_by_class,
+    build_theta_harvester_config,
+    build_theta_harvester_configs_by_class,
+    reference_sampling_dt_seconds,
+    reference_vol_lookback_seconds,
 )
-from ..strategy.theta_harvester import (
-    ThetaHarvesterConfig, ThetaHarvesterStrategy,
+from .pm_watchdogs import (  # noqa: F401  (re-exported for back-compat)
+    PM_REDEMPTION_TIMEOUT_S,
+    PM_UNCONFIRMED_THRESHOLD_S,
+    _pm_check_redemption_timeouts,
+    _pm_check_unconfirmed_orders,
 )
+from .pm_strike import maybe_capture_pm_strike, pm_strike_capture_loop
+from .events_sink import events_persist_loop
 
 
 # Internal symbol the Binance SPOT reference feed is remapped to (see
@@ -84,292 +101,6 @@ def _remap_reference_symbol(ev: NormalizedEvent) -> NormalizedEvent:
     ):
         return msgspec.structs.replace(ev, symbol=_SPOT_REF_SYMBOL)
     return ev
-
-
-# PM unconfirmed-order watchdog: OrderUnconfirmed fires once a live PM order
-# has sat in flight (status=open/pending/partially_filled) past this threshold
-# without a status change. 30s gives PM CLOB plenty of room under heavy chain
-# load while still surfacing stuck orders before the next scan tick would
-# top up on top of stale state.
-PM_UNCONFIRMED_THRESHOLD_S: float = 30.0
-
-# PM redemption watchdog: RedemptionTimeout fires this long after the
-# settlement Exit if the operator hasn't redeemed yet (we don't watch USDC
-# on-chain). 6h is a generous window that catches genuinely-forgotten
-# settlements without nagging through the normal redemption flow.
-PM_REDEMPTION_TIMEOUT_S: float = 6 * 3600.0
-
-
-def _pm_check_unconfirmed_orders(
-    slot: "AccountSlot", now_ns: int, *,
-    threshold_s: float = PM_UNCONFIRMED_THRESHOLD_S,
-) -> list[OrderUnconfirmed]:
-    """Pure detector: scan slot.dal.live_orders() and return one
-    OrderUnconfirmed for each open order older than threshold_s that hasn't
-    already alerted. Mutates `slot.pm_alerted_unconfirmed_cloids` to record
-    new alerts and to evict cloids no longer live.
-    """
-    live = slot.dal.live_orders()
-    live_cloids: set[str] = {o.cloid for o in live}
-    # Garbage-collect alerted set so a re-placed order with the same cloid
-    # would re-fire after its next stall. Without this, the set grows
-    # unbounded over the process lifetime.
-    slot.pm_alerted_unconfirmed_cloids &= live_cloids
-    out: list[OrderUnconfirmed] = []
-    for o in live:
-        if o.status != "open":
-            continue
-        age_s = (now_ns - o.last_update_ts_ns) / 1e9
-        if age_s < threshold_s:
-            continue
-        if o.cloid in slot.pm_alerted_unconfirmed_cloids:
-            continue
-        out.append(OrderUnconfirmed(
-            ts_ns=now_ns, account_alias=slot.alias,
-            cloid=o.cloid, symbol=o.symbol, side=o.side,  # type: ignore[arg-type]
-            size=o.size, limit_price=o.price, age_seconds=age_s,
-            venue_oid=o.venue_oid or "",
-        ))
-        slot.pm_alerted_unconfirmed_cloids.add(o.cloid)
-    return out
-
-
-def _pm_check_redemption_timeouts(
-    slot: "AccountSlot", now_ns: int, *,
-    threshold_s: float = PM_REDEMPTION_TIMEOUT_S,
-) -> list[RedemptionTimeout]:
-    """Pure detector: walk slot.pm_settlements and return one
-    RedemptionTimeout per PM settlement older than threshold_s that hasn't
-    alerted. Mutates `slot.pm_alerted_redemption_qidxs`.
-    """
-    out: list[RedemptionTimeout] = []
-    for qidx, (settled_ts_ns, symbol, qty, realized_pnl) in slot.pm_settlements.items():
-        if qidx in slot.pm_alerted_redemption_qidxs:
-            continue
-        age_s = (now_ns - settled_ts_ns) / 1e9
-        if age_s < threshold_s:
-            continue
-        # No on-chain check (see RedemptionTimeout docstring): for a winning
-        # leg the operator should see qty USDC arrive; for a loser, zero.
-        # Winner heuristic: realized_pnl > 0 (PM binary payouts make this
-        # equivalent under positive entry prices, which is always the case).
-        expected_payout = qty if realized_pnl > 0 else 0.0
-        out.append(RedemptionTimeout(
-            ts_ns=now_ns, account_alias=slot.alias,
-            question_idx=qidx, symbol=symbol, qty=qty,
-            settled_ts_ns=settled_ts_ns, age_seconds=age_s,
-            expected_payout_usd=expected_payout,
-        ))
-        slot.pm_alerted_redemption_qidxs.add(qidx)
-    return out
-
-
-# LateResolutionConfig fields sourced from the strategy GLOBAL block, not the
-# allowlist entry. Everything else on the dataclass that also exists on
-# AllowlistEntry is forwarded by reflection (see below); stop_loss_pct is
-# special-cased (None -> disabled sentinel).
-_LR_GLOBAL_SOURCED = {
-    "max_strike_distance_pct",
-    "min_recent_volume_usd",
-    "stale_data_halt_seconds",
-}
-
-
-def _late_resolution_config_from_entry(
-    entry, *, global_,
-) -> LateResolutionConfig:
-    """Build a LateResolutionConfig from a single AllowlistEntry plus the
-    strategy's global block.
-
-    Reflection-based forwarding (the SHR-65 pattern, mirroring
-    ``build_theta_harvester_config``): every LateResolutionConfig field that
-    also exists on AllowlistEntry is forwarded straight through — no
-    hand-maintained subset, so a tuned knob can never be silently dropped (the
-    old getattr-subset dropped drift_aware_d / exit_bid_floor / exit_safety_d_5m
-    / exit_vol_lookback_5m_seconds / size_scaling / size_min_fraction /
-    vol_scaled_tte_*, diverging live from the backtest builder
-    build_v1_late_resolution). The GLOBAL-sourced fields come from ``global_``;
-    stop_loss_pct maps None -> the ≥1e8 "disabled" sentinel the strategy expects
-    (matches build_v1_late_resolution). Defaults on AllowlistEntry mirror the
-    dataclass, so an entry that sets none of the optional knobs reproduces
-    today's effective live behavior exactly.
-    ``tests/unit/test_late_resolution_config_parity.py`` guards the mirror.
-    """
-    dataclass_field_names = {f.name for f in dataclass_fields_of(LateResolutionConfig)}
-    entry_field_names = set(type(entry).model_fields)
-    forwarded = {
-        name: getattr(entry, name)
-        for name in dataclass_field_names & entry_field_names
-        if name not in _LR_GLOBAL_SOURCED and name != "stop_loss_pct"
-    }
-    return LateResolutionConfig(
-        max_strike_distance_pct=global_.max_strike_distance_pct,
-        min_recent_volume_usd=global_.min_recent_volume_usd,
-        stale_data_halt_seconds=global_.stale_data_halt_seconds,
-        # LateResolutionConfig.stop_loss_pct is a non-Optional float; the
-        # strategy treats values ≥1e8 as "disabled". Map None -> sentinel here.
-        stop_loss_pct=1e9 if entry.stop_loss_pct is None else entry.stop_loss_pct,
-        **forwarded,
-    )
-
-
-def build_late_resolution_config(cfg: StrategyConfig) -> LateResolutionConfig:
-    """Build the default LateResolutionConfig from a loaded StrategyConfig.
-
-    Shared by EngineRuntime (live) and replay CLI. Returns the config sourced
-    from `cfg.defaults`; per-class overrides land via
-    `build_late_resolution_configs_by_class`.
-    """
-    return _late_resolution_config_from_entry(cfg.defaults, global_=cfg.global_)
-
-
-def build_late_resolution_configs_by_class(
-    cfg: StrategyConfig,
-) -> dict[str, LateResolutionConfig]:
-    """Build per-question.klass LateResolutionConfig overrides from the
-    strategy's allowlist. Each entry whose `match.class` is set produces one
-    config; entries without a class match fall through to defaults at
-    evaluation time. Multiple entries with the same class: last one wins.
-
-    Plumbed into LateResolutionStrategy so allowlist match-specific gate
-    fields (e.g. priceBucket `tte_max_seconds: 86400`) actually take effect
-    at the strategy gate, not only at the risk-gate caps.
-    """
-    by_class: dict[str, LateResolutionConfig] = {}
-    for entry in cfg.allowlist:
-        klass = entry.match.get("class")
-        if not klass:
-            continue
-        by_class[klass] = _late_resolution_config_from_entry(
-            entry, global_=cfg.global_,
-        )
-    return by_class
-
-
-def build_theta_harvester_config(cfg: StrategyConfig) -> ThetaHarvesterConfig:
-    """Construct ThetaHarvesterConfig from the YAML `theta:` block.
-
-    Falls back to allowlist-defaults for fields the theta block omits so the
-    strategy always sees a fully-populated config.
-    """
-    d = cfg.defaults
-    t = cfg.theta
-    if t is None:
-        raise ValueError(
-            f"strategy '{cfg.name}' (alias={cfg.account_alias}) is "
-            "strategy_type=theta_harvester but no `theta:` block was supplied",
-        )
-    # Forward EVERY field the `theta:` block declares straight through to the
-    # dataclass — no hand-maintained subset, so a new tuned knob can never be
-    # silently dropped (SHR-65). The four fields below come from the allowlist
-    # `defaults:` block instead and are not part of the theta block.
-    # test_theta_config_parity.py guards that ThetaParams stays a full mirror.
-    _ALLOWLIST_SOURCED = {
-        "max_position_usd", "tte_min_seconds", "tte_max_seconds", "stop_loss_pct",
-    }
-    dataclass_fields = {f.name for f in dataclass_fields_of(ThetaHarvesterConfig)}
-    forwarded = {
-        name: getattr(t, name)
-        for name in dataclass_fields & set(type(t).model_fields)
-        if name not in _ALLOWLIST_SOURCED
-    }
-    return ThetaHarvesterConfig(
-        max_position_usd=d.max_position_usd,
-        tte_min_seconds=d.tte_min_seconds,
-        tte_max_seconds=d.tte_max_seconds,
-        stop_loss_pct=d.stop_loss_pct,
-        **forwarded,
-    )
-
-
-def build_theta_harvester_configs_by_class(
-    cfg: StrategyConfig,
-) -> dict[str, ThetaHarvesterConfig]:
-    """Build per-question.klass ThetaHarvesterConfig overrides from the strategy's
-    `theta_overrides:` block. Mirrors build_late_resolution_configs_by_class.
-
-    Each class maps to a PARTIAL ThetaParams; only the fields the operator
-    explicitly set (pydantic ``model_fields_set``) override the instance theta
-    defaults built by ``build_theta_harvester_config``. Resolution order is
-    per-class override > instance theta defaults. When `theta_overrides` is unset
-    the map is empty and the strategy runs the single default config for every
-    class — bit-identical to today.
-
-    Using ``model_fields_set`` (not a value diff) is load-bearing: e.g.
-    exit_safety_d=0.0 is both the dataclass default AND a meaningful bucket
-    target, so an explicit 0.0 must win over the instance theta's 1.0.
-
-    Per-class ``vol_sampling_dt_seconds`` IS supported: MarketState buckets the
-    shared reference feed at each registered (symbol, dt) cadence independently,
-    so a class can run a different σ sampling cadence. The engine registers each
-    class's cadence so the dt divergence is realized at the σ-history read.
-    """
-    overrides = cfg.theta_overrides
-    if not overrides:
-        return {}
-    base = build_theta_harvester_config(cfg)
-    by_class: dict[str, ThetaHarvesterConfig] = {}
-    for klass, override in overrides.items():
-        set_fields = {name: getattr(override, name) for name in override.model_fields_set}
-        by_class[klass] = dataclass_replace(base, **set_fields)
-    return by_class
-
-
-def reference_sampling_dt_seconds(cfg: StrategyConfig) -> int:
-    """Effective ``vol_sampling_dt_seconds`` for a slot's reference feed.
-
-    Single source of truth coupling MarketState's mark-bucket period to the
-    cadence the strategy's σ formula assumes. theta_harvester carries it in the
-    `theta:` block; late_resolution carries it on its allowlist/defaults
-    (`AllowlistEntry.vol_sampling_dt_seconds`). Default 60 preserves legacy
-    1m bucketing for both. This lets v1 + v31 move to dt=5 in lockstep on the
-    shared BTC feed (see summeries/v1_cadence_validation_2026_05_30.md).
-    """
-    if cfg.theta is not None:
-        return int(cfg.theta.vol_sampling_dt_seconds)
-    return int(cfg.defaults.vol_sampling_dt_seconds)
-
-
-def reference_vol_lookback_seconds(cfg: StrategyConfig) -> int:
-    """Largest σ/drift lookback window the slot's strategy will request, across
-    defaults, every allowlist entry, and (for theta) the theta block. Used to
-    size MarketState's per-symbol mark history so sub-minute cadences don't
-    truncate the σ window. Mirrors Scanner._required_returns_n's inputs."""
-    secs = cfg.defaults.vol_lookback_seconds
-    for entry in cfg.allowlist:
-        secs = max(secs, entry.vol_lookback_seconds)
-    if cfg.theta is not None:
-        secs = max(
-            secs, cfg.theta.vol_lookback_seconds, cfg.theta.drift_lookback_seconds,
-        )
-    # Per-class theta overrides may request a longer σ/drift window for one
-    # class; size MarketState history for the largest across all of them so a
-    # bucket-vs-binary divergence isn't truncated. Only explicitly-set fields
-    # carry a meaningful value (model_fields_set); unset ones fall back to the
-    # already-counted instance theta defaults above.
-    for override in (cfg.theta_overrides or {}).values():
-        set_fields = override.model_fields_set
-        if "vol_lookback_seconds" in set_fields:
-            secs = max(secs, override.vol_lookback_seconds)
-        if "drift_lookback_seconds" in set_fields:
-            secs = max(secs, override.drift_lookback_seconds)
-    return secs
-
-
-def _build_strategy_for_slot(cfg: StrategyConfig) -> Strategy:
-    """Dispatch on strategy_type. Add new strategies here as they're surfaced
-    for live trading."""
-    if cfg.strategy_type == "late_resolution":
-        return LateResolutionStrategy(
-            build_late_resolution_config(cfg),
-            cfg_by_class=build_late_resolution_configs_by_class(cfg),
-        )
-    if cfg.strategy_type == "theta_harvester":
-        return ThetaHarvesterStrategy(
-            build_theta_harvester_config(cfg),
-            cfg_by_class=build_theta_harvester_configs_by_class(cfg),
-        )
-    raise ValueError(f"unknown strategy_type: {cfg.strategy_type!r}")
 
 
 @dataclass
@@ -850,103 +581,13 @@ class EngineRuntime:
     async def _maybe_capture_pm_strike(
         self, qv, slots: list[AccountSlot], fields: dict[str, str], *, now_ns: int,
     ) -> None:
-        """Capture a PM up/down strike from the Binance SPOT 1m candle close.
-
-        Single capture path. PM resolves against the spot 1m candle CLOSE at
-        strike_ref_ts_ns, so we wait until that minute has closed
-        (now >= ref_ts + 60s) and fetch the close. Fires only when: the question
-        is a PM up/down market (has strike_ref_ts_ns), its strike is still unset,
-        the reference minute has closed, and no slot already has a persisted
-        strike (a restart reloads instead). Fetched off the event loop.
-        """
-        _ONE_MINUTE_NS = 60 * 1_000_000_000
-        _CANDLE_SETTLE_NS = 2 * 1_000_000_000  # let Binance finalize/publish the 1m close
-        if qv is None or qv.venue != "polymarket":
-            return
-        if qv.strike == qv.strike:  # already non-NaN
-            return
-        raw = dict(qv.kv).get("strike_ref_ts_ns")
-        if not raw:
-            return
-        try:
-            ref_ts_ns = int(raw)
-        except (TypeError, ValueError):
-            return
-        if now_ns < ref_ts_ns + _ONE_MINUTE_NS + _CANDLE_SETTLE_NS:
-            return  # reference 1m candle not closed+published yet — retry next tick
-        qidx = qv.question_idx
-        # Per-question lock: prevents a concurrent first-sight call and a periodic
-        # loop tick from both entering the fetch path simultaneously. The second
-        # caller acquires the lock after the first has persisted the strike and
-        # bails on the get_pm_strike check inside.
-        lock = self._pm_strike_locks.setdefault(qidx, asyncio.Lock())
-        async with lock:
-            pm_slots = [
-                s for s in slots
-                if match_question(s.cfg, question_idx=qidx, fields=fields) is not None
-            ]
-            if any(s.dal.get_pm_strike(qidx) is not None for s in pm_slots):
-                return  # a prior run captured it; scanner reloads from DB
-            try:
-                strike = await asyncio.to_thread(self.klines_fetcher, ref_ts_ns)
-            except Exception:
-                logger.exception("pm strike capture fetch crashed qidx={}", qidx)
-                return
-            if strike is None:
-                logger.warning(
-                    "pm strike capture failed qidx={} ref_ts_ns={} — market skipped",
-                    qidx, ref_ts_ns,
-                )
-                return
-            self.market_state.set_question_strike(qidx, strike)
-            for s in pm_slots:
-                s.dal.set_pm_strike(qidx, strike)
-            logger.info(
-                "pm strike captured qidx={} strike={} (binance spot 1m close)",
-                qidx, strike,
-            )
-            _MISMATCH_TOL_BPS = 10.0
-            mark = self.market_state.last_mark(_SPOT_REF_SYMBOL)
-            if mark:
-                bps = abs(strike - mark) / mark * 1e4
-                if bps > _MISMATCH_TOL_BPS:
-                    from .risk_events import PMStrikeMismatch
-                    await self.bus.publish(PMStrikeMismatch(
-                        ts_ns=now_ns, question_idx=qidx,
-                        captured_strike=strike, reference_mark=mark,
-                        divergence_bps=bps,
-                    ))
-                    logger.warning(
-                        "pm strike/mark divergence qidx={} strike={} mark={} bps={:.1f} "
-                        "(alert only)", qidx, strike, mark, bps,
-                    )
+        """Thin delegator to ``pm_strike.maybe_capture_pm_strike`` (the capture
+        logic lives there; this preserves the method API)."""
+        await maybe_capture_pm_strike(self, qv, slots, fields, now_ns=now_ns)
 
     async def _pm_strike_capture_loop(self, slots: list[AccountSlot]) -> None:
-        """Retry PM up/down strike capture each second. First-sight capture in
-        _ingest_loop fires at discovery, but PM lists markets ~24h before open,
-        so the strike can only be fetched once the reference 1m candle closes.
-        This loop walks unresolved PM questions and retries until captured."""
-        while not self.stop_event.is_set():
-            try:
-                now_ns = self._now_ns()
-                for qv in self.market_state.all_questions():
-                    # skip non-PM and already-captured (strike==strike is True
-                    # for a real float, False for NaN = still unresolved)
-                    if qv.venue != "polymarket" or qv.strike == qv.strike:
-                        continue
-                    fields = {
-                        "class": qv.klass, "underlying": qv.underlying,
-                        "period": qv.period, "venue": qv.venue,
-                        "series_slug": dict(qv.kv).get("series_slug", ""),
-                    }
-                    if any(
-                        match_question(s.cfg, question_idx=qv.question_idx, fields=fields) is not None
-                        for s in slots
-                    ):
-                        await self._maybe_capture_pm_strike(qv, slots, fields, now_ns=now_ns)
-            except Exception:
-                logger.exception("pm strike capture loop tick crashed")
-            await self._sleep_or_stop(1.0)
+        """Thin delegator to ``pm_strike.pm_strike_capture_loop``."""
+        await pm_strike_capture_loop(self, slots)
 
     async def _scan_loop(self, slot: AccountSlot) -> None:
         g = slot.cfg.global_
@@ -1014,71 +655,9 @@ class EngineRuntime:
 
     # ---- events persistence (Component 2 — engine observability) -----------
 
-    @staticmethod
-    def _event_columns(ev: BusEvent) -> dict[str, Any]:
-        """Extract the stable, queryable columns from a bus event.
-
-        Single source of truth for how an event maps to the `events` table so
-        the static and instance persist loops can't drift. ``reason`` is
-        normalised across event types: ``.reason`` (RiskVeto/RiskHalt/
-        StaleDataHalt/Exit/ReconcileDrift) or ``.error`` (OrderRejected),
-        else None. The full event is kept as ``payload_json`` for fidelity.
-        """
-        return {
-            "ts_ns": ev.ts_ns,
-            "alias": getattr(ev, "account_alias", None) or None,
-            "kind": ev.kind,
-            "question_idx": getattr(ev, "question_idx", None),
-            "reason": getattr(ev, "reason", None) or getattr(ev, "error", None) or None,
-            "payload_json": ev.model_dump_json(),
-        }
-
-    @staticmethod
-    async def _events_persist_loop_static(
-        sub: asyncio.Queue[BusEvent],
-        dal: StateDAL,
-        *,
-        max_age_ns: int,
-        max_rows: int,
-        prune_every_n: int = 500,
-        # Kept for back-compat with any callers that pass stop_event; ignored
-        # because the loop terminates via task cancellation (same pattern as
-        # AlertRules.run) so CancelledError exits cleanly.
-        stop_event: asyncio.Event | None = None,
-    ) -> None:
-        """Consume every BusEvent and write it to the events table.
-
-        Symmetric to AlertRules.run(alerts_sub): loops on sub.get(), extracts
-        the stable fields (alias, kind, question_idx, reason) into named columns
-        for SQL queries, and writes the full event as payload_json for fidelity.
-        Terminates via task cancellation (CancelledError from sub.get()).
-
-        Prune runs every prune_every_n inserts (not per-insert) to avoid a
-        steady per-row overhead while still bounding growth between long idle
-        periods. Both age and row-count bounds are applied on each prune call.
-
-        Exposed as a @staticmethod so tests can call it directly without
-        constructing a full EngineRuntime, following the same pattern as
-        the test suite for alert rules.
-        """
-        inserted = 0
-        while True:
-            ev = await sub.get()
-            try:
-                dal.append_event(**EngineRuntime._event_columns(ev))
-                inserted += 1
-                if inserted % prune_every_n == 0:
-                    try:
-                        dal.prune_events(max_age_ns=max_age_ns, max_rows=max_rows)
-                    except Exception:
-                        logger.exception("events_persist_loop: prune failed")
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("events_persist_loop: failed to persist {}", ev.kind)
-
     async def _events_persist_loop(self) -> None:
-        """Subscribe to the bus and persist every event to each slot's DB.
+        """Subscribe to the bus and persist every event to each slot's DB via
+        the unified ``events_sink.events_persist_loop``.
 
         Route events to every slot's DAL. All slots' DBs are independent
         (one state.db per alias). We write the same event to every slot so
@@ -1092,29 +671,10 @@ class EngineRuntime:
         sub = self.bus.subscribe()
         max_age_ns = self.deploy_cfg.events_retention_days * 24 * 3600 * 10**9
         max_rows = self.deploy_cfg.events_retention_max_rows
-        dals = [s.dal for s in self.slots]
-        inserted = 0
-        while True:
-            ev = await sub.get()
-            try:
-                cols = EngineRuntime._event_columns(ev)
-                for dal in dals:
-                    dal.append_event(**cols)
-                inserted += 1
-                if inserted % 500 == 0:
-                    try:
-                        for dal in dals:
-                            dal.prune_events(
-                                max_age_ns=max_age_ns, max_rows=max_rows
-                            )
-                    except Exception:
-                        logger.exception("events_persist_loop: prune failed")
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception(
-                    "events_persist_loop: failed to persist {}", ev.kind
-                )
+        await events_persist_loop(
+            sub, [s.dal for s in self.slots],
+            max_age_ns=max_age_ns, max_rows=max_rows,
+        )
 
     # ---- liveness / dead-man's-switch (SHR-43) -----------------------------
 

@@ -258,11 +258,11 @@ def test_prune_both_bounds(dal):
 
 def _make_persist_task(bus, dal, tmp_path=None, prune_every_n=1000):
     """Helper: subscribe and start a persist loop task. Returns (task, sub)."""
-    from hlanalysis.engine.runtime import EngineRuntime
+    from hlanalysis.engine.events_sink import events_persist_loop
     persist_sub = bus.subscribe()
     task = asyncio.create_task(
-        EngineRuntime._events_persist_loop_static(
-            persist_sub, dal,
+        events_persist_loop(
+            persist_sub, [dal],
             max_age_ns=14 * 24 * 3600 * 10**9,
             max_rows=1_000_000,
             prune_every_n=prune_every_n,
@@ -450,7 +450,7 @@ async def test_publish_does_not_block_on_slow_persist_consumer():
 async def test_persist_loop_prune_fires_via_n_counter(tmp_path):
     """With prune_every_n=3 and 5 events, the prune should fire once and
     enforce max_rows=3, leaving only the 3 newest rows."""
-    from hlanalysis.engine.runtime import EngineRuntime
+    from hlanalysis.engine.events_sink import events_persist_loop
 
     db_path = tmp_path / "state.db"
     dal = StateDAL(db_path)
@@ -459,8 +459,8 @@ async def test_persist_loop_prune_fires_via_n_counter(tmp_path):
     bus = EventBus(maxsize=64)
     persist_sub = bus.subscribe()
     task = asyncio.create_task(
-        EngineRuntime._events_persist_loop_static(
-            persist_sub, dal,
+        events_persist_loop(
+            persist_sub, [dal],
             max_age_ns=9999 * 24 * 3600 * 10**9,
             max_rows=3,
             prune_every_n=3,
