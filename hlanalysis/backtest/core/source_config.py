@@ -33,6 +33,21 @@ PM_FLAVORS: dict[str, dict[str, str]] = {
         "series_slug": "oil-daily-up-or-down",
         "klines_subdir": "wti_klines",
     },
+    "eth_updown": {
+        "reference_symbol": "ETH",
+        "series_slug": "eth-up-or-down-daily",
+        "klines_subdir": "eth_klines",
+    },
+    "btc_multistrike": {
+        "reference_symbol": "BTC",
+        "bucket_series_slug": "btc-multi-strikes-weekly",
+        "klines_subdir": "btc_klines",
+    },
+    "eth_multistrike": {
+        "reference_symbol": "ETH",
+        "bucket_series_slug": "ethereum-multi-strikes-weekly",
+        "klines_subdir": "eth_klines",
+    },
 }
 
 
