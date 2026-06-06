@@ -8,6 +8,7 @@ from typing import Any
 from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
+from sqlalchemy import delete, func
 from sqlmodel import Field, Session as _Session, SQLModel, create_engine, select
 
 
@@ -187,7 +188,9 @@ class StateDAL:
     # ---- orders ----
 
     def upsert_order(self, o: OpenOrder) -> None:
-        with _Session(self._engine) as s:
+        # expire_on_commit=False so `o` stays readable after commit (the cached
+        # subclass reads its fields post-write without a re-SELECT).
+        with _Session(self._engine, expire_on_commit=False) as s:
             existing = s.get(OpenOrder, o.cloid)
             if existing is None:
                 s.add(o)
@@ -225,7 +228,9 @@ class StateDAL:
     # ---- positions ----
 
     def upsert_position(self, p: Position) -> None:
-        with _Session(self._engine) as s:
+        # expire_on_commit=False so `p` stays readable after commit (the cached
+        # subclass reads its fields post-write without a re-SELECT).
+        with _Session(self._engine, expire_on_commit=False) as s:
             existing = s.get(Position, p.question_idx)
             if existing is None:
                 s.add(p)
@@ -353,25 +358,22 @@ class StateDAL:
         reason: str | None,
         payload_json: str | None,
     ) -> None:
-        """Insert one event row. Thread-safe (opens a fresh connection)."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "INSERT INTO events (ts_ns, alias, kind, question_idx, reason, payload_json) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (ts_ns, alias, kind, question_idx, reason, payload_json),
-            )
-            conn.commit()
+        """Insert one event row. Thread-safe (each call opens its own session
+        on the shared engine, same connect-per-call isolation as before)."""
+        with _Session(self._engine) as s:
+            s.add(Event(
+                ts_ns=ts_ns, alias=alias, kind=kind,
+                question_idx=question_idx, reason=reason, payload_json=payload_json,
+            ))
+            s.commit()
 
     def events_since(self, since_ts_ns: int) -> list[dict[str, Any]]:
         """Return all events with ts_ns >= since_ts_ns, ordered by ts_ns asc."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT id, ts_ns, alias, kind, question_idx, reason, payload_json "
-                "FROM events WHERE ts_ns >= ? ORDER BY ts_ns ASC",
-                (since_ts_ns,),
-            ).fetchall()
-        return [dict(r) for r in rows]
+        with _Session(self._engine) as s:
+            rows = s.exec(
+                select(Event).where(Event.ts_ns >= since_ts_ns).order_by(Event.ts_ns)
+            ).all()
+            return [r.model_dump() for r in rows]
 
     def reject_counts_since(self, since_ts_ns: int) -> list[dict[str, Any]]:
         """Group events by (kind, reason) since since_ts_ns with counts.
@@ -397,14 +399,13 @@ class StateDAL:
 
     def events_for_question(self, question_idx: int) -> list[dict[str, Any]]:
         """Return all events for a given question_idx, ordered by ts_ns asc."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT id, ts_ns, alias, kind, question_idx, reason, payload_json "
-                "FROM events WHERE question_idx = ? ORDER BY ts_ns ASC",
-                (question_idx,),
-            ).fetchall()
-        return [dict(r) for r in rows]
+        with _Session(self._engine) as s:
+            rows = s.exec(
+                select(Event)
+                .where(Event.question_idx == question_idx)
+                .order_by(Event.ts_ns)
+            ).all()
+            return [r.model_dump() for r in rows]
 
     def last_event_by_kind(
         self, kind: str, *, alias: str | None = None
@@ -413,23 +414,13 @@ class StateDAL:
 
         When alias is provided, filter to that slot. Returns None if no match.
         """
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            if alias is not None:
-                row = conn.execute(
-                    "SELECT id, ts_ns, alias, kind, question_idx, reason, payload_json "
-                    "FROM events WHERE kind = ? AND alias = ? "
-                    "ORDER BY ts_ns DESC LIMIT 1",
-                    (kind, alias),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT id, ts_ns, alias, kind, question_idx, reason, payload_json "
-                    "FROM events WHERE kind = ? "
-                    "ORDER BY ts_ns DESC LIMIT 1",
-                    (kind,),
-                ).fetchone()
-        return dict(row) if row is not None else None
+        stmt = select(Event).where(Event.kind == kind)
+        if alias is not None:
+            stmt = stmt.where(Event.alias == alias)
+        stmt = stmt.order_by(Event.ts_ns.desc()).limit(1)
+        with _Session(self._engine) as s:
+            row = s.exec(stmt).first()
+        return row.model_dump() if row is not None else None
 
     def prune_events(self, *, max_age_ns: int, max_rows: int) -> None:
         """Delete events older than max_age_ns, then enforce max_rows ceiling.
@@ -440,26 +431,23 @@ class StateDAL:
         Both bounds apply on every call — caller decides the frequency.
         """
         cutoff_ns = time.time_ns() - max_age_ns
-        with sqlite3.connect(self.db_path) as conn:
+        with _Session(self._engine) as s:
             # 1) Age prune
-            conn.execute("DELETE FROM events WHERE ts_ns < ?", (cutoff_ns,))
+            s.exec(delete(Event).where(Event.ts_ns < cutoff_ns))
             # 2) Row-count ceiling: keep only the newest max_rows rows.
             # We count current rows; if count > max_rows, delete the oldest
             # (count - max_rows) rows. Using COUNT avoids the NULL-subquery
             # problem when OFFSET >= row count (LIMIT 1 OFFSET N returns NULL
             # when N >= count, causing `id <= NULL` to silently delete nothing
             # or everything depending on the DB).
-            count_row = conn.execute("SELECT COUNT(*) FROM events").fetchone()
-            count = count_row[0] if count_row else 0
+            count = s.exec(select(func.count()).select_from(Event)).one()
             excess = count - max_rows
             if excess > 0:
-                conn.execute(
-                    "DELETE FROM events WHERE id IN ("
-                    "  SELECT id FROM events ORDER BY id ASC LIMIT ?"
-                    ")",
-                    (excess,),
+                oldest_ids = (
+                    select(Event.id).order_by(Event.id.asc()).limit(excess)
                 )
-            conn.commit()
+                s.exec(delete(Event).where(Event.id.in_(oldest_ids)))
+            s.commit()
 
     # ---- realized pnl helpers ----
 
@@ -529,14 +517,10 @@ class CachedStateDAL(StateDAL):
 
     def upsert_position(self, p: Position) -> None:
         self._ensure_loaded()
-        # Snapshot field values BEFORE the DB write: SQLAlchemy's
-        # expire_on_commit=True (default) marks all attributes expired after
-        # commit, making any post-commit attribute access raise
-        # DetachedInstanceError once the session closes. Snapshotting first
-        # preserves the values independently of session lifetime.
-        data = p.model_dump()
-        super().upsert_position(p)            # DB first
-        self._pos_cache[data["question_idx"]] = Position(**data)
+        # DB first; the base writes with expire_on_commit=False so `p` stays
+        # readable after the commit and can be cached directly.
+        super().upsert_position(p)
+        self._pos_cache[p.question_idx] = p
 
     def get_position(self, question_idx: int) -> Position | None:
         self._ensure_loaded()
@@ -555,10 +539,10 @@ class CachedStateDAL(StateDAL):
 
     def upsert_order(self, o: OpenOrder) -> None:
         self._ensure_loaded()
-        # Snapshot before DB write for the same session-expiry reason.
-        data = o.model_dump()
+        # DB first; the base writes with expire_on_commit=False so `o` stays
+        # readable after the commit and can be cached directly.
         super().upsert_order(o)
-        self._order_cache[data["cloid"]] = OpenOrder(**data)
+        self._order_cache[o.cloid] = o
 
     def update_order_status(
         self, cloid: str, *, status: str, venue_oid: str | None = None, now_ns: int,
