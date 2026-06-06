@@ -960,6 +960,85 @@ async def test_circuit_breaker_is_scoped_per_question(tmp_path):
     )
 
 
+class _DustFloorExec(_CountingExec):
+    """Mimics the PM market-order 2dp share floor: a SELL fills only
+    ``floor(size*100)/100`` shares (``pm_client._round_down_2``), so closing a
+    >2dp position strands the floored-off fraction. Models the live wedge in the
+    2026-06-06 v31_pm incident (sell 58.1279 → fills 58.12 → 0.0079 dust)."""
+
+    def place(self, req: PlaceRequest) -> OrderAck:
+        self.placed.append(req)
+        import math as _m
+        filled = (_m.floor(req.size * 100.0) / 100.0
+                  if req.side == "sell" else req.size)
+        if filled <= 0:
+            return OrderAck(cloid=req.cloid, venue_oid="", status="rejected",
+                            error="invalid maker amount")
+        return OrderAck(cloid=req.cloid, venue_oid="v", status="filled",
+                        fill_price=req.price, fill_size=filled)
+
+
+@pytest.mark.asyncio
+async def test_pm_reduce_only_dust_residual_closes_position(tmp_path):
+    """PM market sells floor the share amount to 2dp, so a reduce-only exit of a
+    >2dp position (e.g. 58.1279) fills only 58.12 and leaves a 0.0079 un-sellable
+    dust residual. With a PM dust ``reduce_close_atol`` the router must treat the
+    near-flat result as a full CLOSE (delete the row + Exit), not leave the dust
+    open — otherwise the position wedges and the strategy re-fires forever,
+    flooding `invalid maker amount` rejects (2026-06-06 v31_pm incident)."""
+    from hlanalysis.engine.risk_events import Exit
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    _held(dal, 42, "@30", 58.1279)
+    bus = EventBus()
+    sub = bus.subscribe()
+    client = _DustFloorExec()
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
+                    strategy_cfg=cfg, reduce_close_atol=1e-2)
+
+    exit_full = OrderIntent(
+        question_idx=42, symbol="@30", side="sell", size=58.1279,
+        limit_price=0.89, cloid="hla-dust-1", time_in_force="ioc",
+        reduce_only=True, exit_reason="exit_safety_d",
+    )
+    await router.handle(Decision(action=Action.EXIT, intents=(exit_full,)),
+                        inputs=_approval_inputs(), now_ns=3)
+
+    # The floored 58.12 fill leaves 0.0079 — within the PM dust floor, so the
+    # position is fully closed, NOT left wedged at dust.
+    assert dal.get_position(42) is None, (
+        f"dust residual left position open: {dal.get_position(42)}"
+    )
+    ev = await asyncio.wait_for(sub.get(), timeout=0.5)
+    assert isinstance(ev, Exit)
+
+
+@pytest.mark.asyncio
+async def test_pm_reduce_only_sub_dust_sell_suppressed(tmp_path):
+    """An already-wedged dust position (held 0.0079) must NOT re-fire a sell:
+    PM floors the amount to 0.00 → guaranteed `invalid maker amount` reject every
+    scan tick. With the PM dust ``reduce_close_atol`` the router suppresses the
+    placement entirely (no network call, no reject flood)."""
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    _held(dal, 42, "@30", 0.0079)
+    client = _DustFloorExec()
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=EventBus(), exec_client=client,
+                    strategy_cfg=cfg, reduce_close_atol=1e-2)
+
+    dust_exit = OrderIntent(
+        question_idx=42, symbol="@30", side="sell", size=0.0079,
+        limit_price=0.89, cloid="hla-dust-2", time_in_force="ioc",
+        reduce_only=True, exit_reason="exit_safety_d",
+    )
+    await router.handle(Decision(action=Action.EXIT, intents=(dust_exit,)),
+                        inputs=_approval_inputs(), now_ns=3)
+
+    assert client.placed == [], "sub-dust reduce-only sell was placed (would reject)"
+
+
 class _PartialExec(_CountingExec):
     """Fills at most `fill_cap` units per order, so reduce-only exits partial-
     fill and the position drains gradually across stop-loss ticks (SHR-47)."""

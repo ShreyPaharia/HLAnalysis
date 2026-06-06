@@ -27,6 +27,18 @@ from dataclasses import dataclass
 # means a change can never desync the three.
 STOP_DISABLED_SENTINEL = -1.0
 
+# Sub-precision dust floor for Polymarket positions. PM market sells round the
+# share amount DOWN to 2dp (``pm_client._round_down_2``), so closing a non-round
+# buy strands the floored-off fraction (a 58.1279-share exit sells 58.12 and
+# leaves 0.0079). That residual is BOTH un-sellable (PM floors it back to 0.00 →
+# `invalid maker amount`) and ~$0.01 of notional, so a position at or below this
+# size is "closed for all practical purposes". The router treats a reduce that
+# lands here as a full close (``reduce_close_atol``); the reconciler clears a
+# stranded dust row instead of re-firing DRIFT forever. The floor sits above the
+# max 2dp sell residual (≤5e-3) with margin and ~100x below a 1-share min order,
+# so it can never swallow a real lagging position (which is whole shares).
+DUST_QTY_ABS_TOL = 1e-2
+
 
 @dataclass(frozen=True, slots=True)
 class PositionState:
@@ -113,4 +125,7 @@ def apply_fill(
     )
 
 
-__all__ = ["STOP_DISABLED_SENTINEL", "PositionState", "stop_price", "apply_fill"]
+__all__ = [
+    "STOP_DISABLED_SENTINEL", "DUST_QTY_ABS_TOL",
+    "PositionState", "stop_price", "apply_fill",
+]

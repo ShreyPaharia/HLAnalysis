@@ -12,7 +12,7 @@ from .hl_client import (
 )
 from .risk_events import ReconcileDrift
 from .state import Fill, OpenOrder, Position, StateDAL
-from ..marketdata.position_math import STOP_DISABLED_SENTINEL
+from ..marketdata.position_math import DUST_QTY_ABS_TOL, STOP_DISABLED_SENTINEL
 
 
 CLOID_PREFIX = "hla-"
@@ -25,25 +25,27 @@ CLOID_PREFIX = "hla-"
 # rounding. An exact `>1e-9` check treats that noise as a position_mismatch and
 # re-fires a DRIFT alert every reconcile cycle. A real fill discrepancy (a
 # missed buy/sell) is on the order of whole shares, so we only flag a mismatch
-# when the quantities differ by more than rounding noise. abs_tol clears 4dp
-# truncation (≤5e-5) with margin; rel_tol keeps it scale-safe for large lots.
+# when the quantities differ by more than rounding noise. The PM BUY size we book
+# (notional/limit → 55.5444) vs the data-api `/positions` settled size (55.5523)
+# routinely diverges by ~8e-3 shares — an order of magnitude above 4dp truncation
+# — so abs_tol is set to 2e-2 to absorb it (still ~50x below a 1-share real
+# discrepancy); rel_tol keeps it scale-safe for large lots.
 _QTY_MISMATCH_REL_TOL = 1e-4
-_QTY_MISMATCH_ABS_TOL = 1e-3
+_QTY_MISMATCH_ABS_TOL = 2e-2
 
-# Dust floor for the alert-only venue-absent branch. PM market sells round the
-# share amount to 2dp, so closing a non-round-2dp buy strands sub-precision dust
-# (a 54.934055-share buy closes by selling 54.93, leaving 0.004055 shares). That
-# residual is BOTH un-sellable (below PM's ~$1 min order size) and un-reported
-# (below the data-api's dust filter), so the venue shows it absent forever and
-# the alert-only branch re-fires `venue_absent_alert_only` every reconcile cycle
-# (~1 Telegram DRIFT/min, permanently — incident 2026-06-05, q729375628). When
-# the LOCAL qty is itself this small AND the venue reports it absent, the
-# position is genuinely stranded-closed, not a data-api flap of a real holding:
-# clear the row so the flood stops. The threshold sits above the max 2dp sell
-# residual (≤5e-3) with margin and ~100x below a 1-share min order, so it can
-# never swallow a real lagging position (which is whole shares). PM prices are
-# ≤1.0, so 1e-2 shares is ≤$0.01 notional.
-_DUST_QTY_ABS_TOL = 1e-2
+# Dust floor for clearing stranded PM positions — shared with the router's
+# reduce_close_atol (see marketdata.position_math.DUST_QTY_ABS_TOL). PM market
+# sells round the share amount to 2dp, so closing a non-round-2dp buy strands
+# sub-precision dust (a 58.1279-share exit sells 58.12, leaving 0.0079). That
+# residual is BOTH un-sellable (PM floors it to 0.00 → `invalid maker amount`)
+# and ~$0.01 of notional. Whether the laggy data-api reports it absent OR still
+# shows the stale pre-sell qty, a local position at or below this size is
+# genuinely stranded-closed: clear the row so the alert-only DRIFT stops re-firing
+# every reconcile cycle (incidents 2026-06-05 q729375628 venue-absent; 2026-06-06
+# v31_pm venue-stale). Above the max 2dp sell residual (≤5e-3) with margin and
+# ~100x below a 1-share min order, so it can never swallow a real lagging
+# position (which is whole shares).
+_DUST_QTY_ABS_TOL = DUST_QTY_ABS_TOL
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +231,26 @@ class Reconciler:
 
         for qidx, lp in local_by_qidx.items():
             vp = venue_by_symbol.get(lp.symbol)
+            # Stranded sub-precision dust (alert-only / PM). The PM 2dp sell-floor
+            # leaves an un-sellable residual (≤0.0079 sh, ≤$0.01). Whether the
+            # laggy data-api reports it absent OR still shows the stale pre-sell
+            # qty, our own ledger says we're ~flat and the dust can't be traded —
+            # so clear the row to stop the alert-only DRIFT re-firing every cycle
+            # (2026-06-05 venue-absent q729375628; 2026-06-06 v31_pm venue-stale).
+            # No vanished_positions entry / settlement Exit: the round-trip PnL is
+            # already booked on the sell fill's closed_pnl, and we must NOT adopt
+            # the stale venue qty (that resurrects a closed position → 2026-06-02
+            # double-exit). Apply mode (HL) is venue-authoritative, so dust there
+            # falls through to the vanish/adopt paths below.
+            if not apply and abs(lp.qty) <= _DUST_QTY_ABS_TOL:
+                self.dal.delete_position(qidx)
+                drift.append(ReconcileDrift(
+                    ts_ns=now_ns, account_alias=self.account_alias,
+                    case="position_mismatch", question_idx=qidx,
+                    detail={"resolution": "dust_cleared",
+                            "symbol": lp.symbol, "db_qty": f"{lp.qty}"},
+                ))
+                continue
             if vp is None or abs(vp.qty) < 1e-9:
                 # Position absent on venue (or present at qty=0). On HL this is
                 # a HIP-4 settlement auto-close: surface it as a
@@ -238,24 +260,10 @@ class Reconciler:
                 # absence is NOT trusted as a close — the data-api drops
                 # positions transiently / lags our own sell fills — so we only
                 # emit an informational drift and leave local state to the fill
-                # ledger + the endDate gamma settlement.
+                # ledger + the endDate gamma settlement. (Dust is handled above.)
                 if apply:
                     vanished.append((qidx, lp.symbol, lp))
                     self.dal.delete_position(qidx)
-                elif abs(lp.qty) <= _DUST_QTY_ABS_TOL:
-                    # Stranded sub-precision dust (un-sellable + un-reported):
-                    # delete the row so the alert-only branch stops re-firing
-                    # forever. No vanished_positions entry — the round-trip PnL
-                    # is already booked in the sell fill's closed_pnl, so routing
-                    # a settlement Exit here would double-book it and surface a
-                    # misleading 🏁 on un-sellable dust. One informational drift.
-                    self.dal.delete_position(qidx)
-                    drift.append(ReconcileDrift(
-                        ts_ns=now_ns, account_alias=self.account_alias,
-                        case="position_mismatch", question_idx=qidx,
-                        detail={"resolution": "venue_absent_dust_cleared",
-                                "symbol": lp.symbol, "db_qty": f"{lp.qty}"},
-                    ))
                 else:
                     drift.append(ReconcileDrift(
                         ts_ns=now_ns, account_alias=self.account_alias,

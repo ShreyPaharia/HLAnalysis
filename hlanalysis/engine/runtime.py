@@ -56,6 +56,7 @@ from .scanner import Scanner
 from .state import CachedStateDAL, StateDAL
 from ..alerts.rules import AlertRules
 from ..alerts.telegram import TelegramClient
+from ..marketdata.position_math import DUST_QTY_ABS_TOL
 from ..strategy.base import Strategy
 from ..strategy.late_resolution import (
     LateResolutionConfig, LateResolutionStrategy,
@@ -683,10 +684,18 @@ class EngineRuntime:
             raise ValueError(f"unsupported account type: {type(acct).__name__}")
 
         risk = RiskGate(s_cfg)
+        # PM market sells floor the share amount to 2dp, stranding sub-0.01 dust
+        # that wedges the position open (2026-06-06 v31_pm). PM slots treat a
+        # reduce landing within that dust of flat as a full close (and suppress
+        # un-sellable dust sells). HL fills the exact size, so it stays ~exact.
+        reduce_close_atol = (
+            DUST_QTY_ABS_TOL if isinstance(acct, PolymarketAccount) else 1e-9
+        )
         router = Router(
             dal=dal, gate=risk, bus=self.bus, exec_client=exec_client,
             strategy_cfg=s_cfg, strategy_id=s_cfg.name,
             cloid_prefix=cloid_prefix,
+            reduce_close_atol=reduce_close_atol,
         )
         strategy = _build_strategy_for_slot(s_cfg)
         # Gate-decision log sibling of state.db. Operators tail this during

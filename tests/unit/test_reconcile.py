@@ -261,7 +261,7 @@ def test_alert_only_clears_dust_position_on_venue_absence(dal):
     assert dal.get_position(42) is None            # dust row cleared
     assert res.vanished_positions == []            # no settlement Exit / re-book
     assert any(
-        d.detail.get("resolution") == "venue_absent_dust_cleared"
+        d.detail.get("resolution") == "dust_cleared"
         for d in res.drift_events
     )
 
@@ -288,13 +288,44 @@ def test_alert_only_keeps_whole_share_position_on_venue_absence(dal):
     )
 
 
-def test_alert_only_keeps_local_qty_on_drift(dal):
-    # PM live: a SELL reduced local to dust (0.006) but the data-api still
-    # reports the pre-sell 51.536 (lag). Alert-only must KEEP the fresh local
-    # qty (our fill ledger is truth) and only alert — overwriting it reverted
-    # the fill and caused the 2026-06-02 double-exit.
+def test_alert_only_clears_dust_position_when_venue_reports_stale_qty(dal):
+    # PM live: a reduce-only SELL fills the 2dp-floored share amount and strands
+    # sub-precision dust (0.0079 — the 2026-06-06 v31_pm wedge). The data-api
+    # still reports the pre-sell qty (58.1279, lag). The OLD behaviour kept the
+    # dust + re-fired `qty_mismatch_alert_only` every reconcile cycle forever.
+    # Since the local qty is un-sellable dust, clear the row (NOT adopt the stale
+    # venue qty — that would resurrect a closed position → 2026-06-02 double-exit).
     dal.upsert_position(Position(
-        question_idx=42, symbol="tok", qty=0.006, avg_entry=0.97,
+        question_idx=42, symbol="tok", qty=0.0079, avg_entry=0.90,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
+    ))
+    venue = ClearinghouseState(
+        positions=(VenuePosition(
+            symbol="tok", qty=58.1279, avg_entry=0.90, unrealized_pnl=0.0),),
+        account_value_usd=0,
+    )
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 42},
+        apply_position_changes=False,
+    ).run(venue_open=[], venue_state=venue, now_ns=2)
+    assert dal.get_position(42) is None            # dust row cleared
+    assert any(
+        d.detail.get("resolution") == "dust_cleared"
+        for d in res.drift_events
+    )
+    # NOT adopted as the stale venue qty (would resurrect a closed position).
+    assert not any(
+        d.detail.get("resolution") == "adopted_venue_orphan"
+        for d in res.drift_events
+    )
+
+
+def test_alert_only_keeps_real_local_qty_on_drift(dal):
+    # Boundary guard: a REAL (non-dust) local qty that drifts from the laggy
+    # data-api must still be KEPT (our fill ledger is truth) and only alerted —
+    # overwriting it reverted the fill and caused the 2026-06-02 double-exit.
+    dal.upsert_position(Position(
+        question_idx=42, symbol="tok", qty=30.0, avg_entry=0.97,
         realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
     ))
     venue = ClearinghouseState(
@@ -306,11 +337,34 @@ def test_alert_only_keeps_local_qty_on_drift(dal):
         dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 42},
         apply_position_changes=False,
     ).run(venue_open=[], venue_state=venue, now_ns=2)
-    assert dal.get_position(42).qty == 0.006      # local kept, not reverted
+    assert dal.get_position(42).qty == 30.0       # local kept, not reverted
     assert any(
         d.detail.get("resolution") == "qty_mismatch_alert_only"
         for d in res.drift_events
     )
+
+
+def test_alert_only_ack_vs_indexer_subshare_gap_no_drift(dal):
+    # PM live: the BUY fill size we book (notional/limit → 55.5444) routinely
+    # differs from the data-api `/positions` size (the settled on-chain balance,
+    # 55.5523) by ~8e-3 shares — bigger than 4dp truncation. The old abs_tol of
+    # 1e-3 flagged this as a `qty_mismatch_alert_only` on EVERY held PM position
+    # every reconcile cycle. The widened tolerance treats sub-share ack-vs-
+    # indexer divergence as noise (a real missed fill is ≥~1 share).
+    dal.upsert_position(Position(
+        question_idx=42, symbol="tok", qty=55.5444, avg_entry=0.90,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
+    ))
+    venue = ClearinghouseState(
+        positions=(VenuePosition(
+            symbol="tok", qty=55.5523, avg_entry=0.90, unrealized_pnl=0.0),),
+        account_value_usd=0,
+    )
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 42},
+        apply_position_changes=False,
+    ).run(venue_open=[], venue_state=venue, now_ns=2)
+    assert not any(d.case == "position_mismatch" for d in res.drift_events)
 
 
 def test_alert_only_does_not_adopt_venue_orphan(dal):

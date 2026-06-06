@@ -39,8 +39,17 @@ class Router:
         strategy_id: str = "late_resolution",
         cloid_prefix: str = "hla-",
         reject_breaker_threshold: int = 5,
+        reduce_close_atol: float = 1e-9,
     ) -> None:
         self.dal = dal
+        # A reduce that lands within this many shares of flat is treated as a
+        # full close, and a reduce-only sell against a holding this small is
+        # suppressed (un-sellable dust). Defaults to ~exact (1e-9) for HL, where
+        # the venue fills the exact size; PM slots pass DUST_QTY_ABS_TOL because
+        # PM market sells floor the share amount to 2dp and strand a sub-0.01
+        # residual that would otherwise wedge the position open forever
+        # (2026-06-06 v31_pm incident). See marketdata.position_math.
+        self._reduce_close_atol = reduce_close_atol
         self.gate = gate
         self.bus = bus
         self.exec_client = exec_client
@@ -204,10 +213,14 @@ class Router:
                 (held > 0 and intent.side == "sell")
                 or (held < 0 and intent.side == "buy")
             )
-            if not reducing or abs(held) < 1e-9:
+            if not reducing or abs(held) <= self._reduce_close_atol:
+                # `abs(held) <= reduce_close_atol` catches un-sellable PM dust:
+                # PM floors a sell to 2dp, so a 0.0079-share residual rounds to
+                # 0.00 → guaranteed `invalid maker amount` every scan tick. Don't
+                # send it. The dust row is cleared by the reconciler.
                 logger.info(
                     "reduce_only suppressed cloid={} qidx={} side={} size={} "
-                    "held={} (nothing to reduce / wrong direction)",
+                    "held={} (nothing to reduce / wrong direction / dust)",
                     intent.cloid, intent.question_idx, intent.side,
                     intent.size, held,
                 )
@@ -362,6 +375,7 @@ class Router:
         )
         new_state, realized_this_fill = apply_fill(
             prev_state, intent.side, size, price,
+            close_atol=self._reduce_close_atol,
         )
         if existing is None:
             assert new_state is not None
