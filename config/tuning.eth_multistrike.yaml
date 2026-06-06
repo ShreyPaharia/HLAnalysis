@@ -13,7 +13,7 @@ grids:
     vol_estimator: [bipower]
     vol_sampling_dt_seconds: [60]
     tte_min_seconds: [0]
-    tte_max_seconds: [604800]
+    tte_max_seconds: [86400]
     fee_model: [pm_binary]
 
 run:
