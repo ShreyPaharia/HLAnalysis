@@ -153,8 +153,14 @@ def _jr_trust_weight(recent_returns: tuple[float, ...], lookback_min: int) -> fl
 
 @dataclass(frozen=True, slots=True)
 class ThetaHarvesterConfig:
-    # v2 entry knobs (copied; we deliberately do NOT import ModelEdgeConfig to
-    # keep v3 standalone and let the two diverge over time)
+    # Fields are ordered required-first then defaulted (a dataclass constraint),
+    # so a logical section (e.g. exit) is split across that boundary: its
+    # required triggers live in the block below and its optional extras in the
+    # defaulted block. Section banners mark the contiguous groups in place;
+    # unifying them would require reordering across the required/default split.
+    #
+    # === required: vol / entry / fees / drift / sizing (copied from v2; we
+    # deliberately do NOT import ModelEdgeConfig so v3 can diverge) ===
     vol_lookback_seconds: int
     vol_sampling_dt_seconds: int
     vol_clip_min: float
@@ -168,11 +174,12 @@ class ThetaHarvesterConfig:
     favorite_threshold: float
     tte_min_seconds: int
     tte_max_seconds: int
-    # v3 exit knobs
+    # === required: exit triggers ===
     stop_loss_pct: Optional[float]
     exit_edge_threshold: float          # exit when edge_held_side < this (typically <= 0)
     take_profit_price: Optional[float]  # exit when held_bid >= entry_px + this
     time_stop_seconds: int              # exit when tau_s < this; 0 disables
+    # === optional: entry edge filters ===
     # v3.1 entry upper-edge filter. Trade-level analysis of v3 PM-corpus run
     # surfaced an asymmetry: entries claiming edge >= 0.20 had hit rate 55%
     # (same as the rest) but with full-position wipeouts on the losers, netting
@@ -206,6 +213,7 @@ class ThetaHarvesterConfig:
     # held position sooner when path variance is high).
     # None disables (legacy behavior).
     gamma_lambda: Optional[float] = None
+    # === optional: position topup ===
     # Strategy-side position topup. When a held position's notional (qty × ask)
     # is below max_position_usd by at least topup_threshold_pct, the strategy
     # re-runs ALL entry gates against the CURRENT state and, if the same leg is
@@ -215,6 +223,7 @@ class ThetaHarvesterConfig:
     topup_enabled: bool = True
     topup_threshold_pct: float = 0.2
     topup_min_notional_usd: float = 11.0
+    # === optional: exit extras / vol estimator / jump gate (added incrementally) ===
     # σ-normalized mid-hold distance exit. Computes the signed distance from
     # BTC to the leg's NEAREST adverse boundary in σ√τ units (the same Itô-
     # corrected d-statistic the entry edge uses). When safety_d < this threshold
@@ -260,8 +269,10 @@ class ThetaHarvesterConfig:
     # PM's headline 7% taker rate is applied to the *expected loss* leg of the
     # binary, so the realized per-share cost peaks at p=0.5 (0.0175 at 7%)
     # and tapers to ~0 for deep favorites. Default "flat" keeps HL bit-identical.
+    # === optional: fee model ===
     fee_model: str = "flat"
     fee_rate: float = 0.0
+    # === optional: momentum / mean-reversion ===
     # v3.5: momentum / mean-reversion (MR) gate or tilt on the favorite-side
     # entry rule. Default off → v3.1 behavior is preserved bit-for-bit.
     # When `enabled` and `mode == "gate"`: skip entries where the momentum_mr

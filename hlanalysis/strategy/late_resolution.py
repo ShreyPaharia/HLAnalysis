@@ -72,6 +72,12 @@ def _safety_d_for_region(
 
 @dataclass(frozen=True, slots=True)
 class LateResolutionConfig:
+    # Fields are ordered required-first then defaulted (a dataclass constraint),
+    # so a logical section is split across that boundary. Section banners mark
+    # the contiguous groups in place; unifying them would require reordering
+    # across the required/default split.
+    #
+    # === required: entry window / favorite-price / vol / sizing / safety ===
     tte_min_seconds: int
     tte_max_seconds: int
     price_extreme_threshold: float    # winning-leg ask must be ≥ this (e.g. 0.95)
@@ -82,6 +88,7 @@ class LateResolutionConfig:
     max_strike_distance_pct: float    # reject if |strike − BTC|/BTC > this
     min_recent_volume_usd: float
     stale_data_halt_seconds: int
+    # === optional: entry filters ===
     # Upper bound on entry ask. Histogram showed v1 entries at >0.99 contribute
     # zero PnL after the [0,1] fill clamp — they pay $1 and settle $1. Default
     # 1.0 disables the cap (existing behavior); set to ~0.99 to skip dead trades.
@@ -144,6 +151,7 @@ class LateResolutionConfig:
     # scale as 1m close-to-close std). Both entry and exit safety_d gates use
     # the same estimator.
     vol_estimator: str = "stdev"
+    # === optional: near-strike size cap ===
     # Targeted size cap for catastrophic near-strike low-ask entries. When non-zero
     # AND chosen leg ask < size_cap_min_ask AND BTC is within
     # size_cap_max_dist_pct% of the chosen leg's nearest adverse boundary
@@ -155,6 +163,7 @@ class LateResolutionConfig:
     # Ask ceiling below which the cap kicks in (favorites that are still cheap
     # enough to flip catastrophically).
     size_cap_min_ask: float = 0.88
+    # === optional: entry-gate price source & spoof filter ===
     # Entry-gate price source. When True, the favorite-leg filter checks bid
     # against price_extreme_threshold instead of ask. Sizing and IOC limit
     # still use ask, so fills happen at-or-below ask as before — only the
@@ -173,6 +182,7 @@ class LateResolutionConfig:
     # bid-price threshold but represent no real buying interest. Default 0
     # disables (legacy behavior); set to ~$10–20 for a meaningful filter.
     min_bid_notional_usd: float = 0.0
+    # === optional: position topup ===
     # Strategy-side position topup. When a held position's notional (qty × ask)
     # is below max_position_usd by at least topup_threshold_pct (e.g. 20%), the
     # strategy re-runs all entry gates against the CURRENT state and, if the
@@ -183,6 +193,7 @@ class LateResolutionConfig:
     topup_enabled: bool = True
     topup_threshold_pct: float = 0.2
     topup_min_notional_usd: float = 11.0
+    # === optional: fee model ===
     # Fee model declaration. Mirrors theta_harvester's fields so v1 can run on
     # Polymarket with the same `fee_model: pm_binary` / `fee_rate: 0.07` config
     # shape as v31_pm. The strategy's gates don't read these directly — v1 has
