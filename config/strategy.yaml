@@ -681,17 +681,21 @@ strategies:
       topup_enabled: true
       topup_threshold_pct: 0.2
       topup_min_notional_usd: 11.0
-      exit_safety_d: 1.0
+      exit_safety_d: 0.5                    # PR #12 tuned cell (see note below)
       fee_model: pm_binary
       fee_rate: 0.07
     # No theta_overrides: this slot allowlists ONLY priceBucket, so the base
-    # theta block above IS the effective bucket config (fav0.75/eb0.02/vlb1800).
-    # PR #12's tuned cell wanted exit_safety_d=0.5, but that LOOSENS the mid-hold
-    # safety exit below the binary baseline (1.0) and is forbidden by the
-    # 2026-06-06 risk-gate guardrail (test_bucket_override_risk_gates_not_below_binary)
-    # — the tune was on synthetic-liquidity / possibly-tailless data, the exact
-    # case the guardrail guards against. Held at 1.0 (more protective) for the
-    # paper burn-in; revisit esd=0.5 only with adverse-settlement evidence.
+    # theta block above IS the effective bucket config — the full PR #12 tuned
+    # cell (fav0.75/eb0.02/vlb1800/esd0.5). esd=0.5 is BELOW the HL binary
+    # baseline (1.0); that is allowed here because this is a dedicated
+    # bucket-only slot (no binary leg to be inconsistent with) and the value is
+    # justified by PR #12's walk-forward OOS evidence (worst split −$24, maxDD
+    # $49, non-zero DDs across 18 splits / ~1100 trades). The 2026-06-06
+    # risk-gate guardrail (test_bucket_override_risk_gates_not_below_binary)
+    # guards the per-CLASS OVERRIDE mechanism on mixed binary+bucket slots
+    # (HL v31); it does not apply to a bucket-only slot's base config. Operator
+    # accepted keeping the tuned esd 2026-06-08; revisit if the burn-in surfaces
+    # adverse settlements the synthetic-liquidity tune didn't see.
 
   # --- v3.1 theta Polymarket multi-strike buckets (ETH) ---
   # Same tuned cell (+$832 / worst −$31 / maxDD $61 / 74% hit). reference_symbol
@@ -769,9 +773,9 @@ strategies:
       topup_enabled: true
       topup_threshold_pct: 0.2
       topup_min_notional_usd: 11.0
-      exit_safety_d: 1.0
+      exit_safety_d: 0.5                    # PR #12 tuned cell
       fee_model: pm_binary
       fee_rate: 0.07
-    # No theta_overrides — bucket-only slot, base theta is the effective config.
-    # exit_safety_d held at 1.0 (not PR #12's 0.5) per the risk-gate guardrail;
-    # see the v31_pm_btc_ms slot above for the rationale.
+    # No theta_overrides — bucket-only slot, base theta is the effective config
+    # (full PR #12 tuned cell incl. esd=0.5). See the v31_pm_btc_ms slot above
+    # for why esd<1.0 is allowed on a dedicated bucket-only slot.

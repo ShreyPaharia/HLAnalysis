@@ -52,18 +52,29 @@ def test_theta_params_rejects_unknown_keys() -> None:
 
 
 def test_live_strategy_yaml_forwards_exit_safety_d() -> None:
-    """Regression for the headline SHR-65 bug: config/strategy.yaml sets
-    exit_safety_d=1.0 on both live theta slots; the built config must carry
-    1.0 through to the strategy (it was silently 0.0)."""
+    """Regression for the headline SHR-65 bug: exit_safety_d was silently 0.0
+    (dataclass default) instead of the YAML value. The invariant is FORWARDING
+    FIDELITY — the built config must carry whatever the YAML declares, never the
+    silent default. (Originally pinned to ==1.0 when every slot used 1.0; the PM
+    multi-strike bucket slots legitimately run the tuned 0.5, so we assert the
+    round-trip instead, which is the stronger form of the same guard.)"""
     cfgs = load_strategies_config(Path("config/strategy.yaml"))
     theta_slots = [c for c in cfgs.strategies if c.strategy_type == "theta_harvester"]
     assert theta_slots, "expected at least one theta_harvester slot in strategy.yaml"
     for c in theta_slots:
         built = build_theta_harvester_config(c)
-        assert built.exit_safety_d == 1.0, (
+        assert built.exit_safety_d == c.theta.exit_safety_d, (
             f"slot {c.account_alias}: exit_safety_d forwarded as "
-            f"{built.exit_safety_d}, expected 1.0 (YAML intent)"
+            f"{built.exit_safety_d}, expected YAML value {c.theta.exit_safety_d}"
         )
+    # Pin the original always-on slots to 1.0 so a silent regression to the 0.0
+    # default on the core slots still fails (the headline SHR-65 bug).
+    by_alias = {c.account_alias: c for c in theta_slots}
+    for alias in ("v31", "v31_pm"):
+        if alias in by_alias:
+            assert build_theta_harvester_config(by_alias[alias]).exit_safety_d == 1.0, (
+                f"slot {alias}: exit_safety_d must stay 1.0 (SHR-65 regression guard)"
+            )
 
 
 def test_build_forwards_all_declared_theta_fields() -> None:

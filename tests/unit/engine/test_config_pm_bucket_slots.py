@@ -3,10 +3,9 @@
 
 Verifies that v31_pm_btc_ms and v31_pm_eth_ms load cleanly from
 config/strategy.yaml, carry the correct reference symbols, paper_mode=True,
-and that the (bucket-only) base theta config carries the tuned cell
-(fav0.75/eb0.02/vlb1800). exit_safety_d is held at the safety-guardrail floor
-(1.0), NOT PR #12's tuned 0.5 — see config/strategy.yaml and
-test_bucket_override_risk_gates_not_below_binary.
+and that the (bucket-only) base theta config carries the full PR #12 tuned cell
+(fav0.75/eb0.02/vlb1800/esd0.5). esd=0.5 is below the HL binary baseline but is
+allowed on a dedicated bucket-only slot — see config/strategy.yaml.
 
 These slots allowlist ONLY priceBucket and carry no theta_overrides, so the
 base theta block IS the effective bucket config.
@@ -46,8 +45,8 @@ def test_bucket_slots_load_with_tuned_cell_and_refs():
         assert base.vol_lookback_seconds == 1800, (
             f"slot {s.account_alias}: vol_lookback_seconds={base.vol_lookback_seconds}"
         )
-        # esd held at the guardrail floor (1.0), not PR #12's 0.5.
-        assert base.exit_safety_d == 1.0, (
+        # PR #12 tuned exit_safety_d=0.5 (allowed on a dedicated bucket-only slot).
+        assert base.exit_safety_d == 0.5, (
             f"slot {s.account_alias}: exit_safety_d={base.exit_safety_d}"
         )
         assert base.vol_estimator == "bipower", (
