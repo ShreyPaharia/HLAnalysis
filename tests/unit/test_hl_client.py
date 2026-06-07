@@ -99,6 +99,9 @@ class _FakeInfo:
     def user_fills(self, _addr):
         return self._fills
 
+    def user_fills_by_time(self, _addr, start_time=0, end_time=None):
+        return [f for f in self._fills if int(f.get("time", 0)) >= start_time]
+
 
 def _live_client_with(perp_state: dict, spot_state: dict) -> HLClient:
     c = HLClient(
@@ -197,16 +200,16 @@ def test_realized_pnl_since_is_cached_to_bound_rest_calls():
                  pnl_cache_ttl_s=60.0)
     fake = _FakeInfo(perp_state=perp, spot_state=spot, fills=fills)
     c._info = fake  # type: ignore[assignment]
-    # Count REST calls by wrapping user_fills.
+    # Count REST calls by wrapping the paginating fetch (user_fills_by_time).
     call_count = {"n": 0}
-    orig = fake.user_fills
-    def counted(addr):  # noqa: ANN001
+    orig = fake.user_fills_by_time
+    def counted(addr, start_time=0, end_time=None):  # noqa: ANN001
         call_count["n"] += 1
-        return orig(addr)
-    fake.user_fills = counted  # type: ignore[assignment]
+        return orig(addr, start_time=start_time, end_time=end_time)
+    fake.user_fills_by_time = counted  # type: ignore[assignment]
     for _ in range(5):
         c.realized_pnl_since(0)
-    assert call_count["n"] == 1  # cache hit on the next four
+    assert call_count["n"] == 1  # cache hit on the next four (one page, <2000)
 
 
 class _FlakyInfo:
@@ -228,6 +231,9 @@ class _FlakyInfo:
         return {"balances": []}
 
     def user_fills(self, _addr):
+        return []
+
+    def user_fills_by_time(self, _addr, start_time=0, end_time=None):
         return []
 
 
@@ -283,3 +289,31 @@ def test_clearinghouse_state_empty_spot_balances_ok():
     syms = [p.symbol for p in state.positions]
     assert syms == ["BTC"]
     assert state.account_value_usd == 10000.0
+
+
+def test_user_fills_paginates_past_2000_cap():
+    """HL caps each fills response at 2000; the client must paginate by time so
+    realized PnL isn't silently truncated for >2000-fill accounts (the v1 bug)."""
+    class _PagedInfo:
+        def __init__(self):
+            self.fills = [
+                {"tid": i, "time": i + 1, "coin": "#1", "side": "B",
+                 "px": "1", "sz": "1", "fee": "0", "closedPnl": "1"}
+                for i in range(2500)
+            ]
+            self.calls = 0
+        def user_fills_by_time(self, _addr, start_time=0, end_time=None):
+            self.calls += 1
+            return [f for f in self.fills if f["time"] >= start_time][:2000]
+        def user_state(self, _a):
+            return {"assetPositions": [], "marginSummary": {"accountValue": "0"}}
+        def spot_user_state(self, _a):
+            return {"balances": []}
+
+    c = _live_client()
+    info = _PagedInfo()
+    c._info = info  # type: ignore[assignment]
+    fills = c.user_fills(since_ts_ns=0)
+    assert len(fills) == 2500, "must paginate past the 2000 cap, not truncate"
+    assert info.calls >= 2, "should have made multiple paginated calls"
+    assert c.realized_pnl_since(0) == pytest.approx(2500.0)

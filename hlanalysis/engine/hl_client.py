@@ -430,13 +430,34 @@ class HLClient:
             account_value_usd=perp_value + spot_cash_usd,
         )
 
+    def _fetch_fills_raw(self, since_ts_ns: int) -> list[dict]:
+        """Fetch raw fills [since_ts_ns, now] via user_fills_by_time, paginating
+        past HL's 2000-per-response cap (dedup by tid). Plain user_fills returns
+        only the 2000 MOST-RECENT fills, silently truncating realized PnL for
+        accounts with >2000 lifetime fills (e.g. v1 had 2399 → capped figure
+        overstated realized by ~$36). For a recent cutoff this is a single page,
+        so the daily-loss gate pays no extra cost."""
+        assert self._info is not None
+        start_ms = max(0, since_ts_ns // 1_000_000)
+        out: list[dict] = []
+        seen: set = set()
+        for _ in range(100):  # safety bound: 100 pages × 2000 = 200k fills
+            batch = self._info.user_fills_by_time(self.account_address, start_time=start_ms)
+            if not batch:
+                break
+            out.extend(r for r in batch if r.get("tid") not in seen)
+            seen.update(r.get("tid") for r in batch)
+            if len(batch) < 2000:
+                break
+            start_ms = max(int(r.get("time", 0)) for r in batch)
+        return out
+
     @_read_retry
     def user_fills(self, *, since_ts_ns: int = 0) -> list[UserFillRow]:
         if self.paper_mode:
             return [f for f in self._paper_fills if f.ts_ns >= since_ts_ns]
-        assert self._info is not None
         try:
-            rows = self._info.user_fills(self.account_address)
+            rows = self._fetch_fills_raw(since_ts_ns)
         except Exception as e:
             _reraise_rest(e)
         out: list[UserFillRow] = []
@@ -446,7 +467,7 @@ class HLClient:
             if ts_ns < since_ts_ns:
                 continue
             out.append(UserFillRow(
-                fill_id=str(r.get("hash", r.get("tid", ""))),
+                fill_id=str(r.get("tid", r.get("hash", ""))),
                 cloid=str(r.get("cloid", "")),
                 symbol=str(r.get("coin", "")),
                 side="buy" if r.get("side") == "B" else "sell",
