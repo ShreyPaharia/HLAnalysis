@@ -4,7 +4,7 @@
 # dt=5/bbo live slots) over the last 6 months (~180 daily markets, 2025-12→2026-06).
 # 1m klines are still fetched for strike/settlement (PM settles on the 1m close).
 grids:
-  theta_harvester:
+  v3_theta_harvester:
     favorite_threshold: [0.80, 0.85, 0.90]
     edge_buffer: [0.01, 0.02, 0.03, 0.05]
     vol_lookback_seconds: [900, 1800, 3600]

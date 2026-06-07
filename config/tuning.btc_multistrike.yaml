@@ -6,7 +6,7 @@
 # last 6 months. 1m klines still fetched for strike/settlement (PM 1m-close settle).
 # Last-6mo daily buckets → ~19 splits at 30/8/8 (thin-history risk refuted by corpus).
 grids:
-  theta_harvester:
+  v3_theta_harvester:
     favorite_threshold: [0.75, 0.80, 0.85]
     edge_buffer: [0.005, 0.01, 0.02]
     vol_lookback_seconds: [1800, 2700, 3600]

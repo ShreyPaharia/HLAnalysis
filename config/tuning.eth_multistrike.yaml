@@ -5,7 +5,7 @@
 # to dt=5 (live-parity) over the last 6 months; 1m klines still fetched for
 # strike/settlement (PM 1m-close settle).
 grids:
-  theta_harvester:
+  v3_theta_harvester:
     favorite_threshold: [0.75, 0.80, 0.85]
     edge_buffer: [0.005, 0.01, 0.02]
     vol_lookback_seconds: [1800, 2700, 3600]

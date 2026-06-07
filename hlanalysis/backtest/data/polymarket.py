@@ -483,24 +483,26 @@ class PolymarketDataSource:
         return self._events_bucket(q, entry)
 
     def events_arrays(self, q: QuestionDescriptor):
-        """Return a ``FastPathBundle`` for *recorded* mode, skipping the
-        dataclass round-trip of ``events()``.
+        """Return a ``FastPathBundle`` for both *recorded* and *synthetic* mode,
+        skipping the per-market dataclass overhead so repeated grid-cell replays
+        hit the disk cache rather than rebuilding arrays from scratch each time.
 
-        Only ``book_source="recorded"`` is supported.  Raises
-        ``NotImplementedError`` for synthetic mode — the runner's
-        ``getattr(data_source, "events_arrays", None)`` guard means the legacy
-        path is taken instead.
+        Both modes are supported:
 
-        The bundle is bit-equivalent to the legacy path: the within-snapshot
-        level ordering of ``read_pm_book_columns`` matches ``_normalize_levels``
-        (bids px DESC, asks px ASC), and the same trade / reference / settlement
-        lists feed the shared assembler.
+        - ``book_source="recorded"``: reads the real multi-level L2
+          ``book_snapshot`` parquet directly via the column-vectorised assembler.
+          Bit-equivalent to the legacy ``events()`` path for that mode.
+        - ``book_source="synthetic"`` (default): drives the same legacy
+          ``events()`` stream the runner consumes, partitions events by type and
+          symbol exactly as the runner does, and calls the shared in-memory
+          assembler — producing arrays that are **bit-identical** to the legacy
+          path while enabling the disk cache for grid-cell reuse.
+
+        The bundle is cached on disk under ``<cache_root>/_event_array_cache``
+        keyed by ``(question_id, config_sig, source-file mtimes)``.  A second
+        call for the same question + config returns the cached bundle without
+        re-reading any source files.
         """
-        if self._book_source != "recorded":
-            raise NotImplementedError(
-                "PM fast path is recorded-mode only; "
-                "use book_source='recorded' to enable events_arrays()"
-            )
 
         from ._event_array_cache import inproc_lookup
 
@@ -524,12 +526,22 @@ class PolymarketDataSource:
                 settlement_events=[],
             )
 
-        from ._pm_fastpath import build_pm_fast_path_bundle
+        from ._pm_fastpath import build_pm_fast_path_bundle, build_pm_synthetic_fast_path_bundle
 
         # All source reads (trades, klines/BBO reference, book parquet,
         # settlement) are deferred into ``_build`` so a cache HIT skips ALL of
         # them — only the cheap source-file stat + npz load runs.
         def _build() -> "FastPathBundle":
+            if self._book_source == "synthetic":
+                # Synthetic: assemble arrays from the SAME legacy event stream
+                # the runner consumes. Partitions exactly as the runner does and
+                # calls the same shared assembler → bit-identical output.
+                return build_pm_synthetic_fast_path_bundle(
+                    q=q,
+                    events_iter=self.events(q),
+                )
+
+            # Recorded: vectorised column path (the original recorded assembler).
             if entry.get("kind", "binary") == "binary":
                 trades = self._read_trades(q.question_id)
                 outcome = self._binary_outcome(q, entry)
@@ -596,14 +608,23 @@ class PolymarketDataSource:
 
     def _bundle_config_sig(self) -> str:
         """Cache-key signature: every non-source-file input that changes the
-        built bundle (resample period + reference/book source mode), so a bundle
-        built under one config never aliases to a request under another. Keep in
-        sync with the params that flow into ``_build``."""
+        built bundle (resample period + reference/book source mode + liquidity
+        profile), so a bundle built under one config never aliases to a request
+        under another. Keep in sync with the params that flow into ``_build``."""
+        lp = self._liquidity_profile
+        if lp is None:
+            lp_sig = "none"
+        else:
+            lp_sig = (
+                f"{lp.bucket_width}:{lp.global_half_spread}:{lp.global_depth}"
+                f":{hash(tuple(lp.half_spread))}:{hash(tuple(lp.depth))}"
+            )
         return (
             f"rrs={self._reference_resample_ns}"
             f"|refsrc={self._reference_source}"
             f"|book={self._book_source}"
             f"|bbo={self._binance_bbo_product_type}"
+            f"|lp={lp_sig}"
         )
 
     def _fastpath_source_files(self, q: QuestionDescriptor) -> list[Path]:
