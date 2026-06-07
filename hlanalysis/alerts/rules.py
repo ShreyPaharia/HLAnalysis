@@ -23,7 +23,7 @@ from loguru import logger
 from ..engine.event_bus import EventBus
 from ..engine.risk_events import (
     BusEvent, DailyLossHalt, Entry, Exit, FeedDown, FeedRecovered, FeedStale,
-    KillSwitchActivated, NewQuestion, OrderRejected, OrderUnconfirmed,
+    KillSwitchActivated, MemoryHalt, NewQuestion, OrderRejected, OrderUnconfirmed,
     PMStrikeMismatch, ReconcileDrift, RedemptionTimeout, RiskHalt, RiskVeto,
     StaleDataHalt, StopLossTriggered,
 )
@@ -104,6 +104,15 @@ class AlertRules:
                 return None, (
                     f"<b>DAILY LOSS HALT</b>\n"
                     f"Realized: ${ev.realized_pnl:.2f} / Cap: ${ev.cap:.2f}"
+                )
+            case MemoryHalt():
+                rss_mb = ev.rss_kb / 1024
+                ceil_mb = ev.ceiling_kb / 1024
+                return None, (
+                    f"🧠 <b>MEMORY SELF-HALT</b> (W1.9)\n"
+                    f"RSS {rss_mb:.0f} MB exceeds ceiling {ceil_mb:.0f} MB — "
+                    f"all slots halted to prevent OOM kill mid-position.\n"
+                    f"Remove kill-switch flags and restart engine to resume."
                 )
             case FeedStale():
                 return "feed_stale", (

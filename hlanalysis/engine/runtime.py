@@ -47,7 +47,7 @@ from .restart_drift import RestartDriftGate
 from .risk import RiskGate
 from .risk_events import (
     DailyLossHalt, EngineHeartbeat, Exit, FeedDown, FeedRecovered, FeedStale,
-    KillSwitchActivated, NewQuestion,
+    KillSwitchActivated, MemoryHalt, NewQuestion,
     StaleDataHalt, StopLossTriggered,
 )
 from .router import Router
@@ -1213,10 +1213,22 @@ class EngineRuntime:
         """RSS self-halt guard (W1.9).
 
         Read process RSS and, if it exceeds ``rss_halt_kb``, latch all slots
-        halted + write their kill-switch flags + emit a Telegram-visible log
-        line.  This is the memory safety net behind the SHR-44/63 memory
-        fixes: if buffered state still grows past budget we stop placing
-        rather than die mid-position under the kernel OOM-killer.
+        halted + write their kill-switch flags + publish a MemoryHalt bus
+        event so AlertRules forwards a Telegram alert to the operator.
+
+        This is the memory safety net behind the SHR-44/63 memory fixes: if
+        buffered state still grows past budget we stop placing rather than die
+        mid-position under the kernel OOM-killer.
+
+        The halt latches all slots (kill-switch flag files written) and
+        requires operator flag-removal + engine restart to resume.  Stop-loss
+        enforcement loops intentionally keep running after the latch so open
+        positions remain protected while the operator intervenes.
+
+        The MemoryHalt event is published only once — on the tick that first
+        crosses the ceiling — because _latch_kill_switch sets slot.halted=True
+        and _heartbeat_loop already logs the halted flag on every subsequent
+        tick, avoiding alert spam.
         """
         try:
             rss_kb = self._read_rss_kb()
@@ -1232,6 +1244,14 @@ class EngineRuntime:
         )
         for slot in slots:
             self._latch_kill_switch(slot)
+        # Publish once so AlertRules fires a Telegram alert. account_alias=""
+        # keeps the event cross-slot (no per-slot prefix) — RSS is a
+        # process-wide condition, not per-slot.
+        await self.bus.publish(MemoryHalt(
+            ts_ns=self._now_ns(),
+            rss_kb=rss_kb,
+            ceiling_kb=self.rss_halt_kb,
+        ))
 
     def _maybe_stop_all_halted(self, just_halted: AccountSlot) -> None:
         """If every slot has latched halted, drop the global stop event so

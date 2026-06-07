@@ -9,7 +9,7 @@ from hlanalysis.alerts.rules import AlertRules
 from hlanalysis.engine.event_bus import EventBus
 from hlanalysis.engine.risk_events import (
     DailyLossHalt, EngineHeartbeat, Entry, Exit, FeedDown, FeedRecovered,
-    FeedStale, KillSwitchActivated,
+    FeedStale, KillSwitchActivated, MemoryHalt,
     OrderRejected, OrderUnconfirmed, PMStrikeMismatch, ReconcileDrift,
     RedemptionTimeout, RiskVeto,
 )
@@ -335,6 +335,37 @@ async def test_reconcile_drift_dedupes_repeated_identical_events():
         pass
     drift_msgs = [m for m in tg.messages if "DRIFT" in m]
     assert len(drift_msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_halt_formats_with_rss_and_ceiling():
+    """MemoryHalt must reach Telegram with MB-converted RSS and ceiling values
+    and a clear 'HALT' indicator so the operator knows the engine self-halted."""
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    # 900 MB RSS, 850 MB ceiling (typical 1 GB box configuration)
+    await bus.publish(MemoryHalt(
+        ts_ns=1, rss_kb=921_600, ceiling_kb=870_400,
+    ))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert tg.messages, "MemoryHalt must produce at least one Telegram message"
+    msg = tg.messages[0]
+    # Must mention the halt condition clearly
+    assert "MEMORY" in msg or "HALT" in msg, (
+        "message must mention MEMORY or HALT so operators recognise it as a "
+        "self-halt event"
+    )
+    # MB values: 921600 KB → 900 MB, 870400 KB → 850 MB
+    assert "900" in msg, "message must include current RSS in MB"
+    assert "850" in msg, "message must include ceiling in MB"
 
 
 @pytest.mark.asyncio

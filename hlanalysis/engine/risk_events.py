@@ -188,12 +188,24 @@ class FeedRecovered(_Base):
     kind: Literal["feed_recovered"] = "feed_recovered"
 
 
+class MemoryHalt(_Base):
+    """Process RSS exceeded the self-halt ceiling (W1.9).
+
+    Published once when ``_check_rss_halt`` fires so the operator receives a
+    Telegram alert.  The halt latches all slots and writes their kill-switch
+    flag files — only operator flag-removal and an engine restart can resume
+    trading.  Stop-loss loops remain running to protect open positions."""
+    kind: Literal["memory_halt"] = "memory_halt"
+    rss_kb: int
+    ceiling_kb: int
+
+
 BusEvent = Annotated[
     Union[
         RiskVeto, RiskHalt, StopLossTriggered, DailyLossHalt, StaleDataHalt,
         KillSwitchActivated, ReconcileDrift, Entry, Exit, NewQuestion,
         OrderRejected, OrderUnconfirmed, RedemptionTimeout, PMStrikeMismatch,
-        EngineHeartbeat, FeedStale, FeedDown, FeedRecovered,
+        EngineHeartbeat, FeedStale, FeedDown, FeedRecovered, MemoryHalt,
     ],
     Field(discriminator="kind"),
 ]

@@ -1,6 +1,6 @@
 """W1.9 — Latching daily-loss kill-switch + RSS self-halt guard.
 
-Three groups of assertions:
+Groups of assertions:
 
 A) Daily-loss breach latches persistently:
    - slot.halted is True
@@ -15,6 +15,10 @@ B) Exits (stop-loss enforcement) still work while halted — the stop-loss loop
 
 C) RSS self-halt guard: injecting a fake RSS reading above the ceiling halts
    all slots + writes their kill-switch flag files.
+
+F) RSS self-halt publishes a MemoryHalt bus event so AlertRules fires a
+   Telegram alert — a silent halt defeats the guard's purpose when the operator
+   is not notified.
 """
 from __future__ import annotations
 
@@ -24,7 +28,7 @@ from pathlib import Path
 import pytest
 
 from tests.unit.test_async_offload import _build_runtime_with_recording
-from hlanalysis.engine.risk_events import DailyLossHalt, StopLossTriggered
+from hlanalysis.engine.risk_events import DailyLossHalt, MemoryHalt, StopLossTriggered
 
 
 _NOW = 1_750_000_000_000_000_000  # arbitrary fixed timestamp
@@ -375,4 +379,93 @@ async def test_continuous_checks_loop_latches_and_writes_flag(tmp_path):
     assert slot.halted is True
     assert slot.kill_switch_path.exists(), (
         "_continuous_checks_loop must call _latch_kill_switch on breach"
+    )
+
+
+# ---------------------------------------------------------------------------
+# F) RSS self-halt publishes MemoryHalt bus event → Telegram alert
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_rss_halt_publishes_memory_halt_event(tmp_path, monkeypatch):
+    """When _check_rss_halt fires above the ceiling it must publish a
+    MemoryHalt event on the bus.  Without this AlertRules never receives the
+    event and no Telegram alert is sent — defeating the guard's purpose."""
+    from hlanalysis.engine.runtime import EngineRuntime
+
+    rt, slot = _build_runtime_with_recording(tmp_path)
+    rt.slots = [slot]
+
+    monkeypatch.setattr(EngineRuntime, "_read_rss_kb",
+                        staticmethod(lambda: 900_000), raising=True)
+
+    collected: list = []
+    sub = rt.bus.subscribe()
+
+    await rt._check_rss_halt(rt.slots)
+
+    # Drain all events published to the bus
+    while not sub.empty():
+        collected.append(sub.get_nowait())
+
+    memory_halts = [e for e in collected if isinstance(e, MemoryHalt)]
+    assert len(memory_halts) == 1, (
+        "_check_rss_halt must publish exactly one MemoryHalt event when RSS "
+        "exceeds the ceiling so AlertRules can forward it to Telegram"
+    )
+    ev = memory_halts[0]
+    assert ev.rss_kb == 900_000
+    assert ev.ceiling_kb == rt.rss_halt_kb
+    assert slot.halted is True
+
+
+@pytest.mark.asyncio
+async def test_rss_halt_alert_formats_to_nonempty_telegram_message(tmp_path, monkeypatch):
+    """AlertRules must format MemoryHalt into a non-empty Telegram message
+    that mentions the RSS size and ceiling.  This closes the full alert path:
+    _check_rss_halt → bus → AlertRules → Telegram."""
+    from hlanalysis.alerts.rules import AlertRules
+    from hlanalysis.engine.event_bus import EventBus
+    from hlanalysis.engine.runtime import EngineRuntime
+
+    class _FakeTelegram:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+        async def send(self, text: str, *, markdown: bool = True) -> bool:
+            self.messages.append(text)
+            return True
+
+    rt, slot = _build_runtime_with_recording(tmp_path)
+    rt.slots = [slot]
+
+    monkeypatch.setattr(EngineRuntime, "_read_rss_kb",
+                        staticmethod(lambda: 920_000), raising=True)
+
+    tg = _FakeTelegram()
+    bus = rt.bus
+    rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
+    sub = bus.subscribe()
+    alert_task = asyncio.create_task(rules.run(sub))
+
+    await rt._check_rss_halt(rt.slots)
+    await asyncio.sleep(0.05)  # let the alert loop drain the queue
+
+    alert_task.cancel()
+    try:
+        await alert_task
+    except asyncio.CancelledError:
+        pass
+
+    memory_msgs = [m for m in tg.messages if "MEMORY" in m or "RSS" in m or "OOM" in m]
+    assert memory_msgs, (
+        "AlertRules must forward MemoryHalt to Telegram with a non-empty message"
+    )
+    msg = memory_msgs[0]
+    # Message must mention the RSS reading and the ceiling so the operator
+    # knows how close to the limit the process was.
+    assert "898" in msg or "920" in msg or "MB" in msg, (
+        "Telegram message must include RSS/ceiling size information"
+    )
+    assert "halt" in msg.lower() or "HALT" in msg, (
+        "Telegram message must clearly indicate a halt has occurred"
     )
