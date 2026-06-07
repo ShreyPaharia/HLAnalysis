@@ -41,6 +41,7 @@ from ..core.events import (
     TradeEvent,
 )
 from ._synthetic_l2 import L2Snapshot, trade_to_l2
+from hlanalysis.adapters.polymarket_normalize import parse_bucket_event as _shared_parse_bucket_event
 
 _GAMMA_BASE = "https://gamma-api.polymarket.com"
 _CLOB_DATA_BASE = "https://data-api.polymarket.com"
@@ -252,55 +253,56 @@ def _parse_binary_event(ev: dict) -> dict | None:
 def _parse_bucket_event(ev: dict) -> dict | None:
     """Parse a Gamma multi-strike event into a bucket manifest record.
 
-    Each sub-market is a binary "BTC above $X" with its own conditionId + (YES,
-    NO) clob token pair. We sort sub-markets by strike ascending so leg_tokens
-    + thresholds align positionally with the canonical
-    (yes_o0, no_o0, yes_o1, no_o1, ...) layout.
+    Delegates leg-collection + strike-sorting to the shared
+    `parse_bucket_event` (polymarket_normalize) so the live adapter and
+    backtest always produce identical leg orderings. The backtest-only fields
+    (`event_slug`, `start_ts_ns`, `end_ts_ns`, `leg_resolutions`) are
+    appended here; `thresholds`/`leg_tokens`/`leg_condition_ids` come verbatim
+    from the shared helper to avoid drift.
     """
-    markets = ev.get("markets") or []
-    if len(markets) < 2:
+    base = _shared_parse_bucket_event(ev)
+    if base is None:
         return None
     slug = ev.get("slug") or ev.get("ticker")
-    end_iso = ev.get("endDate")
-    start_iso = ev.get("startDate")
+    start_iso, end_iso = ev.get("startDate"), ev.get("endDate")
     if not (slug and start_iso and end_iso):
         return None
-    legs: list[tuple[float, str, str, str, str]] = []  # (strike, cond_id, yes_tok, no_tok, res)
-    for mk in markets:
-        tok_raw = mk.get("clobTokenIds")
-        if not tok_raw:
+    # leg_resolutions stays backtest-only (settlement replay); recompute in
+    # the SAME strike-ascending order the shared parser used.
+    pairs = []  # (strike, yes_p, no_p)
+    for mk in ev.get("markets") or []:
+        raw = mk.get("clobTokenIds")
+        if not raw:
             continue
-        tok = json.loads(tok_raw) if isinstance(tok_raw, str) else tok_raw
+        tok = json.loads(raw) if isinstance(raw, str) else raw
         if len(tok) != 2:
             continue
-        cond_id = mk.get("conditionId") or mk.get("id")
-        strike_raw = mk.get("groupItemTitle") or ""
         try:
-            strike = float(str(strike_raw).replace(",", ""))
+            # Match the shared parser's strike cleaning (lstrip "$") so the
+            # re-sorted leg_resolutions stay positionally aligned with the
+            # shared helper's thresholds/leg_tokens even for "$80,000" titles.
+            strike = float(str(mk.get("groupItemTitle") or "").lstrip("$").replace(",", ""))
         except ValueError:
             continue
-        outcome: Literal["yes", "no", "unknown"] = "unknown"
+        res = "unknown"
         op = mk.get("outcomePrices")
         if op:
-            prices = json.loads(op) if isinstance(op, str) else op
-            if len(prices) == 2:
-                yes_p, no_p = float(prices[0]), float(prices[1])
-                if yes_p >= 0.99:
-                    outcome = "yes"
-                elif no_p >= 0.99:
-                    outcome = "no"
-        legs.append((strike, str(cond_id), str(tok[0]), str(tok[1]), outcome))
-    if not legs:
-        return None
-    legs.sort(key=lambda x: x[0])
+            pr = json.loads(op) if isinstance(op, str) else op
+            if len(pr) == 2:
+                if float(pr[0]) >= 0.99:
+                    res = "yes"
+                elif float(pr[1]) >= 0.99:
+                    res = "no"
+        pairs.append((strike, res))
+    pairs.sort(key=lambda x: x[0])
     return {
         "event_slug": str(slug),
         "start_ts_ns": _parse_iso_ns(start_iso),
         "end_ts_ns": _parse_iso_ns(end_iso),
-        "thresholds": [float(l[0]) for l in legs],
-        "leg_tokens": [[l[2], l[3]] for l in legs],
-        "leg_condition_ids": [l[1] for l in legs],
-        "leg_resolutions": [l[4] for l in legs],
+        "thresholds": base["thresholds"],
+        "leg_tokens": base["leg_tokens"],
+        "leg_condition_ids": base["leg_condition_ids"],
+        "leg_resolutions": [r for _, r in pairs],
     }
 
 
