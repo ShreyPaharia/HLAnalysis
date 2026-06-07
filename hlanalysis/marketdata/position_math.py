@@ -49,6 +49,12 @@ class PositionState:
     qty: float
     avg_entry: float
     realized_pnl: float = 0.0
+    # Cumulative ABSOLUTE quantity closed (reduced) over the position's life.
+    # Accumulated on every reduce so a caller can pair the *total* closed size
+    # with the *cumulative* realized PnL on the final close — otherwise an exit
+    # that fills across several partial reduces reports only the last lot's qty
+    # against the whole-trade PnL (the misleading `qty=3 PnL=-$25.80` alert).
+    closed_qty: float = 0.0
 
 
 def stop_price(entry: float, pct: float | None) -> float:
@@ -90,6 +96,11 @@ def apply_fill(
     the closed lot otherwise. On a full close it equals ``(price - avg) * qty``
     for both long and short, so a caller can publish ``realized_this_fill +
     prior_realized`` as the trade's realized PnL.
+
+    ``new_pos.closed_qty`` accumulates the absolute quantity closed on every
+    reduce (carried unchanged through add-ons) so that on the final close the
+    caller can report the TOTAL closed size — ``prior.closed_qty + |final lot|``
+    — paired with the cumulative realized PnL, rather than just the last lot.
     """
     signed = size if side == "buy" else -size
 
@@ -97,11 +108,11 @@ def apply_fill(
     if pos is not None and (
         (pos.qty > 0 and side == "sell") or (pos.qty < 0 and side == "buy")
     ):
-        closed_qty = min(size, abs(pos.qty))
+        closed_lot = min(size, abs(pos.qty))
         if pos.qty > 0:
-            realized_this_fill = (price - pos.avg_entry) * closed_qty
+            realized_this_fill = (price - pos.avg_entry) * closed_lot
         else:
-            realized_this_fill = (pos.avg_entry - price) * closed_qty
+            realized_this_fill = (pos.avg_entry - price) * closed_lot
 
     if pos is None:
         return PositionState(qty=signed, avg_entry=price, realized_pnl=0.0), 0.0
@@ -113,13 +124,17 @@ def apply_fill(
     is_addon = (pos.qty > 0 and side == "buy") or (pos.qty < 0 and side == "sell")
     if is_addon:
         avg = (pos.qty * pos.avg_entry + signed * price) / new_qty
+        closed_qty = pos.closed_qty
     else:
         avg = pos.avg_entry
+        # Partial reduce: accumulate the lot closed on this fill.
+        closed_qty = pos.closed_qty + closed_lot
     return (
         PositionState(
             qty=new_qty,
             avg_entry=avg,
             realized_pnl=pos.realized_pnl + realized_this_fill,
+            closed_qty=closed_qty,
         ),
         realized_this_fill,
     )

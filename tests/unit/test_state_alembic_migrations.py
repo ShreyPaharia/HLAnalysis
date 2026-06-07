@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from hlanalysis.engine.state import Fill, Position, StateDAL
+from hlanalysis.engine.state import Fill, StateDAL
 
 # --- frozen pre-Alembic production schema -----------------------------------
 
@@ -150,16 +150,24 @@ def _table_names(path) -> set[str]:
         conn.close()
 
 
-def test_existing_db_upgrades_without_data_loss_or_schema_drift(tmp_path):
+def test_existing_db_upgrades_without_data_loss_and_backfills_closed_qty(tmp_path):
     db = tmp_path / "state.db"
     _build_legacy_db(db)
 
     # Seed live data spanning multiple tables, incl. the ALTER-added closed_pnl.
+    # The position row is written with the LEGACY column set (no closed_qty),
+    # exactly as a pre-Alembic production DB would already hold it on disk.
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO position (question_idx, symbol, qty, avg_entry, "
+        "realized_pnl, last_update_ts_ns, stop_loss_price) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (42, "@30", 10.0, 0.95, -3.0, 111, 0.85),
+    )
+    conn.commit()
+    conn.close()
+
     seed = StateDAL(db)
-    seed.upsert_position(Position(
-        question_idx=42, symbol="@30", qty=10.0, avg_entry=0.95,
-        realized_pnl=-3.0, last_update_ts_ns=111, stop_loss_price=0.85,
-    ))
     seed.set_pm_strike(1000126, 73_500.0)
     seed.append_fill(Fill(
         fill_id="f-1", cloid="hla-1", question_idx=42, symbol="@30",
@@ -170,19 +178,29 @@ def test_existing_db_upgrades_without_data_loss_or_schema_drift(tmp_path):
 
     schema_before = _app_schema(db)
 
-    # Adopt Alembic on an existing DB: must stamp at baseline, NOT re-run DDL.
+    # Adopt Alembic on an existing DB: stamp at baseline, then apply the
+    # post-baseline 0002 migration that adds position.closed_qty.
     dal = StateDAL(db)
     dal.run_migrations()
 
-    # 1) No schema drift — every app object's CREATE text is unchanged.
-    assert _app_schema(db) == schema_before
+    # 1) The ONLY schema change is position gaining closed_qty; every other app
+    #    object's CREATE text is byte-unchanged.
+    schema_after = _app_schema(db)
+    assert set(schema_after) == set(schema_before)
+    for name, sql in schema_before.items():
+        if name == "position":
+            continue
+        assert schema_after[name] == sql, f"unexpected schema drift on {name}"
+    assert "closed_qty" in schema_after["position"]
 
-    # 2) Stamped at the Alembic baseline (version table now present).
+    # 2) Stamped + upgraded (version table present).
     assert "alembic_version" in _table_names(db)
 
-    # 3) No data loss.
+    # 3) No data loss — and the new column is backfilled to 0.0 on the existing
+    #    pre-migration row.
     assert dal.get_position(42).qty == 10.0
     assert dal.get_position(42).realized_pnl == -3.0
+    assert dal.get_position(42).closed_qty == 0.0
     assert dal.get_pm_strike(1000126) == 73_500.0
     fills = dal.fills_for_cloid("hla-1")
     assert len(fills) == 1 and fills[0].closed_pnl == -2.5
@@ -190,18 +208,24 @@ def test_existing_db_upgrades_without_data_loss_or_schema_drift(tmp_path):
 
     # 4) Idempotent — a second run is a no-op (already at head).
     dal.run_migrations()
-    assert _app_schema(db) == schema_before
+    assert _app_schema(db) == schema_after
 
 
-def test_fresh_db_schema_is_byte_identical_to_legacy(tmp_path):
+def test_fresh_and_upgraded_legacy_converge_to_identical_head_schema(tmp_path):
+    """A fresh-from-scratch DB and an upgraded pre-Alembic production DB must end
+    at the IDENTICAL head schema. This is the durable invariant once the schema
+    evolves past the frozen baseline: both paths add the same post-baseline
+    columns (e.g. position.closed_qty), so they can never diverge."""
     fresh = tmp_path / "fresh.db"
     StateDAL(fresh).run_migrations()
 
     legacy = tmp_path / "legacy.db"
     _build_legacy_db(legacy)
+    StateDAL(legacy).run_migrations()
 
-    # A from-scratch Alembic upgrade must reproduce the exact production schema.
     assert _app_schema(fresh) == _app_schema(legacy)
+    # The head schema includes the post-baseline column on both paths.
+    assert "closed_qty" in _app_schema(fresh)["position"]
     # And it tracks state in alembic_version, not the old schema_migrations.
     assert "alembic_version" in _table_names(fresh)
     assert "schema_migrations" not in _table_names(fresh)

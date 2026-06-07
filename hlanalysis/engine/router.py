@@ -369,7 +369,10 @@ class Router:
         # ``realized_this_fill`` is 0 on opens/add-ons and the closed-lot PnL on
         # reduce/close legs, recorded on the Fill row and the Exit event.
         prev_state = (
-            PositionState(existing.qty, existing.avg_entry, existing.realized_pnl)
+            PositionState(
+                existing.qty, existing.avg_entry, existing.realized_pnl,
+                existing.closed_qty,
+            )
             if existing is not None
             else None
         )
@@ -386,6 +389,7 @@ class Router:
                 stop_loss_price=self._stop_loss_price_for(
                     price, intent.question_idx, question_fields,
                 ),
+                closed_qty=new_state.closed_qty,
             ))
             await self.bus.publish(Entry(
                 ts_ns=now_ns, account_alias=self.account_alias,
@@ -410,10 +414,15 @@ class Router:
             exit_reason = intent.exit_reason or (
                 "stop_loss" if intent.reduce_only else "manual"
             )
+            # Report the TOTAL quantity closed over the trade (prior partial
+            # reduces + this closing lot), so qty and the cumulative realized_pnl
+            # describe the same scope. `existing.qty` alone is just the final lot
+            # and pairs misleadingly with the whole-trade PnL when the exit
+            # filled across several partial reduces.
             await self.bus.publish(Exit(
                 ts_ns=now_ns, account_alias=self.account_alias,
                 question_idx=intent.question_idx,
-                symbol=intent.symbol, qty=existing.qty,
+                symbol=intent.symbol, qty=existing.closed_qty + existing.qty,
                 realized_pnl=realized_this_fill + existing.realized_pnl,
                 reason=exit_reason,
                 question_description=q_desc, outcome_description=o_desc,
@@ -432,6 +441,7 @@ class Router:
                 qty=new_state.qty, avg_entry=new_state.avg_entry,
                 realized_pnl=new_state.realized_pnl,
                 last_update_ts_ns=now_ns, stop_loss_price=existing.stop_loss_price,
+                closed_qty=new_state.closed_qty,
             ))
             # Topups / add-on buys reuse the ENTRY Telegram alert so operators
             # see every size-increasing fill, not just the initial open.
@@ -507,6 +517,6 @@ class Router:
         await self.bus.publish(Exit(
             ts_ns=now_ns, account_alias=self.account_alias,
             question_idx=question_idx, symbol=p.symbol,
-            qty=p.qty, realized_pnl=realized, reason="settlement",
+            qty=p.closed_qty + p.qty, realized_pnl=realized, reason="settlement",
             question_description=q_desc, outcome_description=o_desc,
         ))

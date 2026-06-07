@@ -103,3 +103,28 @@ def test_close_atol_parameter_treats_small_residual_as_closed() -> None:
     new2, _ = apply_fill(pos, "sell", 9.999, 0.95)
     assert new2 is not None
     assert math.isclose(new2.qty, 0.001)
+
+
+def test_closed_qty_accumulates_across_partial_reduces() -> None:
+    """closed_qty tracks the cumulative absolute quantity closed over the
+    position's life so a caller can pair *total* closed size with the
+    *cumulative* realized PnL on the final close. Without it, an exit that
+    fills across several partial reduces reports the last lot's qty against the
+    whole-trade PnL (the misleading `qty=3 PnL=-$25.80` live alert)."""
+    pos, _ = apply_fill(None, "buy", 10.0, 0.95)
+    assert pos.closed_qty == 0.0  # nothing closed on open
+
+    pos, _ = apply_fill(pos, "sell", 4.0, 0.80)  # partial reduce 1
+    assert pos is not None and pos.closed_qty == 4.0
+
+    pos, _ = apply_fill(pos, "sell", 3.0, 0.70)  # partial reduce 2
+    assert pos is not None and pos.closed_qty == 7.0
+
+
+def test_closed_qty_carries_forward_across_addons() -> None:
+    """An add-on (same-direction) fill realizes nothing and must preserve the
+    accumulated closed_qty rather than resetting it."""
+    pos, _ = apply_fill(None, "buy", 10.0, 0.95)
+    pos, _ = apply_fill(pos, "sell", 4.0, 0.80)   # closed_qty -> 4
+    pos, _ = apply_fill(pos, "buy", 2.0, 0.96)    # add-on
+    assert pos is not None and pos.closed_qty == 4.0

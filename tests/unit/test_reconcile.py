@@ -57,7 +57,11 @@ def test_local_ghost_with_known_fill_marks_filled_and_replays(dal):
     res = r.run(venue_open=[], venue_state=ClearinghouseState(positions=(), account_value_usd=0), now_ns=2)
     assert dal.get_order("hla-1").status == "filled"
     assert dal.fills_for_cloid("hla-1")  # replayed
-    assert any(d.case == "state_mismatch" for d in res.drift_events)
+    drift = [d for d in res.drift_events if d.case == "state_mismatch"]
+    assert drift
+    # The drift must carry the order's question_idx (it's in hand via db_o) so
+    # the Telegram alert isn't rendered with q=None and is attributable.
+    assert drift[0].question_idx == 42
 
 
 def test_local_ghost_fill_discovery_logs_unapplied_position_delta(dal):

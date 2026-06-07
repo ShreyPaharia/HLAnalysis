@@ -170,6 +170,7 @@ class Reconciler:
                 )
                 drift.append(ReconcileDrift(
                     ts_ns=now_ns, account_alias=self.account_alias, case="state_mismatch", cloid=cloid,
+                    question_idx=db_o.question_idx,
                     detail={"resolution": "filled_via_user_fills"},
                 ))
             else:

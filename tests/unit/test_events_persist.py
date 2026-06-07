@@ -46,8 +46,10 @@ def dal(tmp_path):
 
 def test_events_table_created_by_baseline(dal):
     # The events table (formerly migration 0006) is now part of the Alembic
-    # baseline; confirm the baseline is applied and the table exists.
-    assert "0001_baseline" in dal.applied_versions()
+    # baseline; confirm migrations ran (a head is recorded) and the table exists.
+    # applied_versions() reports only the current head revision, which advances
+    # with each new migration, so don't pin it to the baseline.
+    assert dal.applied_versions()
     import sqlite3
     with sqlite3.connect(dal.db_path) as conn:
         names = {

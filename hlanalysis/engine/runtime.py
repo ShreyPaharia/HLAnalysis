@@ -884,7 +884,7 @@ class EngineRuntime:
                     await self.bus.publish(Exit(
                         ts_ns=now, account_alias=slot.alias,
                         question_idx=qidx, symbol=sym,
-                        qty=lp.qty, realized_pnl=realized,
+                        qty=lp.closed_qty + lp.qty, realized_pnl=realized,
                         reason="settlement",
                         question_description=question_description(qv) if qv else "",
                         outcome_description=outcome_description(qv, sym) if qv else "",

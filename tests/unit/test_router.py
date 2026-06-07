@@ -313,6 +313,58 @@ async def test_partial_reduce_preserves_avg_entry_and_pnl(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_multi_partial_close_exit_reports_total_qty_not_last_lot(tmp_path):
+    """When an exit fills across several partial reduces, the final close's Exit
+    event must report the TOTAL quantity closed over the trade paired with the
+    cumulative realized PnL — not the last lot's qty against the whole-trade PnL.
+
+    Regression for the live `qty=3 PnL=-$25.80` alert: a 78-share favorite was
+    whittled down by silent partial reduces and the 3-share tail's close carried
+    the entire trade's loss, implying an impossible -$8.60/share on a binary.
+    """
+    from hlanalysis.engine.risk_events import Entry, Exit
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    sub = bus.subscribe()
+    client = HLClient(account_address="0x", api_secret_key="0x",
+                      base_url="x", paper_mode=True)
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
+
+    # Open 10 @ 0.95.
+    await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
+    assert isinstance(await asyncio.wait_for(sub.get(), timeout=0.5), Entry)
+
+    # Two silent partial reduces: sell 4 @ 0.80, then sell 3 @ 0.70.
+    for i, (sz, px) in enumerate(((4.0, 0.80), (3.0, 0.70)), start=1):
+        partial = OrderIntent(
+            question_idx=42, symbol="@30", side="sell", size=sz,
+            limit_price=px, cloid=f"hla-router-p{i}", time_in_force="ioc",
+            reduce_only=True, exit_reason="exit_safety_d",
+        )
+        await router.handle(Decision(action=Action.EXIT, intents=(partial,)),
+                            inputs=_approval_inputs(), now_ns=2 + i)
+    assert sub.qsize() == 0, "partial reduces must stay silent"
+
+    # Final close: sell the last 3 @ 0.70.
+    final = OrderIntent(
+        question_idx=42, symbol="@30", side="sell", size=3.0,
+        limit_price=0.70, cloid="hla-router-final", time_in_force="ioc",
+        reduce_only=True, exit_reason="exit_safety_d",
+    )
+    await router.handle(Decision(action=Action.EXIT, intents=(final,)),
+                        inputs=_approval_inputs(), now_ns=10)
+    exit_ev = await asyncio.wait_for(sub.get(), timeout=0.5)
+    assert isinstance(exit_ev, Exit)
+    # Total closed = 4 + 3 + 3 = 10 (not the 3-share final lot).
+    assert exit_ev.qty == pytest.approx(10.0)
+    # Cumulative realized over the whole trade.
+    expected = (0.80 - 0.95) * 4 + (0.70 - 0.95) * 3 + (0.70 - 0.95) * 3
+    assert exit_ev.realized_pnl == pytest.approx(expected)
+
+
+@pytest.mark.asyncio
 async def test_addon_buy_recomputes_avg_entry(tmp_path):
     """Same-direction add-on (topup buy on an existing long) must
     qty-weight-average the prior basis with the new fill price."""

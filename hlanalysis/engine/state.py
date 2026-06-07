@@ -34,6 +34,12 @@ class Position(SQLModel, table=True):
     realized_pnl: float
     last_update_ts_ns: int
     stop_loss_price: float
+    # Cumulative absolute quantity closed (reduced) over this position's life.
+    # Persisted so a close that fills across multiple partial reduces can report
+    # the TOTAL closed size alongside the cumulative realized_pnl on its Exit
+    # event (see marketdata.position_math.PositionState.closed_qty). Default 0.0
+    # so pre-migration rows and fresh opens start at zero.
+    closed_qty: float = 0.0
 
 
 class Fill(SQLModel, table=True):

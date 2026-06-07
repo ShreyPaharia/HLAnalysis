@@ -16,8 +16,18 @@ def dal(tmp_path):
 
 
 def test_migrations_creates_tables(dal):
-    info = dal.applied_versions()
-    assert "0001_baseline" in info
+    # applied_versions() reports the current Alembic head (a single revision),
+    # so assert a head is recorded rather than a specific revision (which moves
+    # with every new migration). The substantive check is that core tables exist.
+    assert dal.applied_versions()
+    import sqlite3
+    with sqlite3.connect(dal.db_path) as conn:
+        names = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    assert {"position", "openorder", "fill"} <= names
 
 
 def test_pm_strike_round_trip_and_upsert(dal):
