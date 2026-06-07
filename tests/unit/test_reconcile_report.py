@@ -198,16 +198,19 @@ def test_compare_slot_no_pnl_mismatch_within_tolerance():
     assert r.total_true_pnl == 100.4       # still prefers venue
 
 
-def test_account_pnl_all_time_is_headline_true_pnl():
-    # HL portfolio equity PnL ($362.68) is the UI number and must drive true_pnl,
-    # even when closed-trade realized differs ($161.90).
+def test_strategy_pnl_is_outcome_only_not_full_account():
+    # true_pnl must be the OUTCOME-only venue realized ($161.04), NOT the
+    # full-account allTime equity PnL ($362.68) which nets in non-strategy
+    # perp/spot trades. allTime is shown only as labelled context.
     r = compare_slot(
-        alias="v1", db_positions=[], db_realized_pnl=161.90,
+        alias="v1", db_positions=[], db_realized_pnl=161.04,
         venue=ClearinghouseState(positions=(), account_value_usd=894.07),
-        qty_tolerance=1e-6, venue_realized_pnl=161.90, pnl_tolerance=1.0,
+        qty_tolerance=1e-6, venue_realized_pnl=161.04, pnl_tolerance=1.0,
         account_pnl_all_time=362.68,
     )
-    assert r.total_true_pnl == 362.68          # equity PnL wins over closedPnl
-    assert r.pnl_mismatch is False             # local==venue closedPnl → no drift
+    assert r.total_true_pnl == 161.04          # outcome-only, NOT 362.68
+    assert r.pnl_mismatch is False             # local==venue outcome realized
     text = format_report([r])
-    assert "362.68" in text and "account_pnl" in text
+    assert "161.04" in text
+    assert "strategy_pnl(outcome-only)" in text
+    assert "362.68" in text and "non-strategy" in text  # full-account = context

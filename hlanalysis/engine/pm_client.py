@@ -186,7 +186,9 @@ class PMClient:
     # the settlement Exit re-derives it from the (price-sourced) winner.
     settlement_reported_as_fill = False
 
-    def realized_pnl_since(self, since_ts_ns: int) -> float:
+    def realized_pnl_since(self, since_ts_ns: int, *, outcome_only: bool = False) -> float:
+        # outcome_only is a no-op for PM: every PM market the engine trades IS an
+        # outcome market, so there's no non-strategy activity to filter out.
         fills = self.user_fills(since_ts_ns=since_ts_ns)
         return sum(f.closed_pnl - f.fee for f in fills)
 

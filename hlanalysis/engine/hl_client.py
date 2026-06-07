@@ -79,6 +79,11 @@ _WRITE_RETRY = retry(
 
 _HEX_CHARS = set("0123456789abcdefABCDEF")
 
+# HIP-4 binary outcome-market fills report coin as "#N" (the outcome-share index).
+# Perps use the bare ticker (BTC/HYPE/…) and ordinary spot pairs use "@N", so this
+# prefix isolates the strategy's markets from non-strategy account activity.
+OUTCOME_COIN_PREFIX = "#"
+
 # USD-stable spot coins counted as cash in account_value_usd. HIP-4 binaries are
 # spot-classified on HL and funded from spot USDC, so the perp marginSummary is
 # ~0; the real account value is this spot cash plus any perp value.
@@ -520,8 +525,10 @@ class HLClient:
                     return float(ph[-1][1])
         return None
 
-    def realized_pnl_since(self, since_ts_ns: int) -> float:
+    def realized_pnl_since(self, since_ts_ns: int, *, outcome_only: bool = False) -> float:
         """Sum (closedPnl - fee) across this account's fills since the cutoff.
+        When ``outcome_only`` is set, restricts to HIP-4 binary outcome markets
+        (coin "#N"), excluding non-strategy perp/spot trades on the same account.
 
         Source of truth for the daily-loss gate. Reads directly from HL so the
         cap survives DB rotations (e.g. multi-account migration leaving v31
@@ -531,11 +538,20 @@ class HLClient:
         """
         cache = getattr(self, "_pnl_cache", None)
         now = time.time()
+        ckey = (since_ts_ns, outcome_only)
         if cache is not None:
-            cached_since, cached_at, cached_val = cache
-            if cached_since == since_ts_ns and (now - cached_at) < self._pnl_cache_ttl_s:
+            cached_key, cached_at, cached_val = cache
+            if cached_key == ckey and (now - cached_at) < self._pnl_cache_ttl_s:
                 return cached_val
         fills = self.user_fills(since_ts_ns=since_ts_ns)
+        if outcome_only:
+            # The strategy ONLY trades HIP-4 binary outcome markets (coin "#N").
+            # Exclude any non-strategy activity on the same account — perps
+            # (HYPE/ETH/…) and ordinary spot pairs (coin "@N", e.g. HYPE/USDC) —
+            # so realized PnL reflects the strategy, not the operator's manual
+            # trades. (v1: outcome +$161 vs all-coins +$162 only by coincidence —
+            # perp −$363 and @-spot +$363 nearly cancelled.)
+            fills = [f for f in fills if f.symbol.startswith(OUTCOME_COIN_PREFIX)]
         pnl = sum(f.closed_pnl - f.fee for f in fills)
-        self._pnl_cache = (since_ts_ns, now, pnl)
+        self._pnl_cache = (ckey, now, pnl)
         return pnl

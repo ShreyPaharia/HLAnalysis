@@ -49,11 +49,11 @@ class SlotRecon:
 
     @property
     def total_true_pnl(self) -> float:
-        """Authoritative account PnL. Prefer HL's equity-based portfolio PnL (the
-        number on the HL UI; includes perp+spot+funding). Else the venue realized
-        closedPnl, else the local ledger (PM, whose realized lives locally)."""
-        if self.account_pnl_all_time is not None:
-            return self.account_pnl_all_time
+        """The STRATEGY's PnL: outcome-markets only. HL venue_realized_pnl is the
+        outcome-only realized closedPnl (excludes the operator's perp/spot trades
+        on the same account); PM realized lives in the local ledger and is already
+        outcome-only. NOT the HL portfolio `allTime` PnL — that nets in unrelated
+        HYPE/perp/spot activity (see account_pnl_all_time, shown for context)."""
         base = self.venue_realized_pnl if self.venue_realized_pnl is not None else self.realized_pnl
         return base + self.open_mtm
 
@@ -130,17 +130,19 @@ def format_report(recon: list[SlotRecon]) -> str:
         venue_str = (
             f"{r.venue_realized_pnl:+.2f}" if r.venue_realized_pnl is not None else "n/a"
         )
-        acct_pnl_str = (
-            f"{r.account_pnl_all_time:+.2f}" if r.account_pnl_all_time is not None else "n/a"
-        )
         lines.append(
-            f"  account_pnl(all-time)={acct_pnl_str}  true_pnl={r.total_true_pnl:+.2f}  "
+            f"  strategy_pnl(outcome-only)={r.total_true_pnl:+.2f}  "
             f"acct_value={r.account_value_usd:.2f}"
         )
         lines.append(
-            f"    realized: venue_closedPnl={venue_str}  local={r.realized_pnl:+.2f}  "
+            f"    venue_outcome_realized={venue_str}  local={r.realized_pnl:+.2f}  "
             f"open_mtm={r.open_mtm:+.2f}"
         )
+        if r.account_pnl_all_time is not None:
+            lines.append(
+                f"    full_account_pnl(all-time, incl non-strategy perp/spot)="
+                f"{r.account_pnl_all_time:+.2f}"
+            )
         if not r.positions_known:
             lines.append("  (positions unknown — recon skipped this cycle)")
         if r.pnl_mismatch:
@@ -178,7 +180,9 @@ def gather_slot(
     account_pnl: float | None = None
     if fetch_venue_realized:
         try:
-            venue_realized = exec_client.realized_pnl_since(0)
+            # outcome_only: strategy PnL = HIP-4 outcome markets only, excluding
+            # non-strategy perp/spot trades on the same account.
+            venue_realized = exec_client.realized_pnl_since(0, outcome_only=True)
         except Exception:  # noqa: BLE001 — venue PnL read is best-effort; report still useful
             venue_realized = None
         # Equity-based account PnL (HL portfolio = the UI number). Optional: only
