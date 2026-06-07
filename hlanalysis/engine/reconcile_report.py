@@ -148,19 +148,27 @@ def format_report(recon: list[SlotRecon]) -> str:
 def gather_slot(
     *, alias: str, dal: StateDAL, exec_client: ExecutionClient,
     qty_tolerance: float, pnl_tolerance: float = 1.0,
+    fetch_venue_realized: bool = True,
 ) -> SlotRecon:
     """IO: pull local + venue realized PnL + DB positions + venue state for one
     slot and run the pure compare. clearinghouse_state()/realized_pnl_since() are
     blocking read-only SDK calls; the caller offloads via asyncio.to_thread when
-    needed. Venue realized is the authoritative figure (the daily-loss gate's
-    source); a venue read failure falls back to local-only (venue_realized=None)."""
+    needed.
+
+    Venue realized is authoritative ONLY where the venue tracks it: HL exposes
+    per-fill closedPnl via user_fills (the daily-loss gate's source). PM has no
+    venue realized counter — its realized lives in our settlement/fill ledger —
+    so callers pass fetch_venue_realized=False for PM and the local figure stands
+    (venue_realized=None), avoiding a false local-vs-venue mismatch."""
     db_realized = dal.realized_pnl_since(0)
     db_positions = [(p.symbol, p.qty) for p in dal.all_positions()]
     venue = exec_client.clearinghouse_state()
-    try:
-        venue_realized: float | None = exec_client.realized_pnl_since(0)
-    except Exception:  # noqa: BLE001 — venue PnL read is best-effort; report still useful
-        venue_realized = None
+    venue_realized: float | None = None
+    if fetch_venue_realized:
+        try:
+            venue_realized = exec_client.realized_pnl_since(0)
+        except Exception:  # noqa: BLE001 — venue PnL read is best-effort; report still useful
+            venue_realized = None
     return compare_slot(
         alias=alias, db_positions=db_positions, db_realized_pnl=db_realized,
         venue=venue, qty_tolerance=qty_tolerance,
@@ -173,6 +181,7 @@ def build_report(deploy_cfg, strategies_cfg, *, qty_tolerance: float, pnl_tolera
 
     A slot whose client/DAL errors yields a positions_known=False SlotRecon so
     one bad slot never aborts the whole report."""
+    from .config import HyperliquidAccount
     from .config_builders import build_exec_client
     from .state import StateDAL
 
@@ -188,8 +197,12 @@ def build_report(deploy_cfg, strategies_cfg, *, qty_tolerance: float, pnl_tolera
             # report show false "vanished" drift and a zero account value.
             client = build_exec_client(alias, acct, paper_mode=False)
             dal = StateDAL(Path(deploy_cfg.state_db_path_for(alias)))
+            # Only HL exposes an authoritative venue realized (user_fills
+            # closedPnl); PM realized lives in our local settlement/fill ledger.
+            fetch_venue_realized = isinstance(acct, HyperliquidAccount)
             out.append(gather_slot(alias=alias, dal=dal, exec_client=client,
-                                   qty_tolerance=qty_tolerance, pnl_tolerance=pnl_tolerance))
+                                   qty_tolerance=qty_tolerance, pnl_tolerance=pnl_tolerance,
+                                   fetch_venue_realized=fetch_venue_realized))
         except Exception as e:  # noqa: BLE001 — a bad slot must not abort the report
             out.append(SlotRecon(alias=alias, realized_pnl=0.0, open_mtm=0.0,
                                  account_value_usd=0.0, positions_known=False,
