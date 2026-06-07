@@ -144,7 +144,12 @@ def build_report(deploy_cfg, strategies_cfg, *, qty_tolerance: float) -> list[Sl
         alias = s_cfg.account_alias
         try:
             acct = deploy_cfg.accounts[alias]
-            client = build_exec_client(alias, acct, paper_mode=True)  # read-only path
+            # paper_mode=False: clearinghouse_state() is a read-only venue call
+            # (HL /info user_state, PM data-api positions) — NO orders. We MUST
+            # hit the real venue, because in paper mode the clients return an
+            # empty stub (account_value_usd=0, no positions) which would make the
+            # report show false "vanished" drift and a zero account value.
+            client = build_exec_client(alias, acct, paper_mode=False)
             dal = StateDAL(Path(deploy_cfg.state_db_path_for(alias)))
             out.append(gather_slot(alias=alias, dal=dal, exec_client=client,
                                    qty_tolerance=qty_tolerance))

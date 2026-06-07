@@ -258,9 +258,9 @@ reconcile-report:
 	CMD_ID=$$(aws ssm send-command \
 		--instance-ids "$$INSTANCE_ID" \
 		--document-name "AWS-RunShellScript" \
-		--parameters "commands=[\"cd /opt/hl-recorder && source /etc/hl-engine/env && uv run python -m hlanalysis.engine.reconcile_report $$JSON_ARG\"]" \
+		--parameters "commands=[\"cd /opt/hl-recorder && set -a && . /etc/hl-engine/env && set +a && .venv/bin/python -m hlanalysis.engine.reconcile_report $$JSON_ARG\"]" \
 		--query "Command.CommandId" --output text) && \
-	sleep 6 && \
+	sleep 18 && \
 	aws ssm get-command-invocation --command-id "$$CMD_ID" --instance-id "$$INSTANCE_ID" \
 		--query "StandardOutputContent" --output text
 
