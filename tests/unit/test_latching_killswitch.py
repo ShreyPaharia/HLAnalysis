@@ -280,13 +280,82 @@ async def test_rss_halt_kb_configurable(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# D) Integration: _continuous_checks_loop latches on daily-loss breach
+# D) Real _read_rss_kb reflects CURRENT memory, not peak (regression for W1.9)
+# ---------------------------------------------------------------------------
+
+def test_read_rss_kb_returns_current_not_peak():
+    """``_read_rss_kb()`` must return CURRENT RSS, not peak (``ru_maxrss``).
+
+    The regression this guards: ``ru_maxrss`` is monotonic-non-decreasing
+    (peak lifetime RSS).  A duckdb compaction spike that crossed the
+    ``rss_halt_kb`` ceiling and then freed memory would keep ``ru_maxrss``
+    elevated forever, permanently latch-halting all slots even though
+    actual memory is fine.
+
+    Strategy: record RSS before a large allocation, allocate ~200 MB,
+    record the peak, then free it and collect garbage.  On Linux
+    ``/proc/self/status`` ``VmRSS`` reflects the freed memory, so the
+    post-free reading must be strictly below the peak-during-allocation.
+    On macOS the ``ru_maxrss`` fallback IS peak (that is intentional for
+    dev — the guard is safety-critical only on production Linux), so we
+    relax the assertion there.
+
+    At minimum (all platforms): the function returns a positive, plausible
+    value — i.e. between 1 MB and 100 GB.
+    """
+    import gc
+    import sys
+    from hlanalysis.engine.runtime import EngineRuntime
+
+    # Warm up: take a baseline reading before the big allocation so any
+    # lazy-import overhead is already included.
+    baseline_kb = EngineRuntime._read_rss_kb()
+    assert baseline_kb > 0, "_read_rss_kb() must return a positive value"
+    assert baseline_kb < 100 * 1024 * 1024, (
+        "_read_rss_kb() sanity: value should be less than 100 GB"
+    )
+
+    # Allocate ~200 MB and record RSS at peak.
+    _big = bytearray(200 * 1024 * 1024)
+    # Touch every page so the OS actually commits resident memory.
+    _big[::4096] = bytes(len(_big[::4096]))
+    peak_kb = EngineRuntime._read_rss_kb()
+
+    # Free the allocation and force a GC cycle.
+    del _big
+    gc.collect()
+    after_free_kb = EngineRuntime._read_rss_kb()
+
+    # All platforms: basic sanity — still positive and plausible.
+    assert after_free_kb > 0
+    assert after_free_kb < 100 * 1024 * 1024
+
+    # Linux-only: the CURRENT-RSS implementation must reflect the freed
+    # memory.  We require after_free_kb < peak_kb (the allocation must have
+    # bumped RSS meaningfully, and freeing must have brought it back down).
+    # We allow a 50 MB slack for kernel reclaim lag and other allocations.
+    if sys.platform == "linux":
+        slack_kb = 50 * 1024
+        assert peak_kb > baseline_kb + 50 * 1024, (
+            "allocation did not raise RSS enough to make the test meaningful; "
+            "check that page-touching above is working"
+        )
+        assert after_free_kb < peak_kb - slack_kb, (
+            f"_read_rss_kb() appears to return peak RSS (ru_maxrss) rather than "
+            f"current RSS: after_free={after_free_kb} KB is NOT meaningfully "
+            f"below peak_during_alloc={peak_kb} KB.  Fix _read_rss_kb() to read "
+            f"/proc/self/status VmRSS instead."
+        )
+
+
+# ---------------------------------------------------------------------------
+# E) Integration: _continuous_checks_loop latches on daily-loss breach
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_continuous_checks_loop_latches_and_writes_flag(tmp_path):
-    """End-to-end: run _continuous_checks_loop with a PnL that breaches the
-    cap; verify slot.halted + flag file after one iteration."""
+    """End-to-end (E): run _continuous_checks_loop with a PnL that breaches
+    the cap; verify slot.halted + flag file after one iteration."""
     rt, slot = _build_runtime_with_recording(tmp_path)
     # cap = 200; breaching loss
     slot.exec_client.realized_pnl_since = lambda _ns: -300.0

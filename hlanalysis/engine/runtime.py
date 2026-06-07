@@ -1171,16 +1171,42 @@ class EngineRuntime:
 
     @staticmethod
     def _read_rss_kb() -> int:
-        """Return current process RSS in kilobytes.
+        """Current process RSS in KiB (NOT peak). Linux reads /proc/self/status
+        VmRSS; ru_maxrss is peak and never decreases → false permanent halt.
 
-        Thin wrapper around ``resource.getrusage`` that normalises the
-        platform difference: Linux reports ``ru_maxrss`` in KiB; macOS
-        reports it in bytes.  Tests monkeypatch this method to inject
-        arbitrary RSS values without caring about platform units.
+        ``resource.getrusage(RUSAGE_SELF).ru_maxrss`` is the PEAK (maximum)
+        RSS for the process lifetime — it is monotonic and never decreases.
+        On a 1 GB box where duckdb compaction transiently spikes to ~570 MB
+        and then frees memory, ``ru_maxrss`` stays elevated permanently and
+        the guard would latch-halt all slots even though current memory is
+        fine.  This implementation reads the CURRENT resident set instead:
+
+        * Linux primary: ``/proc/self/status`` ``VmRSS`` field (already KiB).
+        * Linux fallback: ``/proc/self/statm`` resident-pages × page-size.
+        * Non-Linux (macOS dev): ``ru_maxrss`` bytes ÷ 1024 (macOS reports
+          bytes, not KiB); peak semantics are acceptable on dev — the guard
+          is only safety-critical in production Linux.
+
+        Tests monkeypatch this method to inject arbitrary RSS values without
+        caring about platform units.
         """
         import sys
+        if sys.platform == "linux":
+            try:
+                with open("/proc/self/status") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            return int(line.split()[1])  # already kB
+            except OSError:
+                pass
+            try:
+                import os
+                pages = int(open("/proc/self/statm").read().split()[1])
+                return pages * os.sysconf("SC_PAGE_SIZE") // 1024
+            except (OSError, ValueError, IndexError):
+                pass
         raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        # macOS: bytes → KiB; Linux: already KiB.
+        # macOS: bytes → KiB; Linux (last-resort fallback): already KiB.
         return raw // 1024 if sys.platform == "darwin" else raw
 
     async def _check_rss_halt(self, slots: list[AccountSlot]) -> None:
