@@ -79,6 +79,11 @@ _WRITE_RETRY = retry(
 
 _HEX_CHARS = set("0123456789abcdefABCDEF")
 
+# USD-stable spot coins counted as cash in account_value_usd. HIP-4 binaries are
+# spot-classified on HL and funded from spot USDC, so the perp marginSummary is
+# ~0; the real account value is this spot cash plus any perp value.
+_SPOT_STABLE_COINS = frozenset({"USDC", "USDH", "USDT0", "USDT", "USDE", "USD"})
+
 
 def _extract_cloid_hex32(internal_cloid: str) -> str:
     """Pull the trailing 32-char hex run out of a cloid in any of the forms
@@ -394,8 +399,15 @@ class HLClient:
             spot = self._info.spot_user_state(self.account_address)
         except Exception as e:
             _reraise_rest(e)
+        spot_cash_usd = 0.0
         for bal in spot.get("balances", []):
             coin = str(bal.get("coin", ""))
+            # USD-stable spot cash is the real funding for HIP-4 (spot-classified)
+            # accounts; the perp marginSummary.accountValue is ~0 for them. Without
+            # summing it, account_value_usd reads $0 even with $1000s of USDC.
+            if coin in _SPOT_STABLE_COINS:
+                spot_cash_usd += float(bal.get("total", 0))
+                continue
             if not coin.startswith("+"):
                 continue
             n_str = coin[1:]
@@ -412,9 +424,10 @@ class HLClient:
                 avg_entry=avg_entry,
                 unrealized_pnl=0.0,
             ))
+        perp_value = float(data.get("marginSummary", {}).get("accountValue", 0))
         return ClearinghouseState(
             positions=tuple(positions),
-            account_value_usd=float(data.get("marginSummary", {}).get("accountValue", 0)),
+            account_value_usd=perp_value + spot_cash_usd,
         )
 
     @_read_retry

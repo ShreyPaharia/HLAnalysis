@@ -143,6 +143,10 @@ def test_clearinghouse_state_merges_hip4_spot_balances():
     # Non-HIP4 spot coins must not be reported as positions.
     assert "USDC" not in by_sym
     assert "USDH" not in by_sym
+    # account_value_usd must include the spot USD-stable cash (USDC 270.37 +
+    # USDH 0.86), not just the ~0 perp marginSummary — HIP-4 accounts are funded
+    # in spot. Volatile spot tokens (HYPE) are NOT counted as cash.
+    assert state.account_value_usd == pytest.approx(270.37 + 0.86)
     assert "o468" not in by_sym
     # Zero qty HIP-4 entries skipped.
     assert "#581" not in by_sym
