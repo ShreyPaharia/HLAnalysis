@@ -127,7 +127,9 @@ def settlement_pnl_usd(
     if qv is None or not qv.settled:
         return prior_realized
     payout: float | None = None
-    if qv.settled_symbol:
+    if qv.settled_symbols:
+        payout = 1.0 if symbol in qv.settled_symbols else 0.0
+    elif qv.settled_symbol:
         payout = 1.0 if symbol == qv.settled_symbol else 0.0
     elif qv.settled_side and qv.yes_symbol and qv.no_symbol:
         winning = qv.yes_symbol if qv.settled_side == "yes" else qv.no_symbol

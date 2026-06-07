@@ -84,11 +84,14 @@ from .pm_strike import maybe_capture_pm_strike, pm_strike_capture_loop
 from .events_sink import events_persist_loop
 
 
-# Internal symbol the Binance SPOT reference feed is remapped to (see
-# _remap_reference_symbol). PM strategy slots reference this via
-# `reference_symbol: BTCUSDT_SPOT` in config/strategy.yaml — that YAML string
-# MUST match this constant exactly, or the slot reads an empty book.
-_SPOT_REF_SYMBOL = "BTCUSDT_SPOT"
+# Map of Binance SPOT symbols → internal remapped symbols used in MarketState.
+# PM strategy slots reference these via `reference_symbol: <SYMBOL>_SPOT` in
+# config/strategy.yaml — those YAML strings MUST match these values exactly, or
+# the slot reads an empty book.
+_SPOT_REF_SYMBOLS = {"BTCUSDT": "BTCUSDT_SPOT", "ETHUSDT": "ETHUSDT_SPOT"}
+# Back-compat alias: callers (pm_strike.py, tests) that reference the BTC
+# constant by name keep working without changes.
+_SPOT_REF_SYMBOL = _SPOT_REF_SYMBOLS["BTCUSDT"]
 
 
 def _is_transient_venue_error(exc: BaseException) -> bool:
@@ -110,15 +113,13 @@ def _is_transient_venue_error(exc: BaseException) -> bool:
 
 
 def _remap_reference_symbol(ev: NormalizedEvent) -> NormalizedEvent:
-    """Rename Binance SPOT BTCUSDT events to BTCUSDT_SPOT so the PM slots'
-    ``reference_symbol: BTCUSDT_SPOT`` resolves to the spot feed (not any
-    future perp entry). No-op for every other event."""
-    if (
-        ev.venue == "binance"
-        and ev.product_type == ProductType.SPOT
-        and ev.symbol == "BTCUSDT"
-    ):
-        return msgspec.structs.replace(ev, symbol=_SPOT_REF_SYMBOL)
+    """Rename Binance SPOT bbo events to ``<symbol>_SPOT`` so PM slots'
+    ``reference_symbol`` resolves to the spot feed (not any perp entry).
+    No-op for every other event."""
+    if ev.venue == "binance" and ev.product_type == ProductType.SPOT:
+        mapped = _SPOT_REF_SYMBOLS.get(ev.symbol)
+        if mapped is not None:
+            return msgspec.structs.replace(ev, symbol=mapped)
     return ev
 
 

@@ -48,6 +48,23 @@ deploy:
       clob_api_passphrase: ${PM_CLOB_API_PASSPHRASE_V1}
       funder_address: ${PM_FUNDER_ADDRESS_V1}
       signature_type: POLY_1271
+    # PM multi-strike bucket slot (ETH). BTC multi-strike is NOT a separate
+    # account — it's folded onto the existing v31_pm slot/wallet above (same
+    # BTCUSDT_SPOT reference). Only ETH needs its own account because it uses a
+    # different reference feed (ETHUSDT_SPOT) → must be a separate slot. paper_mode
+    # transacts nothing, so these reference NEW env placeholders; provision a
+    # dedicated funded PM wallet + SSM secrets at the ETH live flip. The distinct
+    # alias gives it its own state.db / cloid prefix / kill switch.
+    v31_pm_eth_ms:
+      venue: polymarket
+      clob_host: https://clob.polymarket.com
+      chain_id: 137
+      private_key: ${PM_PRIVATE_KEY_ETH_MS}
+      clob_api_key: ${PM_CLOB_API_KEY_ETH_MS}
+      clob_api_secret: ${PM_CLOB_API_SECRET_ETH_MS}
+      clob_api_passphrase: ${PM_CLOB_API_PASSPHRASE_ETH_MS}
+      funder_address: ${PM_FUNDER_ADDRESS_ETH_MS}
+      signature_type: POLY_1271
   alerts:
     telegram:
       bot_token: ${TG_BOT_TOKEN}

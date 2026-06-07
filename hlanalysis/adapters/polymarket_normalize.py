@@ -341,6 +341,83 @@ def parse_gamma_market_to_question_meta(
     )
 
 
+def parse_bucket_event(ev: dict) -> dict | None:
+    """Group a Gamma multi-strike event's sub-markets into a bucket manifest.
+
+    Each sub-market is an "above $X" binary with its own conditionId + (YES,NO)
+    clob token pair. Sub-markets are sorted by strike ascending so leg_tokens +
+    thresholds align with the canonical (yes_o0,no_o0,yes_o1,no_o1,...) layout
+    the strategy's above_ladder region map expects. Returns None for events with
+    fewer than 2 parseable legs. Mirrors the backtest's bucket manifest shape.
+    """
+    markets = ev.get("markets") or []
+    if len(markets) < 2:
+        return None
+    legs: list[tuple[float, str, str, str]] = []  # (strike, cond, yes, no)
+    for mk in markets:
+        raw = mk.get("clobTokenIds")
+        if not raw:
+            continue
+        tok = _json_decode(raw) if isinstance(raw, str) else raw
+        if not isinstance(tok, list) or len(tok) != 2:
+            continue
+        try:
+            strike = float(str(mk.get("groupItemTitle") or "").lstrip("$").replace(",", ""))
+        except ValueError:
+            continue
+        cond = str(mk.get("conditionId") or mk.get("id") or "")
+        legs.append((strike, cond, str(tok[0]), str(tok[1])))
+    if len(legs) < 2:
+        return None
+    legs.sort(key=lambda x: x[0])
+    return {
+        "thresholds": [l[0] for l in legs],
+        "leg_condition_ids": [l[1] for l in legs],
+        "leg_tokens": [[l[2], l[3]] for l in legs],
+    }
+
+
+def parse_gamma_event_to_bucket_question_meta(
+    ev: dict, *, series_slug: str, local_recv_ts: int, underlying: str = "BTC",
+) -> QuestionMetaEvent | None:
+    """One priceBucket QuestionMetaEvent for a multi-strike event, or None.
+
+    kv carries the full leg layout so MarketState._update_question can rebuild
+    the flat leg_symbols tuple and the strategy's winning_region(above_ladder)
+    can map each leg. question_idx is keyed on the event slug so it is stable
+    across restarts (per-leg conditionIds route settlement by leg-symbol
+    membership, so the question_idx only needs to be stable+unique)."""
+    rec = parse_bucket_event(ev)
+    if rec is None:
+        return None
+    slug = str(ev.get("slug") or ev.get("ticker") or "")
+    thresholds = rec["thresholds"]
+    flat_legs = [t for pair in rec["leg_tokens"] for t in pair]
+    end_iso = ev.get("endDate") or ""
+    keys = ["class", "underlying", "leg_token_ids", "priceThresholds",
+            "bucketLayout", "expiry", "expiry_ns", "series_slug",
+            "condition_id", "question_name"]
+    values = [
+        "priceBucket", underlying, ",".join(flat_legs),
+        ",".join(f"{t:.0f}" for t in thresholds), "above_ladder",
+        _iso_to_hl_expiry(end_iso),
+        str(_parse_iso_ns(end_iso)) if end_iso else "0",
+        series_slug, slug, slug,
+    ]
+    return QuestionMetaEvent(
+        venue=_VENUE,
+        product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB,
+        symbol=flat_legs[0],
+        exchange_ts=0,
+        local_recv_ts=local_recv_ts,
+        question_idx=_question_idx_from_condition(slug),
+        named_outcome_idxs=list(range(len(thresholds))),
+        keys=keys,
+        values=values,
+    )
+
+
 def parse_gamma_market_to_settlement(
     market: dict, *, series_slug: str, local_recv_ts: int,
 ) -> SettlementEvent | None:

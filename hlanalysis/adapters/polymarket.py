@@ -43,6 +43,7 @@ from .polymarket_gamma import GammaClient
 from .polymarket_normalize import (
     PmBook,
     parse_book_message,
+    parse_gamma_event_to_bucket_question_meta,
     parse_gamma_market_to_question_meta,
     parse_gamma_market_to_settlement,
     parse_price_change_message,
@@ -106,10 +107,44 @@ class PolymarketAdapter(BaseWsAdapter):
                 # Offload ONLY the blocking 30s requests.get to a worker thread;
                 # all cache mutation (known_conditions / active_tokens) and
                 # queue puts below stay on the event-loop thread to avoid races.
+                klass = (sub.match or {}).get("class")
+                if not isinstance(klass, str):
+                    klass = klass[0] if klass else "priceBinary"
                 events = await asyncio.to_thread(
                     self._gamma.fetch_events,
                     series_slug=series_str, closed=False,
                 )
+                if klass == "priceBucket":
+                    # Group the entire multi-strike event into one priceBucket
+                    # QuestionMetaEvent; subscribe ALL leg tokens so the WS
+                    # receives book/trade frames for every leg. Per-leg
+                    # settlement uses parse_gamma_market_to_settlement which
+                    # names the winning token, routed by leg-symbol membership.
+                    for ev in events:
+                        cond_id = str(ev.get("id") or ev.get("slug") or "")
+                        is_new = cond_id not in known_conditions
+                        known_conditions[cond_id] = ev
+                        if is_new:
+                            qmeta = parse_gamma_event_to_bucket_question_meta(
+                                ev, series_slug=series_str,
+                                local_recv_ts=time.time_ns(),
+                                underlying=underlying,
+                            )
+                            if qmeta is not None:
+                                await queue.put(qmeta)
+                                for mk in ev.get("markets") or []:
+                                    toks = _json_decode(mk.get("clobTokenIds") or "[]")
+                                    active_tokens.update(str(t) for t in toks)
+                        # Per-leg settlement: each sub-market resolves
+                        # independently; _mark_settled routes by leg-symbol.
+                        for mk in ev.get("markets") or []:
+                            settle = parse_gamma_market_to_settlement(
+                                mk, series_slug=series_str,
+                                local_recv_ts=time.time_ns(),
+                            )
+                            if settle is not None:
+                                await queue.put(settle)
+                    continue
                 for mk in self._gamma.iter_binary_markets(events):
                     cond_id = str(mk["conditionId"])
                     is_new = cond_id not in known_conditions

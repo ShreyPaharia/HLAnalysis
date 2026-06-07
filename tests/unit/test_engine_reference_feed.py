@@ -42,7 +42,7 @@ from hlanalysis.events import BboEvent, Mechanism, NormalizedEvent, ProductType
 # ---- subscription wiring ----
 
 def test_engine_subscribes_binance_spot_reference():
-    sub = binance_spot_reference_subscription()
+    sub = binance_spot_reference_subscription()  # default = BTCUSDT
     assert sub.venue == "binance"
     assert sub.product_type == ProductType.SPOT
     assert sub.symbol == "BTCUSDT"
@@ -58,17 +58,18 @@ def test_build_engine_subscriptions_includes_spot_reference_only():
     assert (ProductType.PERP, "BTCUSDT") not in binance   # perp feed removed
 
 
-def test_build_engine_subscriptions_has_exactly_one_binance_bbo_sub():
-    """Exactly one binance bbo sub (spot) — the perp feed is gone."""
+def test_build_engine_subscriptions_has_btc_and_eth_binance_bbo_subs():
+    """Two binance bbo subs (BTCUSDT_SPOT + ETHUSDT_SPOT) — no perp feed."""
     sym_cfg = load_config(Path("config/symbols.yaml"))
     subs = build_engine_subscriptions(sym_cfg)
 
     binance_subs = [s for s in subs if s.venue == "binance"]
-    assert len(binance_subs) == 1  # spot only
-    bsub = binance_subs[0]
-    assert bsub.product_type == ProductType.SPOT
-    assert bsub.symbol == "BTCUSDT"
-    assert bsub.channels == ("bbo",)
+    assert len(binance_subs) == 2  # BTC + ETH spot reference feeds
+    syms = {s.symbol for s in binance_subs}
+    assert syms == {"BTCUSDT", "ETHUSDT"}
+    for bsub in binance_subs:
+        assert bsub.product_type == ProductType.SPOT
+        assert bsub.channels == ("bbo",)
 
 
 def test_build_engine_subscriptions_preserves_hl_and_pm_unchanged():

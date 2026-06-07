@@ -97,6 +97,11 @@ class QuestionView:
     # held-to-settlement positions for multi-outcome buckets where
     # settled_side alone (yes/no) doesn't identify which outcome won.
     settled_symbol: str = ""
+    # For multi-leg (priceBucket) questions every leg-pair resolves at once;
+    # each leg's SettlementEvent names its pair's winning token. We accumulate
+    # all winners here so a held leg's win/loss is decided by membership, not by
+    # whichever leg's event happened to land last (which clobbers settled_symbol).
+    settled_symbols: tuple[str, ...] = ()
     leg_symbols: tuple[str, ...] = ()
     # Display fields from QuestionMetaEvent, used by alerts/reports for human
     # readable rendering. `name` is HL's question name (e.g. "Recurring").

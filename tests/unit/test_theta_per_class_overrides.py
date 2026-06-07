@@ -136,8 +136,13 @@ def test_live_strategy_yaml_bucket_override_matches_tune() -> None:
     # only priceBucket diverges; binary falls through to the default
     assert set(build_theta_harvester_configs_by_class(v31)) == {"priceBucket"}
 
-    # PM slot carries no per-class override.
-    assert build_theta_harvester_configs_by_class(theta["v31_pm"]) == {}
+    # v31_pm now folds in BTC multi-strike buckets → carries a priceBucket
+    # override (PR #12 tuned cell). v1_pm (late_resolution) has none.
+    assert set(build_theta_harvester_configs_by_class(theta["v31_pm"])) == {"priceBucket"}
+    pm_bucket = build_theta_harvester_configs_by_class(theta["v31_pm"])["priceBucket"]
+    assert pm_bucket.favorite_threshold == 0.75
+    assert pm_bucket.vol_lookback_seconds == 1800
+    assert pm_bucket.exit_safety_d == 0.5
 
 
 def test_bucket_override_risk_gates_not_below_binary() -> None:
@@ -151,13 +156,31 @@ def test_bucket_override_risk_gates_not_below_binary() -> None:
 
     Higher = more protective for all three: favorite_threshold (more extreme
     favorites only), edge_buffer (wider entry margin), exit_safety_d (mid-hold
-    stop-out engaged)."""
+    stop-out engaged).
+
+    EXEMPTIONS (`_RISK_GATE_EXEMPT`): a per-class override is exempt only when it
+    is a SEPARATELY-VALIDATED tune for a market that is genuinely a different
+    instrument than the slot's binary leg, so "track the binary baseline" does
+    not apply. The guardrail's premise — bucket and binary are the same
+    underlying daily market (HL HIP-4) — does not hold there.
+      - (v31_pm, priceBucket): v31_pm trades BTC up/down DAILY binaries AND BTC
+        multi-strike WEEKLY buckets (folded onto one wallet). Different
+        instrument + horizon; the bucket cell is PR #12's walk-forward tune
+        (fav0.75/eb0.02/vlb1800/esd0.5; +$870, worst split −$24, maxDD $49,
+        ~1100 trades / 18 splits) — OOS evidence with non-zero DDs, which is
+        exactly the justification this guardrail's docstring demands. Operator-
+        approved 2026-06-08. HL v31/priceBucket is NOT exempt (must still track
+        its binary baseline — the original overfit case)."""
+    # (alias, klass) cells exempt from the not-below-binary check; see docstring.
+    _RISK_GATE_EXEMPT = {("v31_pm", "priceBucket")}
     cfgs = load_strategies_config(Path("config/strategy.yaml"))
     theta = {c.account_alias: c for c in cfgs.strategies
              if c.strategy_type == "theta_harvester"}
     for alias, cfg in theta.items():
         base = build_theta_harvester_config(cfg)
         for klass, override in build_theta_harvester_configs_by_class(cfg).items():
+            if (alias, klass) in _RISK_GATE_EXEMPT:
+                continue
             assert override.favorite_threshold >= base.favorite_threshold, (
                 f"{alias}/{klass} favorite_threshold "
                 f"{override.favorite_threshold} < binary {base.favorite_threshold}")
