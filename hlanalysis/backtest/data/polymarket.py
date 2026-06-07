@@ -666,6 +666,36 @@ class PolymarketDataSource:
         # are emitted via `SettlementEvent.symbol` in events().
         return "unknown"
 
+    def leg_payoff(self, q: QuestionDescriptor, leg_symbol: str) -> float:
+        """Per-leg payoff at settlement: 1.0 if the held leg won, else 0.0.
+
+        Binary: mirrors the runner's binary fallback (yes=leg_symbols[0],
+        no=leg_symbols[1]) via ``resolved_outcome`` — kept bit-identical so the
+        binary settlement path is unchanged.
+
+        Bucket: PM multi-strike is a ladder of independent 'above X' binaries.
+        Each manifest leg pair is (yes_token, no_token) with a per-leg resolution.
+        The YES token wins iff its leg resolved 'yes'; the NO token wins iff 'no'.
+        """
+        manifest = self._load_manifest()
+        entry = manifest.get(q.question_id) or {}
+        kind = entry.get("kind", "binary")
+        if kind != "bucket":
+            outcome = self.resolved_outcome(q)
+            if outcome == "yes" and q.leg_symbols and leg_symbol == q.leg_symbols[0]:
+                return 1.0
+            if outcome == "no" and len(q.leg_symbols) > 1 and leg_symbol == q.leg_symbols[1]:
+                return 1.0
+            return 0.0
+        b = entry.get("bucket") or {}
+        for toks, res in zip(b.get("leg_tokens", []), b.get("leg_resolutions", [])):
+            yes_tok, no_tok = str(toks[0]), str(toks[1])
+            if leg_symbol == yes_tok:
+                return 1.0 if res == "yes" else 0.0
+            if leg_symbol == no_tok:
+                return 1.0 if res == "no" else 0.0
+        return 0.0
+
     def _binary_outcome(
         self, q: QuestionDescriptor, entry: dict,
     ) -> Literal["yes", "no", "unknown"]:
