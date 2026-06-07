@@ -697,6 +697,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         "synthetic book builder uses per-price-bucket half_spread/depth from "
         "the profile instead of the flat 0.005/10000 defaults.",
     )
+    pt.add_argument(
+        "--pm-reference-source",
+        choices=["klines", "binance_bbo", "klines_1s"],
+        default="klines",
+        help="(polymarket only) Reference-feed source for the sweep. `klines` "
+        "(default) = cached 1m Binance klines. `klines_1s` = genuine Binance 1s "
+        "klines (cached under <asset>_klines_1s/) bucketed to the per-cell "
+        "vol_sampling_dt_seconds — use with a dt<60 grid for live-parity. "
+        "`binance_bbo` = recorded Binance BBO ticks.",
+    )
+    pt.add_argument(
+        "--pm-book-source",
+        choices=["synthetic", "recorded"],
+        default="synthetic",
+        help="(polymarket only) Fill-book source for the sweep. `synthetic` "
+        "(default) builds a flat 1-level book per trade print + `1−p` parity "
+        "(calibratable via --pm-liquidity-profile). `recorded` feeds real L2.",
+    )
     # Hedge leg flags (v5_delta_hedged only; safe to pass for other strategies
     # since hedge_enabled defaults to False when --hedge-data-path is omitted).
     pt.add_argument(
