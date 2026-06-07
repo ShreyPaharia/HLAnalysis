@@ -497,6 +497,7 @@ class HLClient:
             if f.symbol == symbol
         )
 
+    @_read_retry
     def account_pnl_all_time(self) -> float | None:
         """All-time account PnL exactly as HL's Portfolio UI shows it: the
         `portfolio` endpoint's `allTime` pnlHistory tail. This is EQUITY-based
