@@ -107,19 +107,35 @@ class ParquetWriter:
         total = sum(len(r) for r in self._buffers.values())
         if total <= self.max_total_buffer_rows:
             return
-        # Drop oldest-first across keys until under the cap. Buffers are append
-        # ordered, so index 0 of each key list is oldest for that key; drop from
-        # the largest key first as a simple, bounded heuristic.
-        while total > self.max_total_buffer_rows and self._buffers:
+        # Batch-drop oldest-first across keys until under the cap.  Buffers are
+        # append-ordered so index 0 of each key list is oldest for that key.
+        # Drain from the largest key first (bounded heuristic) to minimise the
+        # number of max() scans.  Use slice deletion (O(n) once) rather than
+        # pop(0) in a loop (O(n²) overall).
+        overflow = total - self.max_total_buffer_rows
+        dropped_this_call = 0
+        while overflow > 0 and self._buffers:
+            # Remove empty keys left over from prior iterations.
+            empty = [k for k, v in self._buffers.items() if not v]
+            for k in empty:
+                del self._buffers[k]
+            if not self._buffers:
+                break
             key = max(self._buffers, key=lambda k: len(self._buffers[k]))
             rows = self._buffers[key]
+            drop_k = min(overflow, len(rows))
+            del rows[:drop_k]
+            dropped_this_call += drop_k
+            overflow -= drop_k
             if not rows:
                 del self._buffers[key]
-                continue
-            rows.pop(0)
-            self.dropped_rows += 1
-            total -= 1
-        log.warning("recorder buffer cap hit; dropped_rows=%d", self.dropped_rows)
+        self.dropped_rows += dropped_this_call
+        if dropped_this_call:
+            log.warning(
+                "recorder buffer cap hit; dropped=%d this_call, dropped_rows=%d total",
+                dropped_this_call,
+                self.dropped_rows,
+            )
 
     @staticmethod
     def _safe_symbol(symbol: str) -> str:

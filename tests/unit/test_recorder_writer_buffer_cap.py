@@ -21,5 +21,7 @@ def test_global_cap_drops_oldest_on_persistent_write_failure(tmp_path: Path, mon
         w.write(_row(sym=f"S{i % 5}"))
 
     total = sum(len(rows) for rows in w._buffers.values())
-    assert total <= 25                       # global cap enforced
-    assert w.dropped_rows > 0                # and it tracked the drop
+    assert total <= 25                        # global cap enforced
+    assert w.dropped_rows > 0                 # and it tracked the drop
+    # 200 rows written, cap=25; exactly 175 rows must have been dropped
+    assert w.dropped_rows == 200 - total      # dropped == written - surviving
