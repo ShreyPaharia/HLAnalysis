@@ -615,3 +615,147 @@ def test_binance_bbo_perp_bit_identical_after_spot_added(tmp_path):
         assert a.low == b.low
         assert a.close == b.close
         assert a.open == b.open
+
+
+# ---- leg_payoff tests -------------------------------------------------------
+
+
+def _make_ds_with_manifest(tmp_path: Path, manifest: dict) -> PolymarketDataSource:
+    """Build a PolymarketDataSource whose _load_manifest() returns `manifest`
+    without touching disk (monkeypatched via the lazy cache attribute)."""
+    ds = PolymarketDataSource(cache_root=tmp_path)
+    ds._manifest_cache = manifest
+    return ds
+
+
+def _make_binary_q(
+    *,
+    question_id: str,
+    yes_sym: str,
+    no_sym: str,
+) -> "QuestionDescriptor":
+    from hlanalysis.backtest.core.data_source import QuestionDescriptor
+    return QuestionDescriptor(
+        question_id=question_id,
+        question_idx=0,
+        start_ts_ns=1_000_000_000_000_000_000,
+        end_ts_ns=2_000_000_000_000_000_000,
+        leg_symbols=(yes_sym, no_sym),
+        klass="priceBinary",
+        underlying="BTC",
+    )
+
+
+def _make_bucket_q(
+    *,
+    question_id: str,
+    leg_syms: tuple[str, ...],
+) -> "QuestionDescriptor":
+    from hlanalysis.backtest.core.data_source import QuestionDescriptor
+    return QuestionDescriptor(
+        question_id=question_id,
+        question_idx=0,
+        start_ts_ns=1_000_000_000_000_000_000,
+        end_ts_ns=2_000_000_000_000_000_000,
+        leg_symbols=leg_syms,
+        klass="priceBucket",
+        underlying="BTC",
+    )
+
+
+def test_leg_payoff_bucket_yes_token_wins(tmp_path: Path) -> None:
+    """Bucket: per-leg payoff correctly awards 1.0 to the winning token of each
+    leg pair and 0.0 to the losing token, independent of which pair won.
+
+    Leg 0 resolved 'yes'  → YES-token wins (1.0), NO-token loses (0.0).
+    Leg 1 resolved 'no'   → YES-token loses (0.0), NO-token wins (1.0).
+    """
+    qid = "bucket-q1"
+    manifest = {
+        qid: {
+            "kind": "bucket",
+            "bucket": {
+                "event_slug": qid,
+                "start_ts_ns": 1_000_000_000_000_000_000,
+                "end_ts_ns": 2_000_000_000_000_000_000,
+                "thresholds": [90000.0, 95000.0],
+                "leg_tokens": [["y0", "n0"], ["y1", "n1"]],
+                "leg_condition_ids": ["c0", "c1"],
+                "leg_resolutions": ["yes", "no"],
+            },
+        }
+    }
+    q = _make_bucket_q(question_id=qid, leg_syms=("y0", "n0", "y1", "n1"))
+    ds = _make_ds_with_manifest(tmp_path, manifest)
+
+    # Leg 0 resolved 'yes': YES wins, NO loses.
+    assert ds.leg_payoff(q, "y0") == 1.0
+    assert ds.leg_payoff(q, "n0") == 0.0
+    # Leg 1 resolved 'no': YES loses, NO wins.
+    assert ds.leg_payoff(q, "y1") == 0.0
+    assert ds.leg_payoff(q, "n1") == 1.0
+
+
+def test_leg_payoff_binary_matches_legacy(tmp_path: Path) -> None:
+    """Binary: leg_payoff is bit-identical to the runner's legacy
+    _settle_px_for_outcome mapping.
+
+    When resolved_outcome='yes': yes_token→1.0, no_token→0.0.
+    When resolved_outcome='no':  yes_token→0.0, no_token→1.0.
+    """
+    # --- 'yes' outcome ---
+    qid_yes = "bin-yes"
+    manifest_yes = {
+        qid_yes: _binary_manifest_entry(
+            condition_id=qid_yes,
+            yes_token="yes_tok",
+            no_token="no_tok",
+            start_ts_ns=1_000_000_000_000_000_000,
+            end_ts_ns=2_000_000_000_000_000_000,
+            resolved_outcome="yes",
+        )
+    }
+    q_yes = _make_binary_q(question_id=qid_yes, yes_sym="yes_tok", no_sym="no_tok")
+    ds_yes = _make_ds_with_manifest(tmp_path, manifest_yes)
+    assert ds_yes.leg_payoff(q_yes, "yes_tok") == 1.0
+    assert ds_yes.leg_payoff(q_yes, "no_tok") == 0.0
+
+    # --- 'no' outcome ---
+    qid_no = "bin-no"
+    manifest_no = {
+        qid_no: _binary_manifest_entry(
+            condition_id=qid_no,
+            yes_token="yes_tok2",
+            no_token="no_tok2",
+            start_ts_ns=1_000_000_000_000_000_000,
+            end_ts_ns=2_000_000_000_000_000_000,
+            resolved_outcome="no",
+        )
+    }
+    q_no = _make_binary_q(question_id=qid_no, yes_sym="yes_tok2", no_sym="no_tok2")
+    ds_no = _make_ds_with_manifest(tmp_path, manifest_no)
+    assert ds_no.leg_payoff(q_no, "yes_tok2") == 0.0
+    assert ds_no.leg_payoff(q_no, "no_tok2") == 1.0
+
+
+def test_leg_payoff_unknown_token_zero(tmp_path: Path) -> None:
+    """A leg_symbol not present in any leg pair returns 0.0 (no accidental credit)."""
+    qid = "bucket-unknown"
+    manifest = {
+        qid: {
+            "kind": "bucket",
+            "bucket": {
+                "event_slug": qid,
+                "start_ts_ns": 1_000_000_000_000_000_000,
+                "end_ts_ns": 2_000_000_000_000_000_000,
+                "thresholds": [90000.0],
+                "leg_tokens": [["y0", "n0"]],
+                "leg_condition_ids": ["c0"],
+                "leg_resolutions": ["yes"],
+            },
+        }
+    }
+    q = _make_bucket_q(question_id=qid, leg_syms=("y0", "n0"))
+    ds = _make_ds_with_manifest(tmp_path, manifest)
+
+    assert ds.leg_payoff(q, "phantom_token") == 0.0

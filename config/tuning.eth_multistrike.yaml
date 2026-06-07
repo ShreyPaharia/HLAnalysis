@@ -1,0 +1,24 @@
+# ETH multi-strike (bucket, weekly) theta grid — same shape as BTC bucket; the
+# ETH reference asset is supplied via `--pm-flavor eth_multistrike`. Tuned
+# independently (params do not transfer across underlyings). Schema:
+# grids.<strategy_id> + run.*. Tuned single-stage on Binance 1s klines resampled
+# to dt=5 (live-parity) over the last 6 months; 1m klines still fetched for
+# strike/settlement (PM 1m-close settle).
+grids:
+  v3_theta_harvester:
+    favorite_threshold: [0.75, 0.80, 0.85]
+    edge_buffer: [0.005, 0.01, 0.02]
+    vol_lookback_seconds: [1800, 2700, 3600]
+    exit_safety_d: [0.0, 0.5]
+    exit_edge_threshold: [0.0]
+    vol_estimator: [bipower]
+    vol_sampling_dt_seconds: [5]
+    tte_min_seconds: [0]
+    tte_max_seconds: [86400]
+    fee_model: [pm_binary]
+
+run:
+  train_markets: 30
+  test_markets: 8
+  step_markets: 8
+  max_workers: 8

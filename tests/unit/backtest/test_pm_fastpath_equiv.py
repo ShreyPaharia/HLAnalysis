@@ -1,5 +1,4 @@
-"""PM recorded-mode fast path must yield bit-equivalent event arrays to the
-legacy events()-based path.
+"""PM fast-path equivalence tests covering both recorded and synthetic book modes.
 
 Fixture is built programmatically in ``tmp_path`` (same approach as
 ``test_polymarket_recorded_book.py``) — no committed fixture directory needed.
@@ -8,10 +7,12 @@ The equivalence test compares per-leg ``event_dtype`` arrays produced by two
 paths over the same fabricated data:
 
   Legacy:  events() → collect BookSnapshot / TradeEvent per leg
-           → _build_leg_event_array (runner helper, iterative Python)
+           → build_leg_event_array_from_snapshots (shared in-memory assembler)
 
-  Fast:    events_arrays() → read_pm_book_columns + read_pm_trade_columns
-           → build_leg_event_array_from_columns (shared vectorised assembler)
+  Fast:    events_arrays() → recorded: read_pm_book_columns + read_pm_trade_columns
+                                       → build_leg_event_array_from_columns
+                           → synthetic: events() stream partitioned + same
+                                        in-memory assembler (build_pm_synthetic_fast_path_bundle)
 
 For bit-equivalence we choose a fixture that avoids stale-level clear events
 (which have non-deterministic ordering in the legacy set-subtraction path).
@@ -230,23 +231,6 @@ def _legacy_leg_arrays(src: PolymarketDataSource, q) -> dict[str, np.ndarray]:
 # ── tests ─────────────────────────────────────────────────────────────────────
 
 
-def test_events_arrays_raises_for_synthetic(tmp_path: Path) -> None:
-    """events_arrays() must raise NotImplementedError in synthetic mode."""
-    cache = tmp_path / "cache"
-    _write_manifest(cache, cond=_COND, yes_t=_YES, no_t=_NO,
-                    start=_START, end=_END)
-    _write_trades(cache, _COND, [
-        {"ts_ns": _START + 100, "token_id": _YES, "side": "buy", "price": 0.6, "size": 10.0},
-    ])
-    _write_klines(cache, [
-        {"ts_ns": _START + 50, "open": 80000.0, "high": 80100.0,
-         "low": 79900.0, "close": 80050.0},
-    ])
-    src = PolymarketDataSource(cache_root=cache, book_source="synthetic")
-    q = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
-    with pytest.raises(NotImplementedError):
-        src.events_arrays(q)
-
 
 def test_pm_fastpath_leg_arrays_bit_equivalent(tmp_path: Path) -> None:
     """Per-leg event arrays from events_arrays() match the legacy events() path.
@@ -435,3 +419,212 @@ def test_pm_fastpath_no_coverage_returns_empty_arrays(tmp_path: Path) -> None:
         assert len(bundle.leg_arrays[sym].book_ts) == 0, (
             f"{sym}: expected empty book_ts when no recorded book"
         )
+
+
+# ── synthetic-mode equivalence tests ─────────────────────────────────────────
+
+
+def _build_synthetic_fixture(tmp_path: Path) -> Path:
+    """Construct a minimal synthetic-mode fixture (no book parquet needed).
+
+    Design constraints for bit-equivalent comparison (see module docstring):
+    - Snapshots are synthesised from PM trades via ``trade_to_l2``; the
+      synthetic stream always uses superset-price-set semantics within a single
+      trade, so no stale-level clears fire.
+    - 2 legs (YES / NO), 3 trades each.
+    """
+    cache = tmp_path / "cache"
+    _write_manifest(cache, cond=_COND, yes_t=_YES, no_t=_NO,
+                    start=_START, end=_END, outcome="yes")
+    _write_trades(cache, _COND, [
+        {"ts_ns": _START + 200, "token_id": _YES, "side": "buy",  "price": 0.60, "size": 50.0},
+        {"ts_ns": _START + 400, "token_id": _YES, "side": "sell", "price": 0.61, "size": 30.0},
+        {"ts_ns": _START + 600, "token_id": _YES, "side": "buy",  "price": 0.59, "size": 20.0},
+        {"ts_ns": _START + 300, "token_id": _NO,  "side": "buy",  "price": 0.39, "size": 40.0},
+        {"ts_ns": _START + 500, "token_id": _NO,  "side": "sell", "price": 0.38, "size": 25.0},
+        {"ts_ns": _START + 700, "token_id": _NO,  "side": "buy",  "price": 0.40, "size": 15.0},
+    ])
+    _write_klines(cache, [
+        {"ts_ns": _START + 50,  "open": 80000.0, "high": 80100.0,
+         "low": 79900.0, "close": 80050.0},
+        {"ts_ns": _START + 110, "open": 80050.0, "high": 80200.0,
+         "low": 80000.0, "close": 80150.0},
+    ])
+    return cache
+
+
+def test_synthetic_events_arrays_bit_equivalent_to_legacy(tmp_path: Path) -> None:
+    """events_arrays() in synthetic mode must produce bit-identical per-leg
+    event arrays to the legacy events()-based path (no liquidity profile)."""
+    cache = _build_synthetic_fixture(tmp_path)
+    src = PolymarketDataSource(cache_root=cache, book_source="synthetic")
+    q = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
+
+    legacy = _legacy_leg_arrays(src, q)
+    fast_bundle = src.events_arrays(q)
+    fast = {sym: la.events for sym, la in fast_bundle.leg_arrays.items()}
+
+    assert set(fast.keys()) == set(q.leg_symbols)
+
+    for sym in q.leg_symbols:
+        lf, ll = fast[sym], legacy[sym]
+        assert len(lf) == len(ll), (
+            f"{sym}: fast={len(lf)} events, legacy={len(ll)}"
+        )
+        assert np.array_equal(lf["exch_ts"], ll["exch_ts"]), f"{sym}: exch_ts mismatch"
+        assert np.array_equal(lf["ev"], ll["ev"]), f"{sym}: ev mismatch"
+        assert np.allclose(lf["px"], ll["px"]), f"{sym}: px mismatch"
+        assert np.allclose(lf["qty"], ll["qty"]), f"{sym}: qty mismatch"
+
+
+def test_synthetic_events_arrays_bit_equivalent_with_liquidity_profile(
+    tmp_path: Path,
+) -> None:
+    """events_arrays() in synthetic mode must be bit-identical when a
+    LiquidityProfile is supplied (profile-aware spreads/depths)."""
+    import json as _json
+    from hlanalysis.backtest.data._synthetic_l2 import LiquidityProfile
+
+    cache = _build_synthetic_fixture(tmp_path)
+
+    # Write a minimal liquidity profile JSON so we can test the profile path.
+    profile_data = {
+        "bucket_width": 0.1,
+        "half_spread": [0.004, 0.005, 0.006, 0.005, 0.004,
+                        0.004, 0.005, 0.006, 0.005, 0.004],
+        "depth": [8000.0, 9000.0, 10000.0, 9000.0, 8000.0,
+                  8000.0, 9000.0, 10000.0, 9000.0, 8000.0],
+        "global_half_spread": 0.005,
+        "global_depth": 10000.0,
+    }
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(_json.dumps(profile_data))
+
+    src = PolymarketDataSource(
+        cache_root=cache,
+        book_source="synthetic",
+        liquidity_profile_path=profile_path,
+    )
+    q = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
+
+    legacy = _legacy_leg_arrays(src, q)
+    fast_bundle = src.events_arrays(q)
+    fast = {sym: la.events for sym, la in fast_bundle.leg_arrays.items()}
+
+    assert set(fast.keys()) == set(q.leg_symbols)
+
+    for sym in q.leg_symbols:
+        lf, ll = fast[sym], legacy[sym]
+        assert len(lf) == len(ll), (
+            f"{sym}: fast={len(lf)} events, legacy={len(ll)}"
+        )
+        assert np.array_equal(lf["exch_ts"], ll["exch_ts"]), f"{sym}: exch_ts mismatch"
+        assert np.array_equal(lf["ev"], ll["ev"]), f"{sym}: ev mismatch"
+        assert np.allclose(lf["px"], ll["px"]), f"{sym}: px mismatch"
+        assert np.allclose(lf["qty"], ll["qty"]), f"{sym}: qty mismatch"
+
+    # With a profile, spreads differ from the flat default — verify events are
+    # actually different from the no-profile run (the profile is exercised).
+    src_no_profile = PolymarketDataSource(
+        cache_root=cache, book_source="synthetic"
+    )
+    fast_no_profile = {
+        sym: la.events
+        for sym, la in src_no_profile.events_arrays(q).leg_arrays.items()
+    }
+    # At least one leg should differ (profile changes spread ≠ default 0.005).
+    any_differ = any(
+        not np.array_equal(fast[sym]["px"], fast_no_profile[sym]["px"])
+        for sym in q.leg_symbols
+    )
+    assert any_differ, (
+        "liquidity profile had no effect on event px — profile not exercised"
+    )
+
+
+def test_synthetic_events_arrays_reference_and_settlement(tmp_path: Path) -> None:
+    """FastPathBundle from synthetic mode carries correct reference and settlement."""
+    from hlanalysis.backtest.core.events import ReferenceEvent, SettlementEvent
+
+    cache = _build_synthetic_fixture(tmp_path)
+    src = PolymarketDataSource(cache_root=cache, book_source="synthetic")
+    q = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
+
+    bundle = src.events_arrays(q)
+
+    assert len(bundle.reference_events) == 2
+    assert all(isinstance(e, ReferenceEvent) for e in bundle.reference_events)
+
+    assert len(bundle.settlement_events) == 2
+    assert all(isinstance(e, SettlementEvent) for e in bundle.settlement_events)
+    settle_syms = {e.symbol for e in bundle.settlement_events}
+    assert settle_syms == {_YES, _NO}
+    assert all(e.ts_ns == _END for e in bundle.settlement_events)
+
+
+def test_bundle_config_sig_differs_by_liquidity_profile(tmp_path: Path) -> None:
+    """Two PolymarketDataSource instances differing only in liquidity profile
+    must produce DIFFERENT cache key signatures."""
+    import json as _json
+
+    cache = tmp_path / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+
+    profile_data = {
+        "bucket_width": 0.1,
+        "half_spread": [0.004] * 10,
+        "depth": [9000.0] * 10,
+        "global_half_spread": 0.005,
+        "global_depth": 10000.0,
+    }
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(_json.dumps(profile_data))
+
+    src_no_profile = PolymarketDataSource(
+        cache_root=cache, book_source="synthetic"
+    )
+    src_with_profile = PolymarketDataSource(
+        cache_root=cache,
+        book_source="synthetic",
+        liquidity_profile_path=profile_path,
+    )
+
+    sig_none = src_no_profile._bundle_config_sig()
+    sig_prof = src_with_profile._bundle_config_sig()
+    assert sig_none != sig_prof, (
+        f"Expected different sigs but both were: {sig_none!r}"
+    )
+
+
+def test_bundle_config_sig_identical_for_same_profile(tmp_path: Path) -> None:
+    """Two instances with the same liquidity profile file produce IDENTICAL
+    cache key signatures."""
+    import json as _json
+
+    cache = tmp_path / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+
+    profile_data = {
+        "bucket_width": 0.1,
+        "half_spread": [0.004] * 10,
+        "depth": [9000.0] * 10,
+        "global_half_spread": 0.005,
+        "global_depth": 10000.0,
+    }
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(_json.dumps(profile_data))
+
+    src_a = PolymarketDataSource(
+        cache_root=cache,
+        book_source="synthetic",
+        liquidity_profile_path=profile_path,
+    )
+    src_b = PolymarketDataSource(
+        cache_root=cache,
+        book_source="synthetic",
+        liquidity_profile_path=profile_path,
+    )
+
+    assert src_a._bundle_config_sig() == src_b._bundle_config_sig(), (
+        "Same profile should produce identical config sig"
+    )

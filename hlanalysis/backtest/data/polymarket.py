@@ -82,7 +82,7 @@ _PM_BOOK_DATA_SUBPATH = (
 _PM_SETTLEMENT_DATA_SUBPATH = (
     "venue=polymarket/product_type=prediction_binary/mechanism=clob/event=settlement"
 )
-_BTC_BUCKET_SERIES_SLUG = "bitcoin-multi-strikes-hourly"
+_DEFAULT_BUCKET_SERIES_SLUG = "btc-multi-strikes-weekly"
 _SERIES_PAGE_LIMIT = 100  # Gamma /events caps responses at 100 even when limit > 100;
 # requesting 500 silently truncates and we mistake the short response for "end of data".
 _TRADES_PAGE_SIZE = 500
@@ -336,6 +336,7 @@ class PolymarketDataSource:
         depth: float = _DEPTH_DEFAULT,
         reference_symbol: str = _DEFAULT_REF_SYMBOL,
         series_slug: str = _DEFAULT_BINARY_SERIES_SLUG,
+        bucket_series_slug: str = _DEFAULT_BUCKET_SERIES_SLUG,
         klines_subdir: str = _DEFAULT_KLINES_SUBDIR,
         klines_1s_subdir: str = _DEFAULT_KLINES_1S_SUBDIR,
         reference_source: Literal["klines", "binance_bbo", "klines_1s"] = "klines",
@@ -344,11 +345,13 @@ class PolymarketDataSource:
         binance_bbo_product_type: Literal["perp", "spot"] = "perp",
         book_source: Literal["synthetic", "recorded"] = "synthetic",
         pm_book_root: Path | str | None = None,
+        liquidity_profile_path: Path | str | None = None,
     ) -> None:
         self._cache_root = Path(cache_root)
         self._stream_cfg = _StreamCfg(half_spread=half_spread, depth=depth)
         self._reference_symbol = reference_symbol
         self._series_slug = series_slug
+        self._bucket_series_slug = bucket_series_slug
         self._klines_subdir = klines_subdir
         self._klines_1s_subdir = klines_1s_subdir
         # Reference-feed mode.
@@ -399,6 +402,29 @@ class PolymarketDataSource:
             Path(pm_book_root) if pm_book_root is not None
             else self._cache_root.parent
         )
+        # Optional per-bucket liquidity calibration for the synthetic book builder.
+        # When set, trade_to_l2() uses the profile's half_spread/depth per price
+        # bucket instead of the flat _StreamCfg constants.
+        self._liquidity_profile: "LiquidityProfile | None" = None
+        if liquidity_profile_path:
+            import json as _json
+            from ._synthetic_l2 import LiquidityProfile as _LiquidityProfile
+            with open(liquidity_profile_path) as _f:
+                _d = _json.load(_f)
+            try:
+                self._liquidity_profile = _LiquidityProfile(
+                    bucket_width=_d["bucket_width"],
+                    half_spread=_d["half_spread"],
+                    depth=_d["depth"],
+                    global_half_spread=_d["global_half_spread"],
+                    global_depth=_d["global_depth"],
+                )
+            except KeyError as _e:
+                raise ValueError(
+                    f"liquidity profile {liquidity_profile_path} is missing "
+                    f"required key {_e}; expected bucket_width, half_spread, "
+                    f"depth, global_half_spread, global_depth"
+                ) from _e
         # Lazy caches populated on first read. Significant for tuning workers
         # that backtest dozens of markets per cell — without caches each
         # market would re-parse the manifest + the (large) BTC klines JSON.
@@ -457,24 +483,26 @@ class PolymarketDataSource:
         return self._events_bucket(q, entry)
 
     def events_arrays(self, q: QuestionDescriptor):
-        """Return a ``FastPathBundle`` for *recorded* mode, skipping the
-        dataclass round-trip of ``events()``.
+        """Return a ``FastPathBundle`` for both *recorded* and *synthetic* mode,
+        skipping the per-market dataclass overhead so repeated grid-cell replays
+        hit the disk cache rather than rebuilding arrays from scratch each time.
 
-        Only ``book_source="recorded"`` is supported.  Raises
-        ``NotImplementedError`` for synthetic mode — the runner's
-        ``getattr(data_source, "events_arrays", None)`` guard means the legacy
-        path is taken instead.
+        Both modes are supported:
 
-        The bundle is bit-equivalent to the legacy path: the within-snapshot
-        level ordering of ``read_pm_book_columns`` matches ``_normalize_levels``
-        (bids px DESC, asks px ASC), and the same trade / reference / settlement
-        lists feed the shared assembler.
+        - ``book_source="recorded"``: reads the real multi-level L2
+          ``book_snapshot`` parquet directly via the column-vectorised assembler.
+          Bit-equivalent to the legacy ``events()`` path for that mode.
+        - ``book_source="synthetic"`` (default): drives the same legacy
+          ``events()`` stream the runner consumes, partitions events by type and
+          symbol exactly as the runner does, and calls the shared in-memory
+          assembler — producing arrays that are **bit-identical** to the legacy
+          path while enabling the disk cache for grid-cell reuse.
+
+        The bundle is cached on disk under ``<cache_root>/_event_array_cache``
+        keyed by ``(question_id, config_sig, source-file mtimes)``.  A second
+        call for the same question + config returns the cached bundle without
+        re-reading any source files.
         """
-        if self._book_source != "recorded":
-            raise NotImplementedError(
-                "PM fast path is recorded-mode only; "
-                "use book_source='recorded' to enable events_arrays()"
-            )
 
         from ._event_array_cache import inproc_lookup
 
@@ -498,12 +526,22 @@ class PolymarketDataSource:
                 settlement_events=[],
             )
 
-        from ._pm_fastpath import build_pm_fast_path_bundle
+        from ._pm_fastpath import build_pm_fast_path_bundle, build_pm_synthetic_fast_path_bundle
 
         # All source reads (trades, klines/BBO reference, book parquet,
         # settlement) are deferred into ``_build`` so a cache HIT skips ALL of
         # them — only the cheap source-file stat + npz load runs.
         def _build() -> "FastPathBundle":
+            if self._book_source == "synthetic":
+                # Synthetic: assemble arrays from the SAME legacy event stream
+                # the runner consumes. Partitions exactly as the runner does and
+                # calls the same shared assembler → bit-identical output.
+                return build_pm_synthetic_fast_path_bundle(
+                    q=q,
+                    events_iter=self.events(q),
+                )
+
+            # Recorded: vectorised column path (the original recorded assembler).
             if entry.get("kind", "binary") == "binary":
                 trades = self._read_trades(q.question_id)
                 outcome = self._binary_outcome(q, entry)
@@ -570,14 +608,24 @@ class PolymarketDataSource:
 
     def _bundle_config_sig(self) -> str:
         """Cache-key signature: every non-source-file input that changes the
-        built bundle (resample period + reference/book source mode), so a bundle
-        built under one config never aliases to a request under another. Keep in
-        sync with the params that flow into ``_build``."""
+        built bundle (resample period + reference/book source mode + liquidity
+        profile), so a bundle built under one config never aliases to a request
+        under another. Keep in sync with the params that flow into ``_build``."""
+        lp = self._liquidity_profile
+        if lp is None:
+            lp_sig = "none"
+        else:
+            lp_sig = (
+                f"{lp.bucket_width}:{lp.global_half_spread}:{lp.global_depth}"
+                f":{hash(tuple(lp.half_spread))}:{hash(tuple(lp.depth))}"
+            )
         return (
             f"rrs={self._reference_resample_ns}"
             f"|refsrc={self._reference_source}"
             f"|book={self._book_source}"
             f"|bbo={self._binance_bbo_product_type}"
+            f"|lp={lp_sig}"
+            f"|k1m={self._klines_subdir}|k1s={self._klines_1s_subdir}"
         )
 
     def _fastpath_source_files(self, q: QuestionDescriptor) -> list[Path]:
@@ -640,6 +688,36 @@ class PolymarketDataSource:
         # are emitted via `SettlementEvent.symbol` in events().
         return "unknown"
 
+    def leg_payoff(self, q: QuestionDescriptor, leg_symbol: str) -> float:
+        """Per-leg payoff at settlement: 1.0 if the held leg won, else 0.0.
+
+        Binary: mirrors the runner's binary fallback (yes=leg_symbols[0],
+        no=leg_symbols[1]) via ``resolved_outcome`` — kept bit-identical so the
+        binary settlement path is unchanged.
+
+        Bucket: PM multi-strike is a ladder of independent 'above X' binaries.
+        Each manifest leg pair is (yes_token, no_token) with a per-leg resolution.
+        The YES token wins iff its leg resolved 'yes'; the NO token wins iff 'no'.
+        """
+        manifest = self._load_manifest()
+        entry = manifest.get(q.question_id) or {}
+        kind = entry.get("kind", "binary")
+        if kind != "bucket":
+            outcome = self.resolved_outcome(q)
+            if outcome == "yes" and q.leg_symbols and leg_symbol == q.leg_symbols[0]:
+                return 1.0
+            if outcome == "no" and len(q.leg_symbols) > 1 and leg_symbol == q.leg_symbols[1]:
+                return 1.0
+            return 0.0
+        b = entry.get("bucket") or {}
+        for toks, res in zip(b.get("leg_tokens", []), b.get("leg_resolutions", [])):
+            yes_tok, no_tok = str(toks[0]), str(toks[1])
+            if leg_symbol == yes_tok:
+                return 1.0 if res == "yes" else 0.0
+            if leg_symbol == no_tok:
+                return 1.0 if res == "no" else 0.0
+        return 0.0
+
     def _binary_outcome(
         self, q: QuestionDescriptor, entry: dict,
     ) -> Literal["yes", "no", "unknown"]:
@@ -695,16 +773,21 @@ class PolymarketDataSource:
         # SHR-54: keep the kline series advancing in lockstep with the PM market
         # cache. Without this the klines froze behind newly-cached markets and
         # their strikes silently resolved to a stale close.
-        starts = [
-            int(e["market"]["start_ts_ns"])
-            for e in manifest.values()
-            if e.get("kind") == "binary" and (e.get("market") or {}).get("start_ts_ns")
-        ]
-        ends = [
-            int(e["market"]["end_ts_ns"])
-            for e in manifest.values()
-            if e.get("kind") == "binary" and (e.get("market") or {}).get("end_ts_ns")
-        ]
+        starts: list[int] = []
+        ends: list[int] = []
+        for e in manifest.values():
+            if e.get("kind") == "binary":
+                mk = e.get("market") or {}
+                if mk.get("start_ts_ns"):
+                    starts.append(int(mk["start_ts_ns"]))
+                if mk.get("end_ts_ns"):
+                    ends.append(int(mk["end_ts_ns"]))
+            elif e.get("kind") == "bucket":
+                b = e.get("bucket") or {}
+                if b.get("start_ts_ns"):
+                    starts.append(int(b["start_ts_ns"]))
+                if b.get("end_ts_ns"):
+                    ends.append(int(b["end_ts_ns"]))
         if starts and ends:
             self._ensure_kline_coverage(min(starts), max(ends))
         return self.discover(start=start, end=end, kind=kind)
@@ -825,7 +908,10 @@ class PolymarketDataSource:
     ) -> QuestionView:
         b = entry.get("bucket") or {}
         thresholds: list[float] = b.get("thresholds") or []
-        kv = (("priceThresholds", ",".join(f"{t:.0f}" for t in thresholds)),)
+        kv = (
+            ("priceThresholds", ",".join(f"{t:.0f}" for t in thresholds)),
+            ("bucketLayout", "above_ladder"),
+        )
         is_settled = settled or (now_ns > q.end_ts_ns)
         return QuestionView(
             question_idx=q.question_idx,
@@ -927,6 +1013,7 @@ class PolymarketDataSource:
                     snap = trade_to_l2(
                         ts_ns=t.ts_ns, token_id=t.token_id, price=t.price,
                         half_spread=cfg.half_spread, depth=cfg.depth,
+                        profile=self._liquidity_profile,
                     )
                     leg_events.append(_book_from_l2(snap))
                 leg_events.append(TradeEvent(
@@ -944,6 +1031,7 @@ class PolymarketDataSource:
                         comp_snap = trade_to_l2(
                             ts_ns=t.ts_ns, token_id=other, price=comp_price,
                             half_spread=cfg.half_spread, depth=cfg.depth,
+                            profile=self._liquidity_profile,
                         )
                         leg_events.append(_book_from_l2(comp_snap))
         leg_event_streams.append(iter(leg_events))
@@ -1417,7 +1505,7 @@ class PolymarketDataSource:
     def _fetch_and_cache_bucket(
         self, manifest: dict, *, start_iso: str, end_iso: str, refresh: bool,
     ) -> None:
-        raw = _fetch_series_events(_BTC_BUCKET_SERIES_SLUG)
+        raw = _fetch_series_events(self._bucket_series_slug)
         in_window = [ev for ev in raw if _event_in_window(ev, start_iso, end_iso)]
         for ev in in_window:
             parsed = _parse_bucket_event(ev)

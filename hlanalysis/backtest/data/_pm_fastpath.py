@@ -1,23 +1,30 @@
-"""Polymarket recorded-book → flat numpy columns for the shared assembler.
+"""Polymarket fast-path bundle builders for recorded and synthetic book modes.
 
-Only recorded mode. Produces the same {ts, bid_px, bid_sz, bid_offsets,
-ask_px, ask_sz, ask_offsets} / {ts, px, sz, side} dicts that
+Recorded mode: reads real multi-level L2 ``book_snapshot`` parquet and
+produces the same ``{ts, bid_px, bid_sz, bid_offsets, ask_px, ask_sz,
+ask_offsets}`` / ``{ts, px, sz, side}`` dicts that
 ``_fastpath_core.build_leg_event_array_from_columns`` consumes, with
 within-snapshot level ordering normalised to MATCH the legacy ``events()``
 path:
 
   bids sorted px DESC (best = max), asks sorted px ASC (best = min)
 
-so fills stay bit-equivalent to the legacy dataclass path.
+Synthetic mode: drives the same legacy ``events()`` stream the runner
+consumes, partitions events by type/symbol, and calls the shared in-memory
+assembler — guaranteeing bit-identical output to the legacy path while
+allowing the result to be disk-cached so repeated grid cells pay only the
+cache lookup cost.
 """
 from __future__ import annotations
 
 import numpy as np
 
+from ..core.events import BookSnapshot, ReferenceEvent, SettlementEvent, TradeEvent
 from ._fastpath_core import (
     FastPathBundle,
     LegArrays,
     build_leg_event_array_from_columns,
+    build_leg_event_array_from_snapshots,
 )
 
 
@@ -166,8 +173,60 @@ def build_pm_fast_path_bundle(
     )
 
 
+def build_pm_synthetic_fast_path_bundle(
+    *,
+    q,
+    events_iter,
+) -> FastPathBundle:
+    """Assemble a :class:`FastPathBundle` for a PM *synthetic*-mode question.
+
+    Drives the same legacy ``events()`` stream the runner consumes and
+    partitions events by type/symbol exactly as the runner does, then calls
+    :func:`build_leg_event_array_from_snapshots` per leg — the same shared
+    in-memory assembler used by the runner's legacy path.  The resulting arrays
+    are therefore **bit-identical** to what the legacy path would produce.
+
+    Parameters
+    ----------
+    q:
+        ``QuestionDescriptor`` whose ``leg_symbols`` define the partition keys.
+    events_iter:
+        The iterable returned by ``data_source.events(q)`` for this question.
+        Consumed once; caller must not re-use it.
+    """
+    book_events: dict[str, list[BookSnapshot]] = {sym: [] for sym in q.leg_symbols}
+    trade_events: dict[str, list[TradeEvent]] = {sym: [] for sym in q.leg_symbols}
+    ref_events: list[ReferenceEvent] = []
+    settle_events: list[SettlementEvent] = []
+
+    for ev in events_iter:
+        if isinstance(ev, BookSnapshot):
+            if ev.symbol in book_events:
+                book_events[ev.symbol].append(ev)
+        elif isinstance(ev, TradeEvent):
+            if ev.symbol in trade_events:
+                trade_events[ev.symbol].append(ev)
+        elif isinstance(ev, ReferenceEvent):
+            ref_events.append(ev)
+        elif isinstance(ev, SettlementEvent):
+            settle_events.append(ev)
+
+    leg_arrays: dict[str, LegArrays] = {}
+    for sym in q.leg_symbols:
+        arr = build_leg_event_array_from_snapshots(book_events[sym], trade_events[sym])
+        bts = np.asarray([b.ts_ns for b in book_events[sym]], dtype=np.int64)
+        leg_arrays[sym] = LegArrays(events=arr, book_ts=bts)
+
+    return FastPathBundle(
+        leg_arrays=leg_arrays,
+        reference_events=ref_events,
+        settlement_events=settle_events,
+    )
+
+
 __all__ = [
     "read_pm_book_columns",
     "read_pm_trade_columns",
     "build_pm_fast_path_bundle",
+    "build_pm_synthetic_fast_path_bundle",
 ]

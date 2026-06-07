@@ -74,6 +74,7 @@ def _source_config_from_args(
             pm_binance_bbo_product_type=(
                 getattr(args, "pm_binance_bbo_product_type", None) or "perp"
             ),
+            pm_liquidity_profile_path=getattr(args, "pm_liquidity_profile", None),
             reference_resample_seconds=reference_resample_seconds,
         )
     if name == "hl_hip4":
@@ -540,11 +541,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     pr.add_argument(
         "--pm-flavor",
-        choices=["btc_updown", "wti_updown"],
+        choices=sorted(PM_FLAVORS),
         default="btc_updown",
-        help="(polymarket only) Which PM series + reference asset. "
-        "btc_updown: BTC 'Up or Down Daily' (default). "
-        "wti_updown: WTI 'Oil Daily Up or Down'.",
+        help="(polymarket only) Which PM series + reference asset to load. "
+        "Default: btc_updown.",
     )
     pr.add_argument(
         "--hedge-data-path",
@@ -599,6 +599,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "the real multi-level L2 `book_snapshot` parquet per leg (HL parity; "
         "coverage from 2026-05-27).",
     )
+    pr.add_argument(
+        "--pm-liquidity-profile",
+        default=None,
+        dest="pm_liquidity_profile",
+        help="(polymarket synthetic mode only) Path to a JSON liquidity-profile "
+        "produced by scripts/calibrate_pm_liquidity.py. When supplied, the "
+        "synthetic book builder uses per-price-bucket half_spread/depth from "
+        "the profile instead of the flat 0.005/10000 defaults.",
+    )
     pr.add_argument("--workers", type=int, default=1,
                     help="Parallel worker processes for independent markets "
                          "(default 1 = serial). Use up to #cores for big runs.")
@@ -627,11 +636,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     pf.add_argument("--cache-root", default=None, help="Override env HLBT_PM_CACHE_ROOT")
     pf.add_argument(
         "--pm-flavor",
-        choices=["btc_updown", "wti_updown"],
+        choices=sorted(PM_FLAVORS),
         default="btc_updown",
-        help="(polymarket only) Which PM series + reference asset. "
-        "btc_updown: BTC 'Up or Down Daily' (default). "
-        "wti_updown: WTI 'Oil Daily Up or Down'.",
+        help="(polymarket only) Which PM series + reference asset to load. "
+        "Default: btc_updown.",
     )
     pf.add_argument("--min-trades", type=int, default=30)
     pf.add_argument("--min-volume-usd", type=float, default=1000.0)
@@ -653,11 +661,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     pt.add_argument("--cache-root", default=None)
     pt.add_argument(
         "--pm-flavor",
-        choices=["btc_updown", "wti_updown"],
+        choices=sorted(PM_FLAVORS),
         default="btc_updown",
-        help="(polymarket only) Which PM series + reference asset. "
-        "btc_updown: BTC 'Up or Down Daily' (default). "
-        "wti_updown: WTI 'Oil Daily Up or Down'.",
+        help="(polymarket only) Which PM series + reference asset to load. "
+        "Default: btc_updown.",
     )
     pt.add_argument("--start", default=None)
     pt.add_argument("--end", default=None)
@@ -680,6 +687,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="both",
         help="(polymarket) Filter discovery to this question kind. "
         "Avoids mixing binary and bucket markets in one walk-forward.",
+    )
+    pt.add_argument(
+        "--pm-liquidity-profile",
+        default=None,
+        dest="pm_liquidity_profile",
+        help="(polymarket synthetic mode only) Path to a JSON liquidity-profile "
+        "produced by scripts/calibrate_pm_liquidity.py. When supplied, the "
+        "synthetic book builder uses per-price-bucket half_spread/depth from "
+        "the profile instead of the flat 0.005/10000 defaults.",
+    )
+    pt.add_argument(
+        "--pm-reference-source",
+        choices=["klines", "binance_bbo", "klines_1s"],
+        default="klines",
+        help="(polymarket only) Reference-feed source for the sweep. `klines` "
+        "(default) = cached 1m Binance klines. `klines_1s` = genuine Binance 1s "
+        "klines (cached under <asset>_klines_1s/) bucketed to the per-cell "
+        "vol_sampling_dt_seconds — use with a dt<60 grid for live-parity. "
+        "`binance_bbo` = recorded Binance BBO ticks.",
+    )
+    pt.add_argument(
+        "--pm-book-source",
+        choices=["synthetic", "recorded"],
+        default="synthetic",
+        help="(polymarket only) Fill-book source for the sweep. `synthetic` "
+        "(default) builds a flat 1-level book per trade print + `1−p` parity "
+        "(calibratable via --pm-liquidity-profile). `recorded` feeds real L2.",
     )
     # Hedge leg flags (v5_delta_hedged only; safe to pass for other strategies
     # since hedge_enabled defaults to False when --hedge-data-path is omitted).
