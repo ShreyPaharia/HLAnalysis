@@ -74,25 +74,29 @@ Several enablers already landed (SHR-49, SHR-53); Phase 0 is largely
   deployed to EC2, wired into the runbook (DEPLOYMENT.md), one-command access
   documented. Design ref: `docs/specs/2026-06-05-engine-observability-tier1-design.md`.
 
-- **W0.2 — Surface true PnL per slot.** Confirm SHR-49 (daily-loss gate reads
+- **W0.2 — Lock in & surface realized true PnL.** `engine-diag` already reports
+  `true_pnl = realized_fills + settlement` per slot (no venue calls, by design).
+  Add a regression test that pins SHR-49 (daily-loss gate reads
   settlement-inclusive PnL, no structurally-zero fallback) and SHR-53
-  (settlement PnL persisted, single close-path owner) are live in the deployed
-  build. Add a per-slot **true-PnL** field to `engine-diag`: realized fills +
-  persisted settlement + open-position MTM. Fail loud if any component is
-  missing rather than silently reporting fill-only PnL.
+  (settlement persisted, single close-path owner) so they cannot silently
+  regress, and relabel the diag field so it is unambiguous that it excludes
+  open-position MTM (MTM is added in W0.3, which has venue access).
 
-- **W0.3 — Daily reconciliation report.** A script (cron/systemd-timer on the
-  box, memory-capped) that compares engine-DB true PnL + open positions against
-  HL `clearinghouseState` / `spotClearinghouseState` and PM funder balances,
-  per slot. Emits a daily summary (Telegram + log) and **alerts on drift beyond
-  tolerance**. Builds on the existing `verify_position_state_recipe`. Tolerance
-  threshold is a config constant; startup `venue_orphan_unattributed` timing
-  noise is excluded per the known recipe.
+- **W0.3 — Daily reconciliation report.** A module run on the box via SSM
+  (same pattern as `engine-diag`; env-sourced for credentials) that, per slot,
+  compares engine-DB realized true PnL + open positions against the venue's
+  `exec_client.clearinghouse_state()` — `VenuePosition(qty, avg_entry,
+  unrealized_pnl)` + `account_value_usd` + `positions_known`. Reports
+  realized + open-MTM (= Σ venue `unrealized_pnl`) = total true PnL, flags
+  position drift (qty mismatch, vanished, orphan) beyond tolerance, and **alerts
+  via Telegram on drift**. Skips position reconciliation when
+  `positions_known` is False (PM data-api flap) rather than treating an empty
+  set as truth. Builds on `verify_position_state_recipe`.
 
-- **W0.4 — Fold in leakage metric.** The exit-regret / final-exit-regret metric
-  already built (HL result: `exit_edge` is pure leakage, `exit_safety_d`
-  protective) becomes a line in the daily report so exit-policy leakage is
-  visible going forward. No behavior change — reporting only.
+- **W0.4 — Per-slot PnL attribution in the report.** The report breaks true PnL
+  into realized-fills / settlement / open-MTM per slot so attribution is visible
+  every day. (The exit-regret/leakage research metric is a Phase-2 concern, not
+  a reconciliation primitive, and is out of scope here.)
 
 ### Phase 0 exit gate (all must hold)
 
@@ -129,18 +133,22 @@ W1.2) and the memory-guard (W1.9) are first-class, not cleanup.
   engine**. Add a global buffer byte cap with drop-oldest + an alert. Critical
   because we share one box.
 
-- **W1.3 — Reject/error circuit-breaker (SHR-45).** On venue rejects the router
-  logs + publishes but takes no throttling action; the scanner re-fires the same
-  entry every tick (live: 605 rejects in 87 min, zero fills). Add a
-  per-(question, error-class) reject counter that backs off then halts the
-  offending entry; surface in `engine-diag`.
+- **W1.3 — Reject circuit-breaker — VERIFY + regression-test (SHR-45).**
+  Investigation found this is **already implemented** in `router.py` (a
+  per-`(question_idx, side)` consecutive-reject counter with a threshold,
+  pre-place suppression, trip log, and reset-on-fill). So the work is to pin it
+  with a regression test, optionally bucket rejects by error-class in the
+  `order_rejected` payload so `engine-diag` shows reason, and close the ticket —
+  not to rebuild it.
 
-- **W1.4 — Lost-ACK orphan recovery (SHR-46).** An OOM/crash between
-  `exec_client.place()` returning a fill and `update_order_status` leaves the
-  order `pending` in the DB while filled on-venue — an untracked live position.
-  Add idempotency + a startup/reconcile pass that recovers pending-but-filled
-  orders into Positions. Especially important since we *expect* OOM on the
-  shared box until W1.1/W1.2 fully land.
+- **W1.4 — Book the recovered lost-ACK fill (SHR-46, narrowed).** The
+  pending-row-before-`place()` write and the reconcile fill-replay already
+  exist. The remaining gap: the reconcile local-ghost branch marks the order
+  `filled` and replays `Fill` rows but **does not upsert the `Position`**, so an
+  unbooked fill leaves the position open forever → re-exit loop. Fix is to apply
+  the venue-confirmed net delta to the `Position` table in that branch (HL
+  apply-changes path only; PM stays alert-only). Especially important since we
+  *expect* occasional OOM on the shared box until W1.1/W1.2 fully land.
 
 - **W1.5 — Stop/exit IOC sweep within slippage budget + in-flight guard
   (SHR-48).** Stop/exit places a single IOC at top-of-book for full size; on
