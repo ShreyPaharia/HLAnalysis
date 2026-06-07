@@ -67,7 +67,10 @@ class MarketState:
         # One reference-tick stream fans into every cadence registered for the
         # symbol, so a single slot can run different vol_sampling_dt_seconds per
         # question class off the SAME feed (see the (symbol, dt) refactor plan).
-        self._marks: dict[tuple[str, int], deque[tuple[float, float, float]]] = {}
+        # Each bar stores (ts_ns, high, low, close) so the time-bounded
+        # recent_returns / recent_hl_bars paths can filter by wall-clock time
+        # to match the backtest's slice_window semantics (SHR-66).
+        self._marks: dict[tuple[str, int], deque[tuple[int, float, float, float]]] = {}
         self._mark_history: int = mark_history  # default deque maxlen (legacy)
         self._mark_history_by_key: dict[tuple[str, int], int] = {}
         self._mark_bucket_ns: int = mark_bucket_ns  # default (60s) for unregistered symbols
@@ -266,12 +269,17 @@ class MarketState:
             bucket = bucket_index(ts, bucket_ns)
             last_bucket = self._last_mark_bucket.get(key)
             if last_bucket is None or bucket != last_bucket or not hist:
-                hist.append((price, price, price))
+                # New bucket: store (ts, high, low, close) so the time-bounded
+                # read paths can slice by wall-clock (SHR-66).
+                hist.append((ts, price, price, price))
                 self._last_mark_bucket[key] = bucket
             else:
                 # Same merge rule as the batch ``resample_ohlc`` loaders use: a
                 # scalar tick is a degenerate (price, price, price) bar.
-                hist[-1] = update_bar(hist[-1], price, price, price)
+                # Carry forward the bucket-open timestamp; update OHLC from tick.
+                old_ts = hist[-1][0]
+                new_hlc = update_bar((hist[-1][1], hist[-1][2], hist[-1][3]), price, price, price)
+                hist[-1] = (ts, new_hlc[0], new_hlc[1], new_hlc[2])
 
     def _evict_old_trades(self, dq: "deque[TradeEvent]", *, now: int) -> None:
         cutoff = now - self._volume_window_ns
@@ -484,42 +492,92 @@ class MarketState:
         the risk gate's stale-reference check (SHR-60)."""
         return self._last_mark_ts.get(symbol)
 
-    def recent_returns(self, symbol: str, n: int, dt: int | None = None) -> tuple[float, ...]:
+    def recent_returns(
+        self,
+        symbol: str,
+        n: int,
+        dt: int | None = None,
+        *,
+        now_ns: int | None = None,
+        lookback_seconds: int | None = None,
+    ) -> tuple[float, ...]:
         """Last ``n`` close-to-close log returns for ``symbol`` at cadence ``dt``
         (default = the symbol's first registered cadence).
 
-        Close-to-close is the legacy stdev input; bit-identical to the pre-OHLC
-        behaviour since the per-bucket close is still the bucket's last tick."""
+        When ``now_ns`` and ``lookback_seconds`` are both provided, the bar
+        sequence is TIME-bounded: only bars with ``ts >= now_ns -
+        lookback_seconds * 1e9`` are kept BEFORE computing returns — matching
+        the backtest's ``slice_window(now_ns, lookback_seconds)`` semantics
+        (SHR-66). Both return endpoints must be inside the time window (the
+        first return in the slice is skipped because its left endpoint is the
+        boundary bar itself, which is inside the window — same rule as
+        ``KlineRingBuffer.slice_window`` using ``ret_slice = ret[lo+1:hi]``).
+
+        Without ``now_ns`` / ``lookback_seconds`` the legacy COUNT path is
+        used (``[-(n+1):]``), preserving bit-identity for callers that have
+        not been updated yet."""
         key = (symbol, self._resolve_dt_ns(symbol, dt))
         hist = self._marks.get(key)
         if hist is None or len(hist) < 2:
             return ()
-        bars = list(hist)[-(n + 1):]
-        rets: list[float] = []
-        for prev, curr in zip(bars, bars[1:], strict=False):
-            prev_c, curr_c = prev[2], curr[2]
-            if prev_c > 0 and curr_c > 0:
-                rets.append(math.log(curr_c / prev_c))
-        return tuple(rets)
+        if now_ns is not None and lookback_seconds is not None:
+            # TIME-bounded path: converge on backtest slice_window semantics.
+            cutoff_ns = now_ns - lookback_seconds * 1_000_000_000
+            # Each bar is (ts, high, low, close); keep bars in [cutoff, now].
+            bars = [b for b in hist if b[0] >= cutoff_ns]
+            rets: list[float] = []
+            for prev, curr in zip(bars, bars[1:], strict=False):
+                prev_c, curr_c = prev[3], curr[3]
+                if prev_c > 0 and curr_c > 0:
+                    rets.append(math.log(curr_c / prev_c))
+            return tuple(rets)
+        else:
+            # Legacy COUNT path: keep for callers that don't pass time args.
+            bars = list(hist)[-(n + 1):]
+            rets = []
+            for prev, curr in zip(bars, bars[1:], strict=False):
+                prev_c, curr_c = prev[3], curr[3]
+                if prev_c > 0 and curr_c > 0:
+                    rets.append(math.log(curr_c / prev_c))
+            return tuple(rets)
 
-    def recent_hl_bars(self, symbol: str, n: int, dt: int | None = None) -> tuple[tuple[float, float], ...]:
+    def recent_hl_bars(
+        self,
+        symbol: str,
+        n: int,
+        dt: int | None = None,
+        *,
+        now_ns: int | None = None,
+        lookback_seconds: int | None = None,
+    ) -> tuple[tuple[float, float], ...]:
         """Last ``n`` per-bucket ``(high, low)`` bars for ``symbol`` at cadence ``dt``
         (default = the symbol's first registered cadence).
 
         Mirrors the backtest MarketState's ``recent_hl_bars`` (KlineRingBuffer
         rows ``[high, low]``) so the strategy's Parkinson σ estimator receives
         the same input shape on the live path as in the backtest. Empty tuple
-        when the symbol has no bars yet. Threading this into the Scanner is what
-        activates Parkinson for ``vol_estimator: parkinson`` slots live (the
-        dormant-Parkinson fix); ``(ln(H/L))²`` is order-invariant so the (high,
-        low) row order does not affect σ, but it matches the backtest column
-        order for clarity."""
+        when the symbol has no bars yet.
+
+        When ``now_ns`` and ``lookback_seconds`` are provided, only bars with
+        ``ts >= now_ns - lookback_seconds * 1e9`` are returned — matching the
+        backtest's time-bounded slice (SHR-66). Without them, the legacy COUNT
+        path (``[-n:]``) is used."""
         key = (symbol, self._resolve_dt_ns(symbol, dt))
         hist = self._marks.get(key)
         if not hist:
             return ()
-        bars = list(hist)[-n:]
-        return tuple((b[0], b[1]) for b in bars)
+        if now_ns is not None and lookback_seconds is not None:
+            # TIME-bounded: keep bars whose ts is inside the window.
+            cutoff_ns = now_ns - lookback_seconds * 1_000_000_000
+            # bar layout: (ts, high, low, close)
+            return tuple(
+                (b[1], b[2]) for b in hist
+                if b[0] >= cutoff_ns and b[1] > 0 and b[2] > 0
+            )
+        else:
+            # Legacy COUNT path.
+            bars = list(hist)[-n:]
+            return tuple((b[1], b[2]) for b in bars)
 
     def recent_volume_usd(self, symbol: str, *, now: int) -> float:
         dq = self._trades.get(symbol)

@@ -117,6 +117,14 @@ class Scanner:
         # override changes vol_sampling_dt_seconds. Classes absent here use the
         # default dt-less read below — bit-identical to pre-refactor behaviour.
         self._cadence_by_class = self.cadence_by_class(cfg)
+        # Default σ/drift lookback (seconds) for the non-class-override path.
+        # Passed as ``lookback_seconds`` to recent_returns / recent_hl_bars so
+        # the live engine time-bounds its window to match the backtest's
+        # slice_window semantics (SHR-66). Derived from the same inputs as
+        # _required_returns_n so the two stay consistent.
+        self._default_lookback_secs: int = self._lookback_secs(cfg)
+        # Per-class lookback (seconds) for classes in _cadence_by_class.
+        self._lookback_secs_by_class: dict[str, int] = self._class_lookback_secs(cfg)
 
     @staticmethod
     def _bars_for(secs: int, dt: int) -> int:
@@ -161,6 +169,28 @@ class Scanner:
         """
         dt = cfg.theta.vol_sampling_dt_seconds if cfg.theta is not None else 60
         return Scanner._bars_for(Scanner._lookback_secs(cfg), dt)
+
+    @staticmethod
+    def _class_lookback_secs(cfg: StrategyConfig) -> dict[str, int]:
+        """Per-class lookback (seconds) for classes that have a dt override.
+
+        Mirrors the ``secs`` logic inside ``cadence_by_class`` but returns the
+        lookback directly (not packed into a tuple) so the scanner can pass it
+        to ``recent_returns(lookback_seconds=...)`` without recomputing it.
+        """
+        out: dict[str, int] = {}
+        base_secs = Scanner._lookback_secs(cfg)
+        for klass, override in (cfg.theta_overrides or {}).items():
+            set_fields = override.model_fields_set
+            if "vol_sampling_dt_seconds" not in set_fields:
+                continue
+            secs = base_secs
+            if "vol_lookback_seconds" in set_fields:
+                secs = max(secs, override.vol_lookback_seconds)
+            if "drift_lookback_seconds" in set_fields:
+                secs = max(secs, override.drift_lookback_seconds)
+            out[klass] = secs
+        return out
 
     @staticmethod
     def cadence_by_class(cfg: StrategyConfig) -> dict[str, tuple[int, int]]:
@@ -328,19 +358,27 @@ class Scanner:
             if cadence is None:
                 # Default path — byte-identical to pre-refactor (dt-less read,
                 # resolves to the symbol's first registered cadence).
+                # Pass now_ns + lookback_seconds so live MarketState uses the
+                # TIME-bounded window, matching the backtest's slice_window rule
+                # after a feed gap (SHR-66).
                 recent_returns = self.ms.recent_returns(
                     self.ref_symbol, n=self._recent_returns_n,
+                    now_ns=now_ns, lookback_seconds=self._default_lookback_secs,
                 )
                 recent_hl_bars = self.ms.recent_hl_bars(
                     self.ref_symbol, n=self._recent_returns_n,
+                    now_ns=now_ns, lookback_seconds=self._default_lookback_secs,
                 )
             else:
                 dt_s, ret_n = cadence
+                lookback_s = self._lookback_secs_by_class.get(q.klass, self._default_lookback_secs)
                 recent_returns = self.ms.recent_returns(
                     self.ref_symbol, n=ret_n, dt=dt_s,
+                    now_ns=now_ns, lookback_seconds=lookback_s,
                 )
                 recent_hl_bars = self.ms.recent_hl_bars(
                     self.ref_symbol, n=ret_n, dt=dt_s,
+                    now_ns=now_ns, lookback_seconds=lookback_s,
                 )
             decision = self.strategy.evaluate(
                 question=q,

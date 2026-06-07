@@ -146,13 +146,23 @@ class _RecordingMarketState(MarketState):
         self.recent_returns_calls: list[tuple[int, int | None]] = []
         self.recent_hl_bars_calls: list[tuple[int, int | None]] = []
 
-    def recent_returns(self, symbol: str, n: int, dt: int | None = None):
+    def recent_returns(
+        self, symbol: str, n: int, dt: int | None = None, *,
+        now_ns: int | None = None, lookback_seconds: int | None = None,
+    ):
         self.recent_returns_calls.append((n, dt))
-        return super().recent_returns(symbol, n, dt)
+        return super().recent_returns(
+            symbol, n, dt, now_ns=now_ns, lookback_seconds=lookback_seconds,
+        )
 
-    def recent_hl_bars(self, symbol: str, n: int, dt: int | None = None):
+    def recent_hl_bars(
+        self, symbol: str, n: int, dt: int | None = None, *,
+        now_ns: int | None = None, lookback_seconds: int | None = None,
+    ):
         self.recent_hl_bars_calls.append((n, dt))
-        return super().recent_hl_bars(symbol, n, dt)
+        return super().recent_hl_bars(
+            symbol, n, dt, now_ns=now_ns, lookback_seconds=lookback_seconds,
+        )
 
 
 class _ClassRecordingStrategy(LateResolutionStrategy):
