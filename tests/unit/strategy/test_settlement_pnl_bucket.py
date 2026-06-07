@@ -34,3 +34,16 @@ def test_binary_settled_symbol_still_works():
         settled=True, settled_symbol="yA", leg_symbols=("yA", "nA"),
     )
     assert math.isclose(settlement_pnl_usd(qv, "yA", qty=5.0, avg_entry=0.8), 5.0 * 0.2)
+
+
+def test_binary_via_settled_symbols_path():
+    # After the _mark_settled change, live binaries ALSO populate settled_symbols
+    # (single winner). Confirm the membership branch books a binary correctly.
+    qv = QuestionView(
+        question_idx=1, yes_symbol="yA", no_symbol="nA", strike=100.0,
+        expiry_ns=0, underlying="BTC", klass="priceBinary", period="1d",
+        settled=True, settled_symbol="yA", settled_symbols=("yA",),
+        leg_symbols=("yA", "nA"),
+    )
+    assert math.isclose(settlement_pnl_usd(qv, "yA", qty=5.0, avg_entry=0.8), 5.0 * 0.2)
+    assert math.isclose(settlement_pnl_usd(qv, "nA", qty=5.0, avg_entry=0.2), 5.0 * -0.2)
