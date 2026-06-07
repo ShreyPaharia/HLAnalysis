@@ -206,11 +206,18 @@ def gather_slot(
     account_pnl: float | None = None
     fills_count: int | None = None
     if fetch_venue_realized:
+        # Fetch fills ONCE and derive both realized PnL and the fill count from
+        # it — calling realized_pnl_since AND user_fills separately would paginate
+        # HL's (capped) fill history twice and risk a per-IP 429. outcome_only:
+        # strategy = HIP-4 outcome markets ("#N"), excluding non-strategy perp/spot.
         try:
-            # outcome_only: strategy PnL = HIP-4 outcome markets only, excluding
-            # non-strategy perp/spot trades on the same account.
-            venue_realized = exec_client.realized_pnl_since(0, outcome_only=True)
-        except Exception:  # noqa: BLE001 — venue PnL read is best-effort; report still useful
+            outcome = [
+                f for f in exec_client.user_fills(since_ts_ns=0)
+                if f.symbol.startswith("#")
+            ]
+            venue_realized = sum(f.closed_pnl - f.fee for f in outcome)
+            fills_count = len(outcome)
+        except Exception:  # noqa: BLE001 — venue read is best-effort; report still useful
             venue_realized = None
         # Equity-based account PnL (HL portfolio = the UI number). Optional: only
         # HL implements it; PM clients won't have the method.
@@ -220,14 +227,6 @@ def gather_slot(
                 account_pnl = pnl_fn()
             except Exception:  # noqa: BLE001
                 account_pnl = None
-        # Strategy fill count = outcome-market (#N) fills only.
-        try:
-            fills_count = sum(
-                1 for f in exec_client.user_fills(since_ts_ns=0)
-                if f.symbol.startswith("#")
-            )
-        except Exception:  # noqa: BLE001
-            fills_count = None
     else:
         # PM: the local ledger is the source of truth and is already outcome-only.
         try:
