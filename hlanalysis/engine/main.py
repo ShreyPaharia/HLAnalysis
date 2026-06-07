@@ -24,40 +24,40 @@ from .runtime import EngineRuntime
 _ENGINE_VENUES_FROM_SYMBOLS = ("hyperliquid", "polymarket")
 
 
-def binance_spot_reference_subscription() -> Subscription:
-    """The engine's dedicated Binance SPOT BTCUSDT `bbo` reference feed.
+def binance_spot_reference_subscription(symbol: str = "BTCUSDT") -> Subscription:
+    """A dedicated Binance SPOT `bbo` reference feed for `symbol`.
 
-    This is the price/σ/strike reference for the PM up/down slots: PM resolves
-    against the Binance spot BTC/USDT 1m candle close, so the live price and the
-    captured strike must both be spot (no perp/spot basis in the edge). Remapped
-    on ingest to internal symbol ``BTCUSDT_SPOT`` (see EngineRuntime._ingest_loop) so
-    it never collides with the perp ``BTCUSDT`` book key. spot bookTicker is not
+    Price/σ/strike reference for PM slots that resolve against the Binance spot
+    1m close. Remapped on ingest to ``<symbol>_SPOT`` (see _remap_reference_symbol)
+    so it never collides with any perp book key. spot bookTicker is not
     geo-blocked from the EC2/Tokyo IP.
     """
     return Subscription(
         venue="binance",
         product_type=ProductType.SPOT,
         mechanism=Mechanism.CLOB,
-        symbol="BTCUSDT",
+        symbol=symbol,
         channels=("bbo",),
     )
 
 
 def build_engine_subscriptions(sym_cfg: RecorderConfig) -> list[Subscription]:
     """Subscriptions feeding the engine's MarketState: the HL + PM entries from
-    symbols.yaml verbatim, plus the dedicated Binance SPOT bbo reference feed.
+    symbols.yaml verbatim, plus dedicated Binance SPOT bbo reference feeds for
+    BTC and ETH.
 
     Binance entries in symbols.yaml are skipped (recorder-only); the spot
-    reference feed is appended explicitly so it's obvious this is the engine's
-    lean, bbo-only reference — not the recorder's full binance ingest.
+    reference feeds are appended explicitly so it's obvious these are the engine's
+    lean, bbo-only references — not the recorder's full binance ingest.
 
-    PM slots use ``reference_symbol: BTCUSDT_SPOT`` (no perp/spot basis in
-    price, σ, or strike). The perp BTCUSDT feed was removed 2026-06-01."""
+    PM slots reference ``BTCUSDT_SPOT`` or ``ETHUSDT_SPOT`` (no perp/spot basis
+    in price, σ, or strike). The perp BTCUSDT feed was removed 2026-06-01."""
     subs = [
         s for s in sym_cfg.subscriptions
         if s.venue in _ENGINE_VENUES_FROM_SYMBOLS
     ]
-    subs.append(binance_spot_reference_subscription())
+    subs.append(binance_spot_reference_subscription("BTCUSDT"))
+    subs.append(binance_spot_reference_subscription("ETHUSDT"))
     return subs
 
 
