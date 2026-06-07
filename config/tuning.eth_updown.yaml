@@ -1,8 +1,8 @@
 # ETH up/down (binary) theta grid — seeded from the live v31_pm BTC region.
 # Schema: grids.<strategy_id> + run.* (loaded by hlanalysis.backtest.tuning.load_tuning_yaml).
-# Broad sweep runs on 1m klines → vol_sampling_dt_seconds fixed at 60 (the tuner
-# couples reference_resample to dt per cell; dt<data granularity makes empty
-# buckets). The dt=5 live-parity check is a separate winner re-run on 1s klines.
+# Tuned single-stage on Binance 1s klines resampled to dt=5 (live-parity with the
+# dt=5/bbo live slots) over the last 6 months (~180 daily markets, 2025-12→2026-06).
+# 1m klines are still fetched for strike/settlement (PM settles on the 1m close).
 grids:
   theta_harvester:
     favorite_threshold: [0.80, 0.85, 0.90]
@@ -11,7 +11,7 @@ grids:
     exit_safety_d: [0.0, 0.5, 1.0]
     exit_edge_threshold: [0.0]
     vol_estimator: [bipower]
-    vol_sampling_dt_seconds: [60]
+    vol_sampling_dt_seconds: [5]
     tte_min_seconds: [0]
     tte_max_seconds: [86400]
     fee_model: [pm_binary]

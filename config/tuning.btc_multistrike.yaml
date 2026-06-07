@@ -1,10 +1,10 @@
 # BTC multi-strike (bucket, weekly) theta grid — seeded from prior HL bucket
 # region (buckets historically want lower favorite_threshold / shorter tte /
 # tighter edge_buffer than binaries). Schema: grids.<strategy_id> + run.*.
-# Daily multi-strike buckets (slug says "weekly" but events are daily, 11 legs/event,
-# ~231 BTC / 200+ ETH events). Broad sweep on 1m klines (dt=60); dt=5 live-parity is a
-# separate winner re-run on 1s klines. ~231 daily bucket events → ~25 splits at
-# 30/8/8 (the thin-history risk in the spec is refuted by the actual corpus).
+# Daily multi-strike buckets (slug says "weekly" but events are daily, 11 legs/event).
+# Tuned single-stage on Binance 1s klines resampled to dt=5 (live-parity) over the
+# last 6 months. 1m klines still fetched for strike/settlement (PM 1m-close settle).
+# Last-6mo daily buckets → ~19 splits at 30/8/8 (thin-history risk refuted by corpus).
 grids:
   theta_harvester:
     favorite_threshold: [0.75, 0.80, 0.85]
@@ -13,7 +13,7 @@ grids:
     exit_safety_d: [0.0, 0.5]
     exit_edge_threshold: [0.0]
     vol_estimator: [bipower]
-    vol_sampling_dt_seconds: [60]
+    vol_sampling_dt_seconds: [5]
     tte_min_seconds: [0]
     tte_max_seconds: [86400]
     fee_model: [pm_binary]
