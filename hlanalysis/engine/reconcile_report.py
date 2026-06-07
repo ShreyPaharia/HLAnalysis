@@ -3,7 +3,7 @@
 Run on the box via SSM (env-sourced for credentials), same pattern as
 engine-diag. Per slot: compare engine-DB realized PnL + open positions against
 the venue's clearinghouse_state(), report realized + open-MTM = total true PnL,
-flag position drift, and alert on Telegram when drift exceeds tolerance.
+flag position drift, and alert on Telegram when any drift is detected.
 
 Split into a PURE core (SlotRecon / compare_slot / format_report — no IO, fully
 unit-tested) and a thin IO shell (gather_slot / build_report / main).
@@ -16,9 +16,15 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
+
+from loguru import logger
 
 from .exec_types import ClearinghouseState
+
+if TYPE_CHECKING:
+    from .exec_client import ExecutionClient
+    from .state import StateDAL
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +118,7 @@ def format_report(recon: list[SlotRecon]) -> str:
     return "\n".join(lines).rstrip()
 
 
-def gather_slot(*, alias, dal, exec_client, qty_tolerance: float) -> SlotRecon:
+def gather_slot(*, alias: str, dal: StateDAL, exec_client: ExecutionClient, qty_tolerance: float) -> SlotRecon:
     """IO: pull realized PnL (incl settlement) + DB positions + venue state for
     one slot and run the pure compare. clearinghouse_state() is a blocking SDK
     call; the caller offloads it via asyncio.to_thread when needed."""
@@ -146,7 +152,6 @@ def build_report(deploy_cfg, strategies_cfg, *, qty_tolerance: float) -> list[Sl
             out.append(SlotRecon(alias=alias, realized_pnl=0.0, open_mtm=0.0,
                                  account_value_usd=0.0, positions_known=False,
                                  drift=[]))
-            from loguru import logger
             logger.warning("recon slot {} failed: {}", alias, e)
     return out
 

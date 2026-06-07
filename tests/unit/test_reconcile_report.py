@@ -84,7 +84,7 @@ def test_format_report_clean():
     assert "v1" in text
     assert "120" in text          # realized
     assert "125" in text          # total true pnl
-    assert "OK" in text or "✅" in text
+    assert "OK" in text
 
 
 def test_format_report_flags_drift():
@@ -148,11 +148,16 @@ def test_alert_sends_only_on_drift(monkeypatch):
 
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "c")
-    monkeypatch.setattr(rr, "aiohttp", type("M", (), {"ClientSession": lambda: FakeSession()}), raising=False)
-    monkeypatch.setattr("hlanalysis.alerts.telegram.TelegramClient", FakeTG)
 
-    asyncio.run(rr._maybe_alert("report", has_drift=False))
+    # Use injection seam directly — avoids fragile module-attribute patching.
+    asyncio.run(rr._maybe_alert(
+        "report", has_drift=False,
+        tg_factory=FakeTG, session_factory=lambda: FakeSession(),
+    ))
     assert sent == []                       # no drift → no alert
 
-    asyncio.run(rr._maybe_alert("report", has_drift=True))
+    asyncio.run(rr._maybe_alert(
+        "report", has_drift=True,
+        tg_factory=FakeTG, session_factory=lambda: FakeSession(),
+    ))
     assert len(sent) == 1 and "DRIFT" in sent[0]
