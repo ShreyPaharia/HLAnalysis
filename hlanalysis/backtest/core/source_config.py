@@ -27,26 +27,33 @@ PM_FLAVORS: dict[str, dict[str, str]] = {
         "reference_symbol": "BTC",
         "series_slug": "btc-up-or-down-daily",
         "klines_subdir": "btc_klines",
+        "klines_1s_subdir": "btc_klines_1s",
     },
     "wti_updown": {
         "reference_symbol": "WTI",
         "series_slug": "oil-daily-up-or-down",
         "klines_subdir": "wti_klines",
+        # WTI uses Pyth klines — no Binance 1s reference; omit klines_1s_subdir
+        # so the ctor default applies (btc_klines_1s, which is also unreachable
+        # for WTI since reference_source="klines_1s" is not meaningful here).
     },
     "eth_updown": {
         "reference_symbol": "ETH",
         "series_slug": "eth-up-or-down-daily",
         "klines_subdir": "eth_klines",
+        "klines_1s_subdir": "eth_klines_1s",
     },
     "btc_multistrike": {
         "reference_symbol": "BTC",
         "bucket_series_slug": "btc-multi-strikes-weekly",
         "klines_subdir": "btc_klines",
+        "klines_1s_subdir": "btc_klines_1s",
     },
     "eth_multistrike": {
         "reference_symbol": "ETH",
         "bucket_series_slug": "ethereum-multi-strikes-weekly",
         "klines_subdir": "eth_klines",
+        "klines_1s_subdir": "eth_klines_1s",
     },
 }
 

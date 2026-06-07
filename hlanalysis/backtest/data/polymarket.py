@@ -625,6 +625,7 @@ class PolymarketDataSource:
             f"|book={self._book_source}"
             f"|bbo={self._binance_bbo_product_type}"
             f"|lp={lp_sig}"
+            f"|k1m={self._klines_subdir}|k1s={self._klines_1s_subdir}"
         )
 
     def _fastpath_source_files(self, q: QuestionDescriptor) -> list[Path]:
