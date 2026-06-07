@@ -421,28 +421,9 @@ class EngineRuntime:
 
         if self.exec_client_factory is not None:
             exec_client = self.exec_client_factory(alias, acct, s_cfg.paper_mode)
-        elif isinstance(acct, HyperliquidAccount):
-            exec_client = HLClient(
-                account_address=acct.account_address,
-                api_secret_key=acct.api_secret_key,
-                base_url=acct.base_url,
-                paper_mode=s_cfg.paper_mode,
-            )
-        elif isinstance(acct, PolymarketAccount):
-            from .pm_client import PMClient
-            exec_client = PMClient(
-                paper_mode=s_cfg.paper_mode,
-                clob_host=acct.clob_host,
-                chain_id=acct.chain_id,
-                private_key=acct.private_key,
-                clob_api_key=acct.clob_api_key,
-                clob_api_secret=acct.clob_api_secret,
-                clob_api_passphrase=acct.clob_api_passphrase,
-                funder_address=acct.funder_address,
-                signature_type=acct.signature_type,
-            )
         else:
-            raise ValueError(f"unsupported account type: {type(acct).__name__}")
+            from .config_builders import build_exec_client
+            exec_client = build_exec_client(alias, acct, s_cfg.paper_mode)
 
         risk = RiskGate(s_cfg)
         # PM market sells floor the share amount to 2dp, stranding sub-0.01 dust

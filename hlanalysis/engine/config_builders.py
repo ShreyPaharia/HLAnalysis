@@ -14,7 +14,14 @@ from dataclasses import (
     replace as dataclass_replace,
 )
 
-from .config import StrategyConfig
+from .config import (
+    AccountConfig,
+    HyperliquidAccount,
+    PolymarketAccount,
+    StrategyConfig,
+)
+from .exec_client import ExecutionClient
+from .hl_client import HLClient
 from ..strategy.base import Strategy
 from ..strategy.late_resolution import (
     LateResolutionConfig, LateResolutionStrategy,
@@ -213,6 +220,39 @@ def reference_vol_lookback_seconds(cfg: StrategyConfig) -> int:
         if "drift_lookback_seconds" in set_fields:
             secs = max(secs, override.drift_lookback_seconds)
     return secs
+
+
+def build_exec_client(alias: str, acct: AccountConfig, paper_mode: bool) -> ExecutionClient:
+    """Construct the venue ExecutionClient for a slot.
+
+    Lifted verbatim from EngineRuntime._build_slot so that a reconciliation
+    report (and any other caller that needs read-only venue access) can reuse
+    client construction without pulling in EngineRuntime. Behaviour is
+    bit-identical to the inline construction it replaces.
+    """
+    if isinstance(acct, HyperliquidAccount):
+        return HLClient(
+            account_address=acct.account_address,
+            api_secret_key=acct.api_secret_key,
+            base_url=acct.base_url,
+            paper_mode=paper_mode,
+        )
+    if isinstance(acct, PolymarketAccount):
+        from .pm_client import PMClient
+        return PMClient(
+            paper_mode=paper_mode,
+            clob_host=acct.clob_host,
+            chain_id=acct.chain_id,
+            private_key=acct.private_key,
+            clob_api_key=acct.clob_api_key,
+            clob_api_secret=acct.clob_api_secret,
+            clob_api_passphrase=acct.clob_api_passphrase,
+            funder_address=acct.funder_address,
+            signature_type=acct.signature_type,
+        )
+    raise TypeError(
+        f"unknown account type for alias {alias!r}: {type(acct).__name__}"
+    )
 
 
 def _build_strategy_for_slot(cfg: StrategyConfig) -> Strategy:
