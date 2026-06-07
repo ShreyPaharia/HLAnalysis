@@ -99,14 +99,13 @@ subscriptions:
       class: priceBinary
       series_slug: hype-up-or-down-daily
 
-  # ── Crypto daily multi-strike "above ___" (digital, settle-at-close) ──
+  # ── Crypto weekly multi-strike "above ___" (digital, settle-at-close) ──
   # Same noon-ET Binance 1m-close resolution as up/down dailies, but a
-  # strike LADDER (~11-16 legs/event, daily settlement). Maps onto the v31
-  # bucket strategy. Each leg is a yes/no binary -> class: priceBinary
-  # (mirrors the gold/oil hit precedent below). Recording only; engine
-  # allowlists still guard trading. NOTE: high leg-count + heavy book
-  # traffic on a t4g.micro — BTC/ETH enabled; watch recorder RSS before
-  # enabling SOL/XRP below.
+  # strike LADDER (~11-16 legs/event, weekly settlement). The adapter now
+  # groups each multi-strike event into one priceBucket question so the v31
+  # theta_harvester bucket path runs verbatim (adapter: live enablement
+  # 2026-06-08). NOTE: high leg-count + heavy book traffic on a t4g.micro —
+  # BTC/ETH enabled; watch recorder RSS before enabling SOL/XRP below.
   - venue: polymarket
     product_type: prediction_binary
     mechanism: clob
@@ -114,7 +113,7 @@ subscriptions:
     channels: [trades, book]
     match:
       underlying: BTC
-      class: priceBinary
+      class: priceBucket
       series_slug: btc-multi-strikes-weekly
   - venue: polymarket
     product_type: prediction_binary
@@ -123,7 +122,7 @@ subscriptions:
     channels: [trades, book]
     match:
       underlying: ETH
-      class: priceBinary
+      class: priceBucket
       series_slug: ethereum-multi-strikes-weekly
   # SOL/XRP multi-strikes — 10-30x smaller volume; enabled per operator
   # request. Watch recorder RSS on the t4g.micro (OOM risk with the added
