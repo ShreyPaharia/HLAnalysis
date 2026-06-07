@@ -161,3 +161,38 @@ def test_alert_sends_only_on_drift(monkeypatch):
         tg_factory=FakeTG, session_factory=lambda: FakeSession(),
     ))
     assert len(sent) == 1 and "DRIFT" in sent[0]
+
+
+def test_compare_slot_flags_pnl_mismatch_and_prefers_venue():
+    # Local ledger says -421 (corrupted by bad settlement rows); venue says +198.
+    r = compare_slot(
+        alias="v1",
+        db_positions=[],
+        db_realized_pnl=-421.49,
+        venue=ClearinghouseState(positions=(), account_value_usd=0.0),
+        qty_tolerance=1e-6,
+        venue_realized_pnl=198.41,
+        pnl_tolerance=1.0,
+    )
+    assert r.pnl_mismatch is True          # local vs venue diverge > $1
+    assert r.has_drift is True             # pnl mismatch counts as drift
+    assert r.venue_realized_pnl == 198.41
+    # total_true_pnl prefers the authoritative venue figure, not the local one
+    assert r.total_true_pnl == 198.41      # + open_mtm 0
+    text = format_report([r])
+    assert "pnl_mismatch" in text and "DRIFT" in text
+
+
+def test_compare_slot_no_pnl_mismatch_within_tolerance():
+    r = compare_slot(
+        alias="v31",
+        db_positions=[],
+        db_realized_pnl=100.0,
+        venue=ClearinghouseState(positions=(), account_value_usd=50.0),
+        qty_tolerance=1e-6,
+        venue_realized_pnl=100.4,          # within $1 tolerance
+        pnl_tolerance=1.0,
+    )
+    assert r.pnl_mismatch is False
+    assert r.has_drift is False
+    assert r.total_true_pnl == 100.4       # still prefers venue

@@ -38,19 +38,25 @@ class Drift:
 @dataclass(frozen=True, slots=True)
 class SlotRecon:
     alias: str
-    realized_pnl: float
+    realized_pnl: float                       # local DB realized (diagnostic)
     open_mtm: float
     account_value_usd: float
     positions_known: bool
+    venue_realized_pnl: float | None = None   # authoritative venue realized
+    pnl_mismatch: bool = False                # local vs venue diverge > tolerance
     drift: list[Drift] = field(default_factory=list)
 
     @property
     def total_true_pnl(self) -> float:
-        return self.realized_pnl + self.open_mtm
+        """Authoritative PnL: prefer the venue realized (the daily-loss gate's
+        source of truth) over the corruptible local ledger; fall back to local
+        only when the venue figure is unavailable."""
+        base = self.venue_realized_pnl if self.venue_realized_pnl is not None else self.realized_pnl
+        return base + self.open_mtm
 
     @property
     def has_drift(self) -> bool:
-        return len(self.drift) > 0
+        return len(self.drift) > 0 or self.pnl_mismatch
 
 
 def compare_slot(
@@ -60,12 +66,17 @@ def compare_slot(
     db_realized_pnl: float,
     venue: ClearinghouseState,
     qty_tolerance: float,
+    venue_realized_pnl: float | None = None,
+    pnl_tolerance: float = 1.0,
 ) -> SlotRecon:
     """Pure three-way-ish compare: DB positions vs venue positions, plus PnL.
 
     Open MTM = Σ venue unrealized_pnl. Position drift is skipped entirely when
     venue.positions_known is False (PM data-api flap) so an empty venue set is
-    never mistaken for 'everything vanished'.
+    never mistaken for 'everything vanished'. When the authoritative venue
+    realized PnL is supplied, a divergence from the local DB realized beyond
+    ``pnl_tolerance`` is flagged as drift — this is the core Phase-0 check that
+    the local ledger reconciles to venue truth.
     """
     open_mtm = sum(vp.unrealized_pnl for vp in venue.positions)
     drift: list[Drift] = []
@@ -84,12 +95,19 @@ def compare_slot(
             if sym not in db_by_sym:
                 drift.append(Drift("orphan", sym, 0.0, v_qty))
 
+    pnl_mismatch = (
+        venue_realized_pnl is not None
+        and abs(db_realized_pnl - venue_realized_pnl) > pnl_tolerance
+    )
+
     return SlotRecon(
         alias=alias,
         realized_pnl=db_realized_pnl,
         open_mtm=open_mtm,
         account_value_usd=venue.account_value_usd,
         positions_known=venue.positions_known,
+        venue_realized_pnl=venue_realized_pnl,
+        pnl_mismatch=pnl_mismatch,
         drift=drift,
     )
 
@@ -104,12 +122,21 @@ def format_report(recon: list[SlotRecon]) -> str:
     for r in recon:
         status = "DRIFT" if r.has_drift else "OK"
         lines.append(f"[{r.alias}] {status}")
+        venue_str = (
+            f"{r.venue_realized_pnl:+.2f}" if r.venue_realized_pnl is not None else "n/a"
+        )
         lines.append(
-            f"  realized={r.realized_pnl:+.2f}  open_mtm={r.open_mtm:+.2f}  "
-            f"true_pnl={r.total_true_pnl:+.2f}  acct_value={r.account_value_usd:.2f}"
+            f"  venue_realized={venue_str}  local_realized={r.realized_pnl:+.2f}  "
+            f"open_mtm={r.open_mtm:+.2f}  true_pnl={r.total_true_pnl:+.2f}  "
+            f"acct_value={r.account_value_usd:.2f}"
         )
         if not r.positions_known:
             lines.append("  (positions unknown — recon skipped this cycle)")
+        if r.pnl_mismatch:
+            lines.append(
+                f"  ! pnl_mismatch: local={r.realized_pnl:+.2f} vs venue={venue_str} "
+                f"(local ledger diverges from venue truth)"
+            )
         for d in r.drift:
             lines.append(
                 f"  ! {d.kind} {d.symbol}: db_qty={d.db_qty} venue_qty={d.venue_qty}"
@@ -118,20 +145,30 @@ def format_report(recon: list[SlotRecon]) -> str:
     return "\n".join(lines).rstrip()
 
 
-def gather_slot(*, alias: str, dal: StateDAL, exec_client: ExecutionClient, qty_tolerance: float) -> SlotRecon:
-    """IO: pull realized PnL (incl settlement) + DB positions + venue state for
-    one slot and run the pure compare. clearinghouse_state() is a blocking SDK
-    call; the caller offloads it via asyncio.to_thread when needed."""
+def gather_slot(
+    *, alias: str, dal: StateDAL, exec_client: ExecutionClient,
+    qty_tolerance: float, pnl_tolerance: float = 1.0,
+) -> SlotRecon:
+    """IO: pull local + venue realized PnL + DB positions + venue state for one
+    slot and run the pure compare. clearinghouse_state()/realized_pnl_since() are
+    blocking read-only SDK calls; the caller offloads via asyncio.to_thread when
+    needed. Venue realized is the authoritative figure (the daily-loss gate's
+    source); a venue read failure falls back to local-only (venue_realized=None)."""
     db_realized = dal.realized_pnl_since(0)
     db_positions = [(p.symbol, p.qty) for p in dal.all_positions()]
     venue = exec_client.clearinghouse_state()
+    try:
+        venue_realized: float | None = exec_client.realized_pnl_since(0)
+    except Exception:  # noqa: BLE001 — venue PnL read is best-effort; report still useful
+        venue_realized = None
     return compare_slot(
         alias=alias, db_positions=db_positions, db_realized_pnl=db_realized,
         venue=venue, qty_tolerance=qty_tolerance,
+        venue_realized_pnl=venue_realized, pnl_tolerance=pnl_tolerance,
     )
 
 
-def build_report(deploy_cfg, strategies_cfg, *, qty_tolerance: float) -> list[SlotRecon]:
+def build_report(deploy_cfg, strategies_cfg, *, qty_tolerance: float, pnl_tolerance: float = 1.0) -> list[SlotRecon]:
     """IO: build a read-only client + open the DAL per slot, gather each.
 
     A slot whose client/DAL errors yields a positions_known=False SlotRecon so
@@ -152,7 +189,7 @@ def build_report(deploy_cfg, strategies_cfg, *, qty_tolerance: float) -> list[Sl
             client = build_exec_client(alias, acct, paper_mode=False)
             dal = StateDAL(Path(deploy_cfg.state_db_path_for(alias)))
             out.append(gather_slot(alias=alias, dal=dal, exec_client=client,
-                                   qty_tolerance=qty_tolerance))
+                                   qty_tolerance=qty_tolerance, pnl_tolerance=pnl_tolerance))
         except Exception as e:  # noqa: BLE001 — a bad slot must not abort the report
             out.append(SlotRecon(alias=alias, realized_pnl=0.0, open_mtm=0.0,
                                  account_value_usd=0.0, positions_known=False,
@@ -194,6 +231,8 @@ def main() -> None:
     p.add_argument("--strategy-config", type=Path, default=Path("config/strategy.yaml"))
     p.add_argument("--deploy-config", type=Path, default=Path("config/deploy.yaml"))
     p.add_argument("--qty-tolerance", type=float, default=1e-6)
+    p.add_argument("--pnl-tolerance", type=float, default=1.0,
+                   help="USD divergence between local and venue realized that counts as drift")
     p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     args = p.parse_args()
 
@@ -201,7 +240,8 @@ def main() -> None:
     deploy_cfg = load_deploy_config(args.deploy_config)
     strategies_cfg = load_strategies_config(args.strategy_config)
 
-    recon = build_report(deploy_cfg, strategies_cfg, qty_tolerance=args.qty_tolerance)
+    recon = build_report(deploy_cfg, strategies_cfg, qty_tolerance=args.qty_tolerance,
+                         pnl_tolerance=args.pnl_tolerance)
     has_drift = any(r.has_drift for r in recon)
     text = format_report(recon)
 
@@ -211,6 +251,8 @@ def main() -> None:
             "has_drift": has_drift,
             "slots": [
                 {"alias": r.alias, "realized_pnl": r.realized_pnl,
+                 "venue_realized_pnl": r.venue_realized_pnl,
+                 "pnl_mismatch": r.pnl_mismatch,
                  "open_mtm": r.open_mtm, "total_true_pnl": r.total_true_pnl,
                  "account_value_usd": r.account_value_usd,
                  "positions_known": r.positions_known,
