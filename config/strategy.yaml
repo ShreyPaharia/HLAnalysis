@@ -684,12 +684,14 @@ strategies:
       exit_safety_d: 1.0
       fee_model: pm_binary
       fee_rate: 0.07
-    theta_overrides:
-      priceBucket:
-        favorite_threshold: 0.75
-        edge_buffer: 0.02
-        vol_lookback_seconds: 1800
-        exit_safety_d: 0.5
+    # No theta_overrides: this slot allowlists ONLY priceBucket, so the base
+    # theta block above IS the effective bucket config (fav0.75/eb0.02/vlb1800).
+    # PR #12's tuned cell wanted exit_safety_d=0.5, but that LOOSENS the mid-hold
+    # safety exit below the binary baseline (1.0) and is forbidden by the
+    # 2026-06-06 risk-gate guardrail (test_bucket_override_risk_gates_not_below_binary)
+    # — the tune was on synthetic-liquidity / possibly-tailless data, the exact
+    # case the guardrail guards against. Held at 1.0 (more protective) for the
+    # paper burn-in; revisit esd=0.5 only with adverse-settlement evidence.
 
   # --- v3.1 theta Polymarket multi-strike buckets (ETH) ---
   # Same tuned cell (+$832 / worst −$31 / maxDD $61 / 74% hit). reference_symbol
@@ -770,9 +772,6 @@ strategies:
       exit_safety_d: 1.0
       fee_model: pm_binary
       fee_rate: 0.07
-    theta_overrides:
-      priceBucket:
-        favorite_threshold: 0.75
-        edge_buffer: 0.02
-        vol_lookback_seconds: 1800
-        exit_safety_d: 0.5
+    # No theta_overrides — bucket-only slot, base theta is the effective config.
+    # exit_safety_d held at 1.0 (not PR #12's 0.5) per the risk-gate guardrail;
+    # see the v31_pm_btc_ms slot above for the rationale.
