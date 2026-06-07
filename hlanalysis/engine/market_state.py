@@ -312,9 +312,14 @@ class MarketState:
         #     where side_idx=0 is YES, 1 is NO (see adapters/hyperliquid.py).
         #     priceBinary: 1 outcome × 2 sides → 2 legs; priceBucket: N×2 legs.
         if ev.venue == "polymarket":
-            yes_t = kv.get("yes_token_id", "")
-            no_t = kv.get("no_token_id", "")
-            leg_symbols = tuple(t for t in (yes_t, no_t) if t)
+            if kv.get("class") == "priceBucket":
+                leg_symbols = tuple(
+                    t for t in kv.get("leg_token_ids", "").split(",") if t
+                )
+            else:
+                yes_t = kv.get("yes_token_id", "")
+                no_t = kv.get("no_token_id", "")
+                leg_symbols = tuple(t for t in (yes_t, no_t) if t)
         else:
             outcomes = sorted(ev.named_outcome_idxs)
             leg_symbols = tuple(
@@ -428,8 +433,11 @@ class MarketState:
             # below (which identifies the exact winning leg, including
             # outcome index for buckets where side alone is ambiguous).
             side: str = "yes" if leg_idx % 2 == 0 else "no"
+            prev = q.settled_symbols
+            winners = prev if ev.symbol in prev else prev + (ev.symbol,)
             self._questions[idx] = dataclasses.replace(
-                q, settled=True, settled_side=side, settled_symbol=ev.symbol,
+                q, settled=True, settled_side=side,
+                settled_symbol=ev.symbol, settled_symbols=winners,
             )
 
     @staticmethod
