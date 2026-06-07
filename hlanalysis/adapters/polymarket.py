@@ -41,6 +41,7 @@ from ..events import Mechanism, NormalizedEvent, ProductType
 from ._ws_base import BaseWsAdapter
 from .polymarket_gamma import GammaClient
 from .polymarket_normalize import (
+    PmBook,
     parse_book_message,
     parse_gamma_market_to_question_meta,
     parse_gamma_market_to_settlement,
@@ -68,6 +69,11 @@ class PolymarketAdapter(BaseWsAdapter):
             lambda url: websockets.connect(url, ping_interval=30)
         )
         self._gamma = gamma_client or GammaClient()
+        # SHR-62: per-asset stateful L2 book so price_change deltas emit MERGED
+        # full snapshots rather than partial ones.  MarketState.apply treats
+        # BookSnapshotEvent as a full replace, so a partial emit would corrupt
+        # the book to 1-2 phantom levels between full frames.
+        self._pm_books: dict[str, PmBook] = {}
 
     def supports(self, product_type: ProductType, mechanism: Mechanism) -> bool:
         return (
@@ -133,6 +139,10 @@ class PolymarketAdapter(BaseWsAdapter):
                 await asyncio.sleep(_GAMMA_POLL_S)
 
         async def _subscribe(ws) -> None:
+            # SHR-62: reset per-asset books on each (re)connect so a stale
+            # local book cannot survive a feed gap.  The first "book" message
+            # after resubscription will re-seed each asset's book from scratch.
+            self._pm_books.clear()
             await ws.send(json.dumps({
                 "type": "market",
                 "assets_ids": sorted(active_tokens),
@@ -187,9 +197,31 @@ class PolymarketAdapter(BaseWsAdapter):
             t = p.get("event_type")
             try:
                 if t == "book":
-                    out.append(parse_book_message(p, local_recv_ts=recv_ns))
+                    # SHR-62: apply_book resets the per-asset book and emits a
+                    # full merged snapshot (identical to the old stateless path
+                    # for a full "book" frame, but now the book is seeded for
+                    # subsequent price_change deltas).
+                    asset_id = str(p.get("asset_id", ""))
+                    if asset_id not in self._pm_books:
+                        self._pm_books[asset_id] = PmBook()
+                    out.append(self._pm_books[asset_id].apply_book(
+                        p, local_recv_ts=recv_ns
+                    ))
                 elif t == "price_change":
-                    ev = parse_price_change_message(p, local_recv_ts=recv_ns)
+                    # SHR-62: merge delta into the full book; emit the merged
+                    # snapshot so MarketState receives a complete replace rather
+                    # than a 1-2 level phantom.  Falls back to the stateless
+                    # path if no prior "book" frame was seen for this asset.
+                    asset_id = str(p.get("asset_id", ""))
+                    if asset_id in self._pm_books:
+                        ev = self._pm_books[asset_id].apply_price_change(
+                            p, local_recv_ts=recv_ns
+                        )
+                    else:
+                        # No prior full snapshot for this asset — fall back to
+                        # the stateless partial emit so we don't drop the delta
+                        # entirely. The next "book" frame will reseed the book.
+                        ev = parse_price_change_message(p, local_recv_ts=recv_ns)
                     if ev is not None:
                         out.append(ev)
                 elif t == "last_trade_price":

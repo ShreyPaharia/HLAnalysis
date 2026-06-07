@@ -90,6 +90,10 @@ def parse_price_change_message(
     only). We snapshot what's present; missing sides yield empty lists.
     Returns None when no changes are present to avoid clobbering a previous
     full snapshot.
+
+    NOTE: this function is a stateless helper retained for direct callers and
+    tests. The live adapter uses :class:`PmBook` to emit MERGED full snapshots
+    instead (SHR-62) — do not call this from the adapter's _handle method.
     """
     changes = payload.get("changes") or []
     bids = [c for c in changes if str(c.get("side", "")).upper() == "BUY"]
@@ -110,6 +114,86 @@ def parse_price_change_message(
         ask_px=ask_px,
         ask_sz=ask_sz,
     )
+
+
+class PmBook:
+    """Per-asset L2 book the PM adapter maintains so price_change deltas merge
+    into a FULL book before emission (SHR-62). MarketState.apply treats
+    BookSnapshotEvent as a full replace, so emitting only-changed levels as a
+    snapshot corrupts the book to 1-2 phantom levels between full frames.
+
+    Usage::
+
+        book = PmBook()
+        # On "book" message (full snapshot):
+        ev = book.apply_book(payload, local_recv_ts=recv_ns)
+        # On "price_change" message (delta):
+        ev = book.apply_price_change(payload, local_recv_ts=recv_ns)
+        if ev is not None:
+            ...  # emit the merged full snapshot
+    """
+
+    def __init__(self) -> None:
+        self._bids: dict[float, float] = {}  # price → size
+        self._asks: dict[float, float] = {}
+
+    def apply_book(
+        self, payload: dict[str, Any], *, local_recv_ts: int = 0
+    ) -> BookSnapshotEvent:
+        """Full replace: reset internal state from a complete book snapshot."""
+        self._bids = {
+            float(lvl["price"]): float(lvl["size"])
+            for lvl in (payload.get("bids") or [])
+        }
+        self._asks = {
+            float(lvl["price"]): float(lvl["size"])
+            for lvl in (payload.get("asks") or [])
+        }
+        return self._emit(payload, local_recv_ts)
+
+    def apply_price_change(
+        self, payload: dict[str, Any], *, local_recv_ts: int = 0
+    ) -> BookSnapshotEvent | None:
+        """Apply a delta and return the merged full-book snapshot.
+
+        Returns None when ``changes`` is empty so the caller can skip the emit
+        (same contract as the stateless ``parse_price_change_message``).
+        """
+        changes = payload.get("changes") or []
+        if not changes:
+            return None
+        for c in changes:
+            side = str(c.get("side", "")).upper()
+            px = float(c["price"])
+            sz = float(c["size"])
+            book = self._bids if side == "BUY" else self._asks
+            if sz <= 0:
+                book.pop(px, None)
+            else:
+                book[px] = sz
+        return self._emit(payload, local_recv_ts)
+
+    def reset(self) -> None:
+        """Clear all book state.  Call on reconnect/resubscribe so a stale
+        local book cannot survive a feed gap."""
+        self._bids.clear()
+        self._asks.clear()
+
+    def _emit(self, payload: dict[str, Any], local_recv_ts: int) -> BookSnapshotEvent:
+        bid_px = sorted(self._bids, reverse=True)  # best (highest) first
+        ask_px = sorted(self._asks)                # best (lowest) first
+        return BookSnapshotEvent(
+            venue=_VENUE,
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol=str(payload["asset_id"]),
+            exchange_ts=_ts_ms_to_ns(payload.get("timestamp", 0)),
+            local_recv_ts=local_recv_ts,
+            bid_px=bid_px,
+            bid_sz=[self._bids[p] for p in bid_px],
+            ask_px=ask_px,
+            ask_sz=[self._asks[p] for p in ask_px],
+        )
 
 
 _BTC_UPDOWN_STRIKE_RULE = re.compile(
