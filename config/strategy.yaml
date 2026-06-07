@@ -602,3 +602,177 @@ strategies:
       # Depth-walk slippage cap — same as v31_pm. PM books are thin at top
       # so we cap blended-fill slippage to ~0.5¢ at a 0.95-favorite leg.
       max_slippage_pct: 0.005
+
+  # --- v3.1 theta Polymarket multi-strike buckets (BTC) ---
+  # Live enablement of the PR #12 backtest. Each "above-X" leg is grouped by the
+  # adapter into one priceBucket question; the tuned bucket cell runs verbatim.
+  # Tuned (6mo recorded, synthetic-calibrated liquidity): fav0.75/eb0.02/
+  # vlb1800/esd0.5 → +$870 / worst split −$24 / maxDD $49 / 72% hit.
+  # paper_mode until the multi-day live burn-in is clean (design 2026-06-07).
+  - name: theta_harvester
+    account_alias: v31_pm_btc_ms
+    strategy_type: theta_harvester
+    paper_mode: true
+    reference_symbol: BTCUSDT_SPOT
+    reference_sigma_source: bbo
+    allowlist:
+      - match:
+          class: priceBucket
+          underlying: BTC
+          venue: polymarket
+          series_slug: btc-multi-strikes-weekly
+        max_position_usd: 50
+        stop_loss_pct: null
+        tte_min_seconds: 0
+        tte_max_seconds: 604800       # weekly multi-strike window
+        price_extreme_threshold: 0.0
+        price_extreme_max: 1.0
+        distance_from_strike_usd_min: 0
+        vol_max: 100
+        entry_cooldown_seconds: 60
+        fee_model: pm_binary
+        fee_rate: 0.07
+    blocklist_question_idxs: []
+    defaults:
+      match: {}
+      max_position_usd: 50
+      stop_loss_pct: null
+      tte_min_seconds: 0
+      tte_max_seconds: 604800
+      price_extreme_threshold: 0.0
+      price_extreme_max: 1.0
+      distance_from_strike_usd_min: 0
+      vol_max: 100
+      entry_cooldown_seconds: 60
+      fee_model: pm_binary
+      fee_rate: 0.07
+    global:
+      max_total_inventory_usd: 100
+      max_concurrent_positions: 5
+      daily_loss_cap_usd: 100
+      max_strike_distance_pct: 50
+      min_recent_volume_usd: 100
+      stale_data_halt_seconds: 180
+      reconcile_interval_seconds: 15
+      scan_min_interval_seconds: 0.2
+      scan_max_interval_seconds: 2.0
+      daily_window_start_hour_utc: 6
+      max_slippage_pct: 0.005
+      min_order_notional_usd: 11.0
+    theta:
+      vol_lookback_seconds: 1800
+      vol_sampling_dt_seconds: 5
+      vol_clip_min: 0.0
+      vol_clip_max: 5.0
+      vol_estimator: bipower
+      edge_buffer: 0.02
+      fee_taker: 0.0
+      half_spread_assumption: 0.005
+      drift_lookback_seconds: 3600
+      drift_blend: 0.0
+      favorite_threshold: 0.75
+      edge_max: null
+      exit_edge_threshold: 0.0
+      time_stop_seconds: 0
+      exit_take_profit_mode: true
+      exit_fee: 0.0007
+      min_distance_pct: null
+      min_bid_notional_usd: 10.0
+      topup_enabled: true
+      topup_threshold_pct: 0.2
+      topup_min_notional_usd: 11.0
+      exit_safety_d: 1.0
+      fee_model: pm_binary
+      fee_rate: 0.07
+    theta_overrides:
+      priceBucket:
+        favorite_threshold: 0.75
+        edge_buffer: 0.02
+        vol_lookback_seconds: 1800
+        exit_safety_d: 0.5
+
+  # --- v3.1 theta Polymarket multi-strike buckets (ETH) ---
+  # Same tuned cell (+$832 / worst −$31 / maxDD $61 / 74% hit). reference_symbol
+  # ETHUSDT_SPOT (new engine feed). paper_mode until the ETH feed is validated
+  # live AND a dedicated PM funder is provisioned (operator step at the flip).
+  - name: theta_harvester
+    account_alias: v31_pm_eth_ms
+    strategy_type: theta_harvester
+    paper_mode: true
+    reference_symbol: ETHUSDT_SPOT
+    reference_sigma_source: bbo
+    allowlist:
+      - match:
+          class: priceBucket
+          underlying: ETH
+          venue: polymarket
+          series_slug: ethereum-multi-strikes-weekly
+        max_position_usd: 50
+        stop_loss_pct: null
+        tte_min_seconds: 0
+        tte_max_seconds: 604800
+        price_extreme_threshold: 0.0
+        price_extreme_max: 1.0
+        distance_from_strike_usd_min: 0
+        vol_max: 100
+        entry_cooldown_seconds: 60
+        fee_model: pm_binary
+        fee_rate: 0.07
+    blocklist_question_idxs: []
+    defaults:
+      match: {}
+      max_position_usd: 50
+      stop_loss_pct: null
+      tte_min_seconds: 0
+      tte_max_seconds: 604800
+      price_extreme_threshold: 0.0
+      price_extreme_max: 1.0
+      distance_from_strike_usd_min: 0
+      vol_max: 100
+      entry_cooldown_seconds: 60
+      fee_model: pm_binary
+      fee_rate: 0.07
+    global:
+      max_total_inventory_usd: 100
+      max_concurrent_positions: 5
+      daily_loss_cap_usd: 100
+      max_strike_distance_pct: 50
+      min_recent_volume_usd: 100
+      stale_data_halt_seconds: 180
+      reconcile_interval_seconds: 15
+      scan_min_interval_seconds: 0.2
+      scan_max_interval_seconds: 2.0
+      daily_window_start_hour_utc: 6
+      max_slippage_pct: 0.005
+      min_order_notional_usd: 11.0
+    theta:
+      vol_lookback_seconds: 1800
+      vol_sampling_dt_seconds: 5
+      vol_clip_min: 0.0
+      vol_clip_max: 5.0
+      vol_estimator: bipower
+      edge_buffer: 0.02
+      fee_taker: 0.0
+      half_spread_assumption: 0.005
+      drift_lookback_seconds: 3600
+      drift_blend: 0.0
+      favorite_threshold: 0.75
+      edge_max: null
+      exit_edge_threshold: 0.0
+      time_stop_seconds: 0
+      exit_take_profit_mode: true
+      exit_fee: 0.0007
+      min_distance_pct: null
+      min_bid_notional_usd: 10.0
+      topup_enabled: true
+      topup_threshold_pct: 0.2
+      topup_min_notional_usd: 11.0
+      exit_safety_d: 1.0
+      fee_model: pm_binary
+      fee_rate: 0.07
+    theta_overrides:
+      priceBucket:
+        favorite_threshold: 0.75
+        edge_buffer: 0.02
+        vol_lookback_seconds: 1800
+        exit_safety_d: 0.5
