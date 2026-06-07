@@ -643,3 +643,22 @@ transient PM data-API flap) to avoid false `vanished` drift — PnL is still rep
       true PnL (+ open MTM) reported by `reconcile-report`.
 - [ ] `reconcile-report` shows no unexplained drift beyond tolerance.
 - [ ] An injected drift raises a Telegram alert (verified once).
+
+### Daily desk report (Telegram)
+
+`hl-daily-report.timer` runs `hl-daily-report.service` at **06:30 UTC daily**, which
+runs `python -m hlanalysis.engine.reconcile_report --summary` and sends a single
+Telegram message: per-strategy outcome-market PnL, fill count, account value, and
+reconcile status, plus a desk total. Unit files are version-controlled at
+`deploy/systemd/`. To (re)install on the box (e.g. after an instance rebuild),
+via SSM as root:
+
+```
+cp deploy/systemd/hl-daily-report.{service,timer} /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now hl-daily-report.timer
+systemctl list-timers hl-daily-report.timer   # verify next run
+```
+
+Manual send: `systemctl start hl-daily-report.service` (or run the module with
+`--summary` directly). The report reads only (no DB writes); TG creds come from
+`deploy.alerts.telegram` (env `TG_BOT_TOKEN`/`TG_CHAT_ID`).

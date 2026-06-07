@@ -1,0 +1,8 @@
+[Unit]
+Description=HL/PM desk daily reconciliation report to Telegram
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/hl-recorder
+ExecStart=/bin/bash -lc "set -a; . /etc/hl-engine/env; set +a; cd /opt/hl-recorder && .venv/bin/python -m hlanalysis.engine.reconcile_report --summary --date $(date -u +%%Y-%%m-%%d)"
