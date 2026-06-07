@@ -42,6 +42,24 @@ def test_pm_strike_round_trip_and_upsert(dal):
     assert dal.get_pm_strike(1000126) == 73_500.0
 
 
+def test_coin_klass_round_trip_and_upsert(dal):
+    # SHR-77: HL outcome-share coins ("#N") are persisted with their market
+    # class at QuestionMetaEvent ingest so the daily report can split venue
+    # fills (which carry only "#N") by binary vs bucket.
+    assert dal.coin_klass_map() == {}
+    dal.set_coin_klass(coin="#150", klass="priceBinary", question_idx=1000015)
+    dal.set_coin_klass(coin="#151", klass="priceBinary", question_idx=1000015)
+    dal.set_coin_klass(coin="#160", klass="priceBucket", question_idx=16)
+    assert dal.coin_klass_map() == {
+        "#150": "priceBinary",
+        "#151": "priceBinary",
+        "#160": "priceBucket",
+    }
+    # Idempotent upsert (re-ingest of the same question must not error/duplicate).
+    dal.set_coin_klass(coin="#150", klass="priceBinary", question_idx=1000015)
+    assert dal.coin_klass_map()["#150"] == "priceBinary"
+
+
 def test_open_order_round_trip(dal):
     oo = OpenOrder(
         cloid="hla-1", venue_oid=None, question_idx=42, symbol="@30",

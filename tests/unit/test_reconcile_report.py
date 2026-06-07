@@ -196,6 +196,131 @@ def test_format_daily_summary_single_message():
     assert "all reconciled" in msg
 
 
+def test_format_daily_summary_splits_hl_by_klass():
+    # SHR-77: HL slots show their outcome PnL + fills split into binary vs
+    # bucket; PM slots (no breakdown) stay a single line; desk total unchanged.
+    from hlanalysis.engine.reconcile_report import KlassStat, format_daily_summary
+    recon = [
+        SlotRecon(alias="v1_pm", realized_pnl=2.17, open_mtm=0.0,
+                  account_value_usd=121.0, positions_known=True, fills_count=8),
+        SlotRecon(alias="v31", realized_pnl=0.0, open_mtm=18.12,
+                  account_value_usd=1299.0, positions_known=True,
+                  venue_realized_pnl=120.0, fills_count=527,
+                  klass_breakdown={
+                      "priceBinary": KlassStat(realized_pnl=100.0, open_mtm=0.0, fills=500),
+                      "priceBucket": KlassStat(realized_pnl=20.0, open_mtm=18.12, fills=27),
+                  }),
+    ]
+    msg = format_daily_summary(recon, date_str="2026-06-08")
+    # PM slot is unchanged (single line, no split sub-lines under it).
+    assert "v1_pm: PnL +2.17" in msg
+    # HL slot keeps its headline AND gains a binary/bucket split.
+    assert "v31: PnL +138.12" in msg          # 120.0 + 18.12 total_true_pnl
+    assert "binary" in msg and "bucket" in msg
+    assert "+100.00" in msg                    # binary total_pnl
+    assert "+38.12" in msg                     # bucket total_pnl 20.0 + 18.12
+    assert "fills 500" in msg and "fills 27" in msg
+    # Desk total unchanged: 2.17 + 138.12
+    assert "Total strategy PnL: +140.29" in msg
+
+
+def test_format_daily_summary_shows_unknown_klass():
+    # Unmapped coins land in an explicit "unknown" bucket — never silently
+    # folded into binary/bucket on a money report.
+    from hlanalysis.engine.reconcile_report import KlassStat, format_daily_summary
+    recon = [
+        SlotRecon(alias="v31", realized_pnl=0.0, open_mtm=0.0,
+                  account_value_usd=10.0, positions_known=True,
+                  venue_realized_pnl=5.0, fills_count=2,
+                  klass_breakdown={
+                      "priceBinary": KlassStat(realized_pnl=3.0, open_mtm=0.0, fills=1),
+                      "unknown": KlassStat(realized_pnl=2.0, open_mtm=0.0, fills=1),
+                  }),
+    ]
+    msg = format_daily_summary(recon)
+    assert "unknown" in msg
+    assert "+2.00" in msg
+
+
+def test_gather_slot_splits_outcome_fills_by_klass():
+    from hlanalysis.engine.reconcile_report import gather_slot
+
+    class P:
+        def __init__(self, symbol, qty):
+            self.symbol = symbol; self.qty = qty
+
+    class FakeDAL:
+        def realized_pnl_since(self, since_ts_ns):
+            return 0.0
+        def all_positions(self):
+            return [P("#160", 5.0)]
+        def coin_klass_map(self):
+            return {"#150": "priceBinary", "#151": "priceBinary",
+                    "#160": "priceBucket"}
+
+    class FakeFill:
+        def __init__(self, symbol, closed_pnl, fee):
+            self.symbol = symbol; self.closed_pnl = closed_pnl; self.fee = fee
+
+    class FakeClient:
+        def clearinghouse_state(self):
+            return ClearinghouseState(
+                positions=(_vp("#160", 5.0, 0.4, 1.5),),
+                account_value_usd=100.0,
+            )
+        def user_fills(self, *, since_ts_ns):
+            return [
+                FakeFill("#150", 10.0, 0.5),   # binary
+                FakeFill("#151", 4.0, 0.0),    # binary
+                FakeFill("#160", 6.0, 0.0),    # bucket
+                FakeFill("@7", 99.0, 0.0),     # non-outcome spot — excluded
+            ]
+
+    r = gather_slot(alias="v31", dal=FakeDAL(), exec_client=FakeClient(),
+                    qty_tolerance=1e-6, fetch_venue_realized=True)
+    bd = r.klass_breakdown
+    assert bd is not None
+    # binary: realized = (10-0.5) + 4 = 13.5, 2 fills, no open mtm
+    assert bd["priceBinary"].realized_pnl == 13.5
+    assert bd["priceBinary"].fills == 2
+    assert bd["priceBinary"].open_mtm == 0.0
+    # bucket: realized = 6.0, 1 fill, open mtm 1.5 from the "#160" venue position
+    assert bd["priceBucket"].realized_pnl == 6.0
+    assert bd["priceBucket"].fills == 1
+    assert bd["priceBucket"].open_mtm == 1.5
+    # Outcome-only fill count excludes the "@7" spot fill.
+    assert r.fills_count == 3
+
+
+def test_gather_slot_unmapped_fill_is_unknown():
+    from hlanalysis.engine.reconcile_report import gather_slot
+
+    class FakeDAL:
+        def realized_pnl_since(self, since_ts_ns):
+            return 0.0
+        def all_positions(self):
+            return []
+        def coin_klass_map(self):
+            return {}   # nothing mapped
+
+    class FakeFill:
+        def __init__(self, symbol, closed_pnl, fee):
+            self.symbol = symbol; self.closed_pnl = closed_pnl; self.fee = fee
+
+    class FakeClient:
+        def clearinghouse_state(self):
+            return ClearinghouseState(positions=(), account_value_usd=1.0)
+        def user_fills(self, *, since_ts_ns):
+            return [FakeFill("#999", 7.0, 0.0)]
+
+    r = gather_slot(alias="v31", dal=FakeDAL(), exec_client=FakeClient(),
+                    qty_tolerance=1e-6, fetch_venue_realized=True)
+    assert r.klass_breakdown is not None
+    assert "unknown" in r.klass_breakdown
+    assert r.klass_breakdown["unknown"].realized_pnl == 7.0
+    assert r.klass_breakdown["unknown"].fills == 1
+
+
 def test_compare_slot_flags_pnl_mismatch_and_prefers_venue():
     # Local ledger says -421 (corrupted by bad settlement rows); venue says +198.
     r = compare_slot(

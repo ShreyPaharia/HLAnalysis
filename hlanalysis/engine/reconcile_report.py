@@ -27,12 +27,38 @@ if TYPE_CHECKING:
     from .state import StateDAL
 
 
+# SHR-77: render order + friendly labels for the per-class daily-report split.
+# Any class not listed here (shouldn't happen for HL) is appended, sorted, under
+# its raw key so nothing is silently dropped.
+_KLASS_ORDER = ("priceBinary", "priceBucket", "unknown")
+_KLASS_LABELS = {
+    "priceBinary": "binary",
+    "priceBucket": "bucket",
+    "unknown": "unknown",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class Drift:
     kind: str       # "qty_mismatch" | "vanished" | "orphan"
     symbol: str
     db_qty: float
     venue_qty: float
+
+
+@dataclass(frozen=True, slots=True)
+class KlassStat:
+    """Per-market-class slice of a slot's outcome PnL (SHR-77). realized_pnl is
+    the venue closedPnl-fee of fills in this class; open_mtm is the unrealized
+    PnL of still-open positions in this class. total_pnl mirrors the slot's
+    total_true_pnl decomposition (realized + open MTM)."""
+    realized_pnl: float
+    open_mtm: float
+    fills: int
+
+    @property
+    def total_pnl(self) -> float:
+        return self.realized_pnl + self.open_mtm
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +72,10 @@ class SlotRecon:
     account_pnl_all_time: float | None = None # HL portfolio equity-based PnL (matches UI)
     fills_count: int | None = None            # # of strategy (outcome-market) fills
     pnl_mismatch: bool = False                # local vs venue closedPnl diverge > tolerance
+    # SHR-77: per-market-class (priceBinary/priceBucket/unknown) split of the
+    # outcome PnL + fills. Populated for HL slots only (PM is binary by
+    # construction); None for PM and for slots whose venue read failed.
+    klass_breakdown: dict[str, "KlassStat"] | None = None
     drift: list[Drift] = field(default_factory=list)
 
     @property
@@ -74,6 +104,7 @@ def compare_slot(
     pnl_tolerance: float = 1.0,
     account_pnl_all_time: float | None = None,
     fills_count: int | None = None,
+    klass_breakdown: dict[str, KlassStat] | None = None,
 ) -> SlotRecon:
     """Pure three-way-ish compare: DB positions vs venue positions, plus PnL.
 
@@ -115,9 +146,43 @@ def compare_slot(
         venue_realized_pnl=venue_realized_pnl,
         account_pnl_all_time=account_pnl_all_time,
         fills_count=fills_count,
+        klass_breakdown=klass_breakdown,
         pnl_mismatch=pnl_mismatch,
         drift=drift,
     )
+
+
+def _split_by_klass(
+    outcome_fills, venue_positions, coin_klass: dict[str, str],
+) -> dict[str, KlassStat]:
+    """Group outcome fills + open positions by market class via the persisted
+    coin("#N")→klass map (SHR-77). Pure: callers pass the already-filtered
+    outcome fills ("#N"), the venue positions, and the map.
+
+    realized_pnl is Σ(closedPnl-fee) of fills in the class (matching the slot's
+    venue_realized_pnl); open_mtm is Σ unrealized of still-open "#N" positions in
+    the class. Unmapped coins → an explicit "unknown" class."""
+    realized: dict[str, float] = {}
+    fills: dict[str, int] = {}
+    mtm: dict[str, float] = {}
+    for f in outcome_fills:
+        k = coin_klass.get(f.symbol, "unknown")
+        realized[k] = realized.get(k, 0.0) + (f.closed_pnl - f.fee)
+        fills[k] = fills.get(k, 0) + 1
+    for vp in venue_positions:
+        if not vp.symbol.startswith("#"):
+            continue  # non-outcome (perp/spot) leg — not a strategy market
+        k = coin_klass.get(vp.symbol, "unknown")
+        mtm[k] = mtm.get(k, 0.0) + vp.unrealized_pnl
+    classes = set(realized) | set(mtm)
+    return {
+        k: KlassStat(
+            realized_pnl=realized.get(k, 0.0),
+            open_mtm=mtm.get(k, 0.0),
+            fills=fills.get(k, 0),
+        )
+        for k in classes
+    }
 
 
 def format_report(recon: list[SlotRecon]) -> str:
@@ -175,6 +240,21 @@ def format_daily_summary(recon: list[SlotRecon], *, date_str: str | None = None)
             f"{r.alias}: PnL {r.total_true_pnl:+.2f} | fills {fills} | "
             f"acct ${r.account_value_usd:.0f} | {status}"
         )
+        # SHR-77: HL slots trade both binary + bucket markets on one account, so
+        # split their outcome PnL + fills by class. PM slots (klass_breakdown
+        # None) are binary-only and stay a single line. The split is purely
+        # informational — the slot PnL above and the desk total are unchanged.
+        if r.klass_breakdown:
+            for klass in _KLASS_ORDER + tuple(
+                k for k in sorted(r.klass_breakdown) if k not in _KLASS_ORDER
+            ):
+                st = r.klass_breakdown.get(klass)
+                if st is None:
+                    continue
+                label = _KLASS_LABELS.get(klass, klass)
+                lines.append(
+                    f"    {label}: PnL {st.total_pnl:+.2f} | fills {st.fills}"
+                )
         total += r.total_true_pnl
         if r.has_drift:
             drifting.append(r.alias)
@@ -205,6 +285,7 @@ def gather_slot(
     venue_realized: float | None = None
     account_pnl: float | None = None
     fills_count: int | None = None
+    klass_breakdown: dict[str, KlassStat] | None = None
     if fetch_venue_realized:
         # Fetch fills ONCE and derive both realized PnL and the fill count from
         # it — calling realized_pnl_since AND user_fills separately would paginate
@@ -217,6 +298,14 @@ def gather_slot(
             ]
             venue_realized = sum(f.closed_pnl - f.fee for f in outcome)
             fills_count = len(outcome)
+            # SHR-77: split realized PnL + fills (and open-MTM) by market class.
+            # The coin("#N")→klass map is persisted at QuestionMetaEvent ingest,
+            # so this is a durable join — not a description heuristic. Coins with
+            # no mapped class fall into an explicit "unknown" bucket (never
+            # silently folded into binary/bucket on a money report).
+            klass_breakdown = _split_by_klass(
+                outcome, venue.positions, dal.coin_klass_map(),
+            )
         except Exception:  # noqa: BLE001 — venue read is best-effort; report still useful
             venue_realized = None
         # Equity-based account PnL (HL portfolio = the UI number). Optional: only
@@ -238,6 +327,7 @@ def gather_slot(
         venue=venue, qty_tolerance=qty_tolerance,
         venue_realized_pnl=venue_realized, pnl_tolerance=pnl_tolerance,
         account_pnl_all_time=account_pnl, fills_count=fills_count,
+        klass_breakdown=klass_breakdown,
     )
 
 

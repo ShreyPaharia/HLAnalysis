@@ -580,6 +580,14 @@ class EngineRuntime:
             "venue": qv.venue,
             "series_slug": dict(qv.kv).get("series_slug", ""),
         }
+        # SHR-77: HL outcome fills report only coin "#N" + closedPnl (no class),
+        # and the events table is pruned — so the daily report can't classify
+        # fills after the fact. Persist the coin("#N")→klass map now, while the
+        # class and the deterministic leg coins are known, into the DB of each
+        # slot that can trade this question (HL only; PM legs are token ids, and
+        # PM fills are binary by construction). Idempotent upsert — re-ingested
+        # on every restart, class never changes.
+        persist_klass = qv.klass and qv.venue != "polymarket" and qv.leg_symbols
         any_unseen = False
         any_tradeable = False
         for slot in slots:
@@ -590,6 +598,11 @@ class EngineRuntime:
                 slot.cfg, question_idx=qidx, fields=fields,
             ) is not None:
                 any_tradeable = True
+                if persist_klass:
+                    for leg in qv.leg_symbols:
+                        slot.dal.set_coin_klass(
+                            coin=leg, klass=qv.klass, question_idx=qidx,
+                        )
         # PM up/down open-strike: single capture path. Fires once the reference
         # 1m candle has closed (now >= ref_ts + 60s) by fetching the Binance
         # spot 1m close. Covers both the observed-open case (market listed just

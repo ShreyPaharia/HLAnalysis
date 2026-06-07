@@ -84,6 +84,23 @@ class PmStrike(SQLModel, table=True):
     strike: float
 
 
+class CoinKlass(SQLModel, table=True):
+    """Maps an HL HIP-4 outcome-share coin ("#N") to its market class
+    ("priceBinary" | "priceBucket"), written at QuestionMetaEvent ingest (SHR-77).
+
+    The venue fill feed (user_fills) reports each HIP-4 fill as coin "#N" with a
+    closedPnl but NO market type, and the engine `events` table is pruned and
+    keyed by a different symbol representation — so neither can reliably classify
+    historical fills. This table is the durable, forward-correct join: the engine
+    already derives the leg coins ``f"#{10*outcome_idx + side_idx}"`` and the
+    class from the question's metadata, so we persist that pair keyed by the exact
+    coin user_fills returns. HL-only (PM fills are binary by construction)."""
+    __tablename__ = "coin_klass"
+    coin: str = Field(primary_key=True)
+    klass: str
+    question_idx: int
+
+
 class Settlement(SQLModel, table=True):
     """Persisted realized PnL of a settled position (SHR-53). HIP-4 binaries
     close via settlement payouts, not HL fills, so this PnL was previously only
@@ -287,6 +304,29 @@ class StateDAL:
                 existing.strike = strike
                 s.add(existing)
             s.commit()
+
+    # ---- coin → market-class map (SHR-77) ----
+
+    def set_coin_klass(self, *, coin: str, klass: str, question_idx: int) -> None:
+        """Persist (or refresh) the market class for an HL outcome coin "#N".
+
+        Idempotent upsert: a question's QuestionMetaEvent is re-ingested on every
+        engine restart, and its class never changes, so re-stamping the same pair
+        must not error or duplicate."""
+        with _Session(self._engine) as s:
+            existing = s.get(CoinKlass, coin)
+            if existing is None:
+                s.add(CoinKlass(coin=coin, klass=klass, question_idx=question_idx))
+            else:
+                existing.klass = klass
+                existing.question_idx = question_idx
+                s.add(existing)
+            s.commit()
+
+    def coin_klass_map(self) -> dict[str, str]:
+        """All persisted coin("#N") → klass pairs, for the daily report's split."""
+        with _Session(self._engine) as s:
+            return {r.coin: r.klass for r in s.exec(select(CoinKlass)).all()}
 
     # ---- settlements ----
 
