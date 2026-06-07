@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import resource
 import signal
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -248,6 +249,11 @@ class EngineRuntime:
     # callers can't double-fetch the same PM strike. Created lazily; bounded by
     # the number of PM questions (no eviction needed).
     _pm_strike_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
+    # RSS self-halt guard (W1.9). If process RSS (in KB) exceeds this ceiling
+    # the heartbeat loop halts all slots and writes their kill-switch flags
+    # before the kernel OOM-killer fires. Default is ~85% of a 1 GB box.
+    # Override on EngineRuntime for different box sizes.
+    rss_halt_kb: int = 850_000
 
     # ---------- legacy single-strategy compatibility ----------
 
@@ -658,6 +664,10 @@ class EngineRuntime:
                         n_questions, n_positions, n_live,
                         " HALTED" if slot.halted else "",
                     )
+                # W1.9: RSS self-halt guard — check on every heartbeat so an
+                # OOM trajectory is caught before the kernel fires. Runs
+                # AFTER the info log so the log line is always emitted.
+                await self._check_rss_halt(slots)
                 await self._publish_heartbeat(
                     d_events=d_events, n_questions=n_questions,
                 )
@@ -929,6 +939,13 @@ class EngineRuntime:
         while not self.stop_event.is_set():
             try:
                 if slot.halted:
+                    # W1.9: even a halted slot must protect open positions.
+                    # The dedicated stop-loss loop also runs enforcement (when
+                    # stop_loss_loop_enabled); when it is disabled, this is
+                    # the only path.  New entries remain blocked (scan_loop
+                    # still skips when halted).
+                    if not slot.cfg.global_.stop_loss_loop_enabled or slot.blocked:
+                        await self._enforce_stop_losses(slot, now_ns=self._now_ns())
                     await self._sleep_or_stop(1.0)
                     continue
                 now = self._now_ns()
@@ -974,7 +991,9 @@ class EngineRuntime:
                         realized_pnl=pnl,
                         cap=slot.cfg.global_.daily_loss_cap_usd,
                     ))
-                    slot.halted = True
+                    # W1.9: latch persistently — writes flag file so a restart
+                    # re-reads it and stays halted (operator-clearable only).
+                    self._latch_kill_switch(slot)
                     self._maybe_stop_all_halted(slot)
                     continue
 
@@ -1110,14 +1129,15 @@ class EngineRuntime:
         """Event-driven stop-loss enforcement (P1). Active only when
         stop_loss_loop_enabled; wakes on the market-dirty signal, bounded by
         scan_min/max_interval_seconds, so a stop breach is acted on promptly
-        without speeding up the venue-reading checks in _continuous_checks_loop."""
+        without speeding up the venue-reading checks in _continuous_checks_loop.
+
+        Note: stop-loss enforcement intentionally runs even when slot.halted is
+        True (W1.9). A daily-loss latch blocks NEW entries via the scan loop,
+        but must not abandon open positions — those need protective exits."""
         g = slot.cfg.global_
         min_iv = float(getattr(g, "scan_min_interval_seconds", 1.0))
         max_iv = float(getattr(g, "scan_max_interval_seconds", 1.0))
         while not self.stop_event.is_set():
-            if slot.halted:
-                await self._sleep_or_stop(1.0)
-                continue
             try:
                 await self._enforce_stop_losses(slot, now_ns=self._now_ns())
             except Exception:
@@ -1127,6 +1147,65 @@ class EngineRuntime:
                 await self._wait_for_market_or_timeout(max_interval=max_iv - min_iv)
 
     # ---------- helpers ----------
+
+    def _latch_kill_switch(self, slot: AccountSlot) -> None:
+        """Write the kill-switch flag file for a slot and set slot.halted.
+
+        Called on a confirmed daily-loss breach (W1.9). Writing the flag file
+        makes the halt PERSISTENT across engine restarts — the
+        _continuous_checks_loop reads the flag on every iteration, so an
+        operator must explicitly remove it to resume the slot (no auto-clear).
+
+        Safe to call multiple times (touch is idempotent).
+        """
+        slot.halted = True
+        try:
+            slot.kill_switch_path.parent.mkdir(parents=True, exist_ok=True)
+            slot.kill_switch_path.touch(exist_ok=True)
+        except OSError:
+            logger.error(
+                "failed to write kill-switch flag alias={} path={}; slot is "
+                "halted in memory but will NOT survive a restart — investigate "
+                "immediately", slot.alias, slot.kill_switch_path,
+            )
+
+    @staticmethod
+    def _read_rss_kb() -> int:
+        """Return current process RSS in kilobytes.
+
+        Thin wrapper around ``resource.getrusage`` that normalises the
+        platform difference: Linux reports ``ru_maxrss`` in KiB; macOS
+        reports it in bytes.  Tests monkeypatch this method to inject
+        arbitrary RSS values without caring about platform units.
+        """
+        import sys
+        raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # macOS: bytes → KiB; Linux: already KiB.
+        return raw // 1024 if sys.platform == "darwin" else raw
+
+    async def _check_rss_halt(self, slots: list[AccountSlot]) -> None:
+        """RSS self-halt guard (W1.9).
+
+        Read process RSS and, if it exceeds ``rss_halt_kb``, latch all slots
+        halted + write their kill-switch flags + emit a Telegram-visible log
+        line.  This is the memory safety net behind the SHR-44/63 memory
+        fixes: if buffered state still grows past budget we stop placing
+        rather than die mid-position under the kernel OOM-killer.
+        """
+        try:
+            rss_kb = self._read_rss_kb()
+        except Exception:
+            logger.warning("could not read process RSS; skipping RSS guard")
+            return
+        if rss_kb <= self.rss_halt_kb:
+            return
+        logger.error(
+            "RSS {}KB exceeds ceiling {}KB — self-halting all slots to prevent "
+            "OOM kill mid-position (W1.9)",
+            rss_kb, self.rss_halt_kb,
+        )
+        for slot in slots:
+            self._latch_kill_switch(slot)
 
     def _maybe_stop_all_halted(self, just_halted: AccountSlot) -> None:
         """If every slot has latched halted, drop the global stop event so
