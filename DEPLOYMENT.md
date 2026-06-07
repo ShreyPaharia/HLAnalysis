@@ -618,3 +618,28 @@ once a new market appears.
   via `pq.read_table(path)` — pyarrow merges the in-file `venue` column
   against the `venue=...` hive partition value and errors on type mismatch.
   Read individual files via `pq.ParquetFile(path).read()` instead.
+
+### Reconciliation report (Phase 0)
+
+`make reconcile-report` — per-slot realized + open-MTM true PnL reconciled to the
+venue, with position-drift detection. `JSON=1` for machine-readable output.
+Exits nonzero on drift; sends a Telegram alert when `TELEGRAM_*` env is set.
+
+**Drift kinds:**
+
+| Kind | Meaning |
+|------|---------|
+| `qty_mismatch` | DB and venue agree the symbol is open but the qty differs beyond tolerance. |
+| `vanished` | DB has an open position the venue doesn't recognise. |
+| `orphan` | Venue has an open position the DB has no record of. |
+
+Position reconciliation is skipped for a slot when `positions_known=False` (e.g. a
+transient PM data-API flap) to avoid false `vanished` drift — PnL is still reported.
+
+**Phase 0 exit gate — all must hold for 7 consecutive days, all 4 slots:**
+
+- [ ] `engine-diag` + `reconcile-report` accessible via one command (documented above).
+- [ ] Per-slot true PnL (realized + settlement) reported by `engine-diag`; total
+      true PnL (+ open MTM) reported by `reconcile-report`.
+- [ ] `reconcile-report` shows no unexplained drift beyond tolerance.
+- [ ] An injected drift raises a Telegram alert (verified once).

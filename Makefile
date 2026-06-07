@@ -1,4 +1,4 @@
-.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy deploy-recorder deploy-engine engine-local install-engine-on-ec2 push-engine-secrets ssh-ec2 status engine-status logs engine-logs engine-diag engine-events query data-summary pull-data help
+.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy deploy-recorder deploy-engine engine-local install-engine-on-ec2 push-engine-secrets ssh-ec2 status engine-status logs engine-logs engine-diag reconcile-report engine-events query data-summary pull-data help
 
 # Stack name
 STACK_NAME=HLRecorderStack
@@ -243,6 +243,27 @@ engine-diag:
 	aws ssm get-command-invocation --command-id "$$CMD_ID" --instance-id "$$INSTANCE_ID" \
 		--query "StandardOutputContent" --output text
 
+# One-shot venue reconciliation report: per-slot realized + open-MTM = true PnL,
+# plus position drift (qty mismatch / vanished / orphan) vs the venue. Sends a
+# Telegram alert when drift is found. Pass JSON=1 for machine-readable output.
+reconcile-report:
+	@INSTANCE_ID=$$(aws cloudformation describe-stacks --stack-name $(STACK_NAME) \
+		--query "Stacks[0].Outputs[?ExportName=='HLRecorderInstanceID'].OutputValue" \
+		--output text) && \
+	if [ -z "$$INSTANCE_ID" ]; then \
+		echo "ERROR: Could not fetch instance ID. Is the stack deployed?"; exit 1; \
+	fi && \
+	JSON_ARG="" && [ -n "$$JSON" ] && JSON_ARG="--json" || true && \
+	echo "Fetching reconciliation report from $$INSTANCE_ID..." && \
+	CMD_ID=$$(aws ssm send-command \
+		--instance-ids "$$INSTANCE_ID" \
+		--document-name "AWS-RunShellScript" \
+		--parameters "commands=[\"cd /opt/hl-recorder && source /etc/hl-engine/env && uv run python -m hlanalysis.engine.reconcile_report $$JSON_ARG\"]" \
+		--query "Command.CommandId" --output text) && \
+	sleep 6 && \
+	aws ssm get-command-invocation --command-id "$$CMD_ID" --instance-id "$$INSTANCE_ID" \
+		--query "StandardOutputContent" --output text
+
 # Event trace for a single question index: make engine-events Q=<question_idx>
 # Shows all events (entry/exit/veto/reject) for the given question across all slots.
 engine-events:
@@ -315,6 +336,7 @@ help:
 	@echo "  engine-status     Check engine service + restart_blocked / halt flags + journal"
 	@echo "  engine-logs       Tail last 200 lines of engine journal"
 	@echo "  engine-diag       One-shot JSON snapshot: positions, rejects, config hash, feed (ALIAS=v1, WINDOW=48, PRETTY=1)"
+	@echo "  reconcile-report  Per-slot realized + open-MTM true PnL vs venue; flags position drift (JSON=1 for machine output)"
 	@echo "  engine-events Q=N Event trace for question_idx N across all slot DBs"
 	@echo "  data-summary      Show event counts grouped by venue and event type"
 	@echo "  query Q=\"...\"     Run custom DuckDB query, e.g. Q=\"SELECT COUNT(*) FROM ...\""
