@@ -5,7 +5,9 @@ both consume.
 Extracted from runtime.py so the build_* functions and the reference_* cadence
 helpers live in one focused module, imported by EngineRuntime (live),
 ``replay.py`` (backtest replay), and the config-parity tests. No engine
-orchestration state here — every function is pure (cfg in, config out).
+orchestration state here — every function is pure (cfg in, config out), except
+``build_exec_client``, which constructs the venue ExecutionClient from an
+AccountConfig.
 """
 from __future__ import annotations
 

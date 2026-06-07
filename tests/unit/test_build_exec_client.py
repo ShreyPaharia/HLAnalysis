@@ -1,3 +1,5 @@
+import pytest
+
 from hlanalysis.engine.config_builders import build_exec_client
 from hlanalysis.engine.config import HyperliquidAccount, PolymarketAccount
 from hlanalysis.engine.hl_client import HLClient
@@ -23,3 +25,8 @@ def test_build_exec_client_pm():
     )
     client = build_exec_client("v1_pm", acct, paper_mode=True)
     assert isinstance(client, PMClient)
+
+
+def test_build_exec_client_unknown_type_raises():
+    with pytest.raises(TypeError):
+        build_exec_client("x", object(), paper_mode=True)

@@ -40,7 +40,6 @@ from .config import (
 from .event_bus import EventBus
 from .exec_client import ExecutionClient
 from .exec_types import ClearinghouseState, OpenOrderRow, UserFillRow
-from .hl_client import HLClient
 from .market_state import MarketState
 from .reconcile import Reconciler
 from .restart_drift import RestartDriftGate
@@ -66,6 +65,7 @@ from .config_builders import (  # noqa: F401  (re-exported for back-compat)
     _LR_GLOBAL_SOURCED,
     _build_strategy_for_slot,
     _late_resolution_config_from_entry,
+    build_exec_client,
     build_late_resolution_config,
     build_late_resolution_configs_by_class,
     build_theta_harvester_config,
@@ -422,7 +422,6 @@ class EngineRuntime:
         if self.exec_client_factory is not None:
             exec_client = self.exec_client_factory(alias, acct, s_cfg.paper_mode)
         else:
-            from .config_builders import build_exec_client
             exec_client = build_exec_client(alias, acct, s_cfg.paper_mode)
 
         risk = RiskGate(s_cfg)
