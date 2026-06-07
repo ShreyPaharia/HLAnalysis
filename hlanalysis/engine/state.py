@@ -331,6 +331,11 @@ class StateDAL:
                 s.add(f)
                 s.commit()
 
+    def fills_count(self) -> int:
+        """Total number of Fill rows (used by the daily report)."""
+        with _Session(self._engine) as s:
+            return int(s.exec(select(func.count()).select_from(Fill)).one())
+
     def fills_for_cloid(self, cloid: str) -> list[Fill]:
         with _Session(self._engine) as s:
             stmt = select(Fill).where(Fill.cloid == cloid).order_by(Fill.ts_ns)

@@ -44,6 +44,7 @@ class SlotRecon:
     positions_known: bool
     venue_realized_pnl: float | None = None   # venue realized closedPnl (Σ closedPnl-fee)
     account_pnl_all_time: float | None = None # HL portfolio equity-based PnL (matches UI)
+    fills_count: int | None = None            # # of strategy (outcome-market) fills
     pnl_mismatch: bool = False                # local vs venue closedPnl diverge > tolerance
     drift: list[Drift] = field(default_factory=list)
 
@@ -72,6 +73,7 @@ def compare_slot(
     venue_realized_pnl: float | None = None,
     pnl_tolerance: float = 1.0,
     account_pnl_all_time: float | None = None,
+    fills_count: int | None = None,
 ) -> SlotRecon:
     """Pure three-way-ish compare: DB positions vs venue positions, plus PnL.
 
@@ -112,6 +114,7 @@ def compare_slot(
         positions_known=venue.positions_known,
         venue_realized_pnl=venue_realized_pnl,
         account_pnl_all_time=account_pnl_all_time,
+        fills_count=fills_count,
         pnl_mismatch=pnl_mismatch,
         drift=drift,
     )
@@ -158,6 +161,29 @@ def format_report(recon: list[SlotRecon]) -> str:
     return "\n".join(lines).rstrip()
 
 
+def format_daily_summary(recon: list[SlotRecon], *, date_str: str | None = None) -> str:
+    """Compact ONE-message daily summary for Telegram: per-strategy outcome PnL,
+    fill count, and reconcile status, plus a desk total."""
+    header = "📊 Desk daily report" + (f" — {date_str}" if date_str else "")
+    lines = [header, ""]
+    total = 0.0
+    drifting: list[str] = []
+    for r in recon:
+        status = "⚠️ DRIFT" if r.has_drift else "✅"
+        fills = r.fills_count if r.fills_count is not None else "?"
+        lines.append(
+            f"{r.alias}: PnL {r.total_true_pnl:+.2f} | fills {fills} | "
+            f"acct ${r.account_value_usd:.0f} | {status}"
+        )
+        total += r.total_true_pnl
+        if r.has_drift:
+            drifting.append(r.alias)
+    lines.append("")
+    recon_line = "all reconciled ✅" if not drifting else f"⚠️ DRIFT: {', '.join(drifting)}"
+    lines.append(f"Total strategy PnL: {total:+.2f}  |  {recon_line}")
+    return "\n".join(lines)
+
+
 def gather_slot(
     *, alias: str, dal: StateDAL, exec_client: ExecutionClient,
     qty_tolerance: float, pnl_tolerance: float = 1.0,
@@ -178,6 +204,7 @@ def gather_slot(
     venue = exec_client.clearinghouse_state()
     venue_realized: float | None = None
     account_pnl: float | None = None
+    fills_count: int | None = None
     if fetch_venue_realized:
         try:
             # outcome_only: strategy PnL = HIP-4 outcome markets only, excluding
@@ -193,11 +220,25 @@ def gather_slot(
                 account_pnl = pnl_fn()
             except Exception:  # noqa: BLE001
                 account_pnl = None
+        # Strategy fill count = outcome-market (#N) fills only.
+        try:
+            fills_count = sum(
+                1 for f in exec_client.user_fills(since_ts_ns=0)
+                if f.symbol.startswith("#")
+            )
+        except Exception:  # noqa: BLE001
+            fills_count = None
+    else:
+        # PM: the local ledger is the source of truth and is already outcome-only.
+        try:
+            fills_count = dal.fills_count()
+        except Exception:  # noqa: BLE001
+            fills_count = None
     return compare_slot(
         alias=alias, db_positions=db_positions, db_realized_pnl=db_realized,
         venue=venue, qty_tolerance=qty_tolerance,
         venue_realized_pnl=venue_realized, pnl_tolerance=pnl_tolerance,
-        account_pnl_all_time=account_pnl,
+        account_pnl_all_time=account_pnl, fills_count=fills_count,
     )
 
 
@@ -236,23 +277,16 @@ def build_report(deploy_cfg, strategies_cfg, *, qty_tolerance: float, pnl_tolera
     return out
 
 
-async def _maybe_alert(
-    report_text: str,
-    has_drift: bool,
-    *,
-    session_factory=None,
-    tg_factory=None,
-) -> None:
-    """Send the report to Telegram when there is drift. Credentials come from
-    the same env the engine uses; no-op if unset.
-
-    session_factory and tg_factory are injectable for testing; both default to
-    the real aiohttp.ClientSession and TelegramClient respectively."""
-    import os
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat = os.environ.get("TELEGRAM_CHAT_ID")
-    if not (has_drift and token and chat):
-        return
+async def _post_tg(
+    text: str, *, bot_token: str | None, chat_id: str | None,
+    session_factory=None, tg_factory=None,
+) -> bool:
+    """Send one Telegram message. Credentials are the engine's own
+    deploy.alerts.telegram (env TG_BOT_TOKEN/TG_CHAT_ID) — NOT TELEGRAM_*.
+    No-op (returns False) if creds are missing. session_factory/tg_factory are
+    injectable for tests."""
+    if not (bot_token and chat_id):
+        return False
     if session_factory is None:
         import aiohttp as _aiohttp
         session_factory = _aiohttp.ClientSession
@@ -260,8 +294,19 @@ async def _maybe_alert(
         from hlanalysis.alerts.telegram import TelegramClient
         tg_factory = TelegramClient
     async with session_factory() as session:
-        tg = tg_factory(bot_token=token, chat_id=chat, session=session)
-        await tg.send("⚠️ Reconciliation DRIFT\n\n" + report_text)
+        return await tg_factory(bot_token=bot_token, chat_id=chat_id, session=session).send(text)
+
+
+async def _maybe_alert(
+    report_text: str, has_drift: bool, *,
+    bot_token: str | None = None, chat_id: str | None = None,
+    session_factory=None, tg_factory=None,
+) -> None:
+    """Send the full reconciliation report to Telegram ONLY when there is drift."""
+    if not has_drift:
+        return
+    await _post_tg("⚠️ Reconciliation DRIFT\n\n" + report_text, bot_token=bot_token,
+                   chat_id=chat_id, session_factory=session_factory, tg_factory=tg_factory)
 
 
 def main() -> None:
@@ -272,16 +317,32 @@ def main() -> None:
     p.add_argument("--pnl-tolerance", type=float, default=1.0,
                    help="USD divergence between local and venue realized that counts as drift")
     p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    p.add_argument("--summary", action="store_true",
+                   help="send the compact one-message daily summary to Telegram (always)")
+    p.add_argument("--date", type=str, default=None, help="date label for the summary header")
     args = p.parse_args()
 
     from .config import load_deploy_config, load_strategies_config
     deploy_cfg = load_deploy_config(args.deploy_config)
     strategies_cfg = load_strategies_config(args.strategy_config)
 
+    # Telegram creds — the engine's own (deploy.alerts.telegram = TG_BOT_TOKEN/TG_CHAT_ID).
+    tg = getattr(getattr(deploy_cfg, "alerts", None), "telegram", None)
+    bot_token = getattr(tg, "bot_token", None)
+    chat_id = getattr(tg, "chat_id", None)
+
     recon = build_report(deploy_cfg, strategies_cfg, qty_tolerance=args.qty_tolerance,
                          pnl_tolerance=args.pnl_tolerance)
     has_drift = any(r.has_drift for r in recon)
     text = format_report(recon)
+
+    if args.summary:
+        summary = format_daily_summary(recon, date_str=args.date)
+        print(summary)
+        sent = asyncio.run(_post_tg(summary, bot_token=bot_token, chat_id=chat_id))
+        if not sent:
+            logger.warning("daily summary NOT sent to Telegram (creds missing?)")
+        raise SystemExit(1 if has_drift else 0)
 
     if args.json:
         print(json.dumps({
@@ -302,7 +363,7 @@ def main() -> None:
     else:
         print(text)
 
-    asyncio.run(_maybe_alert(text, has_drift))
+    asyncio.run(_maybe_alert(text, has_drift, bot_token=bot_token, chat_id=chat_id))
     # Nonzero exit on drift so an SSM/cron caller can detect it.
     raise SystemExit(1 if has_drift else 0)
 

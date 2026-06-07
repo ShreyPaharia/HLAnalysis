@@ -146,21 +146,54 @@ def test_alert_sends_only_on_drift(monkeypatch):
         async def __aenter__(self): return self
         async def __aexit__(self, *a): return False
 
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
-    monkeypatch.setenv("TELEGRAM_CHAT_ID", "c")
-
-    # Use injection seam directly — avoids fragile module-attribute patching.
+    # Creds passed explicitly (engine's TG_BOT_TOKEN/TG_CHAT_ID, not env TELEGRAM_*).
     asyncio.run(rr._maybe_alert(
-        "report", has_drift=False,
+        "report", has_drift=False, bot_token="t", chat_id="c",
         tg_factory=FakeTG, session_factory=lambda: FakeSession(),
     ))
     assert sent == []                       # no drift → no alert
 
     asyncio.run(rr._maybe_alert(
-        "report", has_drift=True,
+        "report", has_drift=True, bot_token="t", chat_id="c",
         tg_factory=FakeTG, session_factory=lambda: FakeSession(),
     ))
     assert len(sent) == 1 and "DRIFT" in sent[0]
+
+
+def test_post_tg_noop_without_creds():
+    import hlanalysis.engine.reconcile_report as rr
+    sent = []
+
+    class FakeTG:
+        def __init__(self, **kw): ...
+        async def send(self, text, *, markdown=True):
+            sent.append(text); return True
+
+    class FakeSession:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+    ok = asyncio.run(rr._post_tg("x", bot_token=None, chat_id=None,
+                                 tg_factory=FakeTG, session_factory=lambda: FakeSession()))
+    assert ok is False and sent == []       # missing creds → no send
+
+
+def test_format_daily_summary_single_message():
+    from hlanalysis.engine.reconcile_report import format_daily_summary
+    recon = [
+        SlotRecon(alias="v1_pm", realized_pnl=2.17, open_mtm=0.0,
+                  account_value_usd=121.0, positions_known=True, fills_count=8),
+        SlotRecon(alias="v31", realized_pnl=0.0, open_mtm=0.0,
+                  account_value_usd=1299.0, positions_known=True,
+                  venue_realized_pnl=138.12, fills_count=527),
+    ]
+    msg = format_daily_summary(recon, date_str="2026-06-08")
+    # ONE message containing every strategy + a desk total
+    assert msg.count("Desk daily report") == 1
+    assert "v1_pm" in msg and "v31" in msg
+    assert "fills 8" in msg and "fills 527" in msg
+    assert "Total strategy PnL: +140.29" in msg   # 2.17 + 138.12
+    assert "all reconciled" in msg
 
 
 def test_compare_slot_flags_pnl_mismatch_and_prefers_venue():
