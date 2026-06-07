@@ -497,6 +497,28 @@ class HLClient:
             if f.symbol == symbol
         )
 
+    def account_pnl_all_time(self) -> float | None:
+        """All-time account PnL exactly as HL's Portfolio UI shows it: the
+        `portfolio` endpoint's `allTime` pnlHistory tail. This is EQUITY-based
+        (current account value net of deposits/withdrawals) and so includes perp
+        + spot + funding — NOT just closed-trade closedPnl. It can diverge a lot
+        from `realized_pnl_since` for accounts with perp activity (e.g. v1:
+        equity PnL +$362.68 vs realized-closedPnl +$161.90 because perpAllTime is
+        −$350). Returns None if unavailable (e.g. paper mode)."""
+        if self.paper_mode:
+            return None
+        assert self._info is not None
+        try:
+            pf = self._info.portfolio(self.account_address)
+        except Exception as e:
+            _reraise_rest(e)
+        for period, d in pf or []:
+            if period == "allTime":
+                ph = d.get("pnlHistory") or []
+                if ph:
+                    return float(ph[-1][1])
+        return None
+
     def realized_pnl_since(self, since_ts_ns: int) -> float:
         """Sum (closedPnl - fee) across this account's fills since the cutoff.
 

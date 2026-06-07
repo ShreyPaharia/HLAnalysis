@@ -42,15 +42,18 @@ class SlotRecon:
     open_mtm: float
     account_value_usd: float
     positions_known: bool
-    venue_realized_pnl: float | None = None   # authoritative venue realized
-    pnl_mismatch: bool = False                # local vs venue diverge > tolerance
+    venue_realized_pnl: float | None = None   # venue realized closedPnl (Σ closedPnl-fee)
+    account_pnl_all_time: float | None = None # HL portfolio equity-based PnL (matches UI)
+    pnl_mismatch: bool = False                # local vs venue closedPnl diverge > tolerance
     drift: list[Drift] = field(default_factory=list)
 
     @property
     def total_true_pnl(self) -> float:
-        """Authoritative PnL: prefer the venue realized (the daily-loss gate's
-        source of truth) over the corruptible local ledger; fall back to local
-        only when the venue figure is unavailable."""
+        """Authoritative account PnL. Prefer HL's equity-based portfolio PnL (the
+        number on the HL UI; includes perp+spot+funding). Else the venue realized
+        closedPnl, else the local ledger (PM, whose realized lives locally)."""
+        if self.account_pnl_all_time is not None:
+            return self.account_pnl_all_time
         base = self.venue_realized_pnl if self.venue_realized_pnl is not None else self.realized_pnl
         return base + self.open_mtm
 
@@ -68,6 +71,7 @@ def compare_slot(
     qty_tolerance: float,
     venue_realized_pnl: float | None = None,
     pnl_tolerance: float = 1.0,
+    account_pnl_all_time: float | None = None,
 ) -> SlotRecon:
     """Pure three-way-ish compare: DB positions vs venue positions, plus PnL.
 
@@ -107,6 +111,7 @@ def compare_slot(
         account_value_usd=venue.account_value_usd,
         positions_known=venue.positions_known,
         venue_realized_pnl=venue_realized_pnl,
+        account_pnl_all_time=account_pnl_all_time,
         pnl_mismatch=pnl_mismatch,
         drift=drift,
     )
@@ -125,10 +130,16 @@ def format_report(recon: list[SlotRecon]) -> str:
         venue_str = (
             f"{r.venue_realized_pnl:+.2f}" if r.venue_realized_pnl is not None else "n/a"
         )
+        acct_pnl_str = (
+            f"{r.account_pnl_all_time:+.2f}" if r.account_pnl_all_time is not None else "n/a"
+        )
         lines.append(
-            f"  venue_realized={venue_str}  local_realized={r.realized_pnl:+.2f}  "
-            f"open_mtm={r.open_mtm:+.2f}  true_pnl={r.total_true_pnl:+.2f}  "
+            f"  account_pnl(all-time)={acct_pnl_str}  true_pnl={r.total_true_pnl:+.2f}  "
             f"acct_value={r.account_value_usd:.2f}"
+        )
+        lines.append(
+            f"    realized: venue_closedPnl={venue_str}  local={r.realized_pnl:+.2f}  "
+            f"open_mtm={r.open_mtm:+.2f}"
         )
         if not r.positions_known:
             lines.append("  (positions unknown — recon skipped this cycle)")
@@ -164,15 +175,25 @@ def gather_slot(
     db_positions = [(p.symbol, p.qty) for p in dal.all_positions()]
     venue = exec_client.clearinghouse_state()
     venue_realized: float | None = None
+    account_pnl: float | None = None
     if fetch_venue_realized:
         try:
             venue_realized = exec_client.realized_pnl_since(0)
         except Exception:  # noqa: BLE001 — venue PnL read is best-effort; report still useful
             venue_realized = None
+        # Equity-based account PnL (HL portfolio = the UI number). Optional: only
+        # HL implements it; PM clients won't have the method.
+        pnl_fn = getattr(exec_client, "account_pnl_all_time", None)
+        if pnl_fn is not None:
+            try:
+                account_pnl = pnl_fn()
+            except Exception:  # noqa: BLE001
+                account_pnl = None
     return compare_slot(
         alias=alias, db_positions=db_positions, db_realized_pnl=db_realized,
         venue=venue, qty_tolerance=qty_tolerance,
         venue_realized_pnl=venue_realized, pnl_tolerance=pnl_tolerance,
+        account_pnl_all_time=account_pnl,
     )
 
 
@@ -265,6 +286,7 @@ def main() -> None:
             "slots": [
                 {"alias": r.alias, "realized_pnl": r.realized_pnl,
                  "venue_realized_pnl": r.venue_realized_pnl,
+                 "account_pnl_all_time": r.account_pnl_all_time,
                  "pnl_mismatch": r.pnl_mismatch,
                  "open_mtm": r.open_mtm, "total_true_pnl": r.total_true_pnl,
                  "account_value_usd": r.account_value_usd,

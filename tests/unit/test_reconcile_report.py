@@ -196,3 +196,18 @@ def test_compare_slot_no_pnl_mismatch_within_tolerance():
     assert r.pnl_mismatch is False
     assert r.has_drift is False
     assert r.total_true_pnl == 100.4       # still prefers venue
+
+
+def test_account_pnl_all_time_is_headline_true_pnl():
+    # HL portfolio equity PnL ($362.68) is the UI number and must drive true_pnl,
+    # even when closed-trade realized differs ($161.90).
+    r = compare_slot(
+        alias="v1", db_positions=[], db_realized_pnl=161.90,
+        venue=ClearinghouseState(positions=(), account_value_usd=894.07),
+        qty_tolerance=1e-6, venue_realized_pnl=161.90, pnl_tolerance=1.0,
+        account_pnl_all_time=362.68,
+    )
+    assert r.total_true_pnl == 362.68          # equity PnL wins over closedPnl
+    assert r.pnl_mismatch is False             # local==venue closedPnl → no drift
+    text = format_report([r])
+    assert "362.68" in text and "account_pnl" in text
