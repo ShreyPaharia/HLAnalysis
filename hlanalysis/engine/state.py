@@ -470,27 +470,21 @@ class StateDAL:
 
         With the 0003 migration, Router._book_fill writes a Fill row on every
         venue fill (including closed_pnl on reduces), so this calc is finally
-        meaningful for post-hoc analysis. We sum (closed_pnl - fee) across
-        today's fills plus any residual realized_pnl on still-open positions
-        (intra-cycle partial closes).
+        meaningful for post-hoc analysis. The sum of (closed_pnl - fee) across
+        the window's fills IS the authoritative windowed realized-from-trades
+        figure — including the partial-reduce PnL of positions still open. We do
+        NOT add the open positions' accumulated realized_pnl: that PnL is already
+        in the Fill sum, so adding it would double-count any still-open position
+        partially reduced inside the window (SHR-72).
         """
         with _Session(self._engine) as s:
             stmt = select(Fill).where(Fill.ts_ns >= since_ts_ns)
             fills = list(s.exec(stmt).all())
-        with _Session(self._engine) as s:
-            positions = list(s.exec(select(Position)).all())
         # Settlement payouts are not fills (HIP-4 binaries close via settlement,
         # not HL trades), so without this the dominant PnL component of the
         # binary strategy is invisible here (SHR-53/49).
-        # ⚠️ SHR-72: this DOUBLE-COUNTS the realized PnL of a position that has
-        # been partially reduced but is still open — its partial-reduce PnL is in
-        # BOTH the Fill.closed_pnl sum above AND the open-position realized_pnl
-        # sum below. Fully-closed positions are fine (the row is deleted). Fix is
-        # to drop the positions term now that _book_fill writes a Fill row with
-        # closed_pnl on every fill. Tracked; fix before Phase-2 sizing.
         return (
             sum(getattr(f, "closed_pnl", 0.0) - f.fee for f in fills)
-            + sum(p.realized_pnl for p in positions)
             + self.settlement_pnl_since(since_ts_ns)
         )
 
