@@ -276,8 +276,8 @@ class MarketState:
             else:
                 # Same merge rule as the batch ``resample_ohlc`` loaders use: a
                 # scalar tick is a degenerate (price, price, price) bar.
-                # Carry forward the bucket-open timestamp; update OHLC from tick.
-                old_ts = hist[-1][0]
+                # The stored ts is the latest tick in the bucket, matching
+                # ``resample_ohlc`` semantics (bar ts = last sample in window).
                 new_hlc = update_bar((hist[-1][1], hist[-1][2], hist[-1][3]), price, price, price)
                 hist[-1] = (ts, new_hlc[0], new_hlc[1], new_hlc[2])
 

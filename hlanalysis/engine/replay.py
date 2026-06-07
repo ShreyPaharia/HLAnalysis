@@ -79,9 +79,13 @@ class ReplayRunner:
                     reference_price=ref,
                     recent_returns=self._market.recent_returns(
                         self._ref, n=self._recent_returns_n,
+                        now_ns=now_ns,
+                        lookback_seconds=self._recent_returns_n * self._sampling_dt_seconds,
                     ),
                     recent_hl_bars=self._market.recent_hl_bars(
                         self._ref, n=self._recent_returns_n,
+                        now_ns=now_ns,
+                        lookback_seconds=self._recent_returns_n * self._sampling_dt_seconds,
                     ),
                     recent_volume_usd=self._market.recent_volume_usd(
                         q.yes_symbol, now=now_ns
