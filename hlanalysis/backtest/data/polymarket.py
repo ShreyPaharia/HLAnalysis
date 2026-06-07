@@ -856,7 +856,10 @@ class PolymarketDataSource:
     ) -> QuestionView:
         b = entry.get("bucket") or {}
         thresholds: list[float] = b.get("thresholds") or []
-        kv = (("priceThresholds", ",".join(f"{t:.0f}" for t in thresholds)),)
+        kv = (
+            ("priceThresholds", ",".join(f"{t:.0f}" for t in thresholds)),
+            ("bucketLayout", "above_ladder"),
+        )
         is_settled = settled or (now_ns > q.end_ts_ns)
         return QuestionView(
             question_idx=q.question_idx,

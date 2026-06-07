@@ -80,6 +80,59 @@ def test_winning_region_bucket_edges_and_middle():
     assert winning_region(qv, "n1") == (None, None)          # NO of middle → non-contiguous
 
 
+def _above_ladder_qv() -> QuestionView:
+    """PM multi-strike ladder: 3 independent 'above X' binaries interleaved YES/NO."""
+    legs = []
+    for t in [78000, 80000, 82000]:
+        legs += [f"y{t}", f"n{t}"]
+    return QuestionView(
+        question_idx=0, yes_symbol="", no_symbol="", strike=float("nan"),
+        expiry_ns=0, underlying="BTC", klass="priceBucket", period="1d",
+        leg_symbols=tuple(legs),
+        kv=(("priceThresholds", "78000,80000,82000"), ("bucketLayout", "above_ladder")),
+    )
+
+
+def test_above_ladder_yes_legs_map_to_half_lines():
+    qv = _above_ladder_qv()
+    assert winning_region(qv, "y78000") == (78000.0, None)
+    assert winning_region(qv, "y80000") == (80000.0, None)
+    assert winning_region(qv, "y82000") == (82000.0, None)
+
+
+def test_above_ladder_no_legs_map_to_lower_half_line():
+    qv = _above_ladder_qv()
+    assert winning_region(qv, "n78000") == (None, 78000.0)
+    assert winning_region(qv, "n80000") == (None, 80000.0)
+    assert winning_region(qv, "n82000") == (None, 82000.0)
+
+
+def test_contiguous_bucket_unchanged_without_flag():
+    """HL path (no bucketLayout kv) must be byte-identical to the original."""
+    # Same leg_symbols and thresholds as above_ladder_qv but NO bucketLayout flag.
+    legs = []
+    for t in [78000, 80000, 82000]:
+        legs += [f"y{t}", f"n{t}"]
+    qv = QuestionView(
+        question_idx=0, yes_symbol="", no_symbol="", strike=float("nan"),
+        expiry_ns=0, underlying="BTC", klass="priceBucket", period="1d",
+        leg_symbols=tuple(legs),
+        kv=(("priceThresholds", "78000,80000,82000"),),  # no bucketLayout
+    )
+    # Contiguous convention: 3 thresholds → 4 outcome buckets, YES at even index.
+    # y78000 = outcome 0 (lowest): (None, 78000); y80000 = outcome 1: (78000, 80000); y82000 = outcome 2: (80000, 82000)
+    assert winning_region(qv, "y78000") == (None, 78000.0)
+    assert winning_region(qv, "y80000") == (78000.0, 80000.0)
+    assert winning_region(qv, "y82000") == (80000.0, 82000.0)
+
+
+def test_binary_unchanged():
+    qv = _binary_qv()
+    assert winning_region(qv, "@Y") == (80_000.0, None)
+    assert winning_region(qv, "@N") == (None, 80_000.0)
+    assert winning_region(qv, "@Z") == (None, None)
+
+
 # --------------------------------------------------------------------------
 # vol
 # --------------------------------------------------------------------------

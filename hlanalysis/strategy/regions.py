@@ -53,8 +53,21 @@ def winning_region(
         return (None, None)
 
     idx = qv.leg_symbols.index(symbol)
-    outcome_pos = idx // 2
     side_idx = idx % 2  # 0=YES, 1=NO
+
+    # PM above-ladder layout: each pair (YES, NO) at index 2k/2k+1 is an
+    # independent "above thr[k]" binary.  YES wins iff underlying > thr[k];
+    # NO wins iff underlying <= thr[k].
+    if kv_get(qv, "bucketLayout") == "above_ladder":
+        k = idx // 2
+        if k >= len(thr):
+            return (None, None)
+        if side_idx == 0:
+            return (thr[k], None)   # YES: above thr[k]
+        else:
+            return (None, thr[k])   # NO: at-or-below thr[k]
+
+    outcome_pos = idx // 2
 
     # YES region for this outcome bucket.
     if outcome_pos == 0:
