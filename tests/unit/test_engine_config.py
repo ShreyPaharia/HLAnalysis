@@ -172,14 +172,10 @@ def test_deploy_config_substitutes_env(monkeypatch, tmp_path):
     monkeypatch.setenv("PM_CLOB_API_SECRET_V1", "stub-secret-v1")
     monkeypatch.setenv("PM_CLOB_API_PASSPHRASE_V1", "stub-pass-v1")
     monkeypatch.setenv("PM_FUNDER_ADDRESS_V1", "0xstubfunder-v1")
-    # PM multi-strike bucket slots (BTC + ETH). paper_mode never signs, but
+    # PM multi-strike bucket slot (ETH only). BTC multi-strike is folded onto
+    # v31_pm (no separate account). paper_mode never signs, but
     # load_deploy_config validates every referenced env var, so these must be
     # set (dummy values are fine) for the production config to load.
-    monkeypatch.setenv("PM_PRIVATE_KEY_BTC_MS", "0xstub-btcms")
-    monkeypatch.setenv("PM_CLOB_API_KEY_BTC_MS", "stub-key-btcms")
-    monkeypatch.setenv("PM_CLOB_API_SECRET_BTC_MS", "stub-secret-btcms")
-    monkeypatch.setenv("PM_CLOB_API_PASSPHRASE_BTC_MS", "stub-pass-btcms")
-    monkeypatch.setenv("PM_FUNDER_ADDRESS_BTC_MS", "0xstubfunder-btcms")
     monkeypatch.setenv("PM_PRIVATE_KEY_ETH_MS", "0xstub-ethms")
     monkeypatch.setenv("PM_CLOB_API_KEY_ETH_MS", "stub-key-ethms")
     monkeypatch.setenv("PM_CLOB_API_SECRET_ETH_MS", "stub-secret-ethms")
@@ -195,8 +191,8 @@ def test_deploy_config_substitutes_env(monkeypatch, tmp_path):
     assert cfg.accounts["v31_pm"].chain_id == 137
     assert "v1_pm" in cfg.accounts
     assert cfg.accounts["v1_pm"].funder_address == "0xstubfunder-v1"
-    assert "v31_pm_btc_ms" in cfg.accounts
-    assert cfg.accounts["v31_pm_btc_ms"].funder_address == "0xstubfunder-btcms"
+    # BTC multi-strike folds onto v31_pm (no separate account); only ETH is new.
+    assert "v31_pm_btc_ms" not in cfg.accounts
     assert "v31_pm_eth_ms" in cfg.accounts
     assert cfg.accounts["v31_pm_eth_ms"].funder_address == "0xstubfunder-ethms"
 
