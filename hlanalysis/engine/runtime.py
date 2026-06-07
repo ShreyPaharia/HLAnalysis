@@ -1068,7 +1068,15 @@ class EngineRuntime:
             for p in positions_db
         ]
         breached = slot.risk.breached_stops(sps, books)
+        # SHR-48: in-flight exit guard — if an exit/stop IOC is already live
+        # for a position's question_idx (pending/open/partially_filled), don't
+        # stack another full-size IOC before the prior ACK resolves.  The ~1 Hz
+        # loop would otherwise fire a fresh order every tick, walking a thin
+        # book to zero.  We build the set once per enforcement pass.
+        live_question_idxs = {o.question_idx for o in slot.dal.live_orders()}
         for sp in breached:
+            if sp.question_idx in live_question_idxs:
+                continue  # exit already in flight; skip until ACK clears it
             await self.bus.publish(StopLossTriggered(
                 ts_ns=now, account_alias=slot.alias,
                 question_idx=sp.question_idx, symbol=sp.symbol, qty=sp.qty,

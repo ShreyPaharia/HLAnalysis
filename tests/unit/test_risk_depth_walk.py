@@ -229,7 +229,9 @@ def test_depth_walk_uses_bid_ladder_for_sell():
         limit_price=0.90, cloid="c", time_in_force="ioc",
         reduce_only=True,
     )
-    # reduce_only → exit path; depth-walk gate is entry-only so this approves.
-    # (Confirmed by the existing risk gate: exits return approved_exit early.)
+    # reduce_only → exit path; exits now run the depth-walk clamp (SHR-48).
+    # bid_levels has 10 @ 0.90 (at-limit) and 100 @ 0.85 (below limit).
+    # Only the 0.90 level is usable → clamped_size=10, still approved.
     v = gate.check_pre_trade(intent, _inputs(book))
     assert v.approved
+    assert v.clamped_size == 10.0

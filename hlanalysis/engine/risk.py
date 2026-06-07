@@ -63,7 +63,13 @@ class RiskGate:
             return RiskVerdict(False, "size_invalid")
 
         if is_exit:
-            return RiskVerdict(True, "approved_exit")
+            # Exits skip entry gates, but MUST respect the slippage budget so a
+            # stop/exit IOC can't walk a thin PM book down (SHR-48).  The depth-walk
+            # clamp is reused from the entry path; on a budget breach we clamp size
+            # (a partial reduce beats none) rather than veto outright.
+            # min_order_notional is deliberately skipped for exits — stopping at
+            # whatever partial fill is available is always better than not stopping.
+            return self._depth_walk_clamp(intent, inp, approve_reason="approved_exit")
 
         # 1. Allowlist
         matched = match_question(
@@ -150,42 +156,10 @@ class RiskGate:
         # explicitly raises the limit to walk multiple price levels. Disabled
         # when cap = 0 (HL default) or when the venue feed doesn't populate
         # book levels.
-        slip_cap = self.cfg.global_.max_slippage_pct
-        clamped_size: float | None = None
-        if slip_cap > 0 and intent.size > 0 and intent.limit_price > 0:
-            levels = (
-                inp.book.ask_levels if intent.side == "buy"
-                else inp.book.bid_levels
-            )
-            if levels:
-                if intent.side == "buy":
-                    usable = [(px, sz) for px, sz in levels if px <= intent.limit_price]
-                else:
-                    usable = [(px, sz) for px, sz in levels if px >= intent.limit_price]
-                if not usable:
-                    return RiskVerdict(False, "depth_walk_no_fill",
-                                       {"shortfall": f"{intent.size:.4f}"})
-                remaining = intent.size
-                cost = 0.0
-                filled = 0.0
-                for px, sz in usable:
-                    take = min(remaining, sz)
-                    cost += take * px
-                    filled += take
-                    remaining -= take
-                    if remaining <= 1e-9:
-                        break
-                avg_px = cost / filled
-                slip = (avg_px - intent.limit_price) / intent.limit_price
-                if intent.side == "sell":
-                    slip = -slip
-                if slip > slip_cap:
-                    return RiskVerdict(False, "depth_walk_slip",
-                                       {"avg_px": f"{avg_px:.5f}",
-                                        "limit": f"{intent.limit_price:.5f}",
-                                        "slip_pct": f"{slip*100:.3f}"})
-                if remaining > 1e-9:
-                    clamped_size = filled
+        clamp_verdict = self._depth_walk_clamp(intent, inp, approve_reason="approved")
+        if not clamp_verdict.approved:
+            return clamp_verdict
+        clamped_size = clamp_verdict.clamped_size
 
         # Min-order-notional floor. Applied to the *effective* size (clamped
         # if the depth-walk shrank it, otherwise intent.size). Rejects orders
@@ -202,6 +176,75 @@ class RiskGate:
                                     "min_ntl": f"{min_ntl:.2f}"})
 
         return RiskVerdict(True, "approved", clamped_size=clamped_size)
+
+    # ---- depth-walk helper (shared by entry and exit paths) ----
+
+    def _depth_walk_clamp(
+        self, intent: OrderIntent, inp: RiskInputs, *, approve_reason: str,
+    ) -> RiskVerdict:
+        """Apply the depth-walk slippage clamp to an intent.
+
+        Restricts the book ladder to levels marketable at the intent's limit
+        price, then either:
+          * returns ``RiskVerdict(True, approve_reason)`` when the full size
+            is fillable within the slip cap,
+          * returns ``RiskVerdict(True, approve_reason, clamped_size=filled)``
+            when only partial depth is available at-limit (caller should use
+            the reduced size — a partial fill beats none, and the stop-loss /
+            topup loop will re-fire),
+          * returns ``RiskVerdict(False, "depth_walk_no_fill")`` when no level
+            is at-or-better-than the limit price,
+          * returns ``RiskVerdict(True, approve_reason)`` with no clamp when
+            the slip cap is 0 (HL default) or no level data is available (BBO
+            feeds that don't populate bid/ask_levels).
+
+        Disabled (no-op → approve) when ``max_slippage_pct == 0`` or when the
+        relevant side of the book has no level data.
+        """
+        slip_cap = self.cfg.global_.max_slippage_pct
+        if slip_cap <= 0 or intent.size <= 0 or intent.limit_price <= 0:
+            return RiskVerdict(True, approve_reason)
+
+        levels = (
+            inp.book.ask_levels if intent.side == "buy"
+            else inp.book.bid_levels
+        )
+        if not levels:
+            return RiskVerdict(True, approve_reason)
+
+        if intent.side == "buy":
+            usable = [(px, sz) for px, sz in levels if px <= intent.limit_price]
+        else:
+            usable = [(px, sz) for px, sz in levels if px >= intent.limit_price]
+
+        if not usable:
+            return RiskVerdict(False, "depth_walk_no_fill",
+                               {"shortfall": f"{intent.size:.4f}"})
+
+        remaining = intent.size
+        cost = 0.0
+        filled = 0.0
+        for px, sz in usable:
+            take = min(remaining, sz)
+            cost += take * px
+            filled += take
+            remaining -= take
+            if remaining <= 1e-9:
+                break
+
+        avg_px = cost / filled
+        slip = (avg_px - intent.limit_price) / intent.limit_price
+        if intent.side == "sell":
+            slip = -slip
+
+        if slip > slip_cap:
+            return RiskVerdict(False, "depth_walk_slip",
+                               {"avg_px": f"{avg_px:.5f}",
+                                "limit": f"{intent.limit_price:.5f}",
+                                "slip_pct": f"{slip*100:.3f}"})
+
+        clamped_size = filled if remaining > 1e-9 else None
+        return RiskVerdict(True, approve_reason, clamped_size=clamped_size)
 
     # ---- continuous checks ----
 
