@@ -471,6 +471,12 @@ class StateDAL:
         # Settlement payouts are not fills (HIP-4 binaries close via settlement,
         # not HL trades), so without this the dominant PnL component of the
         # binary strategy is invisible here (SHR-53/49).
+        # ⚠️ SHR-72: this DOUBLE-COUNTS the realized PnL of a position that has
+        # been partially reduced but is still open — its partial-reduce PnL is in
+        # BOTH the Fill.closed_pnl sum above AND the open-position realized_pnl
+        # sum below. Fully-closed positions are fine (the row is deleted). Fix is
+        # to drop the positions term now that _book_fill writes a Fill row with
+        # closed_pnl on every fill. Tracked; fix before Phase-2 sizing.
         return (
             sum(getattr(f, "closed_pnl", 0.0) - f.fee for f in fills)
             + sum(p.realized_pnl for p in positions)
