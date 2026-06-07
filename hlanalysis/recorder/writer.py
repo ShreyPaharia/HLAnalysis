@@ -35,10 +35,13 @@ class ParquetWriter:
         root: Path,
         flush_interval_s: float = 30.0,
         max_buffer_rows: int = 5000,
+        max_total_buffer_rows: int = 500_000,  # global backstop (SHR-63)
     ) -> None:
         self.root = Path(root)
         self.flush_interval_s = flush_interval_s
         self.max_buffer_rows = max_buffer_rows
+        self.max_total_buffer_rows = max_total_buffer_rows
+        self.dropped_rows = 0
         self._buffers: dict[tuple, list[dict[str, Any]]] = defaultdict(list)
         self._last_flush = time.monotonic()
         self._flush_seq = 0
@@ -56,6 +59,7 @@ class ParquetWriter:
             hour,
         )
         self._buffers[key].append(event_dict)
+        self._enforce_global_cap()
         if len(self._buffers[key]) >= self.max_buffer_rows:
             self._flush_key(key)
 
@@ -93,6 +97,29 @@ class ParquetWriter:
             log.exception("failed to write %s (%d rows)", path, len(rows))
             # Re-buffer so we don't lose the events; subsequent flush may succeed.
             self._buffers[key].extend(rows)
+            self._enforce_global_cap()
+
+    def _enforce_global_cap(self) -> None:
+        """SHR-63: on a persistent write failure _flush_key re-buffers rows; on
+        the OOMScore=-500 recorder that would OOM-kill the +500 live engine.
+        Cap total buffered rows across all keys; drop the OLDEST rows (FIFO) and
+        count them so a monitor/alert can see data loss instead of an OOM."""
+        total = sum(len(r) for r in self._buffers.values())
+        if total <= self.max_total_buffer_rows:
+            return
+        # Drop oldest-first across keys until under the cap. Buffers are append
+        # ordered, so index 0 of each key list is oldest for that key; drop from
+        # the largest key first as a simple, bounded heuristic.
+        while total > self.max_total_buffer_rows and self._buffers:
+            key = max(self._buffers, key=lambda k: len(self._buffers[k]))
+            rows = self._buffers[key]
+            if not rows:
+                del self._buffers[key]
+                continue
+            rows.pop(0)
+            self.dropped_rows += 1
+            total -= 1
+        log.warning("recorder buffer cap hit; dropped_rows=%d", self.dropped_rows)
 
     @staticmethod
     def _safe_symbol(symbol: str) -> str:
