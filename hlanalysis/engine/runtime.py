@@ -895,6 +895,13 @@ class EngineRuntime:
                     await asyncio.to_thread(
                         slot.exec_client.cancel, cloid=cloid, symbol=symbol,
                     )
+                # SHR-44: bound the question set on the 1 GB box. Retain a
+                # generous window after settlement so late reconciles / settlement
+                # Exits still find the question, then drop it.
+                self.market_state.evict_settled_questions(
+                    now_ns=self._now_ns(),
+                    retain_after_settle_ns=6 * 3600 * 1_000_000_000,  # 6h
+                )
                 slot.last_reconcile_ns = now
             except Exception as exc:
                 # An expected, self-recovering venue read failure (HL 429 burst,
