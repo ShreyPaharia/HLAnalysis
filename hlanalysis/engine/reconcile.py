@@ -164,10 +164,31 @@ class Reconciler:
                 )
                 logger.info(
                     "reconcile_fill_discovered cloid={} qidx={} symbol={} "
-                    "n_fills={} net_delta={:g} (order marked filled; position "
-                    "table NOT auto-applied — verify router booked it)",
+                    "n_fills={} net_delta={:g}",
                     cloid, db_o.question_idx, db_o.symbol, len(fills), net_delta,
                 )
+                # SHR-46: apply the venue-confirmed position so the re-exit loop
+                # can't re-fire. Use the venue's reported qty/avg_entry
+                # (authoritative), keyed off db_o.question_idx which is always
+                # available — unlike symbol_to_question which may be absent.
+                # Only applies when apply_position_changes=True (HL). PM stays
+                # alert-only: position truth there comes from the fill ledger +
+                # the endDate gamma settlement, not from reconcile injection.
+                if self.apply_position_changes:
+                    vp = next(
+                        (p for p in venue_state.positions if p.symbol == db_o.symbol),
+                        None,
+                    )
+                    if vp is not None and abs(vp.qty) > 1e-9:
+                        self.dal.upsert_position(Position(
+                            question_idx=db_o.question_idx,
+                            symbol=db_o.symbol,
+                            qty=vp.qty,
+                            avg_entry=vp.avg_entry,
+                            realized_pnl=0.0,
+                            last_update_ts_ns=now_ns,
+                            stop_loss_price=0.0,
+                        ))
                 drift.append(ReconcileDrift(
                     ts_ns=now_ns, account_alias=self.account_alias, case="state_mismatch", cloid=cloid,
                     question_idx=db_o.question_idx,
