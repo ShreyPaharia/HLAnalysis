@@ -384,6 +384,25 @@ class MarketState:
         self._questions[question_idx] = dataclasses.replace(q, settled=True)
         return True
 
+    def evict_settled_questions(
+        self, *, now_ns: int, retain_after_settle_ns: int,
+    ) -> int:
+        """Drop questions that are settled AND whose expiry is older than the
+        retain window. Bounds _questions on the 1 GB box (SHR-44) and shrinks
+        the per-tick scan set. Returns the number evicted. Invalidates the
+        symbol→question cache when anything is removed."""
+        victims = [
+            idx for idx, q in self._questions.items()
+            if q.settled
+            and q.expiry_ns
+            and (now_ns - q.expiry_ns) > retain_after_settle_ns
+        ]
+        for idx in victims:
+            del self._questions[idx]
+        if victims:
+            self._sym_to_q_cache = None
+        return len(victims)
+
     def _mark_settled(self, ev: SettlementEvent) -> None:
         # SettlementEvent.symbol is one leg; find the question whose leg_symbols
         # contains it and mark it settled. Multi-outcome (priceBucket) has up to
