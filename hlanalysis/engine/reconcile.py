@@ -187,7 +187,7 @@ class Reconciler:
                             avg_entry=vp.avg_entry,
                             realized_pnl=0.0,
                             last_update_ts_ns=now_ns,
-                            stop_loss_price=0.0,
+                            stop_loss_price=STOP_DISABLED_SENTINEL,
                         ))
                 drift.append(ReconcileDrift(
                     ts_ns=now_ns, account_alias=self.account_alias, case="state_mismatch", cloid=cloid,
