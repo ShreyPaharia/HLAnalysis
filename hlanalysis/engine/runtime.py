@@ -242,6 +242,12 @@ class EngineRuntime:
     _venue_pnl_failures: dict[str, int] = field(default_factory=dict)
     # Process-wide counter for events ingested (one WS feed, shared).
     events_ingested: int = 0
+    # Wall-clock ns of the last ingested market-data event, across ALL symbols
+    # (shared MarketState). Lets per-symbol staleness checks distinguish "the
+    # whole feed went silent" (genuine death → alert) from "this one book is
+    # quiet while others tick" (calm illiquid market → not stale). 0 until the
+    # first event arrives, so checks must guard on > 0.
+    _last_ingest_ns: int = 0
     # Populated by run() so external observers (heartbeat consumers, tests)
     # can read live slot state without rebuilding clones.
     slots: list[AccountSlot] = field(default_factory=list)
@@ -536,6 +542,7 @@ class EngineRuntime:
         ev = _remap_reference_symbol(ev)
         self.market_state.apply(ev)
         self.events_ingested += 1
+        self._last_ingest_ns = self._now_ns()
         if isinstance(ev, _PRICE_EVENT_TYPES):
             self._market_dirty.set()
         if not isinstance(ev, QuestionMetaEvent):
@@ -1047,7 +1054,24 @@ class EngineRuntime:
                     }
                     books_only_held = {sym: self.market_state.book(sym) for sym in held_symbols}
                     books_only_held = {s: b for s, b in books_only_held.items() if b is not None}
-                    stale_now = set(slot.risk.stale_books(books_only_held, now_ns=now))
+                    # A single held book going quiet while the rest of the feed is
+                    # still flowing is a calm/illiquid market (e.g. a deep PM
+                    # favorite near resolution with an empty bid side), not stale
+                    # data — the last book is still the current truth. Only treat
+                    # a held leg's idle-timeout as a StaleDataHalt when the WHOLE
+                    # feed has gone silent (genuine ingest/connection death; also
+                    # surfaced by FeedStale/FeedDown). This stops the per-favorite
+                    # alert flood while preserving the dead-feed alarm. The idle
+                    # window reuses the slot's stale_data_halt_seconds.
+                    stale_ns = slot.cfg.global_.stale_data_halt_seconds * 1_000_000_000
+                    global_silent = (
+                        self._last_ingest_ns > 0
+                        and (now - self._last_ingest_ns) > stale_ns
+                    )
+                    stale_now = (
+                        set(slot.risk.stale_books(books_only_held, now_ns=now))
+                        if global_silent else set()
+                    )
                     # Evict recovered symbols so a future stale episode re-alerts.
                     slot.stale_alerted_symbols &= stale_now
                     for sym in stale_now:

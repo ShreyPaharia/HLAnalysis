@@ -59,19 +59,20 @@ def _runtime(tmp_path):
     return rt, rt.slots[0]
 
 
-async def test_continuous_checks_publishes_stale_halt_when_position_held(tmp_path):
-    rt, slot = _runtime(tmp_path)
-    # Held position on "#150"; stop disabled (sentinel) so no stop-loss fires.
+def _hold_stale_book(rt, slot):
+    """Held position on '#150' with a deep-past book (age >> threshold)."""
     slot.dal.upsert_position(Position(
         question_idx=999, symbol="#150", qty=10.0, avg_entry=0.9,
         realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
     ))
-    # Stale book for that symbol: exchange_ts in the deep past → age >> 30s.
     rt.market_state.apply(BboEvent(
         venue="hyperliquid", symbol="#150", product_type=ProductType.SPOT,
         mechanism=Mechanism.CLOB, bid_px=0.9, bid_sz=10.0, ask_px=0.92,
         ask_sz=10.0, exchange_ts=1, local_recv_ts=1,
     ))
+
+
+async def _run_one_iteration(rt, slot):
     seen = rt.bus.subscribe()
     task = asyncio.create_task(rt._continuous_checks_loop(slot))
     await asyncio.sleep(0.2)        # let one iteration run
@@ -82,10 +83,34 @@ async def test_continuous_checks_publishes_stale_halt_when_position_held(tmp_pat
         await task
     except asyncio.CancelledError:
         pass
-
     events = []
     while not seen.empty():
         events.append(seen.get_nowait())
+    return events
+
+
+async def test_continuous_checks_publishes_stale_halt_when_global_feed_silent(tmp_path):
+    """Genuine feed death: a held leg's book is stale AND the whole feed has gone
+    silent (no events ingested for >threshold). StaleDataHalt must fire."""
+    rt, slot = _runtime(tmp_path)
+    _hold_stale_book(rt, slot)
+    rt._last_ingest_ns = 1          # last global event in the deep past → silent
+    events = await _run_one_iteration(rt, slot)
     assert any(
         isinstance(e, StaleDataHalt) and e.symbol == "#150" for e in events
     ), f"expected StaleDataHalt for #150, got {[type(e).__name__ for e in events]}"
+
+
+async def test_continuous_checks_suppresses_stale_halt_when_global_feed_alive(tmp_path):
+    """A single held favorite's book going quiet while the global feed is still
+    flowing is a quiet market, not stale data — no StaleDataHalt should fire.
+
+    This is the PM-favorite flood: '#150' hasn't printed in minutes but other
+    symbols are ticking, so last_ingest_ns is recent."""
+    rt, slot = _runtime(tmp_path)
+    _hold_stale_book(rt, slot)
+    rt._last_ingest_ns = rt._now_ns()   # feed delivered an event just now
+    events = await _run_one_iteration(rt, slot)
+    assert not any(
+        isinstance(e, StaleDataHalt) for e in events
+    ), f"expected no StaleDataHalt while feed alive, got {[type(e).__name__ for e in events]}"
