@@ -88,6 +88,22 @@ MAPPING=(
   "PM_CLOB_API_SECRET_V1|/hl-engine/pm-clob-api-secret-v1|SecureString|no"
   "PM_CLOB_API_PASSPHRASE_V1|/hl-engine/pm-clob-api-passphrase-v1|SecureString|no"
   "PM_FUNDER_ADDRESS_V1|/hl-engine/pm-funder-address-v1|String|no"
+
+  # Polymarket multi-strike bucket slots (v31_pm_btc_ms / v31_pm_eth_ms).
+  # deploy.yaml references these, and load_deploy_config validates EVERY
+  # referenced env var even in paper_mode — so they must be present in SSM
+  # before deploying the bucket slots. paper_mode never signs, so dummy
+  # (non-placeholder) values are fine until the live flip.
+  "PM_PRIVATE_KEY_BTC_MS|/hl-engine/pm-private-key-btc-ms|SecureString|no"
+  "PM_CLOB_API_KEY_BTC_MS|/hl-engine/pm-clob-api-key-btc-ms|SecureString|no"
+  "PM_CLOB_API_SECRET_BTC_MS|/hl-engine/pm-clob-api-secret-btc-ms|SecureString|no"
+  "PM_CLOB_API_PASSPHRASE_BTC_MS|/hl-engine/pm-clob-api-passphrase-btc-ms|SecureString|no"
+  "PM_FUNDER_ADDRESS_BTC_MS|/hl-engine/pm-funder-address-btc-ms|String|no"
+  "PM_PRIVATE_KEY_ETH_MS|/hl-engine/pm-private-key-eth-ms|SecureString|no"
+  "PM_CLOB_API_KEY_ETH_MS|/hl-engine/pm-clob-api-key-eth-ms|SecureString|no"
+  "PM_CLOB_API_SECRET_ETH_MS|/hl-engine/pm-clob-api-secret-eth-ms|SecureString|no"
+  "PM_CLOB_API_PASSPHRASE_ETH_MS|/hl-engine/pm-clob-api-passphrase-eth-ms|SecureString|no"
+  "PM_FUNDER_ADDRESS_ETH_MS|/hl-engine/pm-funder-address-eth-ms|String|no"
 )
 
 # Dummy-value guard: the .env.local.example ships placeholder addresses like
