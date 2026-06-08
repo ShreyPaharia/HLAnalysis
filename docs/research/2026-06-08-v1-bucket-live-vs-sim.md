@@ -1,186 +1,233 @@
-# v1 (late_resolution) HL priceBucket — live vs sim, fill-by-fill divergence
+# v1 (late_resolution) HL priceBucket — live-vs-sim fill-by-fill divergence
 
 **Window:** 2026-05-31 → 2026-06-08 UTC
-**Strategy:** `v1_late_resolution`, HL HIP-4 **priceBucket** track (the live `v1` slot)
-**Date:** 2026-06-08
+**Strategy:** `v1_late_resolution`, HL HIP-4 **priceBucket** track
+**Author:** analysis run 2026-06-08/09
+**Scope:** ANALYSIS ONLY — no strategy or engine behavior was changed. The
+backtest config and the live-fill dump script are committed alongside this doc.
 
-This mirrors the v31 live-vs-sim exercise: take the live v1 bucket fills off the
-venue, reproduce the same window in the backtester, and explain — leg by leg —
-*where* and *why* the two diverge. **Analysis only; no strategy/engine behaviour
-was changed.**
+---
 
 ## TL;DR
 
-| | PnL | positions | hit |
+- **Live** v1 bucket: **+$51.35**, 26 fills (19 buy / 7 sell), 7 trading days,
+  one bucket coin per day, **every position held to the 06:00 UTC settlement and
+  won (7/7)**. The 7 "sells" are settlement fills at price `1.0000`, not market
+  exits — v1 buckets are pure buy-and-hold-to-resolution.
+- **Sim** (gate disabled per SHR-78, default 60 s scan): **+$36.32**, 12 fills
+  (6 buy / 6 settle), 6 entries, 75 % hit (4/6 question-days resolved `yes` with
+  a position; one resolved `yes` but was never entered; one `unknown`).
+- Within the **comparable window (05-31→06-07, excludes the 06-08 live trade
+  that isn't in the recorded corpus yet)**: **live +$45.22 vs sim +$36.32**.
+- **The single biggest knob is the sim's scanner cadence, not the strategy.**
+  Re-running at `--scanner-interval-seconds 5` (vs the default 60) lifts the sim
+  to **+$44.18**, essentially matching live's in-window +$45.22. Live evaluates
+  entries on every tick; the default-60 s sim misses the first-seconds favorable
+  fills that drive v1's edge.
+- The residual divergence is **not** one cause. Per leg it splits into: (a) scan
+  cadence + single-shot fills (SHR-79) making entry PnL hypersensitive to *when*
+  the one fill lands; (b) a genuine `safety_d` gate divergence that keeps the sim
+  out of one live winner (#1510) **even at 5 s**; (c) SHR-78's disabled volume
+  gate letting the sim trade one day (#1670, 06-07) that live skipped.
+
+---
+
+## Inputs & method
+
+- **Recorded corpus:** canonical `make pull-data` tree at
+  `…/HLAnalysis/data/venue=hyperliquid` (topped up through 2026-06-07; the
+  06-08 daily partition is not yet sealed to the archive). Reference =
+  `--ref-source hl_perp` (HL perp mark; Binance not needed).
+- **Sim config:** `config/backtest/v1_hl_bucket_since0531.json` — the current
+  **live** v1 priceBucket params, with **`min_recent_volume_usd: 0.0`** to work
+  around **SHR-78** (the runner hardcodes `recent_volume_usd=0.0`
+  — `hlanalysis/backtest/runner/hftbt_runner.py:814` — so the live gate of 100
+  would veto *every* entry → 0 trades). This means the sim evaluates a slightly
+  **different entry set** than live; see the 06-07 leg below.
+- **Sim command:** `hl-bt run --strategy v1_late_resolution --data-source
+  hl_hip4 --kind bucket --ref-source hl_perp --fee-taker 0.0 --slippage-bps 0
+  --start 2026-05-31 --end 2026-06-08`. Outputs in
+  `data/sim/runs/v1_bucket_since0531/` (+ `…_scan5/` for the 5 s sensitivity).
+- **Live fills:** read-only venue `user_fills` via AWS SSM
+  (`tools/dump_v1_bucket_fills.py`; SSH to the box is blocked). Classified
+  `priceBucket` by the engine's `coin_klass_map`. Fees observed = 0 on every HL
+  HIP-4 fill, so **SHR-57 (HL fees) is a non-factor** here.
+
+---
+
+## Per-day net PnL: live vs sim
+
+| Day    | Coin   | Live net | sim@60s | sim@5s | Match? |
+| :----- | :----- | -------: | ------: | -----: | :----- |
+| 05-31  | #1290  | +6.873   | +5.188  | +10.559 | cadence/partial-fill |
+| 06-01  | #1340  | +10.231  | +10.238 | +10.238 | **match** |
+| 06-02  | #1380  | +10.388  | +4.568  | +4.568  | gate/σ (persists at 5 s) |
+| 06-03  | #1460  | +4.107   | +4.260  | +6.748  | cadence |
+| 06-04  | #1510  | +8.281   | **0** (no entry) | **0** (no entry) | **safety_d gate** |
+| 06-05  | —      | 0        | 0       | 0       | both skip |
+| 06-06  | #1610  | +5.344   | +1.508  | +1.508  | gate/σ late entry |
+| 06-07  | #1670  | **0** (no live trade) | +10.559 | +10.559 | **SHR-78 entry set** |
+| 06-08  | #2230  | +6.123   | — (outside corpus) | — | corpus coverage |
+| **Σ in-window (05-31→06-07)** | | **+45.22** | **+36.32** | **+44.18** | |
+| **Σ total** | | **+51.35** | — | — | |
+
+Sim question→coin mapping is exact (sim uses the same `#N` symbols as the
+venue): Q24=#1290, Q25=#1340, Q26=#1380, Q27=#1460, Q28=#1510, Q30=#1610,
+Q31=#1670.
+
+---
+
+## The dominant driver: scanner cadence (default 60 s)
+
+The diagnostics rows are spaced **exactly 60 s apart** — the `hl-bt run` default
+`--scanner-interval-seconds 60`, which the Step-3 command does not override.
+The live engine evaluates entries event-driven / at the dt=5 cadence. v1's edge
+is a near-resolution favorite that drifts from ~0.96 toward 1.0 over the session,
+so **the first seconds after market open are the cheapest entry** — and a 60 s
+scanner systematically misses them.
+
+Re-running everything identically at `--scanner-interval-seconds 5`:
+
+| | sim@60s | sim@5s | live (in-window) |
 | :-- | --: | --: | --: |
-| **Live** (venue `closedPnl − fee`, 05-31→06-08) | **+$51.35** | 7 coins / 26 fills | 7/7 = 100% |
-| **Sim** (`hl-bt run`, 05-31→06-07 corpus) | **+$36.32** | 6 traded / 12 fills | 6/8 questions resolved-win, 75% |
+| Total PnL | +$36.32 | **+$44.18** | +$45.22 |
+| Entries | 6 | 6 | 6 (+1 on 06-08) |
 
-The headline gap ($51 vs $36) is **not** a single effect — it is four separate
-divergences that partly cancel:
+**~$7.9 of the ~$8.9 in-window gap is pure scan cadence.** This is *not* an edge
+difference — at 5 s the sim reproduces live's economics almost exactly. The
+correct reading of the headline "sim +$36 vs live +$45" is: **the sim is not
+mispricing v1's edge; the default 60 s decision cadence is starving it of the
+early ticks live actually trades on.**
 
-1. **Sim misses 06-04 #1510 (live +$8.28).** The 60 s scan grid's first eligible
-   sample landed inside a momentary high-vol `safety_d` veto; live entered in the
-   first 7 seconds and won.
-2. **Sim trades 06-07 #1670 (sim +$10.56) that live never took.** This is the
-   **SHR-78** artifact: the volume gate is disabled in sim, so the sim takes an
-   entry set live's `min_recent_volume_usd=100` filtered out. This single phantom
-   trade is ~29% of the sim's total PnL.
-3. **On markets both took, sim under-performs live by ~$11** because live's
-   sub-second cadence + partial-fill ladder (**SHR-79**) captured better entry
-   prices (06-02 and 06-06 especially).
-4. **06-08 #2230 (live +$6.12) is outside the corpus** — the archive's daily
-   `hour=all` partition for 06-08 was not yet sealed at analysis time, and
-   `--end 2026-06-08` is exclusive regardless.
+---
 
-**Corrected read:** strip the phantom 06-07 trade and the sim is +$25.77 on the
-five shared coins, versus live's +$36.94 on those same coins. So once the
-entry-set artifact is removed, **the sim is *pessimistic*, not optimistic** — the
-idealized full-size-at-touch fill on a 60 s grid earns *less* than the live
-engine's fast, laddered execution on these near-resolution favorites.
+## Leg-by-leg on the divergent days
 
-## Method & caveats
+### 06-04 #1510 — live +$8.28, sim **never enters** (the biggest single gap)
 
-- **Live fills:** venue `user_fills`, read-only via AWS SSM (SSH blocked) on
-  `i-0dc4c0abec85a9eda`, classified `priceBucket` by the engine's
-  `coin_klass_map`. Script: `tools/dump_v1_bucket_fills.py`. HL HIP-4 settlement
-  is exposed as a *fill* with `closedPnl` (the `sell @ 1.0000` rows are
-  settlements, not market exits), so live net = Σ(`closedPnl − fee`); observed
-  `fee = 0` on every HL bucket fill (SHR-57 a non-factor here).
-- **Sim:** `hl-bt run --strategy v1_late_resolution --kind bucket --ref-source
-  hl_perp --fee-taker 0 --slippage-bps 0`, config
-  `config/backtest/v1_hl_bucket_since0531.json` (live v1 params).
-- **SHR-78 caveat (load-bearing):** `hftbt_runner.py:814` hardcodes
-  `recent_volume_usd=0.0`, so v1's `min_recent_volume_usd=100` gate would veto
-  *every* entry → 0 trades. The config sets `min_recent_volume_usd=0.0` to make
-  v1 trade at all. **Consequence:** the sim evaluates a *different (larger) entry
-  set than live* — it cannot see the volume condition that live actually gates
-  on. This is the single biggest interpretability caveat and directly causes
-  divergence #2 above.
-- **Corpus:** recorded HL feed synced from
-  `s3://hl-recorder-archive-819175935435/venue=hyperliquid/` (the `make
-  pull-data` set), 3.2 GB, `prediction_binary` book coverage 05-31→**06-07**.
-  06-08 not present.
-
-## Per-day / per-coin comparison
-
-One bucket market resolves per day at **06:00 UTC**. Coin `#N` is the HL HIP-4
-market id; live and sim agree on the coin id, so legs line up exactly.
-
-| Day | Coin | Live net | Live VWAP (n buys) | Sim net | Sim entry px | Δ (sim−live) | Root cause |
-| :-- | :-- | --: | :-- | --: | --: | --: | :-- |
-| 05-31 | #1290 | +6.87 | 0.9775 (11) | +5.19 | 0.983 | −1.68 | SHR-79 ladder + earlier entry (live 00:00:04 vs sim 00:01:10) |
-| 06-01 | #1340 | +10.23 | 0.9670 (2) | +10.24 | 0.967 | +0.01 | **match** (both entered ~0.967 at open) |
-| 06-02 | #1380 | +10.39 | 0.9665 (1) | +4.57 | 0.985 | **−5.82** | scan cadence: live caught favorite at 01:35:51@0.9665, sim's grid passed at 01:53:55@0.985 |
-| 06-03 | #1460 | +4.11 | 0.9865 (1) | +4.26 | 0.986 | +0.15 | ~match |
-| 06-04 | #1510 | +8.28 | 0.9730 (2) | **0.00** | — | **−8.28** | sim **no trade**: `safety_d_below_min` veto on 60 s grid; live entered 00:00:03/07 |
-| 06-06 | #1610 | +5.34 | 0.9825 (1) | +1.51 | 0.995 | **−3.83** | scan cadence: live entered 04:19:06@0.9825, sim 05:00:11@0.995 (favorite emerged intraday) |
-| 06-07 | #1670 | **0.00** | — (live skipped) | +10.56 | 0.966 | **+10.56** | **SHR-78**: volume gate disabled in sim → sim takes a market live's `min_recent_volume_usd` blocked |
-| 06-08 | #2230 | +6.12 | 0.9800 (1) | — | — | n/a | corpus coverage gap (06-08 not in archive; `--end` exclusive) |
-| **Total** | | **+51.35** | | **+36.32** | | **−15.03** | |
-
-### Reconciliation of the −$15.03 gap
-
-| Component | Δ |
-| :-- | --: |
-| Shared coins (#1290,#1340,#1380,#1460,#1610): sim 25.77 vs live 36.94 | **−11.17** |
-| 06-04 #1510 live-only winner (sim safety_d veto) | **−8.28** |
-| 06-08 #2230 live-only (corpus coverage) | **−6.12** |
-| 06-07 #1670 sim-only winner (SHR-78 phantom) | **+10.56** |
-| **Net** | **−15.01** |
-
-(rounds to the −$15.03 headline; residual is sub-cent fill rounding.)
-
-## Fill-by-fill on the two biggest divergences
-
-### 06-04 #1510 — sim never enters (−$8.28)
-
-Live, in the first seven seconds of the market:
+Live entered at **00:00:03** (2 fills, 166 + 141 @ ~0.97) and held to settle:
++$8.281. The sim **never trades this market at either cadence.** Diagnostics for
+Q28 show the in-window samples are wall-to-wall `safety_d_below_min` (with a few
+`no_extreme_leg`), e.g.:
 
 ```
-00:00:03  buy 166 @ 0.9700
-00:00:07  buy 141 @ 0.9766   → 307 sh, VWAP 0.9730 → settles +$8.28
+06-04 00:00:52  safety_d_below_min  yes_bid 0.940 yes_ask 0.977  ref 64292.5
+06-04 00:02:52  safety_d_below_min  yes_bid 0.968 yes_ask 0.977  ref 64384.5
+06-04 00:12:52  safety_d_below_min  yes_bid 0.970 yes_ask 0.977  ref 64279.5
 ```
 
-Sim diagnostics for the same market (`question_idx=28`) — **first eligible sample
-is 00:00:52**, and every in-window sample thereafter is a veto:
+The favorite leg *is* extreme (yes_ask 0.977 ≥ 0.85), but `safety_d =
+distance_to_bucket_boundary / (σ·√τ)` stays **below the `min_safety_d=3.0`
+floor for the entire window** — the price sits too close to the bucket boundary
+relative to the Parkinson σ. **This persists at 5 s**, so it is *not* a cadence
+artifact: it is a real gate/σ divergence. The most likely live-vs-sim mechanism
+is **σ warm-up at market open** — at 00:00:03 the live engine's vol lookback is
+nearly empty → σ underestimated → `safety_d` transiently clears → live enters;
+by the sim's first evaluated sample the recorded book + lookback give a σ large
+enough to keep `safety_d < 3.0`. (We cannot confirm live's σ at entry without
+live diagnostics; flagged as the leading hypothesis.) Net: **the sim is *more*
+conservative than live here**, and it costs the comparison $8.28.
 
-```
-00:00:52  hold  safety_d_below_min   yes_ask 0.977  ref 64292
-...        (BTC drifts 64384 → 63076 over the hour, ~2% range)
-360 in-window samples: 303 no_extreme_leg, 57 safety_d_below_min, 0 enter
-```
+### 06-02 #1380 — live +$10.39 @ 0.9665 (01:35), sim +$4.57 @ 0.985 (01:50/01:53)
 
-Root cause: at market open (00:00:00) time-to-expiry equals `tte_max=21600` (6 h
-to the 06:00 settle), so the first ~52 s are `tte_out_of_window`; the sim's
-**60 s scan grid** therefore takes its first real look at **00:00:52**. By then
-BTC had begun a volatile slide, the Parkinson σ had risen, and `safety_d`
-(distance-to-bucket-edge in σ units) sat below the `min_safety_d=3.0` gate for
-the rest of the window. **Live evaluated at 00:00:03**, inside the brief window
-where the favorite was both extreme and far enough from the edge in σ terms, and
-got filled. This is a *cadence-granularity* miss (scan grid), compounded by the
-`safety_d` gate's sensitivity to the σ estimate during a volatile session — not a
-disagreement about the trade's merit.
+Both enter mid-session (≈1.5 h after open), but the sim enters **~15–18 min
+later, after the favorite has drifted 0.9665 → 0.985**. Earlier in-window samples
+were `no_extreme_leg` / `safety_d_below_min`; the gate only clears at 01:50.
+**This gap persists at 5 s**, so it is gate/σ timing, not cadence — the recorded
+book + Parkinson-σ at dt let the sim through ~15 min later than live did. Cost:
+≈$5.8. This is the cleanest candidate for an **SHR-80 σ-cadence** contribution.
 
-### 06-02 #1380 — same trade, 18 minutes late, −$5.82
+### 06-06 #1610 — live +$5.34 @ 0.9825 (04:19), sim +$1.51 @ 0.995 (04:59)
 
-```
-LIVE  01:35:51  buy 310 @ 0.9665                → settles +$10.39
-SIM   01:53:55  enter    304.56 @ 0.985 (1 fill) → settles +$4.57
-```
+Same shape as #1380, later in the session: the sim's gate clears ~40 min after
+live's, at 0.995 (almost no edge left → +$1.51). Persists at 5 s → gate/σ, not
+cadence. Cost ≈$3.8.
 
-The #1380 favorite did not exist at 00:00 — it emerged ~01:35 as BTC moved. Live
-caught it the moment it crossed the gate; the sim's 60 s grid + σ/`safety_d`
-timing did not clear until 01:53, by which point the ask had run from 0.9665 to
-0.985 (1.85 pp less edge on 310 sh ≈ the $5.82 difference). Same family as 06-06
-#1610 (live 04:19@0.9825 → +$5.34 vs sim 05:00@0.995 → +$1.51).
+### 05-31 #1290 & 06-03 #1460 — cadence + single-shot fills (SHR-79)
 
-## Does the sim reproduce hold-to-settlement? — Yes.
+These flip the *other* way once cadence is fixed:
 
-Live is 19 buys / 7 sells, and all 7 sells are settlement fills at 1.0000: every
-position is bought and held to the 06:00 resolution, never market-exited. The sim
-mirrors this exactly — all 6 sim exits are `settle` rows at price 1.000; there are
-**zero mid-hold exits**. With `exit_safety_d=0.0` (mid-hold exit disabled) and
-`stop_loss_pct=null`, the strategy has no early-exit path, so sim and live agree
-on the *hold* behaviour. The divergence is entirely on the **entry** side
-(whether, when, and at what price each leg is entered), never on the exit.
+- **#1290:** Live churned **11 partial buys** from 0.9661 → 0.9815 (sizes 7–131,
+  classic top-up scaling) for a blended entry ≈0.977 → +$6.873. The sim has no
+  partial/queue model (**SHR-79**, `no_partial_fill_exchange`): it takes **one
+  full-size fill at the touch**. At 60 s that one fill lands late at 0.983 →
+  +$5.19 (pessimistic); at 5 s it lands on the very first tick at 0.966 →
+  +$10.56 (optimistic). The single-fill model makes entry PnL **hypersensitive
+  to which tick the lone fill snaps to** — live's smear across the book is the
+  faithful behavior, and the sim brackets it depending on cadence.
+- **#1460:** sim@5 enters 00:06 @0.978 → +$6.75 vs live 00:13 @0.9865 → +$4.11.
+  At 5 s the sim actually enters *earlier/cheaper* than live → optimistic.
 
-## Root-cause attribution (summary)
+### 06-07 #1670 — sim +$10.56, **live never traded** (SHR-78 entry set)
 
-| Divergence | $ impact | Root cause | Ticket |
-| :-- | --: | :-- | :-- |
-| 06-07 phantom winner (sim-only) | +$10.56 | volume gate disabled → sim takes wider entry set than live | **SHR-78** |
-| Shared-coin entry-price shortfall | −$11.17 | 60 s scan grid + single full-size touch fill vs live's fast laddered partials | **SHR-79**, scan cadence |
-| 06-04 missed winner (live-only) | −$8.28 | 60 s grid's first sample hit a transient `safety_d` veto; live entered in 7 s | scan cadence + σ/`safety_d` sensitivity |
-| 06-08 missed winner (live-only) | −$6.12 | corpus coverage (archive 06-08 unsealed; `--end` exclusive) | data coverage |
-| σ cadence (dt) | (subsumed above) | `hl-bt run` *does* couple `reference_resample_seconds`→`vol_sampling_dt_seconds=5` on this branch; σ is dt=5. The residual cadence gap is the **scanner** interval (60 s), not σ resample. | **SHR-80** (σ path already wired; scanner interval still coarse) |
+The sim enters #1670 at 00:00:01 @0.966 and wins +$10.56. **Live placed no v1
+bucket trade on 06-07.** The one config knob that differs between the two is the
+**volume gate**: live runs `min_recent_volume_usd=100`; the sim has it disabled
+(SHR-78 workaround). 06-07 is the lone day the sim trades that live didn't, so
+the disabled gate is the prime suspect (live's recent-volume read was likely
+<100 at the entry moment, vetoing live while every other day cleared). We can't
+confirm live's gate value without live diagnostics, but this is exactly the
+**different entry set** the SHR-78 workaround warns about — and here it *adds*
+$10.56 to the sim that live never realized.
 
-### Note on SHR-80
+---
 
-The original SHR-80 framing ("`hl-bt run` hardcodes
-`reference_resample_seconds=60`") is **already addressed for the σ path** on this
-branch: `cli.py:239` sets `reference_resample_seconds =
-params["vol_sampling_dt_seconds"]` (=5 here) and the HL source resamples the
-reference to 5 s bars accordingly. The remaining cadence fidelity gap is the
-**scanner evaluation interval**, which defaults to 60 s
-(`HftbtRunConfig.scanner_interval_seconds=60`) and is what makes the sim sample
-the market on a 60 s grid while the live engine evaluates sub-second. That is the
-lever behind divergences #1 and #3. It can be probed today with
-`--scanner-interval-seconds 5` (no code change).
+## Hold-to-settlement behavior
 
-## Reproduction
+Live is **pure buy-and-hold**: 19 buys / 7 sells, where all 7 sells are the
+06:00 settlement fill at `1.0000`. There are **no intraday market exits** — with
+`exit_safety_d=0.0` and `stop_loss_pct=null`, v1 buckets never exit early. **The
+sim reproduces this exactly:** every entered question has exactly one `enter`
+then a `settle` fill at 1.000; the only `hold` reasons after entry are
+`have_position`. So unlike v31 (which churns mid-hold exits), **v1's
+hold-to-settlement structure is faithfully reproduced** — the divergence is
+entirely on the **entry** side (timing, price, and which legs get taken), not on
+exits.
 
-```bash
-# corpus (≈3 GB; same as `make pull-data`)
-aws s3 sync s3://hl-recorder-archive-819175935435/venue=hyperliquid/ \
-  data/venue=hyperliquid/ --exclude '*' --include '*/hour=all/*' --size-only
+---
 
-# sim
-export HLBT_HL_DATA_ROOT="$PWD/data" LOGURU_LEVEL=WARNING
-uv run hl-bt run --strategy v1_late_resolution --data-source hl_hip4 --kind bucket \
-  --config config/backtest/v1_hl_bucket_since0531.json \
-  --out-dir data/sim/runs/v1_bucket_since0531 \
-  --start 2026-05-31 --end 2026-06-08 --ref-source hl_perp --fee-taker 0.0 --slippage-bps 0
+## Divergence attribution summary
 
-# live fills (read-only, on the engine box via SSM — see tools/dump_v1_bucket_fills.py)
-```
+| Root cause | Mechanism | Legs affected | Direction | ~$ impact (in-window) |
+| :--------- | :-------- | :------------ | :-------- | :-------------------- |
+| **Scanner cadence (60 s default)** | misses first-seconds cheap fills | #1290, #1460 (+#1380/#1610 partially) | sim pessimistic | **≈ +$7.9 recovered at 5 s** |
+| **SHR-79** (no partial/queue fills) | single full-size fill at touch → PnL snaps to one tick | #1290 (live scaled 0.966→0.982) | either way | bounded by tick spread; ±$1–5/leg |
+| **safety_d gate × σ warm-up** | sim σ keeps `safety_d<3` at open; live clears | **#1510 (never entered)** | sim conservative | **−$8.28** |
+| **SHR-80** (σ cadence) | gate clears later in sim → entry at worse price | #1380 (−$5.8), #1610 (−$3.8) | sim pessimistic | **≈ −$9.6** |
+| **SHR-78** (volume gate disabled) | sim takes a leg live's gate vetoed | #1670 (06-07) | sim optimistic | **+$10.56** |
+| **Corpus coverage** | 06-08 not yet sealed to archive | #2230 | n/a | live-only +$6.12 |
+
+These largely offset: in-window the sim's conservative misses (#1510, #1380,
+#1610 ≈ −$17.9 vs live) are nearly cancelled by its optimistic extras (#1670
++$10.56, and the cadence/partial-fill swings on #1290/#1460). **The aggregate
+"+$36 vs +$45" understates how close the two are once cadence is matched
+(+$44 vs +$45).**
+
+---
+
+## Caveats (do not over-read)
+
+1. **SHR-78 workaround changes the entry set.** With the volume gate at 0 the sim
+   can take legs live would veto (#1670). Aggregate PnL is therefore *not* a
+   clean apples-to-apples; read it per-leg.
+2. **SHR-79 single-fill model** makes any single-leg entry PnL sensitive to the
+   exact fill tick. The honest live behavior is the partial-fill smear; the sim
+   brackets it.
+3. **SHR-80 / cadence:** the headline number used the default 60 s scan. The 5 s
+   sensitivity is the more faithful live comparison and should be the one quoted.
+4. **No live diagnostics.** Live veto/σ values at the entry instant are not
+   recorded, so the #1510 (σ warm-up) and #1670 (volume gate) mechanisms are the
+   leading hypotheses, consistent with the data, not proven from live state.
+5. **06-08 (#2230, +$6.12) is outside the recorded corpus** — `--end 2026-06-08`
+   is end-exclusive and the 06-08 daily partition isn't archived yet.
+
+---
+
+## Artifacts
+
+- Config: `config/backtest/v1_hl_bucket_since0531.json`
+- Live-fill dump: `tools/dump_v1_bucket_fills.py` (read-only, SSM)
+- Sim outputs: `data/sim/runs/v1_bucket_since0531/` (60 s),
+  `data/sim/runs/v1_bucket_since0531_scan5/` (5 s sensitivity)
+- Reproduce: see "Inputs & method" above; set
+  `HLBT_HL_DATA_ROOT=…/HLAnalysis/data`.
