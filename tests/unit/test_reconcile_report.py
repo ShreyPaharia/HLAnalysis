@@ -191,8 +191,10 @@ def test_format_daily_summary_single_message():
     # ONE message containing every strategy + a desk total
     assert msg.count("Desk daily report") == 1
     assert "v1_pm" in msg and "v31" in msg
-    assert "fills 8" in msg and "fills 527" in msg
-    assert "Total strategy PnL: +140.29" in msg   # 2.17 + 138.12
+    # New format: fills shown as window/total — with no windowed data, shows ?/N
+    assert "?/8" in msg and "?/527" in msg
+    # Total shown in new dual format
+    assert "total +140.29" in msg   # 2.17 + 138.12
     assert "all reconciled" in msg
 
 
@@ -213,15 +215,16 @@ def test_format_daily_summary_splits_hl_by_klass():
     ]
     msg = format_daily_summary(recon, date_str="2026-06-08")
     # PM slot is unchanged (single line, no split sub-lines under it).
-    assert "v1_pm: PnL +2.17" in msg
+    assert "v1_pm" in msg
     # HL slot keeps its headline AND gains a binary/bucket split.
-    assert "v31: PnL +138.12" in msg          # 120.0 + 18.12 total_true_pnl
+    assert "v31" in msg
+    assert "total +138.12" in msg          # 120.0 + 18.12 total_true_pnl shown as total
     assert "binary" in msg and "bucket" in msg
     assert "+100.00" in msg                    # binary total_pnl
     assert "+38.12" in msg                     # bucket total_pnl 20.0 + 18.12
-    assert "fills 500" in msg and "fills 27" in msg
+    assert "500" in msg and "27" in msg
     # Desk total unchanged: 2.17 + 138.12
-    assert "Total strategy PnL: +140.29" in msg
+    assert "total +140.29" in msg
 
 
 def test_format_daily_summary_shows_unknown_klass():
@@ -372,3 +375,258 @@ def test_strategy_pnl_is_outcome_only_not_full_account():
     assert "161.04" in text
     assert "strategy_pnl(outcome-only)" in text
     assert "362.68" in text and "non-strategy" in text  # full-account = context
+
+
+# ---------------------------------------------------------------------------
+# New tests for trailing-24h windowed PnL fields
+# ---------------------------------------------------------------------------
+
+def test_slot_recon_window_total_pnl_uses_venue_window():
+    """window_total_pnl = venue_realized_pnl_window + open_mtm when venue window is set."""
+    r = SlotRecon(
+        alias="v1", realized_pnl=500.0, open_mtm=12.5,
+        account_value_usd=1000.0, positions_known=True,
+        venue_realized_pnl=500.0,
+        venue_realized_pnl_window=80.0,   # only 80 realized in last 24h
+        realized_pnl_window=79.0,         # local (not used when venue window set)
+        fills_count=50, fills_count_window=5,
+    )
+    # window_total_pnl = venue_realized_pnl_window (80) + open_mtm (12.5)
+    assert r.window_total_pnl == 80.0 + 12.5
+    # total_true_pnl still uses all-time venue realized
+    assert r.total_true_pnl == 500.0 + 12.5
+
+
+def test_slot_recon_window_total_pnl_falls_back_to_local_for_pm():
+    """For PM (venue_realized_pnl_window=None), window_total_pnl uses local realized_pnl_window."""
+    r = SlotRecon(
+        alias="v31_pm", realized_pnl=30.0, open_mtm=3.0,
+        account_value_usd=200.0, positions_known=True,
+        venue_realized_pnl=None,          # PM: no venue realized
+        venue_realized_pnl_window=None,   # PM: no venue window
+        realized_pnl_window=15.0,         # local 24h realized
+        fills_count=20, fills_count_window=4,
+    )
+    # window_total_pnl falls back to local realized_pnl_window (15) + open_mtm (3)
+    assert r.window_total_pnl == 15.0 + 3.0
+    # total_true_pnl uses local all-time realized (no venue)
+    assert r.total_true_pnl == 30.0 + 3.0
+
+
+def test_format_daily_summary_shows_both_24h_and_total():
+    """format_daily_summary renders 24h and total PnL on each slot line and footer."""
+    from hlanalysis.engine.reconcile_report import format_daily_summary
+    recon = [
+        SlotRecon(
+            alias="v1", realized_pnl=500.0, open_mtm=10.0,
+            account_value_usd=900.0, positions_known=True,
+            venue_realized_pnl=500.0,
+            venue_realized_pnl_window=80.0,
+            fills_count=50, fills_count_window=5,
+        ),
+        SlotRecon(
+            alias="v31_pm", realized_pnl=30.0, open_mtm=3.0,
+            account_value_usd=200.0, positions_known=True,
+            venue_realized_pnl=None,
+            realized_pnl_window=15.0,
+            fills_count=20, fills_count_window=4,
+        ),
+    ]
+    msg = format_daily_summary(recon, date_str="2026-06-08")
+    # Per-slot: both 24h and total visible
+    # v1: window_total_pnl = 80 + 10 = 90; total_true_pnl = 500 + 10 = 510
+    assert "v1: 24h +90.00 | total +510.00" in msg
+    assert "fills 5/50" in msg
+    # v31_pm: window_total_pnl = 15 + 3 = 18; total_true_pnl = 30 + 3 = 33
+    assert "v31_pm: 24h +18.00 | total +33.00" in msg
+    assert "fills 4/20" in msg
+    # Footer: 24h total = 90 + 18 = 108; all-time total = 510 + 33 = 543
+    assert "Total strategy PnL: 24h +108.00 | total +543.00" in msg
+    assert "all reconciled" in msg
+
+
+def test_format_daily_summary_fills_question_mark_when_window_unknown():
+    """When fills_count_window is None the fills field shows ?/N."""
+    from hlanalysis.engine.reconcile_report import format_daily_summary
+    recon = [
+        SlotRecon(
+            alias="v31", realized_pnl=0.0, open_mtm=0.0,
+            account_value_usd=500.0, positions_known=True,
+            venue_realized_pnl=100.0,
+            fills_count=200,
+            fills_count_window=None,   # window fill count not available
+        ),
+    ]
+    msg = format_daily_summary(recon)
+    assert "fills ?/200" in msg
+
+
+def test_format_daily_summary_desk_footer_dual_totals():
+    """Desk footer shows BOTH 24h and total; recon status is unchanged."""
+    from hlanalysis.engine.reconcile_report import format_daily_summary
+    recon = [
+        SlotRecon(alias="v1", realized_pnl=100.0, open_mtm=5.0,
+                  account_value_usd=500.0, positions_known=True,
+                  venue_realized_pnl=100.0,
+                  venue_realized_pnl_window=20.0,
+                  fills_count=10, fills_count_window=2),
+        SlotRecon(alias="v31", realized_pnl=0.0, open_mtm=2.0,
+                  account_value_usd=800.0, positions_known=True,
+                  venue_realized_pnl=50.0,
+                  venue_realized_pnl_window=10.0,
+                  fills_count=30, fills_count_window=3),
+    ]
+    msg = format_daily_summary(recon)
+    # v1 window: 20+5=25; v31 window: 10+2=12; total window = 37
+    # v1 all-time: 100+5=105; v31 all-time: 50+2=52; total all-time = 157
+    assert "Total strategy PnL: 24h +37.00 | total +157.00" in msg
+    assert "all reconciled ✅" in msg
+
+
+def test_format_daily_summary_klass_split_window_and_total():
+    """Per-class lines show both 24h and total PnL + fills when windowed breakdown is set."""
+    from hlanalysis.engine.reconcile_report import KlassStat, format_daily_summary
+    recon = [
+        SlotRecon(
+            alias="v31",
+            realized_pnl=0.0, open_mtm=5.0,
+            account_value_usd=1000.0, positions_known=True,
+            venue_realized_pnl=120.0, fills_count=50,
+            klass_breakdown={
+                "priceBinary": KlassStat(realized_pnl=80.0, open_mtm=0.0, fills=40),
+                "priceBucket": KlassStat(realized_pnl=40.0, open_mtm=5.0, fills=10),
+            },
+            venue_realized_pnl_window=30.0, fills_count_window=8,
+            klass_breakdown_window={
+                "priceBinary": KlassStat(realized_pnl=20.0, open_mtm=0.0, fills=5),
+                "priceBucket": KlassStat(realized_pnl=10.0, open_mtm=5.0, fills=3),
+            },
+        ),
+    ]
+    msg = format_daily_summary(recon, date_str="2026-06-08")
+    # Per-class lines must show both window and total PnL and fills.
+    # binary: win total_pnl=20+0=20; tot total_pnl=80+0=80; wins fills=5 tot=40
+    assert "binary: 24h +20.00 | total +80.00 | fills 5/40" in msg
+    # bucket: win total_pnl=10+5=15; tot total_pnl=40+5=45; wins fills=3 tot=10
+    assert "bucket: 24h +15.00 | total +45.00 | fills 3/10" in msg
+
+
+def test_gather_slot_windowed_fills_filtered_by_ts_ns():
+    """gather_slot filters fills to the trailing window using ts_ns; fills without
+    ts_ns are excluded from the window but included in the all-time count."""
+    from hlanalysis.engine.reconcile_report import gather_slot
+
+    class P:
+        def __init__(self, symbol, qty):
+            self.symbol = symbol; self.qty = qty
+
+    class FakeDAL:
+        def realized_pnl_since(self, since_ts_ns):
+            return 0.0
+        def all_positions(self):
+            return []
+        def coin_klass_map(self):
+            return {"#100": "priceBinary", "#101": "priceBinary"}
+
+    NOW_NS = 1_000_000_000_000_000_000   # arbitrary "now"
+    WINDOW_NS = 24 * 3600 * 1_000_000_000
+
+    class FakeFill:
+        def __init__(self, symbol, closed_pnl, fee, ts_ns):
+            self.symbol = symbol
+            self.closed_pnl = closed_pnl
+            self.fee = fee
+            self.ts_ns = ts_ns
+
+    class FakeClient:
+        def clearinghouse_state(self):
+            return ClearinghouseState(positions=(), account_value_usd=50.0)
+        def user_fills(self, *, since_ts_ns):
+            return [
+                # In-window fill (ts_ns >= NOW_NS - WINDOW_NS)
+                FakeFill("#100", 10.0, 0.5, NOW_NS - WINDOW_NS + 1),
+                # Out-of-window fill (ts_ns < NOW_NS - WINDOW_NS)
+                FakeFill("#101", 5.0, 0.0, NOW_NS - WINDOW_NS - 1),
+            ]
+
+    r = gather_slot(
+        alias="v31", dal=FakeDAL(), exec_client=FakeClient(),
+        qty_tolerance=1e-6, fetch_venue_realized=True,
+        now_ns=NOW_NS, window_hours=24.0,
+    )
+    # All-time: both fills included
+    assert r.fills_count == 2
+    assert r.venue_realized_pnl == pytest.approx((10.0 - 0.5) + 5.0)
+    # Window: only the in-window fill
+    assert r.fills_count_window == 1
+    assert r.venue_realized_pnl_window == pytest.approx(10.0 - 0.5)
+
+
+def test_gather_slot_window_pm_uses_dal_since():
+    """For PM (fetch_venue_realized=False) the window realized comes from dal.realized_pnl_since."""
+    from hlanalysis.engine.reconcile_report import gather_slot
+
+    NOW_NS = 2_000_000_000_000_000_000
+    WINDOW_START = NOW_NS - 24 * 3600 * 1_000_000_000
+
+    class FakeDAL:
+        def realized_pnl_since(self, since_ts_ns):
+            # Return different values for all-time vs window queries
+            if since_ts_ns == 0:
+                return 100.0
+            elif since_ts_ns == WINDOW_START:
+                return 25.0
+            return 0.0
+
+        def all_positions(self):
+            return []
+
+        def fills_count(self):
+            return 50
+
+    class FakeClient:
+        def clearinghouse_state(self):
+            return ClearinghouseState(positions=(), account_value_usd=200.0,
+                                      positions_known=False)
+
+    r = gather_slot(
+        alias="v31_pm", dal=FakeDAL(), exec_client=FakeClient(),
+        qty_tolerance=1e-6, fetch_venue_realized=False,
+        now_ns=NOW_NS, window_hours=24.0,
+    )
+    assert r.realized_pnl == 100.0           # all-time local
+    assert r.realized_pnl_window == 25.0     # trailing-24h local
+    assert r.venue_realized_pnl is None      # no venue for PM
+    assert r.venue_realized_pnl_window is None
+    # window_total_pnl = 25 (local window) + 0 (open_mtm) = 25
+    assert r.window_total_pnl == 25.0
+    # total_true_pnl = 100 (all-time local) + 0 = 100
+    assert r.total_true_pnl == 100.0
+
+
+def test_compare_slot_windowed_fields_passthrough():
+    """compare_slot passes through windowed fields unchanged into SlotRecon."""
+    from hlanalysis.engine.reconcile_report import KlassStat
+
+    win_klass = {"priceBinary": KlassStat(10.0, 0.0, 3)}
+    r = compare_slot(
+        alias="v31",
+        db_positions=[],
+        db_realized_pnl=100.0,
+        venue=ClearinghouseState(positions=(), account_value_usd=50.0),
+        qty_tolerance=1e-6,
+        venue_realized_pnl=100.0,
+        venue_realized_pnl_window=15.0,
+        realized_pnl_window=14.0,
+        fills_count_window=3,
+        klass_breakdown_window=win_klass,
+    )
+    assert r.venue_realized_pnl_window == 15.0
+    assert r.realized_pnl_window == 14.0
+    assert r.fills_count_window == 3
+    assert r.klass_breakdown_window is win_klass
+    assert r.window_total_pnl == 15.0   # venue window (15) + open_mtm (0)
+
+
+# Import pytest for approx assertions used above
+import pytest

@@ -12,6 +12,11 @@ from sqlalchemy import delete, func
 from sqlmodel import Field, Session as _Session, SQLModel, create_engine, select
 
 
+# Fill provenance (SHR-74). See Fill.source / 0004_fill_source.
+FILL_SOURCE_ROUTER = "router"
+FILL_SOURCE_VENUE = "venue"
+
+
 class OpenOrder(SQLModel, table=True):
     cloid: str = Field(primary_key=True)
     venue_oid: str | None = None
@@ -57,6 +62,12 @@ class Fill(SQLModel, table=True):
     # Router._book_fill for post-hoc audit; the daily-loss gate reads HL's
     # closedPnl directly via HLClient.hl_realized_pnl_since.
     closed_pnl: float = 0.0
+    # Provenance (SHR-74). 'router' = booked by Router._book_fill (cloid-keyed,
+    # fee=0, locally-computed closed_pnl); 'venue' = mirrored from HL user_fills
+    # by the reconcile loop (tid-keyed, venue closedPnl/fee). realized_pnl_since
+    # prefers 'venue' rows when present so the HL local ledger == venue (HIP-4
+    # settlement payouts only ever arrive as venue fills). See 0004_fill_source.
+    source: str = FILL_SOURCE_ROUTER
 
 
 class Session_(SQLModel, table=True):
@@ -364,12 +375,45 @@ class StateDAL:
 
     # ---- fills ----
 
-    def append_fill(self, f: Fill) -> None:
+    def append_fill(self, f: Fill) -> bool:
+        """Insert a Fill row if its fill_id is not already present. Returns True
+        when a new row was inserted, False when it already existed (the dedup
+        that lets the venue mirror run idempotently every reconcile cycle)."""
         with _Session(self._engine) as s:
             existing = s.get(Fill, f.fill_id)
             if existing is None:
                 s.add(f)
                 s.commit()
+                return True
+        return False
+
+    def mirror_venue_fills(
+        self, fills, *, symbol_to_question: dict[str, int] | None = None,
+    ) -> int:
+        """Book HL venue user_fills into the local Fill table as source='venue'
+        (SHR-74). Only outcome ("#") fills are mirrored — perp/spot legs are not
+        strategy markets and would pollute the outcome-only realized figure that
+        the daily report reconciles against. Keyed by the venue tid
+        (``fill.fill_id``) and idempotent via append_fill, so calling it every
+        reconcile cycle only books newly-seen fills (settlement-dir payouts
+        included). Returns the count of rows newly inserted.
+
+        ``fills`` is any iterable of objects with the UserFillRow shape
+        (fill_id, cloid, symbol, side, price, size, fee, ts_ns, closed_pnl)."""
+        sym_q = symbol_to_question or {}
+        inserted = 0
+        for f in fills:
+            if not f.symbol.startswith("#"):
+                continue
+            if self.append_fill(Fill(
+                fill_id=f.fill_id, cloid=f.cloid,
+                question_idx=sym_q.get(f.symbol, -1),
+                symbol=f.symbol, side=f.side, price=f.price, size=f.size,
+                fee=f.fee, ts_ns=f.ts_ns, closed_pnl=f.closed_pnl,
+                source=FILL_SOURCE_VENUE,
+            )):
+                inserted += 1
+        return inserted
 
     def fills_count(self) -> int:
         """Total number of Fill rows (used by the daily report)."""
@@ -516,9 +560,25 @@ class StateDAL:
         NOT add the open positions' accumulated realized_pnl: that PnL is already
         in the Fill sum, so adding it would double-count any still-open position
         partially reduced inside the window (SHR-72).
+
+        Source preference (SHR-74): when the slot has ANY source='venue' row
+        (an HL slot whose ledger the reconcile loop mirrors from user_fills), we
+        sum ONLY those — they carry the venue's own closedPnl/fee and include the
+        HIP-4 settlement payouts that never reach _book_fill, so the figure
+        equals venue truth by construction. The 'router' rows (cloid-keyed,
+        fee=0, locally-computed) are then redundant diagnostics and excluded to
+        avoid double-counting. A PM slot (or a not-yet-mirrored HL slot) has no
+        'venue' rows, so this falls back to summing all rows — its 'router'
+        ledger is authoritative.
         """
         with _Session(self._engine) as s:
+            has_venue = s.exec(
+                select(func.count()).select_from(Fill)
+                .where(Fill.source == FILL_SOURCE_VENUE)
+            ).one() > 0
             stmt = select(Fill).where(Fill.ts_ns >= since_ts_ns)
+            if has_venue:
+                stmt = stmt.where(Fill.source == FILL_SOURCE_VENUE)
             fills = list(s.exec(stmt).all())
         # Settlement payouts are not fills (HIP-4 binaries close via settlement,
         # not HL trades), so without this the dominant PnL component of the

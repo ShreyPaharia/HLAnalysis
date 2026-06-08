@@ -52,7 +52,9 @@ from .risk_events import (
 )
 from .router import Router
 from .scanner import Scanner
-from .state import CachedStateDAL, StateDAL
+from .state import (
+    FILL_SOURCE_ROUTER, FILL_SOURCE_VENUE, CachedStateDAL, StateDAL,
+)
 from ..alerts.rules import AlertRules
 from ..alerts.telegram import TelegramClient
 from ..marketdata.position_math import DUST_QTY_ABS_TOL
@@ -844,19 +846,42 @@ class EngineRuntime:
                 # event loop (SHR-41); the cached fills feed the Reconciler's
                 # fills_lookup for every cloid.
                 venue_open, venue_state, all_fills = await self._venue_snapshot(slot)
+                sym_to_q = self.market_state.symbol_to_question_map()
                 rec = Reconciler(
                     slot.dal,
                     fills_lookup=lambda c, _f=all_fills: _f,
-                    symbol_to_question=self.market_state.symbol_to_question_map(),
+                    symbol_to_question=sym_to_q,
                     cloid_prefix=slot.cloid_prefix,
                     account_alias=slot.alias,
                     apply_position_changes=apply_positions,
+                    venue_fill_source=(
+                        FILL_SOURCE_ROUTER if is_pm else FILL_SOURCE_VENUE
+                    ),
                 )
                 res = rec.run(
                     venue_open=venue_open,
                     venue_state=venue_state,
                     now_ns=now,
                 )
+                # SHR-74: mirror the venue's own fill ledger into the local Fill
+                # table for HL slots. HL HIP-4/bucket settlement payouts arrive
+                # ONLY as venue fills (dir="Settlement") and never reach
+                # _book_fill, and the trade fills _book_fill DOES write carry
+                # fee=0 + a locally-computed closed_pnl — so the local realized
+                # diverged from venue (recurring DRIFT). Booking every '#' venue
+                # fill as source='venue' (tid-keyed, idempotent) makes
+                # realized_pnl_since == venue by construction. PM is skipped (its
+                # local fill ledger is authoritative; PM redeems aren't fills).
+                if not is_pm:
+                    mirrored = await asyncio.to_thread(
+                        slot.dal.mirror_venue_fills, all_fills,
+                        symbol_to_question=sym_to_q,
+                    )
+                    if mirrored:
+                        logger.debug(
+                            "venue_fill_mirror alias={} booked={}",
+                            slot.alias, mirrored,
+                        )
                 # Mark the PM startup sync done only once we've had an
                 # authoritative (positions_known) pass — so a data-api outage at
                 # startup doesn't prematurely flip us to alert-only.

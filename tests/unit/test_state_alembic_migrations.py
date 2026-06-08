@@ -164,15 +164,19 @@ def test_existing_db_upgrades_without_data_loss_and_backfills_closed_qty(tmp_pat
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (42, "@30", 10.0, 0.95, -3.0, 111, 0.85),
     )
+    # The fill row is seeded with the LEGACY column set (no `source`, added by
+    # 0004), exactly as a pre-migration production DB holds it on disk — so the
+    # ORM Fill model (now carrying `source`) must NOT be used to write it here.
+    conn.execute(
+        "INSERT INTO fill (fill_id, cloid, question_idx, symbol, side, price, "
+        "size, fee, ts_ns, closed_pnl) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("f-1", "hla-1", 42, "@30", "buy", 0.95, 10.0, 0.05, 222, -2.5),
+    )
     conn.commit()
     conn.close()
 
     seed = StateDAL(db)
     seed.set_pm_strike(1000126, 73_500.0)
-    seed.append_fill(Fill(
-        fill_id="f-1", cloid="hla-1", question_idx=42, symbol="@30",
-        side="buy", price=0.95, size=10.0, fee=0.05, ts_ns=222, closed_pnl=-2.5,
-    ))
     seed.record_settlement(question_idx=42, symbol="@30",
                            realized_pnl=-5.0, ts_ns=333)
 
@@ -189,10 +193,11 @@ def test_existing_db_upgrades_without_data_loss_and_backfills_closed_qty(tmp_pat
     schema_after = _app_schema(db)
     assert set(schema_after) - set(schema_before) == {"coin_klass"}
     for name, sql in schema_before.items():
-        if name == "position":
-            continue
+        if name in ("position", "fill"):
+            continue  # position gains closed_qty (0002); fill gains source (0004)
         assert schema_after[name] == sql, f"unexpected schema drift on {name}"
     assert "closed_qty" in schema_after["position"]
+    assert "source" in schema_after["fill"]
 
     # 2) Stamped + upgraded (version table present).
     assert "alembic_version" in _table_names(db)
@@ -205,6 +210,8 @@ def test_existing_db_upgrades_without_data_loss_and_backfills_closed_qty(tmp_pat
     assert dal.get_pm_strike(1000126) == 73_500.0
     fills = dal.fills_for_cloid("hla-1")
     assert len(fills) == 1 and fills[0].closed_pnl == -2.5
+    # 0004 backfills fill.source to 'router' on the pre-existing row.
+    assert fills[0].source == "router"
     assert dal.settlement_pnl_since(0) == -5.0
 
     # 4) Idempotent — a second run is a no-op (already at head).

@@ -10,7 +10,7 @@ from loguru import logger
 from .exec_types import ClearinghouseState, OpenOrderRow, UserFillRow
 from .hl_client import _extract_cloid_hex32
 from .risk_events import ReconcileDrift
-from .state import Fill, OpenOrder, Position, StateDAL
+from .state import FILL_SOURCE_ROUTER, Fill, OpenOrder, Position, StateDAL
 from ..marketdata.position_math import DUST_QTY_ABS_TOL, STOP_DISABLED_SENTINEL
 
 
@@ -88,11 +88,19 @@ class Reconciler:
         cloid_prefix: str = CLOID_PREFIX,
         account_alias: str = "",
         apply_position_changes: bool = True,
+        venue_fill_source: str = FILL_SOURCE_ROUTER,
     ) -> None:
         self.dal = dal
         self.fills_lookup = fills_lookup
         self.symbol_to_question = symbol_to_question or {}
         self.cloid_prefix = cloid_prefix
+        # Provenance stamped on fills replayed from venue user_fills here
+        # (lost-ACK recovery). For HL pass FILL_SOURCE_VENUE so these tid-keyed
+        # rows agree with the reconcile loop's full venue mirror — otherwise a
+        # 'router'-stamped tid would block the mirror's 'venue' write (append_fill
+        # dedups by fill_id) and realized_pnl_since's venue-preference would drop
+        # it. PM keeps the default 'router' (its local ledger is authoritative).
+        self.venue_fill_source = venue_fill_source
         # When False, the positions pass DETECTS venue/local mismatches and
         # emits drift alerts but does NOT mutate the DB (no vanish, no
         # qty-overwrite, no adopt). Used for the PM live loop: PM's only
@@ -150,7 +158,8 @@ class Reconciler:
                     self.dal.append_fill(Fill(
                         fill_id=f.fill_id, cloid=cloid, question_idx=db_o.question_idx,
                         symbol=db_o.symbol, side=f.side, price=f.price, size=f.size,
-                        fee=f.fee, ts_ns=f.ts_ns,
+                        fee=f.fee, ts_ns=f.ts_ns, closed_pnl=f.closed_pnl,
+                        source=self.venue_fill_source,
                     ))
                 self.dal.update_order_status(cloid, status="filled", now_ns=now_ns)
                 # Diagnostic (incident 2026-06-04, #1 root-cause suspect): this

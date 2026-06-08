@@ -37,6 +37,8 @@ _KLASS_LABELS = {
     "unknown": "unknown",
 }
 
+_24H_NS = 24 * 3600 * 1_000_000_000
+
 
 @dataclass(frozen=True, slots=True)
 class Drift:
@@ -78,6 +80,18 @@ class SlotRecon:
     klass_breakdown: dict[str, "KlassStat"] | None = None
     drift: list[Drift] = field(default_factory=list)
 
+    # --- Trailing-24h windowed fields ---
+    # venue_realized_pnl_window: sum of closedPnl-fee for HL outcome fills
+    # within the trailing window (None when venue fills not fetched).
+    venue_realized_pnl_window: float | None = None
+    # realized_pnl_window: local DB realized within the trailing window (PM uses
+    # this as the primary source; HL uses it for diagnostics only).
+    realized_pnl_window: float = 0.0
+    # fills_count_window: number of outcome fills within the trailing window.
+    fills_count_window: int | None = None
+    # klass_breakdown_window: per-class split for the trailing window (HL only).
+    klass_breakdown_window: dict[str, "KlassStat"] | None = None
+
     @property
     def total_true_pnl(self) -> float:
         """The STRATEGY's PnL: outcome-markets only. HL venue_realized_pnl is the
@@ -86,6 +100,18 @@ class SlotRecon:
         outcome-only. NOT the HL portfolio `allTime` PnL — that nets in unrelated
         HYPE/perp/spot activity (see account_pnl_all_time, shown for context)."""
         base = self.venue_realized_pnl if self.venue_realized_pnl is not None else self.realized_pnl
+        return base + self.open_mtm
+
+    @property
+    def window_total_pnl(self) -> float:
+        """Trailing-window strategy PnL: windowed realized + current open MTM.
+        Uses venue_realized_pnl_window (HL) when available; falls back to
+        realized_pnl_window (local, PM). Open MTM is always today's figure."""
+        base = (
+            self.venue_realized_pnl_window
+            if self.venue_realized_pnl_window is not None
+            else self.realized_pnl_window
+        )
         return base + self.open_mtm
 
     @property
@@ -105,6 +131,11 @@ def compare_slot(
     account_pnl_all_time: float | None = None,
     fills_count: int | None = None,
     klass_breakdown: dict[str, KlassStat] | None = None,
+    # Trailing-window fields (optional; defaults leave window fields unset)
+    venue_realized_pnl_window: float | None = None,
+    realized_pnl_window: float = 0.0,
+    fills_count_window: int | None = None,
+    klass_breakdown_window: dict[str, KlassStat] | None = None,
 ) -> SlotRecon:
     """Pure three-way-ish compare: DB positions vs venue positions, plus PnL.
 
@@ -149,6 +180,10 @@ def compare_slot(
         klass_breakdown=klass_breakdown,
         pnl_mismatch=pnl_mismatch,
         drift=drift,
+        venue_realized_pnl_window=venue_realized_pnl_window,
+        realized_pnl_window=realized_pnl_window,
+        fills_count_window=fills_count_window,
+        klass_breakdown_window=klass_breakdown_window,
     )
 
 
@@ -227,40 +262,59 @@ def format_report(recon: list[SlotRecon]) -> str:
 
 
 def format_daily_summary(recon: list[SlotRecon], *, date_str: str | None = None) -> str:
-    """Compact ONE-message daily summary for Telegram: per-strategy outcome PnL,
-    fill count, and reconcile status, plus a desk total."""
+    """Compact ONE-message daily summary for Telegram: per-strategy outcome PnL
+    (both trailing-24h window and all-time total), fill count, and reconcile
+    status, plus a desk total."""
     header = "📊 Desk daily report" + (f" — {date_str}" if date_str else "")
     lines = [header, ""]
-    total = 0.0
+    total_window = 0.0
+    total_alltime = 0.0
     drifting: list[str] = []
     for r in recon:
         status = "⚠️ DRIFT" if r.has_drift else "✅"
-        fills = r.fills_count if r.fills_count is not None else "?"
+        # Fill counts: prefer windowed/total pair; fall back to "?" when unknown.
+        fills_win: int | str = r.fills_count_window if r.fills_count_window is not None else "?"
+        fills_tot: int | str = r.fills_count if r.fills_count is not None else "?"
         lines.append(
-            f"{r.alias}: PnL {r.total_true_pnl:+.2f} | fills {fills} | "
+            f"{r.alias}: 24h {r.window_total_pnl:+.2f} | total {r.total_true_pnl:+.2f} | "
+            f"fills {fills_win}/{fills_tot} | "
             f"acct ${r.account_value_usd:.0f} | {status}"
         )
         # SHR-77: HL slots trade both binary + bucket markets on one account, so
         # split their outcome PnL + fills by class. PM slots (klass_breakdown
         # None) are binary-only and stay a single line. The split is purely
         # informational — the slot PnL above and the desk total are unchanged.
-        if r.klass_breakdown:
+        if r.klass_breakdown or r.klass_breakdown_window:
+            all_klasses = set()
+            if r.klass_breakdown:
+                all_klasses |= set(r.klass_breakdown)
+            if r.klass_breakdown_window:
+                all_klasses |= set(r.klass_breakdown_window)
             for klass in _KLASS_ORDER + tuple(
-                k for k in sorted(r.klass_breakdown) if k not in _KLASS_ORDER
+                k for k in sorted(all_klasses) if k not in _KLASS_ORDER
             ):
-                st = r.klass_breakdown.get(klass)
-                if st is None:
+                if klass not in all_klasses:
                     continue
+                st_tot = r.klass_breakdown.get(klass) if r.klass_breakdown else None
+                st_win = r.klass_breakdown_window.get(klass) if r.klass_breakdown_window else None
                 label = _KLASS_LABELS.get(klass, klass)
+                win_pnl_str = f"{st_win.total_pnl:+.2f}" if st_win is not None else "n/a"
+                tot_pnl_str = f"{st_tot.total_pnl:+.2f}" if st_tot is not None else "n/a"
+                win_fills_str = str(st_win.fills) if st_win is not None else "?"
+                tot_fills_str = str(st_tot.fills) if st_tot is not None else "?"
                 lines.append(
-                    f"    {label}: PnL {st.total_pnl:+.2f} | fills {st.fills}"
+                    f"    {label}: 24h {win_pnl_str} | total {tot_pnl_str} | "
+                    f"fills {win_fills_str}/{tot_fills_str}"
                 )
-        total += r.total_true_pnl
+        total_window += r.window_total_pnl
+        total_alltime += r.total_true_pnl
         if r.has_drift:
             drifting.append(r.alias)
     lines.append("")
     recon_line = "all reconciled ✅" if not drifting else f"⚠️ DRIFT: {', '.join(drifting)}"
-    lines.append(f"Total strategy PnL: {total:+.2f}  |  {recon_line}")
+    lines.append(
+        f"Total strategy PnL: 24h {total_window:+.2f} | total {total_alltime:+.2f}  |  {recon_line}"
+    )
     return "\n".join(lines)
 
 
@@ -268,6 +322,8 @@ def gather_slot(
     *, alias: str, dal: StateDAL, exec_client: ExecutionClient,
     qty_tolerance: float, pnl_tolerance: float = 1.0,
     fetch_venue_realized: bool = True,
+    now_ns: int | None = None,
+    window_hours: float = 24.0,
 ) -> SlotRecon:
     """IO: pull local + venue realized PnL + DB positions + venue state for one
     slot and run the pure compare. clearinghouse_state()/realized_pnl_since() are
@@ -278,7 +334,16 @@ def gather_slot(
     per-fill closedPnl via user_fills (the daily-loss gate's source). PM has no
     venue realized counter — its realized lives in our settlement/fill ledger —
     so callers pass fetch_venue_realized=False for PM and the local figure stands
-    (venue_realized=None), avoiding a false local-vs-venue mismatch."""
+    (venue_realized=None), avoiding a false local-vs-venue mismatch.
+
+    now_ns is injected by the caller (from main's clock) for testability; if
+    None it defaults to time.time_ns(). window_hours controls the look-back
+    window (default 24h) for the trailing-window PnL figures.
+    """
+    if now_ns is None:
+        now_ns = time.time_ns()
+    window_start_ns = now_ns - int(window_hours * 3600 * 1_000_000_000)
+
     db_realized = dal.realized_pnl_since(0)
     db_positions = [(p.symbol, p.qty) for p in dal.all_positions()]
     venue = exec_client.clearinghouse_state()
@@ -286,6 +351,9 @@ def gather_slot(
     account_pnl: float | None = None
     fills_count: int | None = None
     klass_breakdown: dict[str, KlassStat] | None = None
+    venue_realized_window: float | None = None
+    fills_count_window: int | None = None
+    klass_breakdown_window: dict[str, KlassStat] | None = None
     if fetch_venue_realized:
         # Fetch fills ONCE and derive both realized PnL and the fill count from
         # it — calling realized_pnl_since AND user_fills separately would paginate
@@ -306,6 +374,19 @@ def gather_slot(
             klass_breakdown = _split_by_klass(
                 outcome, venue.positions, dal.coin_klass_map(),
             )
+            # Trailing-window: filter the already-fetched fills — no second fetch.
+            # Fills carry a ts_ns attribute; filter to those within the window.
+            outcome_window = [
+                f for f in outcome
+                if getattr(f, "ts_ns", None) is not None and f.ts_ns >= window_start_ns
+            ]
+            venue_realized_window = sum(f.closed_pnl - f.fee for f in outcome_window)
+            fills_count_window = len(outcome_window)
+            # Window klass split: open MTM is passed through (it IS today's
+            # unrealized); realized/fills come from the windowed fill list.
+            klass_breakdown_window = _split_by_klass(
+                outcome_window, venue.positions, dal.coin_klass_map(),
+            )
         except Exception:  # noqa: BLE001 — venue read is best-effort; report still useful
             venue_realized = None
         # Equity-based account PnL (HL portfolio = the UI number). Optional: only
@@ -322,23 +403,47 @@ def gather_slot(
             fills_count = dal.fills_count()
         except Exception:  # noqa: BLE001
             fills_count = None
+
+    # PM windowed local realized (dal.realized_pnl_since supports a cutoff).
+    realized_pnl_window: float = 0.0
+    if not fetch_venue_realized:
+        try:
+            realized_pnl_window = dal.realized_pnl_since(window_start_ns)
+        except Exception:  # noqa: BLE001
+            realized_pnl_window = 0.0
+
     return compare_slot(
         alias=alias, db_positions=db_positions, db_realized_pnl=db_realized,
         venue=venue, qty_tolerance=qty_tolerance,
         venue_realized_pnl=venue_realized, pnl_tolerance=pnl_tolerance,
         account_pnl_all_time=account_pnl, fills_count=fills_count,
         klass_breakdown=klass_breakdown,
+        venue_realized_pnl_window=venue_realized_window,
+        realized_pnl_window=realized_pnl_window,
+        fills_count_window=fills_count_window,
+        klass_breakdown_window=klass_breakdown_window,
     )
 
 
-def build_report(deploy_cfg, strategies_cfg, *, qty_tolerance: float, pnl_tolerance: float = 1.0) -> list[SlotRecon]:
+def build_report(
+    deploy_cfg, strategies_cfg, *,
+    qty_tolerance: float, pnl_tolerance: float = 1.0,
+    now_ns: int | None = None,
+    window_hours: float = 24.0,
+) -> list[SlotRecon]:
     """IO: build a read-only client + open the DAL per slot, gather each.
 
     A slot whose client/DAL errors yields a positions_known=False SlotRecon so
-    one bad slot never aborts the whole report."""
+    one bad slot never aborts the whole report.
+
+    now_ns is injected for testability; defaults to time.time_ns() in gather_slot.
+    window_hours controls the trailing PnL window (default 24h)."""
     from .config import HyperliquidAccount
     from .config_builders import build_exec_client
     from .state import StateDAL
+
+    if now_ns is None:
+        now_ns = time.time_ns()
 
     out: list[SlotRecon] = []
     for s_cfg in strategies_cfg.strategies:
@@ -357,7 +462,8 @@ def build_report(deploy_cfg, strategies_cfg, *, qty_tolerance: float, pnl_tolera
             fetch_venue_realized = isinstance(acct, HyperliquidAccount)
             out.append(gather_slot(alias=alias, dal=dal, exec_client=client,
                                    qty_tolerance=qty_tolerance, pnl_tolerance=pnl_tolerance,
-                                   fetch_venue_realized=fetch_venue_realized))
+                                   fetch_venue_realized=fetch_venue_realized,
+                                   now_ns=now_ns, window_hours=window_hours))
         except Exception as e:  # noqa: BLE001 — a bad slot must not abort the report
             out.append(SlotRecon(alias=alias, realized_pnl=0.0, open_mtm=0.0,
                                  account_value_usd=0.0, positions_known=False,
@@ -409,6 +515,8 @@ def main() -> None:
     p.add_argument("--summary", action="store_true",
                    help="send the compact one-message daily summary to Telegram (always)")
     p.add_argument("--date", type=str, default=None, help="date label for the summary header")
+    p.add_argument("--window-hours", type=float, default=24.0,
+                   help="look-back window in hours for the trailing PnL figures (default 24)")
     args = p.parse_args()
 
     from .config import load_deploy_config, load_strategies_config
@@ -420,8 +528,10 @@ def main() -> None:
     bot_token = getattr(tg, "bot_token", None)
     chat_id = getattr(tg, "chat_id", None)
 
+    now_ns = time.time_ns()
     recon = build_report(deploy_cfg, strategies_cfg, qty_tolerance=args.qty_tolerance,
-                         pnl_tolerance=args.pnl_tolerance)
+                         pnl_tolerance=args.pnl_tolerance, now_ns=now_ns,
+                         window_hours=args.window_hours)
     has_drift = any(r.has_drift for r in recon)
     text = format_report(recon)
 
@@ -435,7 +545,7 @@ def main() -> None:
 
     if args.json:
         print(json.dumps({
-            "generated_at_ns": time.time_ns(),
+            "generated_at_ns": now_ns,
             "has_drift": has_drift,
             "slots": [
                 {"alias": r.alias, "realized_pnl": r.realized_pnl,
