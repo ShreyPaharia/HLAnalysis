@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from ..marketdata.position_math import PositionState, open_mtm
 from .regions import kv_get as _kv
 from .types import QuestionView
 
@@ -136,4 +137,9 @@ def settlement_pnl_usd(
         payout = 1.0 if symbol == winning else 0.0
     if payout is None:
         return prior_realized
-    return prior_realized + qty * (payout - avg_entry)
+    # SHR-88: the settlement leg PnL is the open position marked to its payoff —
+    # routed through the shared ``position_math.open_mtm`` so the engine's
+    # (compute-path) settlement accounting is identical to the sim's, by
+    # construction. The winner above comes from venue truth (settled_symbol(s) /
+    # settled_side), never a re-derived YES leg.
+    return prior_realized + open_mtm(PositionState(qty, avg_entry), payout)

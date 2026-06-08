@@ -17,7 +17,7 @@ from .risk import RiskGate, RiskInputs
 from .risk_events import Entry, Exit, OrderRejected, RiskVeto
 from .state import Fill, OpenOrder, Position, StateDAL
 from .trade_journal import HaltSnapshot, TradeJournal
-from ..marketdata.position_math import PositionState, apply_fill, stop_price
+from ..marketdata.position_math import PositionState, apply_fill, settle, stop_price
 from ..strategy.render import outcome_description, question_description
 from ..strategy.types import Action, Decision, OrderIntent, QuestionView
 
@@ -572,8 +572,20 @@ class Router:
             window_start_ns = Scanner._daily_window_start_ns(
                 now_ns, hour=self.strategy_cfg.global_.daily_window_start_hour_utc,
             )
-            realized = self.exec_client.realized_pnl_for_symbol(
+            venue_realized = self.exec_client.realized_pnl_for_symbol(
                 p.symbol, since_ts_ns=window_start_ns,
+            )
+            # SHR-88: book the HL settlement through the shared position_math
+            # settle() with the venue-truth `closedPnl` override. The payoff
+            # indices are unused under the override (HL gives us no clean winner
+            # index — that is precisely why we trust the venue's own closedPnl),
+            # so settle() returns `venue_realized` verbatim. This is the LIVE
+            # override path; the sim runs the same settle() with venue override
+            # None (compute path).
+            _, realized = settle(
+                PositionState(p.qty, p.avg_entry, p.realized_pnl, p.closed_qty),
+                position_side_idx=0, settled_side_idx=0,
+                venue_closed_pnl=venue_realized,
             )
         else:
             # PM: the redeem is not a CLOB fill, so re-derive from the

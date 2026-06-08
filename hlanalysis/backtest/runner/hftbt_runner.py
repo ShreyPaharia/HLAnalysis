@@ -65,6 +65,7 @@ from hlanalysis.marketdata.position_math import (
     STOP_DISABLED_SENTINEL,
     PositionState,
     apply_fill,
+    settlement_payoff_price,
     stop_price,
 )
 from hlanalysis.strategy.base import Strategy
@@ -1266,16 +1267,34 @@ def _hedge_mtm_fill(symbol: str, qty: float, mark_px: float) -> Fill:
 
 
 def _settle_px_for_outcome(pos: Position, q: QuestionDescriptor, outcome: str) -> float:
-    """Binary-leg payoff lookup.
+    """Binary-leg settlement payoff, via the shared
+    :func:`position_math.settlement_payoff_price` (SHR-88).
 
-    For ``priceBinary`` the held leg wins when it matches the resolved outcome
-    (leg[0] = yes, leg[1] = no). Unknown / unrecognised outcomes settle at 0.
+    The held leg's index (leg[0] = YES, leg[1] = NO) is the position side; the
+    venue/recorded resolved ``outcome`` supplies the winning (settled) side
+    index — ``yes`` -> 0, ``no`` -> 1. Routing through the shared function makes
+    the sim book payoffs identically to the live engine and, critically, derives
+    the winner from the resolved outcome rather than re-deriving a YES winner.
+    An unrecognised outcome, or a position whose leg isn't one of the question's
+    legs, can never match the settled side and settles worthless (0.0) — exactly
+    as before.
     """
-    if outcome == "yes" and pos.symbol == (q.leg_symbols[0] if q.leg_symbols else ""):
-        return 1.0
-    if outcome == "no" and pos.symbol == (q.leg_symbols[1] if len(q.leg_symbols) > 1 else ""):
-        return 1.0
-    return 0.0
+    legs = q.leg_symbols
+    yes_leg = legs[0] if legs else ""
+    no_leg = legs[1] if len(legs) > 1 else ""
+    if pos.symbol == yes_leg:
+        position_side_idx = 0
+    elif pos.symbol == no_leg:
+        position_side_idx = 1
+    else:
+        return 0.0  # held leg isn't part of this question — can't win
+    if outcome == "yes":
+        settled_side_idx = 0
+    elif outcome == "no":
+        settled_side_idx = 1
+    else:
+        return 0.0  # unresolved / unknown outcome settles worthless
+    return settlement_payoff_price(position_side_idx, settled_side_idx)
 
 
 __all__ = [
