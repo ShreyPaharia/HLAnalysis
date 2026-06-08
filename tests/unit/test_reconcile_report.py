@@ -42,6 +42,40 @@ def test_compare_slot_qty_mismatch_is_drift():
     assert any(d.kind == "qty_mismatch" and d.symbol == "BTC" for d in r.drift)
 
 
+def test_compare_slot_pm_subshare_rounding_not_drift():
+    # PM data-api settled size vs our booked size routinely differ by ~8e-3
+    # shares (2dp sell-floor + indexer rounding). The live engine reconcile
+    # tolerates this (abs_tol=2e-2); the report must match so PM slots don't
+    # false-flag DRIFT every cycle (incident 2026-06-08 v31_pm 56.1685/56.1764).
+    r = compare_slot(
+        alias="v31_pm",
+        db_positions=[("0xTOK", 56.168538)],
+        db_realized_pnl=17.90,
+        venue=ClearinghouseState(
+            positions=(_vp("0xTOK", 56.1764, 0.5, -0.28),),
+            account_value_usd=188.0,
+        ),
+        qty_tolerance=2e-2,   # engine abs_tol
+    )
+    assert r.drift == []
+    assert r.has_drift is False
+
+
+def test_compare_slot_real_qty_diff_flags_at_engine_tol():
+    # A real missed fill (~1 share) still flags at the engine tolerance.
+    r = compare_slot(
+        alias="v1",
+        db_positions=[("#150", 10.0)],
+        db_realized_pnl=0.0,
+        venue=ClearinghouseState(
+            positions=(_vp("#150", 9.0, 0.9, 0.0),),
+            account_value_usd=1.0,
+        ),
+        qty_tolerance=2e-2,
+    )
+    assert any(d.kind == "qty_mismatch" and d.symbol == "#150" for d in r.drift)
+
+
 def test_compare_slot_vanished_and_orphan():
     # DB has ETH the venue doesn't (vanished); venue has SOL the DB doesn't (orphan).
     r = compare_slot(

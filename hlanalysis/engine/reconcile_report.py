@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +22,11 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from .exec_types import ClearinghouseState
+# Reuse the live engine reconcile's qty-drift tolerances so the report never
+# flags a position diff the engine itself tolerates. PM data-api settled sizes
+# carry ~8e-3-share rounding noise vs our booked size; with a tighter tolerance
+# the daily report false-flags PM slots as DRIFT every cycle (2026-06-08).
+from .reconcile import _QTY_MISMATCH_ABS_TOL, _QTY_MISMATCH_REL_TOL
 
 if TYPE_CHECKING:
     from .exec_client import ExecutionClient
@@ -157,7 +163,10 @@ def compare_slot(
             v_qty = venue_by_sym.get(sym)
             if v_qty is None:
                 drift.append(Drift("vanished", sym, db_qty, 0.0))
-            elif abs(v_qty - db_qty) > qty_tolerance:
+            elif not math.isclose(
+                v_qty, db_qty,
+                rel_tol=_QTY_MISMATCH_REL_TOL, abs_tol=qty_tolerance,
+            ):
                 drift.append(Drift("qty_mismatch", sym, db_qty, v_qty))
         for sym, v_qty in venue_by_sym.items():
             if sym not in db_by_sym:
@@ -508,7 +517,10 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Out-of-band venue reconciliation report.")
     p.add_argument("--strategy-config", type=Path, default=Path("config/strategy.yaml"))
     p.add_argument("--deploy-config", type=Path, default=Path("config/deploy.yaml"))
-    p.add_argument("--qty-tolerance", type=float, default=1e-6)
+    p.add_argument("--qty-tolerance", type=float, default=_QTY_MISMATCH_ABS_TOL,
+                   help="abs share tolerance for position qty drift; defaults to the "
+                        "engine reconcile's (2e-2) so benign PM data-api rounding "
+                        "doesn't false-flag DRIFT")
     p.add_argument("--pnl-tolerance", type=float, default=1.0,
                    help="USD divergence between local and venue realized that counts as drift")
     p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
