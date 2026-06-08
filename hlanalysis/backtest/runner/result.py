@@ -42,6 +42,9 @@ class RunResult:
     fills: list[Fill] = field(default_factory=list)
     n_decisions: int = 0
     realized_pnl_usd: float | None = None
+    # SHR-85: count of ENTER decisions suppressed by the sim halt/cap gate
+    # (halt window, daily-loss cap, inventory caps). Exits are never suppressed.
+    n_entries_suppressed: int = 0
 
 
 # ---------------------------------------------------------------------------
