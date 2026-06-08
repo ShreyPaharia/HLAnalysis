@@ -1,9 +1,47 @@
+"""Engine MarketState — a thin adapter over the shared marketdata core (SHR-87).
+
+Spec 2 / SHR-73 unifies the two MarketState implementations (live engine vs
+backtest) onto ONE shared, pure event-driven core
+(``hlanalysis/marketdata/market_state.py``, SHR-81) so the strategy sees
+*identical* σ / returns / volume inputs on both paths — eliminating the
+train/serve input skew by code reuse rather than a diff harness.
+
+This module is the LIVE-MONEY adapter. It owns a shared-core ``MarketState``
+and delegates the **book/returns/σ/volume math** to it:
+
+  * reference-price ticks (perp mark / BBO mid) → ``apply_reference_tick`` →
+    per-(symbol, dt) OHLC bars → ``recent_returns`` / ``recent_hl_bars`` /
+    ``last_mark`` / ``last_mark_ts``;
+  * trade prints → ``apply_trade`` → ``recent_volume_usd`` (1h rolling window).
+
+It keeps the **engine-specific edges** on this side (the data-in edge of the
+Spec-2 architecture), because they are not part of the shared core's contract:
+
+  * the L2 **book** (BBO / snapshot / delta), whose HL semantics — a BBO updates
+    top-of-book WITHOUT touching the deeper levels — the shared core's
+    snapshot-coupled book model cannot represent. ``book()`` therefore reads
+    this side's book and is byte-identical to the pre-refactor engine;
+  * the HIP-4 / PM **question / strike / settlement** registry;
+  * the per-symbol **reference source** (``mark`` | ``bbo``) selection and its
+    fail-fast conflict guard;
+  * the **cadence** registration bookkeeping (``mark_bucket_ns_for`` and the
+    ``_cadences_by_symbol`` / ``_mark_history_by_key`` attributes other engine
+    components and tests read), forwarded to the core so its bar buffers exist.
+
+The legacy **count-path** reads (``recent_returns(symbol, n)`` with no
+``now_ns``) are served from the shared core's full bar history — the
+unbounded-window special case of the time-bounded slice — preserving the old
+``[-(n+1):]`` semantics for callers that have not moved to the time-bounded
+window (scanner/replay both pass ``now_ns`` + ``lookback_seconds``).
+
+Bit-identity is proven against the pre-refactor engine on a real-engine replay
+of the recorded HL corpus in
+``tests/unit/test_market_state_shr87_replay_parity.py`` (the SHR-87 gate).
+"""
 from __future__ import annotations
 
 import dataclasses
-import math
-from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..events import (
     BboEvent,
@@ -15,8 +53,17 @@ from ..events import (
     SettlementEvent,
     TradeEvent,
 )
-from ..marketdata.ohlc import bucket_index, update_bar
+from ..marketdata.market_state import MarketState as _SharedMarketState
 from ..strategy.types import BookState, QuestionView
+
+# Legacy COUNT-path "infinite window": a now_ns above any real epoch-ns and a
+# lookback wide enough that the cutoff precedes any bar, so the shared core's
+# time-bounded slice returns the FULL bar history. The count path then takes the
+# last ``n`` of that — reproducing the pre-SHR-87 deque ``[-(n+1):]`` read. The
+# cutoff (now_ns − lookback·1e9) stays within int64 range so numpy.searchsorted
+# is happy: (2^63−1) − 1e10·1e9 ≈ −7.8e17.
+_COUNT_NOW_NS: int = (1 << 63) - 1
+_COUNT_LOOKBACK_S: int = 10_000_000_000
 
 
 @dataclass
@@ -32,14 +79,12 @@ class _MutableBook:
 
 
 class MarketState:
-    """In-memory market state. Pure (no IO, no asyncio).
+    """In-memory live market state. Pure (no IO, no asyncio).
 
-    Owns:
-      - per-symbol BBO/L2 (top-of-book is sufficient for Phase 1 strategy)
-      - per-symbol recent trades (for last-hour volume)
-      - per-symbol last mark
-      - HIP-4 question registry (idx -> QuestionView)
-      - per-perp tail of marks for realized-vol calc
+    Thin adapter over the shared ``marketdata.MarketState`` core (SHR-87). Owns
+    the engine-specific edges (book, question registry, reference source /
+    cadence config) and delegates the returns / σ / volume / last_mark math to
+    the shared core.
     """
 
     def __init__(
@@ -49,55 +94,40 @@ class MarketState:
         mark_history: int = 256,
         mark_bucket_ns: int = 60 * 1_000_000_000,  # 1 minute
     ) -> None:
+        # The shared core owns the OHLC bar buffers (returns/HL/σ + last_mark)
+        # and the rolling-volume window. The engine forwards reference ticks and
+        # trades into it and reads through its query surface.
+        self._core = _SharedMarketState(
+            volume_window_ns=volume_window_ns,
+            default_bucket_ns=mark_bucket_ns,
+        )
+        # ---- engine-side edges (NOT in the shared core's contract) ----
         self._books: dict[str, _MutableBook] = {}
         self._questions: dict[int, QuestionView] = {}
-        self._trades: dict[str, deque[TradeEvent]] = {}
-        self._last_mark: dict[str, float] = {}
-        # Timestamp of the latest reference tick per symbol; lets the risk gate
-        # detect a stale reference feed (SHR-60).
-        self._last_mark_ts: dict[str, int] = {}
-        # 2026-05-21: bucket marks into ``mark_bucket_ns``-wide windows so the
-        # strategy's σ formula (which assumes 60s-spaced returns) sees a
-        # correctly-spaced series. Without this, HL's ~1.2/s markPx feed
-        # produces 32 sub-second returns that the strategy then annualizes
-        # as if they were 32 minutes — σ collapses to the floor and
-        # p_model/safety_d go to extremes. See bug memo
-        # `engine_sigma_sampling_bug_2026_05_21.md`.
-        # Per (symbol, dt_ns): a deque of per-bucket OHLC bars (high, low, close).
-        # One reference-tick stream fans into every cadence registered for the
-        # symbol, so a single slot can run different vol_sampling_dt_seconds per
-        # question class off the SAME feed (see the (symbol, dt) refactor plan).
-        # Each bar stores (ts_ns, high, low, close) so the time-bounded
-        # recent_returns / recent_hl_bars paths can filter by wall-clock time
-        # to match the backtest's slice_window semantics (SHR-66).
-        self._marks: dict[tuple[str, int], deque[tuple[int, float, float, float]]] = {}
-        self._mark_history: int = mark_history  # default deque maxlen (legacy)
-        self._mark_history_by_key: dict[tuple[str, int], int] = {}
         self._mark_bucket_ns: int = mark_bucket_ns  # default (60s) for unregistered symbols
-        self._default_cadences: tuple[int, ...] = (self._mark_bucket_ns,)
+        self._mark_history: int = mark_history  # default history sizing (legacy)
+        # Per (symbol, dt_ns) history-size bookkeeping. Vestigial for storage
+        # (the shared core's buffers grow as needed) but preserved because
+        # other engine components and tests read it as the configured σ-window
+        # sizing. See ``set_reference_cadence``.
+        self._mark_history_by_key: dict[tuple[str, int], int] = {}
         # Cadences registered per symbol, in registration order. The FIRST
         # registered cadence is the symbol's default (what a dt-less read
-        # resolves to), preserving single-cadence bit-identity.
+        # resolves to), preserving single-cadence bit-identity. Mirrors the
+        # cadences forwarded to the shared core.
         self._cadences_by_symbol: dict[str, list[int]] = {}
         # Per reference symbol, which feed sources the σ/OHLC reference:
         #   "mark" (default) — the venue MarkEvent (HL perp mark; Binance perp
         #     mark REST-poll). Legacy behaviour, unchanged.
         #   "bbo"            — the dense BBO mid = (bid_px+ask_px)/2. Used to
         #     give PM (BTCUSDT_SPOT) a sub-second reference so dt=5 bars don't
-        #     degenerate (the 3s mark poll yields ~1.6 pts/5s bar). The chosen
-        #     feed drives BOTH the OHLC bars and ``last_mark`` so the strategy's
-        #     reference price S is consistent with its σ source. A symbol can be
-        #     fed only one way (shared history), so conflicting registrations
-        #     raise — same fail-fast rule as ``set_reference_cadence``.
+        #     degenerate. The chosen feed drives BOTH the OHLC bars and
+        #     ``last_mark``. A symbol can be fed only one way (shared history),
+        #     so conflicting registrations raise — same fail-fast rule as
+        #     ``set_reference_cadence``.
         self._reference_source_by_symbol: dict[str, str] = {}
-        # Last-bucket-id written per (symbol, dt_ns); coalesces within-bucket
-        # reference-price updates into one bar per cadence.
-        self._last_mark_bucket: dict[tuple[str, int], int] = {}
-        self._volume_window_ns = volume_window_ns
         # Cached symbol→question_idx map. Rebuilt lazily on first access after
-        # _update_question fires, and reused thereafter. Reconciler runs every
-        # ~15s and previously rebuilt this from O(N legs × M questions) on
-        # every cycle; the cache makes that O(1) on the steady-state path.
+        # _update_question fires, and reused thereafter.
         self._sym_to_q_cache: dict[str, int] | None = None
 
     # ---- cadence registration ----
@@ -117,8 +147,11 @@ class MarketState:
         its history sizing (never shrinks, never raises). The first cadence
         registered for a symbol is its default, returned by dt-less reads.
 
-        ``lookback_seconds`` sizes the (symbol, dt) history deque to hold at
-        least ``lookback//dt + 2`` bars; never shrinks below the default maxlen.
+        ``lookback_seconds`` records the σ window the slot will request so other
+        engine components can size against it; the shared core's bar buffers grow
+        as needed, so this no longer bounds a fixed ring. The cadence is
+        forwarded to the shared core so its (symbol, dt) bar buffer exists and
+        the reference-tick stream fans into it.
         """
         if sampling_dt_seconds <= 0:
             raise ValueError(
@@ -135,9 +168,13 @@ class MarketState:
             needed = int(lookback_seconds) // int(sampling_dt_seconds) + 2
             prev = self._mark_history_by_key.get(key, self._mark_history)
             self._mark_history_by_key[key] = max(prev, needed)
-            hist = self._marks.get(key)
-            if hist is not None and hist.maxlen != self._mark_history_by_key[key]:
-                self._marks[key] = deque(hist, maxlen=self._mark_history_by_key[key])
+        # Forward to the shared core so the (symbol, dt) bar buffer exists and
+        # reference ticks fan into it (the core dedups + orders identically).
+        self._core.set_reference_cadence(
+            symbol,
+            sampling_dt_seconds=int(sampling_dt_seconds),
+            lookback_seconds=lookback_seconds,
+        )
 
     def _resolve_dt_ns(self, symbol: str, dt: int | None) -> int:
         """Bucket period (ns) for a (symbol, dt) read. ``dt=None`` resolves to
@@ -147,6 +184,22 @@ class MarketState:
             return int(dt) * 1_000_000_000
         cadences = self._cadences_by_symbol.get(symbol)
         return cadences[0] if cadences else self._mark_bucket_ns
+
+    def _read_dt_seconds(self, symbol: str, dt: int | None) -> int:
+        """Cadence (seconds) to read the shared core at — the explicit ``dt`` or
+        the symbol's resolved default cadence. Passing it explicitly to the core
+        keeps the read on the exact buffer the engine resolved."""
+        return self._resolve_dt_ns(symbol, dt) // 1_000_000_000
+
+    def _history_maxlen(self, symbol: str, dt_ns: int) -> int:
+        """Bar-history capacity for ``(symbol, dt)`` — the bounded ring the
+        pre-SHR-87 engine used. The shared core's buffers grow unbounded, so the
+        read paths re-impose this cap to stay byte-identical: a read sees at most
+        the most-recent ``maxlen`` bars (hence ``maxlen-1`` returns), exactly as
+        the old ``deque(maxlen=...)`` did. Live this is a no-op
+        (``reference_vol_lookback_seconds`` sizes ``maxlen`` ≥ the read window);
+        it only bites the legacy COUNT path over long histories."""
+        return self._mark_history_by_key.get((symbol, dt_ns), self._mark_history)
 
     def mark_bucket_ns_for(self, symbol: str, dt: int | None = None) -> int:
         """The bucket period (ns) applied to ``symbol`` at cadence ``dt`` (or the
@@ -201,8 +254,8 @@ class MarketState:
                 # the bbo for σ (book only) — legacy behaviour.
                 if self._reference_source_by_symbol.get(ev.symbol) == "bbo":
                     mid = (ev.bid_px + ev.ask_px) / 2.0
-                    self._ingest_reference_price(
-                        ev.symbol, mid, ev.exchange_ts or ev.local_recv_ts,
+                    self._core.apply_reference_tick(
+                        ev.symbol, ts_ns=ev.exchange_ts or ev.local_recv_ts, price=mid,
                     )
             case BookSnapshotEvent():
                 b = self._books.setdefault(ev.symbol, _MutableBook())
@@ -219,18 +272,19 @@ class MarketState:
                 b = self._books.setdefault(ev.symbol, _MutableBook())
                 b.last_l2_ts_ns = max(b.last_l2_ts_ns, ev.exchange_ts or ev.local_recv_ts)
             case TradeEvent():
-                dq = self._trades.setdefault(ev.symbol, deque())
-                dq.append(ev)
-                self._evict_old_trades(dq, now=ev.exchange_ts or ev.local_recv_ts)
+                ts = ev.exchange_ts or ev.local_recv_ts
+                # Volume accounting (1h rolling window) lives in the shared core.
+                self._core.apply_trade(ev.symbol, ts_ns=ts, price=ev.price, size=ev.size)
                 b = self._books.setdefault(ev.symbol, _MutableBook())
-                b.last_trade_ts_ns = max(b.last_trade_ts_ns, ev.exchange_ts or ev.local_recv_ts)
+                b.last_trade_ts_ns = max(b.last_trade_ts_ns, ts)
             case MarkEvent():
                 # bbo-sourced symbols take their σ/OHLC reference from the BBO
                 # mid (handled in the BboEvent case); a stray MarkEvent for such
                 # a symbol must NOT touch the reference price or bars.
                 if self._reference_source_by_symbol.get(ev.symbol) != "bbo":
-                    self._ingest_reference_price(
-                        ev.symbol, ev.mark_px, ev.exchange_ts or ev.local_recv_ts,
+                    self._core.apply_reference_tick(
+                        ev.symbol, ts_ns=ev.exchange_ts or ev.local_recv_ts,
+                        price=ev.mark_px,
                     )
             case QuestionMetaEvent():
                 self._update_question(ev)
@@ -238,53 +292,6 @@ class MarketState:
                 self._mark_settled(ev)
             case _:
                 pass  # other events ignored in Phase 1
-
-    def _ingest_reference_price(self, symbol: str, price: float, ts: int) -> None:
-        """Feed one reference-price tick into ``last_mark`` plus the per-cadence
-        OHLC bars.
-
-        Shared by the mark-sourced (MarkEvent) and bbo-sourced (BboEvent mid)
-        paths so both produce identical per-bucket ``(high, low, close)`` bars.
-        ``last_mark`` tracks the absolute latest tick (unbucketed). One shared
-        tick stream fans into every cadence registered for the symbol; within a
-        bucket the bar updates in place (high=max, low=min, close=last), a new
-        bucket appends a fresh (price, price, price). This keeps the strategy's
-        ``recent_returns`` spanning the wall-clock window its σ formula assumes
-        (not the raw sub-second tick rate) and supplies per-bar H/L for
-        Parkinson. An unregistered symbol still gets the legacy single default
-        bucket so pre-registration ticks are not dropped (matches old behaviour).
-        """
-        self._last_mark[symbol] = price
-        self._last_mark_ts[symbol] = ts
-        # An unregistered symbol still gets the legacy single default bucket so
-        # pre-registration ticks are not dropped (matches old behaviour).
-        cadences = self._cadences_by_symbol.get(symbol) or self._default_cadences
-        for bucket_ns in cadences:
-            key = (symbol, bucket_ns)
-            hist = self._marks.get(key)
-            if hist is None:
-                maxlen = self._mark_history_by_key.get(key, self._mark_history)
-                hist = deque(maxlen=maxlen)
-                self._marks[key] = hist
-            bucket = bucket_index(ts, bucket_ns)
-            last_bucket = self._last_mark_bucket.get(key)
-            if last_bucket is None or bucket != last_bucket or not hist:
-                # New bucket: store (ts, high, low, close) so the time-bounded
-                # read paths can slice by wall-clock (SHR-66).
-                hist.append((ts, price, price, price))
-                self._last_mark_bucket[key] = bucket
-            else:
-                # Same merge rule as the batch ``resample_ohlc`` loaders use: a
-                # scalar tick is a degenerate (price, price, price) bar.
-                # The stored ts is the latest tick in the bucket, matching
-                # ``resample_ohlc`` semantics (bar ts = last sample in window).
-                new_hlc = update_bar((hist[-1][1], hist[-1][2], hist[-1][3]), price, price, price)
-                hist[-1] = (ts, new_hlc[0], new_hlc[1], new_hlc[2])
-
-    def _evict_old_trades(self, dq: "deque[TradeEvent]", *, now: int) -> None:
-        cutoff = now - self._volume_window_ns
-        while dq and (dq[0].exchange_ts or dq[0].local_recv_ts) < cutoff:
-            dq.popleft()
 
     def _update_question(self, ev: QuestionMetaEvent) -> None:
         kv = dict(zip(ev.keys, ev.values, strict=False))
@@ -492,13 +499,13 @@ class MarketState:
         return m
 
     def last_mark(self, symbol: str) -> float | None:
-        return self._last_mark.get(symbol)
+        return self._core.last_mark(symbol)
 
     def last_mark_ts(self, symbol: str) -> int | None:
         """Timestamp (ns) of the latest reference tick for ``symbol``, or None
         if none seen yet. Used by the Scanner to compute reference-feed age for
         the risk gate's stale-reference check (SHR-60)."""
-        return self._last_mark_ts.get(symbol)
+        return self._core.last_mark_ts(symbol)
 
     def recent_returns(
         self,
@@ -513,41 +520,30 @@ class MarketState:
         (default = the symbol's first registered cadence).
 
         When ``now_ns`` and ``lookback_seconds`` are both provided, the bar
-        sequence is TIME-bounded: only bars with ``ts >= now_ns -
-        lookback_seconds * 1e9`` are kept BEFORE computing returns — matching
-        the backtest's ``slice_window(now_ns, lookback_seconds)`` semantics
-        (SHR-66). Both return endpoints must be inside the time window (the
-        first return in the slice is skipped because its left endpoint is the
-        boundary bar itself, which is inside the window — same rule as
-        ``KlineRingBuffer.slice_window`` using ``ret_slice = ret[lo+1:hi]``).
-
-        Without ``now_ns`` / ``lookback_seconds`` the legacy COUNT path is
-        used (``[-(n+1):]``), preserving bit-identity for callers that have
-        not been updated yet."""
-        key = (symbol, self._resolve_dt_ns(symbol, dt))
-        hist = self._marks.get(key)
-        if hist is None or len(hist) < 2:
-            return ()
+        sequence is TIME-bounded to the SHR-66 window (the live scanner/replay
+        path) and delegated straight to the shared core. Without them the legacy
+        COUNT path is used: the shared core's FULL bar history sliced to the last
+        ``n`` returns — preserving the pre-SHR-87 ``[-(n+1):]`` semantics for
+        callers not yet on the time-bounded window.
+        """
+        dt_s = self._read_dt_seconds(symbol, dt)
+        maxlen = self._history_maxlen(symbol, dt_s * 1_000_000_000)
         if now_ns is not None and lookback_seconds is not None:
-            # TIME-bounded path: converge on backtest slice_window semantics.
-            cutoff_ns = now_ns - lookback_seconds * 1_000_000_000
-            # Each bar is (ts, high, low, close); keep bars in [cutoff, now].
-            bars = [b for b in hist if b[0] >= cutoff_ns]
-            rets: list[float] = []
-            for prev, curr in zip(bars, bars[1:], strict=False):
-                prev_c, curr_c = prev[3], curr[3]
-                if prev_c > 0 and curr_c > 0:
-                    rets.append(math.log(curr_c / prev_c))
-            return tuple(rets)
+            arr = self._core.recent_returns(
+                symbol, now_ns=now_ns, lookback_seconds=lookback_seconds, dt=dt_s,
+            )
+            # The old deque held ≤ maxlen bars → ≤ maxlen-1 windowed returns.
+            cap = maxlen - 1
         else:
-            # Legacy COUNT path: keep for callers that don't pass time args.
-            bars = list(hist)[-(n + 1):]
-            rets = []
-            for prev, curr in zip(bars, bars[1:], strict=False):
-                prev_c, curr_c = prev[3], curr[3]
-                if prev_c > 0 and curr_c > 0:
-                    rets.append(math.log(curr_c / prev_c))
-            return tuple(rets)
+            arr = self._core.recent_returns(
+                symbol, now_ns=_COUNT_NOW_NS, lookback_seconds=_COUNT_LOOKBACK_S,
+                dt=dt_s,
+            )
+            # Legacy COUNT path: old read `[-(n+1):]` bars off a ≤ maxlen deque.
+            cap = min(n, maxlen - 1)
+        if cap < arr.shape[0]:
+            arr = arr[-cap:] if cap > 0 else arr[:0]
+        return tuple(arr.tolist())
 
     def recent_hl_bars(
         self,
@@ -558,38 +554,31 @@ class MarketState:
         now_ns: int | None = None,
         lookback_seconds: int | None = None,
     ) -> tuple[tuple[float, float], ...]:
-        """Last ``n`` per-bucket ``(high, low)`` bars for ``symbol`` at cadence ``dt``
-        (default = the symbol's first registered cadence).
+        """Last ``n`` per-bucket ``(high, low)`` bars for ``symbol`` at cadence
+        ``dt`` (default = the symbol's first registered cadence).
 
-        Mirrors the backtest MarketState's ``recent_hl_bars`` (KlineRingBuffer
-        rows ``[high, low]``) so the strategy's Parkinson σ estimator receives
-        the same input shape on the live path as in the backtest. Empty tuple
-        when the symbol has no bars yet.
-
-        When ``now_ns`` and ``lookback_seconds`` are provided, only bars with
-        ``ts >= now_ns - lookback_seconds * 1e9`` are returned — matching the
-        backtest's time-bounded slice (SHR-66). Without them, the legacy COUNT
-        path (``[-n:]``) is used."""
-        key = (symbol, self._resolve_dt_ns(symbol, dt))
-        hist = self._marks.get(key)
-        if not hist:
-            return ()
+        Feeds the strategy's Parkinson σ estimator the same input shape on the
+        live path as in the backtest. Time-bounded when ``now_ns`` +
+        ``lookback_seconds`` are given (SHR-66, the live path), else the legacy
+        COUNT path (last ``n`` bars of the full history). Empty tuple when the
+        symbol has no bars yet.
+        """
+        dt_s = self._read_dt_seconds(symbol, dt)
+        maxlen = self._history_maxlen(symbol, dt_s * 1_000_000_000)
         if now_ns is not None and lookback_seconds is not None:
-            # TIME-bounded: keep bars whose ts is inside the window.
-            cutoff_ns = now_ns - lookback_seconds * 1_000_000_000
-            # bar layout: (ts, high, low, close)
-            return tuple(
-                (b[1], b[2]) for b in hist
-                if b[0] >= cutoff_ns and b[1] > 0 and b[2] > 0
+            arr = self._core.recent_hl_bars(
+                symbol, now_ns=now_ns, lookback_seconds=lookback_seconds, dt=dt_s,
             )
+            cap = maxlen  # old deque held ≤ maxlen (high, low) bars
         else:
-            # Legacy COUNT path.
-            bars = list(hist)[-n:]
-            return tuple((b[1], b[2]) for b in bars)
+            arr = self._core.recent_hl_bars(
+                symbol, now_ns=_COUNT_NOW_NS, lookback_seconds=_COUNT_LOOKBACK_S,
+                dt=dt_s,
+            )
+            cap = min(n, maxlen)
+        if cap < arr.shape[0]:
+            arr = arr[-cap:]
+        return tuple((float(h), float(low)) for h, low in arr)
 
     def recent_volume_usd(self, symbol: str, *, now: int) -> float:
-        dq = self._trades.get(symbol)
-        if dq is None:
-            return 0.0
-        self._evict_old_trades(dq, now=now)
-        return float(sum(t.price * t.size for t in dq))
+        return self._core.recent_volume_usd(symbol, now_ns=now)
