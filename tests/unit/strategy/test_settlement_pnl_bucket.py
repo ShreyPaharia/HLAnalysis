@@ -47,3 +47,21 @@ def test_binary_via_settled_symbols_path():
     )
     assert math.isclose(settlement_pnl_usd(qv, "yA", qty=5.0, avg_entry=0.8), 5.0 * 0.2)
     assert math.isclose(settlement_pnl_usd(qv, "nA", qty=5.0, avg_entry=0.2), 5.0 * -0.2)
+
+
+def test_settlement_pnl_routes_through_shared_open_mtm():
+    """SHR-88: the engine's (compute-path) settlement leg PnL must be exactly
+    the shared ``position_math.open_mtm`` of the held position marked to its
+    venue-resolved payoff — so the live engine and the sim book it identically.
+    """
+    from hlanalysis.marketdata.position_math import PositionState, open_mtm
+
+    # Winner (payoff 1.0): held leg won.
+    qv = _qv(settled_symbols=("n90", "y80"))
+    got = settlement_pnl_usd(qv, "y80", qty=10.0, avg_entry=0.9, prior_realized=2.5)
+    assert got == 2.5 + open_mtm(PositionState(10.0, 0.9), 1.0)
+
+    # Loser (payoff 0.0): held leg lost.
+    qv = _qv(settled_symbols=("n80", "y90"))
+    got = settlement_pnl_usd(qv, "y80", qty=10.0, avg_entry=0.9, prior_realized=2.5)
+    assert got == 2.5 + open_mtm(PositionState(10.0, 0.9), 0.0)
