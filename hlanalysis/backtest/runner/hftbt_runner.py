@@ -29,9 +29,16 @@ Algorithm:
 API choice rationale: hftbacktest 2.4.4 exposes both ``HashMapMarketDepthBacktest``
 (per-tick hashmap depth) and ``ROIVectorMarketDepthBacktest`` (region-of-interest
 vector depth). For sparse prediction-market books and a per-second scan cadence,
-the hashmap variant is the right fit — no ROI bounds to configure, and the
-constant-latency / risk-adverse-queue / no-partial-fill defaults match the
-existing sim's IOC-against-synthetic-L2 semantics.
+the hashmap variant is the right fit — no ROI bounds to configure.
+
+Execution model (SHR-79/56/57): HL HIP-4 assets use ``partial_fill_exchange``
+(fills walk real recorded book depth; IOC remainder cancels) and
+``constant_order_latency`` wired to ``RunConfig.order_latency_ms`` (default 50 ms,
+empirical HL median). ``slippage_bps`` is an additive haircut applied to the
+recorded fill price (buys fill higher, sells lower). HL fee = 0 empirically;
+``fee_taker`` defaults to 0.0 and is logged at run start. PM / synthetic paths
+are unaffected — they still build with identical API calls (only the exchange
+model and latency changed, which was already the right trade-off for both).
 """
 from __future__ import annotations
 
@@ -86,7 +93,13 @@ class RunConfig:
     lot_size: float = 1.0
     slippage_bps: float = 5.0
     fee_taker: float = 0.0
-    book_depth_assumption: float = 10_000.0
+    # book_depth_assumption: optional explicit fill-size cap (SHR-79).
+    # None (default) = unlimited — the real recorded book governs fill size via
+    # partial_fill_exchange. A finite value caps exec_qty at that level as a
+    # worst-case guard (e.g. --depth 500 for a $500 position limit). The
+    # legacy default of 10_000 is intentionally removed so thin HIP-4 books
+    # produce realistic partial fills instead of uniform full-cap fills.
+    book_depth_assumption: float | None = None
     vol_lookback_seconds: int = 86_400
     last_trades_capacity: int = 256
     # Binary-leg fee model. "flat" → fee = px * qty * fee_taker (legacy; HL,
@@ -98,6 +111,10 @@ class RunConfig:
     # trade. fee_taker is ignored when model != "flat".
     fee_model: str = "flat"
     fee_rate: float = 0.07
+    # Order latency (SHR-79): constant round-trip to/from the exchange.
+    # Empirical HL HIP-4 median ≈ 46 ms; default 50 ms. Set to 0 for the
+    # legacy zero-latency behaviour (e.g. tests that don't care about timing).
+    order_latency_ms: float = 50.0
     # Hedge leg config (used by v5_delta_hedged; ignored by all other strategies)
     hedge_enabled: bool = False
     hedge_symbol: str = ""
@@ -166,13 +183,17 @@ def _initial_clear_array(start_ts_ns: int) -> np.ndarray:
 
 
 def _build_asset(arr: np.ndarray, cfg: RunConfig):
+    # SHR-79: partial_fill_exchange replaces no_partial_fill_exchange so IOC
+    # orders fill only real recorded book depth and walk levels naturally.
+    # SHR-79: order_latency_ms wires the empirical ~50 ms HL RTT into the sim.
+    latency_ns = int(cfg.order_latency_ms * 1_000_000)
     return (
         hb.BacktestAsset()
         .data(arr)
         .linear_asset(1.0)
-        .constant_order_latency(0, 0)
+        .constant_order_latency(latency_ns, latency_ns)
         .risk_adverse_queue_model()
-        .no_partial_fill_exchange()
+        .partial_fill_exchange()
         .trading_value_fee_model(0.0, 0.0)
         .tick_size(cfg.tick_size)
         .lot_size(cfg.lot_size)
@@ -182,13 +203,14 @@ def _build_asset(arr: np.ndarray, cfg: RunConfig):
 
 def _build_hedge_asset(arr: np.ndarray, cfg: RunConfig):
     """Like _build_asset but uses hedge-specific tick/lot sizes."""
+    latency_ns = int(cfg.order_latency_ms * 1_000_000)
     return (
         hb.BacktestAsset()
         .data(arr)
         .linear_asset(1.0)
-        .constant_order_latency(0, 0)
+        .constant_order_latency(latency_ns, latency_ns)
         .risk_adverse_queue_model()
-        .no_partial_fill_exchange()
+        .partial_fill_exchange()
         .trading_value_fee_model(0.0, 0.0)
         .tick_size(cfg.hedge_tick_size)
         .lot_size(cfg.hedge_lot_size)
@@ -288,18 +310,23 @@ class _RunState:
         order = self.hbt.orders(asset_no).get(oid)
         if order is None:
             return None
-        # FILLED=3, PARTIALLY_FILLED=5
-        if order.status not in (3, 5):
-            return None
+        # Accept FILLED(3), PARTIALLY_FILLED(5), and EXPIRED(2).
+        # With partial_fill_exchange + IOC, a partially-filled order whose
+        # remainder was cancelled gets status=EXPIRED (the IOC cancellation).
+        # exec_qty > 0 confirms something actually filled; exec_qty == 0 means
+        # the order was rejected/expired with no fill (e.g. no book at all).
         exec_qty = float(order.exec_qty)
-        if exec_qty <= 0.0:
+        if order.status not in (2, 3, 5) or exec_qty <= 0.0:
             return None
         exec_px = float(order.exec_price)
         # Bound to [0, 1] for binary tokens.
         exec_px = max(0.0, min(1.0, exec_px))
-        # Cap fill size by the strategy's intended size and the configured
-        # book-depth assumption (mirrors sim/fills.py semantics).
-        exec_qty = min(exec_qty, intent_size, self.cfg.book_depth_assumption)
+        # Cap fill size by the strategy's intended size; apply the optional
+        # book_depth_assumption cap when set (None = unlimited).
+        if self.cfg.book_depth_assumption is not None:
+            exec_qty = min(exec_qty, intent_size, self.cfg.book_depth_assumption)
+        else:
+            exec_qty = min(exec_qty, intent_size)
         fee = _binary_fee(exec_px, exec_qty, self.cfg)
         return Fill(
             cloid=cloid, symbol=symbol, side=side, price=exec_px, size=exec_qty,
@@ -585,6 +612,21 @@ def run_one_question(
     hedge_events: list[BookSnapshot] | None = None,
 ) -> RunResult:
     """Run one question end-to-end through hftbacktest."""
+
+    # SHR-57: log effective fee model/rate once at run start so it is never a
+    # silent default. HL HIP-4 empirically has fee=0 across 767 live fills;
+    # the 'flat' model with fee_taker=0.0 is the correct default. PM uses
+    # 'pm_binary' with fee_rate=0.07; that path is unchanged.
+    if cfg.fee_model == "pm_binary":
+        logger.debug(
+            f"fee_model=pm_binary  fee_rate={cfg.fee_rate:.4f}  "
+            f"(Polymarket curve: fee = qty * {cfg.fee_rate} * p * (1-p))"
+        )
+    else:
+        logger.debug(
+            f"fee_model={cfg.fee_model}  fee_taker={cfg.fee_taker:.6f}  "
+            f"(HL HIP-4 empirical fee = $0 across 767 live fills)"
+        )
 
     # --- Collect events ----------------------------------------------------
     # Two paths:
