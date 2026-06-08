@@ -45,6 +45,10 @@ class RunResult:
     # SHR-85: count of ENTER decisions suppressed by the sim halt/cap gate
     # (halt window, daily-loss cap, inventory caps). Exits are never suppressed.
     n_entries_suppressed: int = 0
+    # SHR-89: count of marketable IOC orders that returned no fill because the
+    # limit was unmarketable at fill time (book moved away / queue not swept
+    # during latency δ). Each reject re-fires next scan — the modelled live churn.
+    n_rejects: int = 0
 
 
 # ---------------------------------------------------------------------------

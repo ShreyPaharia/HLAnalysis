@@ -93,6 +93,92 @@ from .result import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Order-latency models (SHR-89)
+# ---------------------------------------------------------------------------
+#
+# Spec 1 wired a single constant round-trip latency into every asset. Spec 3
+# generalises that into a *pluggable* model so the measured δ distribution from
+# the SHR-83 trade journal can be fed in later, without a hard dependency on
+# live journal data today. The interface is two methods:
+#
+#   - ``apply(asset, *, start_ts_ns, end_ts_ns)`` configures the hftbacktest
+#     latency model on the asset builder and returns the (chained) builder.
+#
+# ``ConstantLatency`` (the default) reproduces Spec 1 bit-for-bit. A
+# distribution model (``SampledLatency``) draws δ per scan-grid point from a
+# supplied sample of millisecond latencies and feeds hftbacktest's interpolated
+# order-latency model, so each order fills on ``book(decision_ts + δ)`` with δ
+# varying across the question.
+
+# Matches hftbacktest's order-latency record layout (data/utils/feed_order_latency.py).
+_ORDER_LATENCY_DTYPE = np.dtype(
+    [("req_ts", "i8"), ("exch_ts", "i8"), ("resp_ts", "i8"), ("_padding", "i8")],
+    align=True,
+)
+
+
+class LatencyModel:
+    """Pluggable order-latency model. Subclasses configure how an order's
+    round-trip latency δ is wired into the hftbacktest asset."""
+
+    def apply(self, asset: Any, *, start_ts_ns: int, end_ts_ns: int) -> Any:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True, slots=True)
+class ConstantLatency(LatencyModel):
+    """Constant round-trip latency (Spec 1 behaviour). ``latency_ms`` ms entry
+    AND response latency, identical for every order."""
+
+    latency_ms: float = 50.0
+
+    def apply(self, asset: Any, *, start_ts_ns: int, end_ts_ns: int) -> Any:
+        ns = int(self.latency_ms * 1_000_000)
+        return asset.constant_order_latency(ns, ns)
+
+
+@dataclass(frozen=True, slots=True)
+class SampledLatency(LatencyModel):
+    """Draw order entry latency δ from an empirical sample of millisecond values
+    (e.g. the SHR-83 journal's measured δ distribution, or any synthetic list).
+
+    Builds an hftbacktest interpolated order-latency array spanning the question
+    on a ``step_ns`` grid, sampling one δ per grid point. The engine interpolates
+    each order's latency from the surrounding grid points, so an order submitted
+    at ``t`` reaches the exchange around ``t + δ`` and fills on the book then.
+
+    Deterministic given ``seed`` — sims must be reproducible (no process-salted
+    randomness). ``resp_ms`` is the response latency added on top of the entry
+    latency (default 0; the entry latency is what governs the fill book)."""
+
+    samples_ms: tuple[float, ...]
+    seed: int = 0
+    step_ns: int = 1_000_000_000  # 1s grid
+    resp_ms: float = 0.0
+
+    def build_latency_array(self, *, start_ts_ns: int, end_ts_ns: int) -> np.ndarray:
+        if not self.samples_ms:
+            raise ValueError("SampledLatency requires at least one δ sample")
+        span = max(0, int(end_ts_ns) - int(start_ts_ns))
+        n = max(2, span // int(self.step_ns) + 2)
+        rng = np.random.default_rng(self.seed)
+        samples = np.asarray(self.samples_ms, dtype=float)
+        draws = rng.choice(samples, size=n)
+        req_ts = int(start_ts_ns) + np.arange(n, dtype=np.int64) * int(self.step_ns)
+        entry_ns = np.rint(draws * 1_000_000).astype(np.int64)
+        resp_ns = int(self.resp_ms * 1_000_000)
+        out = np.zeros(n, dtype=_ORDER_LATENCY_DTYPE)
+        out["req_ts"] = req_ts
+        out["exch_ts"] = req_ts + entry_ns
+        out["resp_ts"] = req_ts + entry_ns + resp_ns
+        return out
+
+    def apply(self, asset: Any, *, start_ts_ns: int, end_ts_ns: int) -> Any:
+        arr = self.build_latency_array(start_ts_ns=start_ts_ns, end_ts_ns=end_ts_ns)
+        return asset.intp_order_latency(arr)
+
+
 @dataclass(frozen=True, slots=True)
 class RunConfig:
     scanner_interval_seconds: int = 60
@@ -122,6 +208,11 @@ class RunConfig:
     # Empirical HL HIP-4 median ≈ 46 ms; default 50 ms. Set to 0 for the
     # legacy zero-latency behaviour (e.g. tests that don't care about timing).
     order_latency_ms: float = 50.0
+    # Pluggable latency model (SHR-89). None → use the constant ``order_latency_ms``
+    # knob above (back-compat). Set to a ``LatencyModel`` (e.g. ``SampledLatency``
+    # fed the SHR-83 journal δ distribution) to fill on ``book(decision_ts + δ)``
+    # with δ varying per order.
+    latency_model: "LatencyModel | None" = None
     # Hedge leg config (used by v5_delta_hedged; ignored by all other strategies)
     hedge_enabled: bool = False
     hedge_symbol: str = ""
@@ -129,6 +220,11 @@ class RunConfig:
     hedge_lot_size: float = 0.001
     hedge_slippage_bps: float = 10.0
     hedge_fee_bps: float = 1.0
+
+    def effective_latency_model(self) -> "LatencyModel":
+        """The latency model to wire into assets: the explicit ``latency_model``
+        if set, else ``ConstantLatency(order_latency_ms)`` (Spec 1 default)."""
+        return self.latency_model or ConstantLatency(self.order_latency_ms)
 
 
 def _binary_fee(px: float, qty: float, cfg: RunConfig) -> float:
@@ -189,16 +285,36 @@ def _initial_clear_array(start_ts_ns: int) -> np.ndarray:
     return arr
 
 
-def _build_asset(arr: np.ndarray, cfg: RunConfig):
+def _latency_span(
+    arr: np.ndarray, start_ts_ns: int | None, end_ts_ns: int | None
+) -> tuple[int, int]:
+    """Resolve the [start, end] ts window the latency model spans. Callers in the
+    runner pass the question's start/end; low-level tests may omit them, in which
+    case the window is derived from the event array's exch_ts range."""
+    if start_ts_ns is not None and end_ts_ns is not None:
+        return int(start_ts_ns), int(end_ts_ns)
+    ts = arr["exch_ts"]
+    derived_start = int(ts.min()) if len(ts) else 0
+    derived_end = int(ts.max()) if len(ts) else derived_start
+    return (
+        int(start_ts_ns) if start_ts_ns is not None else derived_start,
+        int(end_ts_ns) if end_ts_ns is not None else derived_end,
+    )
+
+
+def _build_asset(
+    arr: np.ndarray, cfg: RunConfig, *,
+    start_ts_ns: int | None = None, end_ts_ns: int | None = None,
+):
     # SHR-79: partial_fill_exchange replaces no_partial_fill_exchange so IOC
     # orders fill only real recorded book depth and walk levels naturally.
-    # SHR-79: order_latency_ms wires the empirical ~50 ms HL RTT into the sim.
-    latency_ns = int(cfg.order_latency_ms * 1_000_000)
+    # SHR-89: the pluggable latency model (constant by default; a sampled δ
+    # distribution when configured) wires the order RTT into the sim.
+    start, end = _latency_span(arr, start_ts_ns, end_ts_ns)
+    asset = hb.BacktestAsset().data(arr).linear_asset(1.0)
+    asset = cfg.effective_latency_model().apply(asset, start_ts_ns=start, end_ts_ns=end)
     return (
-        hb.BacktestAsset()
-        .data(arr)
-        .linear_asset(1.0)
-        .constant_order_latency(latency_ns, latency_ns)
+        asset
         .risk_adverse_queue_model()
         .partial_fill_exchange()
         .trading_value_fee_model(0.0, 0.0)
@@ -208,14 +324,16 @@ def _build_asset(arr: np.ndarray, cfg: RunConfig):
     )
 
 
-def _build_hedge_asset(arr: np.ndarray, cfg: RunConfig):
+def _build_hedge_asset(
+    arr: np.ndarray, cfg: RunConfig, *,
+    start_ts_ns: int | None = None, end_ts_ns: int | None = None,
+):
     """Like _build_asset but uses hedge-specific tick/lot sizes."""
-    latency_ns = int(cfg.order_latency_ms * 1_000_000)
+    start, end = _latency_span(arr, start_ts_ns, end_ts_ns)
+    asset = hb.BacktestAsset().data(arr).linear_asset(1.0)
+    asset = cfg.effective_latency_model().apply(asset, start_ts_ns=start, end_ts_ns=end)
     return (
-        hb.BacktestAsset()
-        .data(arr)
-        .linear_asset(1.0)
-        .constant_order_latency(latency_ns, latency_ns)
+        asset
         .risk_adverse_queue_model()
         .partial_fill_exchange()
         .trading_value_fee_model(0.0, 0.0)
@@ -262,6 +380,23 @@ def _slipped_sell_price(book: BookState, limit_price: float, slippage_bps: float
     slipped = book.bid_px * (1.0 - slippage_bps / 1e4)
     px = max(slipped, limit_price) if limit_price > 0 else slipped
     return max(0.0, min(1.0, px))
+
+
+def _classify_reject(book: BookState, side: str, submit_px: float) -> bool:
+    """SHR-89: was a no-fill IOC a *reject* (limit unmarketable at fill time)?
+
+    An order is a reject when it was submitted as a crossing/marketable order
+    against the decision-time book (buy at/through the ask; sell at/through the
+    bid) yet recorded no fill — the book moved away (or the queue wasn't swept)
+    during the latency δ before the order reached the exchange. The strategy
+    then re-fires on the next scan, reproducing live's churn.
+
+    A non-fill on a *non-crossing* order (limit below the ask / above the bid),
+    or when there was no opposing liquidity to cross, is a plain no-op — not a
+    reject."""
+    if side == "buy":
+        return book.ask_px is not None and submit_px >= book.ask_px
+    return book.bid_px is not None and submit_px <= book.bid_px
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +622,10 @@ def _route_hedge(st: _RunState, decision: Any) -> None:
         h_fill = st.record_hedge_fill_from_order(
             h_oid, st.hedge_asset_no, cfg.hedge_symbol, h_side, h_intent.cloid, h_intent.size,
         )
+        if h_fill is None:
+            # SHR-89: marketable hedge IOC with no fill → reject (re-fires next scan).
+            if _classify_reject(h_book, h_side, h_slipped):
+                st.result.n_rejects += 1
         if h_fill is not None:
             st.result.fills.append(h_fill)
             st.fill_ts[h_fill.cloid] = st.now_ns
@@ -547,6 +686,10 @@ def _route_enter(st: _RunState, decision: Any) -> None:
     )
     fill = st.record_fill_from_order(oid, asset_no, intent.symbol, "buy", intent.cloid, intent.size)
     if fill is None:
+        # SHR-89: a marketable buy that returned no fill is a reject (book moved
+        # away during latency δ). Count it; the strategy re-fires next scan.
+        if _classify_reject(book, "buy", slipped):
+            st.result.n_rejects += 1
         return
     st.result.fills.append(fill)
     st.fill_ts[fill.cloid] = st.now_ns
@@ -603,6 +746,11 @@ def _route_exit(st: _RunState, decision: Any) -> None:
     )
     fill = st.record_fill_from_order(oid, exit_asset_no, intent.symbol, "sell", intent.cloid, size)
     if fill is None:
+        # SHR-89: a marketable sell that returned no fill is a reject (bid moved
+        # away during latency δ). Count it; the strategy re-fires next scan with
+        # the position still open.
+        if _classify_reject(book, "sell", slipped):
+            st.result.n_rejects += 1
         return
     st.result.fills.append(fill)
     st.fill_ts[fill.cloid] = st.now_ns
@@ -816,7 +964,9 @@ def run_one_question(
             np.concatenate([clear_arr, leg_arr]) if len(leg_arr) > 0 else clear_arr
         )
         _data_keepalive.append(full)
-        assets.append(_build_asset(full, cfg))
+        assets.append(
+            _build_asset(full, cfg, start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns)
+        )
         leg_to_asset[sym] = i
 
     # Hedge leg: build a third BacktestAsset when hedge_enabled and events provided.
@@ -829,7 +979,11 @@ def run_one_question(
         )
         _data_keepalive.append(hedge_full)
         hedge_asset_no = len(assets)
-        assets.append(_build_hedge_asset(hedge_full, cfg))
+        assets.append(
+            _build_hedge_asset(
+                hedge_full, cfg, start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns
+            )
+        )
 
     hbt = hb.HashMapMarketDepthBacktest(assets)
 
@@ -1124,4 +1278,10 @@ def _settle_px_for_outcome(pos: Position, q: QuestionDescriptor, outcome: str) -
     return 0.0
 
 
-__all__ = ["RunConfig", "run_one_question"]
+__all__ = [
+    "RunConfig",
+    "run_one_question",
+    "LatencyModel",
+    "ConstantLatency",
+    "SampledLatency",
+]
