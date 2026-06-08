@@ -135,11 +135,26 @@ class LegArrays:
 class FastPathBundle:
     """Output of ``HLHip4DataSource.events_arrays(q)``: everything the runner
     needs to skip the dataclass-based ``events()`` iteration entirely.
+
+    ``trade_events_per_leg`` carries the per-symbol ``TradeEvent`` lists so the
+    runner can drain them into ``MarketState`` for the ``recent_volume_usd``
+    gate (SHR-78). They are NOT fed to hftbacktest (the depth engine already
+    ingests them via the ``event_dtype`` array in ``leg_arrays``); they are
+    only needed for the rolling-notional accumulator.
     """
 
     leg_arrays: dict[str, LegArrays]
     reference_events: list[ReferenceEvent]
     settlement_events: list[SettlementEvent]
+    # Per-leg trade events for MarketState volume accounting (SHR-78).
+    # Empty dict for sources that don't record trades (e.g. PM synthetic).
+    trade_events_per_leg: dict[str, list[TradeEvent]] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        # ``frozen=True`` + ``slots=True`` prevents direct assignment; use
+        # object.__setattr__ to provide a safe empty-dict default.
+        if self.trade_events_per_leg is None:
+            object.__setattr__(self, "trade_events_per_leg", {})
 
 
 def build_leg_event_array_from_columns(

@@ -656,11 +656,21 @@ def run_one_question(
             # Source exposes events_arrays() but not for this config (e.g. PM
             # synthetic book mode) — fall back to the legacy events() path.
             bundle = None
+    # Flat sorted list of all leg trade events for MarketState volume accounting
+    # (SHR-78). Drained incrementally in the scan loop alongside ref_events.
+    all_trade_events: list[TradeEvent]
+
     if bundle is not None:
         leg_event_arrays = {sym: legarr.events for sym, legarr in bundle.leg_arrays.items()}
         book_ts_per_leg = {sym: legarr.book_ts for sym, legarr in bundle.leg_arrays.items()}
         ref_events = bundle.reference_events
         settle_events = bundle.settlement_events
+        # Fast path: trade events are pre-read in the bundle (SHR-78).
+        raw: list[TradeEvent] = []
+        for evs in bundle.trade_events_per_leg.values():
+            raw.extend(evs)
+        raw.sort(key=lambda t: t.ts_ns)
+        all_trade_events = raw
     else:
         book_events: dict[str, list[BookSnapshot]] = {sym: [] for sym in q.leg_symbols}
         trade_events: dict[str, list[TradeEvent]] = {sym: [] for sym in q.leg_symbols}
@@ -686,6 +696,12 @@ def run_one_question(
             book_ts_per_leg[sym] = np.asarray(
                 [b.ts_ns for b in book_events[sym]], dtype=np.int64
             )
+        # Legacy path: merge and sort all per-leg trade events (SHR-78).
+        raw_legacy: list[TradeEvent] = []
+        for evs in trade_events.values():
+            raw_legacy.extend(evs)
+        raw_legacy.sort(key=lambda t: t.ts_ns)
+        all_trade_events = raw_legacy
 
     # Binary HIP-4 / PM markets settle relative to the reference price at
     # question start ("BTC > day_open"). When the caller hasn't supplied a
@@ -738,6 +754,9 @@ def run_one_question(
     ref_events.sort(key=lambda r: r.ts_ns)
     ref_idx = 0
     settle_events.sort(key=lambda s: s.ts_ns)
+    # Trade events: all_trade_events is already sorted (built above). Drained
+    # into MarketState at each scan tick for recent_volume_usd (SHR-78).
+    trade_idx = 0
 
     need_diag = (diagnostics_dir is not None) or (fills_dir is not None)
     diag_rows: list[DiagnosticRow] = []
@@ -782,6 +801,12 @@ def run_one_question(
         while ref_idx < len(ref_events) and ref_events[ref_idx].ts_ns <= now_ns:
             state.apply_reference(ref_events[ref_idx])
             ref_idx += 1
+
+        # Drain trade events up to now into MarketState for volume accounting
+        # (SHR-78). Mirrors how ref_events are consumed above.
+        while trade_idx < len(all_trade_events) and all_trade_events[trade_idx].ts_ns <= now_ns:
+            state.apply_trade(all_trade_events[trade_idx])
+            trade_idx += 1
 
         # Advance per-leg book cursors to track the latest L2 snapshot's ts.
         for sym in q.leg_symbols:
@@ -853,7 +878,7 @@ def run_one_question(
             books=books,
             reference_price=float(ref_close),
             recent_returns=recent_returns,
-            recent_volume_usd=0.0,
+            recent_volume_usd=state.recent_volume_usd(q.leg_symbols, now_ns=now_ns),
             position=st.pos,
             now_ns=now_ns,
             recent_hl_bars=recent_hl,

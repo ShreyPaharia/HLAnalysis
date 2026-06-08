@@ -42,7 +42,7 @@ from ._fastpath_core import (
 )
 
 from ..core.data_source import QuestionDescriptor
-from ..core.events import ReferenceEvent, SettlementEvent
+from ..core.events import ReferenceEvent, SettlementEvent, TradeEvent
 
 log = logging.getLogger(__name__)
 
@@ -164,6 +164,9 @@ def build_fast_path_bundle(
     passed in so we don't depend on the data source's private helpers.
     """
     leg_arrays: dict[str, LegArrays] = {}
+    # Trade events per leg: built alongside the event arrays so the runner can
+    # drain them into MarketState for the recent_volume_usd gate (SHR-78).
+    trade_events_per_leg: dict[str, list[TradeEvent]] = {}
     for leg in q.leg_symbols:
         book_glob = book_glob_for(leg)
         trade_glob = trade_glob_for(leg)
@@ -174,6 +177,26 @@ def build_fast_path_bundle(
         arr = build_leg_event_array_from_columns(book_cols, trade_cols)
         book_ts = book_cols["ts"] if book_cols is not None else np.zeros(0, dtype=np.int64)
         leg_arrays[leg] = LegArrays(events=arr, book_ts=book_ts)
+        # Convert trade columns → TradeEvent dataclasses for volume accounting.
+        # The event array already consumed these for depth simulation; here we
+        # just need (ts, px, sz) — no extra parquet I/O.
+        if trade_cols is not None:
+            ts_arr = trade_cols["ts"]
+            px_arr = trade_cols["px"]
+            sz_arr = trade_cols["sz"]
+            side_arr = trade_cols["side"]
+            trade_events_per_leg[leg] = [
+                TradeEvent(
+                    ts_ns=int(ts_arr[i]),
+                    symbol=leg,
+                    side="buy" if side_arr[i] != "sell" else "sell",
+                    price=float(px_arr[i]),
+                    size=float(sz_arr[i]),
+                )
+                for i in range(len(ts_arr))
+            ]
+        else:
+            trade_events_per_leg[leg] = []
 
     # Reference events: already fetched as flat rows in legacy path. Convert
     # here and resample to OHLC bars of width ``reference_resample_ns`` so
@@ -213,6 +236,7 @@ def build_fast_path_bundle(
         leg_arrays=leg_arrays,
         reference_events=ref_events,
         settlement_events=settle_events,
+        trade_events_per_leg=trade_events_per_leg,
     )
 
 

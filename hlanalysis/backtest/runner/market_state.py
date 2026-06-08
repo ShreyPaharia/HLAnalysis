@@ -5,6 +5,7 @@ state the strategies read on each scan tick:
 
 - top-of-book ``BookState`` per leg (updated from ``BookSnapshot``)
 - recent reference HLC + close-to-close log returns over a lookback window
+- per-symbol rolling traded notional for the ``recent_volume_usd`` gate
 
 Returns + HL windows are stored in `KlineRingBuffer` (a numpy-backed ring
 buffer with O(1) append and O(1) windowed slice — see
@@ -12,9 +13,15 @@ buffer with O(1) append and O(1) windowed slice — see
 the original `sim.market_state.SimMarketState` did was the dominant
 hot-path cost at scan cadence; switching to the ring buffer is what makes
 the JIT'd σ helpers actually pay off.
+
+Volume window matches the live engine (``engine/market_state.py``):
+``volume_window_ns = 60 * 60 * 1_000_000_000`` (1 hour), summed per leg and
+aggregated across all leg symbols for a question — identical to scanner.py's
+``sum(ms.recent_volume_usd(sym, now=now_ns) for sym in leg_syms)``.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -22,19 +29,26 @@ import numpy as np
 from hlanalysis.strategy._numba.returns_buffer import KlineRingBuffer
 from hlanalysis.strategy.types import BookState
 
-from ..core.events import BookSnapshot, ReferenceEvent
+from ..core.events import BookSnapshot, ReferenceEvent, TradeEvent
+
+# 1-hour rolling window — matches engine/market_state.py default.
+_VOLUME_WINDOW_NS: int = 60 * 60 * 1_000_000_000
 
 
 @dataclass(slots=True)
 class MarketState:
-    """In-memory book + recent reference HLC."""
+    """In-memory book + recent reference HLC + per-symbol trade volume."""
 
     _books: dict[str, BookState] = None  # type: ignore[assignment]
     _klines: KlineRingBuffer = None  # type: ignore[assignment]
+    # Per-symbol deque of (ts_ns, price, size) for recent-volume accounting.
+    # Eviction-on-insert keeps deques bounded to the window; no background GC.
+    _trade_buf: dict[str, deque[tuple[int, float, float]]] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         self._books = {}
         self._klines = KlineRingBuffer()
+        self._trade_buf = {}
 
     # ---- L2 / trade timestamps -------------------------------------------
 
@@ -68,6 +82,40 @@ class MarketState:
             last_trade_ts_ns=ts_ns,
             last_l2_ts_ns=b.last_l2_ts_ns,
         )
+
+    def apply_trade(self, ev: TradeEvent) -> None:
+        """Record a traded (price, size) pair for rolling-volume accounting.
+
+        Evicts entries older than ``_VOLUME_WINDOW_NS`` on each insert,
+        mirroring ``engine/market_state.py::_evict_old_trades``.
+        """
+        dq = self._trade_buf.setdefault(ev.symbol, deque())
+        dq.append((ev.ts_ns, ev.price, ev.size))
+        cutoff = ev.ts_ns - _VOLUME_WINDOW_NS
+        while dq and dq[0][0] < cutoff:
+            dq.popleft()
+
+    def recent_volume_usd(
+        self, leg_symbols: tuple[str, ...] | list[str], *, now_ns: int
+    ) -> float:
+        """Return the total traded notional (sum price*size) across all
+        ``leg_symbols`` within the last hour, as of ``now_ns``.
+
+        Matches the live scanner (``engine/scanner.py``):
+        ``sum(ms.recent_volume_usd(sym, now=now_ns) for sym in leg_syms)``
+        where each per-symbol call evicts stale entries then sums the deque.
+        """
+        cutoff = now_ns - _VOLUME_WINDOW_NS
+        total = 0.0
+        for sym in leg_symbols:
+            dq = self._trade_buf.get(sym)
+            if dq is None:
+                continue
+            # Evict entries that are now past the window boundary.
+            while dq and dq[0][0] < cutoff:
+                dq.popleft()
+            total += sum(px * sz for _, px, sz in dq)
+        return total
 
     def book(self, symbol: str) -> BookState | None:
         return self._books.get(symbol)
