@@ -129,44 +129,56 @@ def parse_question_meta_parquet(glob_pattern: str) -> list[_Question]:
 
     Returns a list of _Question objects ready for coin_klass_rows().
     """
-    from hlanalysis.recorder.read import read_recorded
+    import pyarrow.parquet as pq
 
-    paths = _glob.glob(glob_pattern, recursive=True)
+    paths = sorted(_glob.glob(glob_pattern, recursive=True))
     if not paths:
         return []
 
-    try:
-        table = read_recorded(paths)
-    except FileNotFoundError:
-        return []
-
-    d = table.to_pydict()
-    n = len(d.get("question_idx", []))
-
+    # Read each file independently and select only the columns we need. A
+    # whole-corpus concat (recorder.read.read_recorded) raises ArrowTypeError
+    # because the recorder's parquet schemas drift across files — e.g.
+    # fallback_outcome_idx is int32 in some files and int64 in others, and
+    # pyarrow's promote_options="default" won't merge those. A per-file read of
+    # a fixed, type-stable column subset (question_idx + the list columns we
+    # actually consume) sidesteps the merge entirely.
+    want = ("question_idx", "named_outcome_idxs", "keys", "values")
     seen: set[int] = set()
     out: list[_Question] = []
-    for i in range(n):
-        qidx = int(d["question_idx"][i])
-        if qidx in seen:
+    for path in paths:
+        try:
+            pf = pq.ParquetFile(path)
+            cols = [c for c in want if c in set(pf.schema_arrow.names)]
+            if "question_idx" not in cols:
+                continue
+            d = pf.read(columns=cols).to_pydict()
+        except Exception:  # noqa: BLE001 — a single unreadable file must not abort the scan
             continue
-        keys_raw   = list(d["keys"][i])   if d.get("keys")   else []
-        values_raw = list(d["values"][i]) if d.get("values") else []
-        kv = dict(zip(keys_raw, values_raw, strict=False))
-        # The recorder stores "class" directly; some older rows bury it inside
-        # the question_description field (pipe-delimited).  Check both.
-        klass = kv.get("class", "")
-        if not klass:
-            desc = kv.get("question_description", "")
-            for part in desc.split("|"):
-                if part.startswith("class:"):
-                    klass = part[len("class:"):]
-                    break
-        if not klass:
-            continue
-        named_raw = d.get("named_outcome_idxs", [])[i]
-        named = [int(x) for x in (named_raw if named_raw is not None else [])]
-        seen.add(qidx)
-        out.append(_Question(question_idx=qidx, named_outcome_idxs=named, klass=klass))
+        n = len(d.get("question_idx", []))
+        for i in range(n):
+            qidx = int(d["question_idx"][i])
+            if qidx in seen:
+                continue
+            keys_i = d.get("keys", [None] * n)[i]
+            values_i = d.get("values", [None] * n)[i]
+            keys_raw = list(keys_i) if keys_i is not None else []
+            values_raw = list(values_i) if values_i is not None else []
+            kv = dict(zip(keys_raw, values_raw, strict=False))
+            # The recorder stores "class" directly; some older rows bury it
+            # inside the question_description field (pipe-delimited). Check both.
+            klass = kv.get("class", "")
+            if not klass:
+                desc = kv.get("question_description", "")
+                for part in desc.split("|"):
+                    if part.startswith("class:"):
+                        klass = part[len("class:"):]
+                        break
+            if not klass:
+                continue
+            named_i = d.get("named_outcome_idxs", [None] * n)[i]
+            named = [int(x) for x in (named_i if named_i is not None else [])]
+            seen.add(qidx)
+            out.append(_Question(question_idx=qidx, named_outcome_idxs=named, klass=klass))
     return out
 
 
