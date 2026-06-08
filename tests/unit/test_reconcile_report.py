@@ -545,6 +545,61 @@ def test_format_daily_summary_klass_split_window_and_total():
     assert "bucket: 24h +15.00 | total +45.00 | fills 3/10" in msg
 
 
+def test_format_daily_summary_klass_zero_window_fills_shows_zero_not_question():
+    """A class with all-time activity but ZERO fills in the trailing window must
+    render '24h +0.00 ... fills 0/N', not 'n/a ... ?/N'. The windowed breakdown
+    only contains classes that had window fills/open-MTM, so an absent class means
+    a known zero — not unknown data. (This was the v31 'bucket: 24h n/a | fills
+    ?/307' in the live report: 307 bucket fills all-time, 0 in the last 24h.)"""
+    from hlanalysis.engine.reconcile_report import KlassStat, format_daily_summary
+    recon = [
+        SlotRecon(
+            alias="v31",
+            realized_pnl=0.0, open_mtm=0.0,
+            account_value_usd=1344.0, positions_known=True,
+            venue_realized_pnl=183.38, fills_count=550,
+            klass_breakdown={
+                "priceBinary": KlassStat(realized_pnl=458.30, open_mtm=0.0, fills=243),
+                "priceBucket": KlassStat(realized_pnl=-274.93, open_mtm=0.0, fills=307),
+            },
+            venue_realized_pnl_window=45.26, fills_count_window=23,
+            # window breakdown was COMPUTED (not None) but bucket had no fills
+            # in the trailing window, so it is simply absent from the dict.
+            klass_breakdown_window={
+                "priceBinary": KlassStat(realized_pnl=45.26, open_mtm=0.0, fills=23),
+            },
+        ),
+    ]
+    msg = format_daily_summary(recon, date_str="2026-06-08")
+    assert "binary: 24h +45.26 | total +458.30 | fills 23/243" in msg
+    # The fix: zero window activity is a KNOWN zero, not "?".
+    assert "bucket: 24h +0.00 | total -274.93 | fills 0/307" in msg
+    assert "?/307" not in msg
+    assert "bucket: 24h n/a" not in msg
+
+
+def test_format_daily_summary_klass_window_unknown_still_question():
+    """When the windowed breakdown could NOT be computed at all
+    (klass_breakdown_window is None — e.g. the venue fill fetch failed), the
+    per-class window column genuinely is unknown and must still render 'n/a'/'?'."""
+    from hlanalysis.engine.reconcile_report import KlassStat, format_daily_summary
+    recon = [
+        SlotRecon(
+            alias="v31",
+            realized_pnl=0.0, open_mtm=0.0,
+            account_value_usd=500.0, positions_known=True,
+            venue_realized_pnl=100.0, fills_count=300,
+            klass_breakdown={
+                "priceBucket": KlassStat(realized_pnl=100.0, open_mtm=0.0, fills=300),
+            },
+            venue_realized_pnl_window=None, fills_count_window=None,
+            klass_breakdown_window=None,   # window data unavailable
+        ),
+    ]
+    msg = format_daily_summary(recon)
+    assert "bucket: 24h n/a | total +100.00 | fills ?/300" in msg
+
+
 def test_gather_slot_windowed_fills_filtered_by_ts_ns():
     """gather_slot filters fills to the trailing window using ts_ns; fills without
     ts_ns are excluded from the window but included in the all-time count."""

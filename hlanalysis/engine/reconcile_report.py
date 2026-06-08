@@ -270,6 +270,23 @@ def format_report(recon: list[SlotRecon]) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _klass_cell(st: "KlassStat | None", breakdown_known: bool) -> tuple[str, str]:
+    """Render one (pnl, fills) cell for a per-class daily-summary column.
+
+    Three states:
+    - st present            → real values.
+    - st absent, but the breakdown WAS computed (breakdown_known) → the class
+      had zero fills + no open MTM that period: a known zero ("+0.00", "0").
+    - st absent and breakdown is None → the period's data couldn't be computed
+      (e.g. venue fill fetch failed): genuinely unknown ("n/a", "?").
+    """
+    if st is not None:
+        return f"{st.total_pnl:+.2f}", str(st.fills)
+    if breakdown_known:
+        return "+0.00", "0"
+    return "n/a", "?"
+
+
 def format_daily_summary(recon: list[SlotRecon], *, date_str: str | None = None) -> str:
     """Compact ONE-message daily summary for Telegram: per-strategy outcome PnL
     (both trailing-24h window and all-time total), fill count, and reconcile
@@ -307,10 +324,16 @@ def format_daily_summary(recon: list[SlotRecon], *, date_str: str | None = None)
                 st_tot = r.klass_breakdown.get(klass) if r.klass_breakdown else None
                 st_win = r.klass_breakdown_window.get(klass) if r.klass_breakdown_window else None
                 label = _KLASS_LABELS.get(klass, klass)
-                win_pnl_str = f"{st_win.total_pnl:+.2f}" if st_win is not None else "n/a"
-                tot_pnl_str = f"{st_tot.total_pnl:+.2f}" if st_tot is not None else "n/a"
-                win_fills_str = str(st_win.fills) if st_win is not None else "?"
-                tot_fills_str = str(st_tot.fills) if st_tot is not None else "?"
+                # A class is absent from a breakdown dict when it had zero fills
+                # AND no open MTM in that period — a KNOWN zero, not unknown data.
+                # So "?"/"n/a" only when the whole breakdown wasn't computed
+                # (None); an absent class within a computed breakdown is 0/+0.00.
+                # (Fixes the live "bucket: 24h n/a | fills ?/307" — 307 bucket
+                # fills all-time, none in the trailing window.)
+                win_known = r.klass_breakdown_window is not None
+                tot_known = r.klass_breakdown is not None
+                win_pnl_str, win_fills_str = _klass_cell(st_win, win_known)
+                tot_pnl_str, tot_fills_str = _klass_cell(st_tot, tot_known)
                 lines.append(
                     f"    {label}: 24h {win_pnl_str} | total {tot_pnl_str} | "
                     f"fills {win_fills_str}/{tot_fills_str}"
