@@ -52,6 +52,7 @@ from .risk_events import (
 )
 from .router import Router
 from .scanner import Scanner
+from .trade_journal import HaltSnapshot, TradeJournal
 from .state import (
     FILL_SOURCE_ROUTER, FILL_SOURCE_VENUE, CachedStateDAL, StateDAL,
 )
@@ -175,6 +176,10 @@ class AccountSlot:
     router: Router
     strategy: Strategy
     scanner: Scanner
+    # Durable trade journal (SHR-83), shared with this slot's Router (decision /
+    # send / reject / fill hooks) and Reconciler (late-discovered fills). One
+    # journal per slot, persisting into the slot's own state.db.
+    journal: TradeJournal | None = None
     # Restart-drift gate result for this slot — if True, the scanner does NOT
     # run for this slot but other slots may still trade.
     blocked: bool = False
@@ -440,6 +445,9 @@ class EngineRuntime:
             exec_client = build_exec_client(alias, acct, s_cfg.paper_mode)
 
         risk = RiskGate(s_cfg)
+        # Durable trade journal (SHR-83): persists into the slot's state.db, shared
+        # by the Router (decision/send/reject/fill) and Reconciler (late fills).
+        journal = TradeJournal(dal)
         # PM market sells floor the share amount to 2dp, stranding sub-0.01 dust
         # that wedges the position open (2026-06-06 v31_pm). PM slots treat a
         # reduce landing within that dust of flat as a full close (and suppress
@@ -452,6 +460,7 @@ class EngineRuntime:
             strategy_cfg=s_cfg, strategy_id=s_cfg.name,
             cloid_prefix=cloid_prefix,
             reduce_close_atol=reduce_close_atol,
+            journal=journal,
         )
         strategy = _build_strategy_for_slot(s_cfg)
         # Gate-decision log sibling of state.db. Operators tail this during
@@ -477,7 +486,7 @@ class EngineRuntime:
             state_db_path=state_db_path, kill_switch_path=kill_switch_path,
             cloid_prefix=cloid_prefix,
             dal=dal, exec_client=exec_client, risk=risk, router=router,
-            strategy=strategy, scanner=scanner,
+            strategy=strategy, scanner=scanner, journal=journal,
             pm=PmSlotState() if acct.venue == "polymarket" else None,
         )
 
@@ -641,11 +650,26 @@ class EngineRuntime:
                 now = self._now_ns()
                 slot.scanner.last_reconcile_ns = slot.last_reconcile_ns
                 realized_today = await self._realized_pnl_today(slot, now_ns=now)
+                # SHR-83: slot halt-state at decision time for the journal. The
+                # scan loop only runs for an un-blocked, un-halted slot (blocked
+                # slots get no scan loop; halted slots skip above), so those flags
+                # are False here — but realized_pnl_today vs the cap is the live
+                # margin the sim's halt-replay needs. The router augments this with
+                # the per-(question,side) reject-breaker + stale-reference bits.
+                halt = HaltSnapshot(
+                    restart_blocked=slot.blocked,
+                    daily_loss_halted=slot.halted,
+                    realized_pnl_today=realized_today or 0.0,
+                    daily_loss_cap_usd=slot.cfg.global_.daily_loss_cap_usd,
+                )
                 for sd in slot.scanner.scan(
                     now_ns=now, realized_pnl_today=realized_today,
                 ):
                     slot.decisions_emitted += 1
-                    await slot.router.handle(sd.decision, inputs=sd.inputs, now_ns=now)
+                    await slot.router.handle(
+                        sd.decision, inputs=sd.inputs, now_ns=now,
+                        recent_returns=sd.recent_returns, halt=halt,
+                    )
                 slot.scans_completed += 1
             except Exception:
                 logger.exception("scan tick crashed alias={}", slot.alias)
@@ -857,6 +881,7 @@ class EngineRuntime:
                     venue_fill_source=(
                         FILL_SOURCE_ROUTER if is_pm else FILL_SOURCE_VENUE
                     ),
+                    journal=slot.journal,
                 )
                 res = rec.run(
                     venue_open=venue_open,

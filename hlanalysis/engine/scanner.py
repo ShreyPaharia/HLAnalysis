@@ -50,6 +50,10 @@ def _binary_favorite_sym(
 class ScannedDecision:
     decision: Decision
     inputs: RiskInputs
+    # recent_returns window the strategy evaluated on, carried through to the
+    # trade journal (SHR-83) so the live decision's σ inputs are recorded
+    # alongside the book-at-decision. Empty for callers that don't supply it.
+    recent_returns: tuple[float, ...] = ()
 
 
 class Scanner:
@@ -418,6 +422,7 @@ class Scanner:
                     decision=Decision(action=decision.action, intents=(intent,),
                                        diagnostics=decision.diagnostics),
                     inputs=inputs,
+                    recent_returns=tuple(recent_returns),
                 ))
             # EXIT with no intents (settlement) — pass through with a synthetic input
             if decision.action is Action.EXIT and not decision.intents:
@@ -431,7 +436,10 @@ class Scanner:
                     realized_pnl_today=realized_today, kill_switch_active=kill,
                     last_reconcile_ns=self.last_reconcile_ns, now_ns=now_ns,
                 )
-                out.append(ScannedDecision(decision=decision, inputs=inputs))
+                out.append(ScannedDecision(
+                    decision=decision, inputs=inputs,
+                    recent_returns=tuple(recent_returns),
+                ))
         return out
 
     def _maybe_log_gate_transition(
