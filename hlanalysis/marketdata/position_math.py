@@ -73,6 +73,7 @@ def apply_fill(
     price: float,
     *,
     close_atol: float = 1e-9,
+    venue_closed_pnl: float | None = None,
 ) -> tuple[PositionState | None, float]:
     """Apply one fill to ``pos`` and return ``(new_pos, realized_this_fill)``.
 
@@ -101,6 +102,16 @@ def apply_fill(
     reduce (carried unchanged through add-ons) so that on the final close the
     caller can report the TOTAL closed size — ``prior.closed_qty + |final lot|``
     — paired with the cumulative realized PnL, rather than just the last lot.
+
+    ``venue_closed_pnl`` is the optional venue-truth realized override. On the
+    live HL path the venue reports the realized ``closedPnl`` for this fill
+    directly (the settlement / reduce fill carries it); passing it here makes the
+    function *replace* — not add to — the computed realized for this fill, so the
+    booked-once-on-the-venue-fill settlement can never be double-counted by also
+    computing it (SHR-72). In the sim it is ``None`` and the realized is computed.
+    The position update (qty / avg) is always computed identically either way, so
+    when ``venue_closed_pnl`` equals the computed realized the two paths are
+    bit-identical (the live/sim parity guarantee).
     """
     signed = size if side == "buy" else -size
 
@@ -113,6 +124,8 @@ def apply_fill(
             realized_this_fill = (price - pos.avg_entry) * closed_lot
         else:
             realized_this_fill = (pos.avg_entry - price) * closed_lot
+        if venue_closed_pnl is not None:
+            realized_this_fill = venue_closed_pnl
 
     if pos is None:
         return PositionState(qty=signed, avg_entry=price, realized_pnl=0.0), 0.0
@@ -140,7 +153,62 @@ def apply_fill(
     )
 
 
+def settlement_payoff_price(position_side_idx: int, settled_side_idx: int) -> float:
+    """The settlement payoff (in [0, 1]) for a binary/bucket leg.
+
+    ``1.0`` if the position's leg is the one that WON (``position_side_idx ==
+    settled_side_idx``), else ``0.0``. The winner is *supplied* by the caller
+    from venue truth — the recorder ``settlement`` event's ``settled_side_idx``
+    live, the data source's resolved outcome in the sim. This function NEVER
+    re-derives a YES winner: the project-history bug that booked winning bucket
+    legs as total losses came from hardcoding the YES leg as the winner instead
+    of trusting the venue's resolved index.
+    """
+    return 1.0 if position_side_idx == settled_side_idx else 0.0
+
+
+def settle(
+    pos: PositionState,
+    *,
+    position_side_idx: int,
+    settled_side_idx: int,
+    venue_closed_pnl: float | None = None,
+) -> tuple[PositionState | None, float]:
+    """Settle a held position at the venue-resolved outcome and return
+    ``(new_pos, realized_this_event)`` — ``new_pos`` is ``None`` (settlement
+    fully closes).
+
+    Routes through :func:`apply_fill` (the ONE realized-PnL code path) so a
+    settlement can never be accounted differently from any other close: the
+    payoff price is ``settlement_payoff_price(position_side_idx,
+    settled_side_idx)`` and the close fill is on the opposite side of the held
+    position. ``venue_closed_pnl`` overrides the computed realized with venue
+    truth on the live HL path (where the settlement arrives as a venue fill with
+    its own ``closedPnl``); ``None`` in the sim computes from the payoff.
+    """
+    payoff = settlement_payoff_price(position_side_idx, settled_side_idx)
+    close_side = "sell" if pos.qty > 0 else "buy"
+    return apply_fill(
+        pos, close_side, abs(pos.qty), payoff,
+        venue_closed_pnl=venue_closed_pnl,
+    )
+
+
+def open_mtm(pos: PositionState | None, mark_price: float) -> float:
+    """Unrealized (mark-to-market) PnL of an open position at ``mark_price``
+    (the current book mid or bid, chosen by the caller).
+
+    ``(mark - avg) * qty`` over signed qty, so it is correct for both longs
+    (``qty > 0``) and shorts (``qty < 0``) with one formula. A flat position
+    (``None``) has no exposure and marks to ``0.0``.
+    """
+    if pos is None:
+        return 0.0
+    return (mark_price - pos.avg_entry) * pos.qty
+
+
 __all__ = [
     "STOP_DISABLED_SENTINEL", "DUST_QTY_ABS_TOL",
     "PositionState", "stop_price", "apply_fill",
+    "settlement_payoff_price", "settle", "open_mtm",
 ]
