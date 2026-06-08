@@ -89,8 +89,14 @@ class Reconciler:
         account_alias: str = "",
         apply_position_changes: bool = True,
         venue_fill_source: str = FILL_SOURCE_ROUTER,
+        journal=None,
     ) -> None:
         self.dal = dal
+        # Optional trade journal (SHR-83). When a synchronous ACK carried no
+        # fill but user_fills later reveals the order filled, stamp the journal
+        # row's fill_ts/px/sz here so the late-fill latency is captured too.
+        # Best-effort (TradeJournal swallows its own errors); None elsewhere.
+        self.journal = journal
         self.fills_lookup = fills_lookup
         self.symbol_to_question = symbol_to_question or {}
         self.cloid_prefix = cloid_prefix
@@ -162,6 +168,14 @@ class Reconciler:
                         source=self.venue_fill_source,
                     ))
                 self.dal.update_order_status(cloid, status="filled", now_ns=now_ns)
+                # SHR-83: record the late-discovered fill on the journal row the
+                # router opened at decision time (latest fill = the resolving one).
+                if self.journal is not None:
+                    last = fills[-1]
+                    self.journal.record_fill(
+                        cloid=cloid, fill_ts_ns=last.ts_ns,
+                        fill_px=last.price, fill_sz=last.size,
+                    )
                 # Diagnostic (incident 2026-06-04, #1 root-cause suspect): this
                 # path replays the Fill rows + marks the order filled but does
                 # NOT apply the fills to the position table. If the router never

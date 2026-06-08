@@ -187,11 +187,14 @@ def test_existing_db_upgrades_without_data_loss_and_backfills_closed_qty(tmp_pat
     dal = StateDAL(db)
     dal.run_migrations()
 
-    # 1) Post-baseline schema changes: position gains closed_qty (0002) and the
-    #    coin_klass table is added (0003, SHR-77). Every pre-existing app object's
-    #    CREATE text is byte-unchanged; the only new object is coin_klass.
+    # 1) Post-baseline schema changes: position gains closed_qty (0002), the
+    #    coin_klass table is added (0003, SHR-77), and the trade_journal table +
+    #    its index are added (0005, SHR-83). Every pre-existing app object's
+    #    CREATE text is byte-unchanged; the only new objects are these.
     schema_after = _app_schema(db)
-    assert set(schema_after) - set(schema_before) == {"coin_klass"}
+    assert set(schema_after) - set(schema_before) == {
+        "coin_klass", "trade_journal", "idx_trade_journal_decision_ts",
+    }
     for name, sql in schema_before.items():
         if name in ("position", "fill"):
             continue  # position gains closed_qty (0002); fill gains source (0004)

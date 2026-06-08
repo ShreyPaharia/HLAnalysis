@@ -16,6 +16,7 @@ from .exec_types import PlaceRequest
 from .risk import RiskGate, RiskInputs
 from .risk_events import Entry, Exit, OrderRejected, RiskVeto
 from .state import Fill, OpenOrder, Position, StateDAL
+from .trade_journal import HaltSnapshot, TradeJournal
 from ..marketdata.position_math import PositionState, apply_fill, stop_price
 from ..strategy.render import outcome_description, question_description
 from ..strategy.types import Action, Decision, OrderIntent, QuestionView
@@ -40,8 +41,14 @@ class Router:
         cloid_prefix: str = "hla-",
         reject_breaker_threshold: int = 5,
         reduce_close_atol: float = 1e-9,
+        journal: "TradeJournal | None" = None,
     ) -> None:
         self.dal = dal
+        # Durable trade journal (SHR-83). Optional + best-effort: when present,
+        # the router records the decision the moment the cloid is final, then
+        # the send_ts, the reject/veto reason, and the venue fill. None in tests
+        # and any caller that doesn't wire it — behaviour is then unchanged.
+        self.journal = journal
         # A reduce that lands within this many shares of flat is treated as a
         # full close, and a reduce-only sell against a holding this small is
         # suppressed (un-sellable dust). Defaults to ~exact (1e-9) for HL, where
@@ -130,11 +137,19 @@ class Router:
         new_cloid = f"{self.cloid_prefix}{tail}"
         return _dc_replace(intent, cloid=new_cloid)
 
-    async def handle(self, decision: Decision, *, inputs: RiskInputs, now_ns: int) -> None:
+    async def handle(
+        self, decision: Decision, *, inputs: RiskInputs, now_ns: int,
+        recent_returns: tuple[float, ...] = (), halt: HaltSnapshot | None = None,
+    ) -> None:
         if decision.action is Action.HOLD:
             return
         for intent in decision.intents:
             intent = self._stamp_cloid(intent)
+            # SHR-83: journal the decision the instant the cloid is final, so
+            # every emitted order has a row regardless of whether it is later
+            # vetoed, rejected, or filled. Best-effort, off the hot path.
+            self._journal_decision(decision, intent, inputs, now_ns,
+                                   recent_returns, halt)
             # Post-exit cooldown — applies to ENTRIES only (reduce_only exits
             # are always allowed, otherwise we couldn't close fast on a flip).
             # Catches v1-style churn where the strategy re-enters at the top
@@ -163,9 +178,11 @@ class Router:
                         "post_exit_cooldown veto q={} elapsed_s={:.1f} cooldown_s={}",
                         intent.question_idx, elapsed_s, cooldown_s,
                     )
+                    self._journal_reject(intent.cloid, "post_exit_cooldown")
                     continue
             verdict = self.gate.check_pre_trade(intent, inputs)
             if not verdict.approved:
+                self._journal_reject(intent.cloid, verdict.reason)
                 await self.bus.publish(RiskVeto(
                     ts_ns=now_ns, account_alias=self.account_alias,
                     reason=verdict.reason,
@@ -192,6 +209,59 @@ class Router:
         # Settlement-driven EXIT with no intents: book the close locally.
         if decision.action is Action.EXIT and not decision.intents:
             await self._close_settled(inputs.question.question_idx, now_ns=now_ns, question=inputs.question)
+
+    # ---- trade journal hooks (SHR-83) ----
+    # All best-effort: TradeJournal swallows its own write errors, and these
+    # guards keep the journal entirely optional. The journal observes the order
+    # lifecycle; it must never gate or delay it.
+
+    def _journal_decision(
+        self, decision: Decision, intent: OrderIntent, inputs: RiskInputs,
+        now_ns: int, recent_returns: tuple[float, ...],
+        halt: HaltSnapshot | None,
+    ) -> None:
+        if self.journal is None:
+            return
+        self.journal.record_decision(
+            cloid=intent.cloid, question_idx=intent.question_idx,
+            decision_ts_ns=now_ns, action=decision.action.value,
+            side=intent.side, symbol=intent.symbol,
+            intended_size=intent.size, intended_price=intent.limit_price,
+            book=inputs.book, reference_price=inputs.reference_price,
+            recent_volume_usd=inputs.recent_volume_usd,
+            recent_returns=recent_returns, diagnostics=decision.diagnostics,
+            halt=self._augment_halt(halt, intent, inputs),
+        )
+
+    def _augment_halt(
+        self, halt: HaltSnapshot | None, intent: OrderIntent, inputs: RiskInputs,
+    ) -> HaltSnapshot:
+        """Fill in the two halt-state bits only the router knows: whether this
+        (question, side) has tripped the reject circuit-breaker, and whether the
+        reference feed was stale at decision time (per the slot's
+        stale_data_halt_seconds)."""
+        base = halt or HaltSnapshot()
+        tripped = (
+            self._consecutive_rejects.get((intent.question_idx, intent.side), 0)
+            >= self._reject_breaker_threshold
+        )
+        stale_ns = self.strategy_cfg.global_.stale_data_halt_seconds * 1_000_000_000
+        stale = inputs.reference_age_ns > stale_ns if inputs.reference_age_ns else False
+        return _dc_replace(base, reject_breaker_tripped=tripped, stale_reference=stale)
+
+    def _journal_send(self, cloid: str, now_ns: int) -> None:
+        if self.journal is not None:
+            self.journal.record_send(cloid=cloid, send_ts_ns=now_ns)
+
+    def _journal_reject(self, cloid: str, reason: str) -> None:
+        if self.journal is not None:
+            self.journal.record_reject(cloid=cloid, reject_reason=reason)
+
+    def _journal_fill(self, cloid: str, ts_ns: int, px: float, sz: float) -> None:
+        if self.journal is not None:
+            self.journal.record_fill(
+                cloid=cloid, fill_ts_ns=ts_ns, fill_px=px, fill_sz=sz,
+            )
 
     async def _place(
         self, intent: OrderIntent, *, now_ns: int, decision: Decision,
@@ -239,6 +309,7 @@ class Router:
         # call. A fill on the question resets the count (see _book_fill).
         breaker_key = (intent.question_idx, intent.side)
         if self._consecutive_rejects.get(breaker_key, 0) >= self._reject_breaker_threshold:
+            self._journal_reject(intent.cloid, "reject_breaker_suppressed")
             return
         # 1. Persist pending row before the network call (spec §5.5 idempotency).
         self.dal.upsert_order(OpenOrder(
@@ -247,6 +318,9 @@ class Router:
             size=intent.size, status="pending", placed_ts_ns=now_ns,
             last_update_ts_ns=now_ns, strategy_id=self.strategy_id,
         ))
+        # SHR-83: stamp the send timestamp on the journal row right before the
+        # network call so decision_ts → send_ts measures the in-engine latency.
+        self._journal_send(intent.cloid, now_ns)
         # 2. Send. The ExecutionClient is a synchronous, requests-backed SDK
         # call wrapped in tenacity retries; running it inline would park the
         # shared event loop (WS ingest, heartbeat, stop-loss enforcer) for the
@@ -265,6 +339,7 @@ class Router:
         # "orders placed silently never fill", which is what bit us live with
         # the HYPE-short eating all margin and HIP-4 buys getting rejected.
         if ack.status == "rejected":
+            self._journal_reject(intent.cloid, ack.error or "rejected")
             n = self._consecutive_rejects.get(breaker_key, 0) + 1
             self._consecutive_rejects[breaker_key] = n
             if n == self._reject_breaker_threshold:
@@ -315,6 +390,8 @@ class Router:
             await self._book_fill(intent, ack.fill_price, ack.fill_size,
                                   now_ns=now_ns, question=question,
                                   question_fields=question_fields)
+            # SHR-83: record the venue fill (ts + px/sz) for latency calibration.
+            self._journal_fill(intent.cloid, now_ns, ack.fill_price, ack.fill_size)
 
     def _stop_loss_price_for(
         self, fill_price: float, question_idx: int,

@@ -124,6 +124,48 @@ class Settlement(SQLModel, table=True):
     ts_ns: int
 
 
+class TradeJournalRow(SQLModel, table=True):
+    """Durable per-decision/order trade journal (SHR-83).
+
+    ONE row per emitted order, keyed by the (account-stamped) cloid and
+    progressively populated across the decision → send → fill → (reject)
+    lifecycle. Captures the evaluate() inputs (book-at-decision top-N, σ,
+    recent_returns summary, recent_volume_usd, reference price), the emitted
+    Decision, the venue send/fill timestamps + fill px/sz, the reject/veto
+    reason, and the slot halt-state at decision time. This single journal serves
+    three Spec-3 consumers at once: decision-parity (sim vs live), execution
+    latency calibration (decision_ts → send_ts → fill_ts deltas), and halt
+    replay (halt_json).
+
+    Written off the hot path via ``trade_journal.TradeJournal`` (best-effort —
+    a write failure is swallowed and never blocks order submission). The
+    nullable columns are populated by later lifecycle hooks; the JSON blobs
+    follow the ``events.payload_json`` precedent (free-form, query via the
+    explicit columns)."""
+    __tablename__ = "trade_journal"
+    cloid: str = Field(primary_key=True)
+    question_idx: int
+    decision_ts_ns: int
+    action: str               # "enter" | "exit"
+    side: str | None = None   # "buy" | "sell"
+    symbol: str | None = None
+    intended_size: float | None = None
+    intended_price: float | None = None
+    reference_price: float | None = None
+    recent_volume_usd: float | None = None
+    sigma: float | None = None
+    returns_summary_json: str | None = None
+    book_json: str | None = None
+    diagnostics_json: str | None = None
+    halt_json: str | None = None
+    # Lifecycle timestamps + outcome — populated after the decision row exists.
+    send_ts_ns: int | None = None
+    fill_ts_ns: int | None = None
+    fill_px: float | None = None
+    fill_sz: float | None = None
+    reject_reason: str | None = None
+
+
 class Event(SQLModel, table=True):
     """Append-only log of every BusEvent published by the engine (Component 2).
 
@@ -543,6 +585,39 @@ class StateDAL:
                 )
                 s.exec(delete(Event).where(Event.id.in_(oldest_ids)))
             s.commit()
+
+    # ---- trade journal (SHR-83) ----
+
+    def add_journal_decision(self, row: TradeJournalRow) -> bool:
+        """Insert a journal row if its cloid is not already present. Returns True
+        when a new row was inserted, False when one already existed (cloids are
+        unique per order, so a duplicate decision is a no-op — first write wins,
+        matching append_fill's insert-once semantics)."""
+        with _Session(self._engine) as s:
+            if s.get(TradeJournalRow, row.cloid) is not None:
+                return False
+            s.add(row)
+            s.commit()
+            return True
+
+    def update_journal(self, cloid: str, **changes: Any) -> None:
+        """Set the given columns on an existing journal row. No-op if the cloid
+        has no decision row (a stray send/fill/reject is dropped rather than
+        creating a partial row)."""
+        if not changes:
+            return
+        with _Session(self._engine) as s:
+            row = s.get(TradeJournalRow, cloid)
+            if row is None:
+                return
+            for k, v in changes.items():
+                setattr(row, k, v)
+            s.add(row)
+            s.commit()
+
+    def get_journal_row(self, cloid: str) -> TradeJournalRow | None:
+        with _Session(self._engine) as s:
+            return s.get(TradeJournalRow, cloid)
 
     # ---- realized pnl helpers ----
 
