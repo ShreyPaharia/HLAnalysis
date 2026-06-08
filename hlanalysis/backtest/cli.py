@@ -94,6 +94,37 @@ def _source_config_from_args(
     raise SystemExit(f"Unknown --data-source: {name}")
 
 
+def assert_hl_cadence_match(source_config: "SourceConfig", params: dict) -> None:
+    """Raise ``ValueError`` if an hl_hip4 source's resample period disagrees with
+    the strategy's ``vol_sampling_dt_seconds``.
+
+    The reference OHLC resample period MUST equal ``vol_sampling_dt_seconds`` so
+    the backtest evaluates σ / safety_d / p_model at the same cadence as the live
+    engine.  A silent mismatch (e.g. resample=60 while dt=5 is live) makes the
+    sim untestable against the real cadence.
+
+    Per-class dt note: binary and bucket use different cadences (dt=5 vs dt=2);
+    run them as separate ``hl-bt run`` invocations — one cadence per invocation.
+
+    Polymarket and pm_nba sources are exempt (they derive cadence differently and
+    do not gate on this param for correctness).
+    """
+    if source_config.kind != "hl_hip4":
+        return
+    if "vol_sampling_dt_seconds" not in params:
+        return
+    expected = int(params["vol_sampling_dt_seconds"])
+    actual = source_config.reference_resample_seconds
+    if actual != expected:
+        raise ValueError(
+            f"hl_hip4 reference_resample_seconds={actual} does not match "
+            f"strategy vol_sampling_dt_seconds={expected}. "
+            "The σ-resample cadence must equal vol_sampling_dt_seconds so the "
+            "backtest evaluates at the live cadence. Pass "
+            f"reference_resample_seconds={expected} when building SourceConfig."
+        )
+
+
 # ---------------------------------------------------------------------------
 # strike resolution helper
 # ---------------------------------------------------------------------------
@@ -239,6 +270,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         args,
         reference_resample_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
     )
+    assert_hl_cadence_match(source_config, params)
     data_source = source_config.build()
     start = args.start or ""
     end = args.end or ""
