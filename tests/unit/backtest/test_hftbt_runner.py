@@ -25,6 +25,7 @@ from hlanalysis.backtest.data.synthetic import (
 )
 from hlanalysis.backtest.runner.hftbt_runner import RunConfig, run_one_question
 from hlanalysis.strategy.base import Strategy
+from hlanalysis.strategy.types import BookState
 
 
 # ---------------------------------------------------------------------------
@@ -872,3 +873,297 @@ def test_runstate_no_caps_never_blocks():
     st.now_ns = 42
     assert st.entry_blocked(intent_notional=1e9, is_topup=False,
                             held_notional=1e9, n_held=99) is None
+
+
+# ---------------------------------------------------------------------------
+# SHR-89: pluggable latency model (constant default + sampled distribution)
+# ---------------------------------------------------------------------------
+
+def test_run_config_latency_model_defaults_none():
+    """RunConfig.latency_model defaults to None (use the constant knob)."""
+    cfg = RunConfig()
+    assert cfg.latency_model is None
+
+
+def test_effective_latency_model_default_is_constant_from_knob():
+    """With no explicit model, effective_latency_model() is ConstantLatency
+    wrapping the legacy order_latency_ms knob (back-compat)."""
+    from hlanalysis.backtest.runner.hftbt_runner import ConstantLatency
+
+    cfg = RunConfig(order_latency_ms=37.0)
+    model = cfg.effective_latency_model()
+    assert isinstance(model, ConstantLatency)
+    assert model.latency_ms == pytest.approx(37.0)
+
+
+def test_effective_latency_model_returns_explicit_model():
+    """An explicit latency_model overrides the constant knob."""
+    from hlanalysis.backtest.runner.hftbt_runner import SampledLatency
+
+    model = SampledLatency(samples_ms=(10.0, 200.0))
+    cfg = RunConfig(latency_model=model)
+    assert cfg.effective_latency_model() is model
+
+
+def test_sampled_latency_build_array_is_deterministic_and_typed():
+    """SampledLatency builds an hftbacktest order-latency array whose entry
+    latencies are drawn from the supplied δ samples (ns), deterministic by seed."""
+    from hlanalysis.backtest.runner.hftbt_runner import (
+        SampledLatency,
+        _ORDER_LATENCY_DTYPE,
+    )
+
+    samples = (10.0, 200.0)
+    model = SampledLatency(samples_ms=samples, seed=7, step_ns=1_000_000_000)
+    a = model.build_latency_array(start_ts_ns=0, end_ts_ns=5_000_000_000)
+    b = model.build_latency_array(start_ts_ns=0, end_ts_ns=5_000_000_000)
+
+    assert a.dtype == _ORDER_LATENCY_DTYPE
+    assert len(a) >= 2
+    # Same seed → identical draws.
+    assert np.array_equal(a["exch_ts"], b["exch_ts"])
+    # req_ts strictly increasing (required by intp interpolation).
+    assert np.all(np.diff(a["req_ts"]) > 0)
+    # Every entry latency is one of the supplied samples (in ns).
+    entry_ns = a["exch_ts"] - a["req_ts"]
+    allowed = {int(s * 1_000_000) for s in samples}
+    assert set(int(x) for x in entry_ns) <= allowed
+
+
+def test_build_asset_uses_sampled_latency_distribution():
+    """_build_asset wired with a SampledLatency model fills on book(decision+δ):
+    the order's reported entry latency equals the sampled δ (single-valued sample
+    → deterministic), not the constant order_latency_ms."""
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, SampledLatency
+
+    DELTA_MS = 123.0
+    DELTA_NS = int(DELTA_MS * 1_000_000)
+    T = 1_000_000_000
+    arr = np.concatenate([
+        _make_depth_clear_arr(T),
+        _depth_ev(T + 1_000, SELL_EVENT, 0.5, 100.0),
+        _trade_ev(T + DELTA_NS + 1_000, BUY_EVENT, 0.5, 100.0),
+    ])
+    # order_latency_ms left at the default 50ms; the model must take precedence.
+    cfg = RunConfig(
+        tick_size=0.001, lot_size=1.0,
+        latency_model=SampledLatency(samples_ms=(DELTA_MS,), seed=0),
+    )
+    asset = _build_asset(arr, cfg, start_ts_ns=T, end_ts_ns=T + 5_000_000_000)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(2_000_000_000)
+    bt.submit_buy_order(0, 1, 0.55, 10.0, hb_order.IOC, hb_order.LIMIT, True)
+    lat = bt.order_latency(0)
+    bt.close()
+
+    assert lat is not None
+    req_ts, exch_ts, _resp_ts = lat
+    assert exch_ts - req_ts == pytest.approx(DELTA_NS, abs=1_000), (
+        f"sampled latency δ={DELTA_NS}ns should drive the exchange arrival; "
+        f"got entry latency {exch_ts - req_ts}ns"
+    )
+
+
+def test_constant_latency_model_matches_legacy_knob():
+    """ConstantLatency via the model path is bit-identical to the legacy
+    constant_order_latency wiring (no behaviour change by default)."""
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset
+
+    LAT_MS = 50.0
+    LAT_NS = int(LAT_MS * 1_000_000)
+    T = 1_000_000_000
+    arr = np.concatenate([
+        _make_depth_clear_arr(T),
+        _depth_ev(T + 1_000, SELL_EVENT, 0.5, 100.0),
+        _trade_ev(T + LAT_NS + 1_000, BUY_EVENT, 0.5, 100.0),
+    ])
+    cfg = RunConfig(tick_size=0.001, lot_size=1.0, order_latency_ms=LAT_MS)
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(2_000_000_000)
+    bt.submit_buy_order(0, 1, 0.55, 10.0, hb_order.IOC, hb_order.LIMIT, True)
+    lat = bt.order_latency(0)
+    bt.close()
+
+    assert lat is not None
+    req_ts, exch_ts, _resp_ts = lat
+    assert exch_ts - req_ts == pytest.approx(LAT_NS, abs=1)
+
+
+# ---------------------------------------------------------------------------
+# SHR-89: explicit IOC reject when the limit is unmarketable at fill time,
+# and re-fire next scan (reproduces live churn)
+# ---------------------------------------------------------------------------
+
+def test_classify_reject_buy_crossing_no_fill_is_reject():
+    """A buy IOC submitted at/through the decision-time ask that returns no fill
+    is a reject (book moved away / queue not swept during latency)."""
+    from hlanalysis.backtest.runner.hftbt_runner import _classify_reject
+
+    book = BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.50, ask_sz=10.0,
+                     last_trade_ts_ns=0, last_l2_ts_ns=0)
+    assert _classify_reject(book, "buy", submit_px=0.50) is True
+    assert _classify_reject(book, "buy", submit_px=0.51) is True
+
+
+def test_classify_reject_buy_non_crossing_is_not_reject():
+    """A buy whose price is below the ask never crossed — a non-fill there is a
+    plain no-op (resting/cancelled), not a reject."""
+    from hlanalysis.backtest.runner.hftbt_runner import _classify_reject
+
+    book = BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.60, ask_sz=10.0,
+                     last_trade_ts_ns=0, last_l2_ts_ns=0)
+    assert _classify_reject(book, "buy", submit_px=0.55) is False
+
+
+def test_classify_reject_sell_crossing_no_fill_is_reject():
+    from hlanalysis.backtest.runner.hftbt_runner import _classify_reject
+
+    book = BookState(symbol="yes", bid_px=0.50, bid_sz=10.0, ask_px=None, ask_sz=None,
+                     last_trade_ts_ns=0, last_l2_ts_ns=0)
+    assert _classify_reject(book, "sell", submit_px=0.50) is True
+    assert _classify_reject(book, "sell", submit_px=0.49) is True
+    assert _classify_reject(book, "sell", submit_px=0.55) is False
+
+
+def test_classify_reject_no_book_is_not_reject():
+    """No opposing liquidity at decision → not a reject (nothing to cross)."""
+    from hlanalysis.backtest.runner.hftbt_runner import _classify_reject
+
+    book = BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=None, ask_sz=None,
+                     last_trade_ts_ns=0, last_l2_ts_ns=0)
+    assert _classify_reject(book, "buy", submit_px=0.50) is False
+    assert _classify_reject(book, "sell", submit_px=0.50) is False
+
+
+def _enter_decision(symbol="yes", size=10.0, limit=0.55):
+    from hlanalysis.strategy.types import Action, Decision, OrderIntent
+    return Decision(
+        action=Action.ENTER,
+        intents=(OrderIntent(question_idx=1, symbol=symbol, side="buy",
+                             size=size, limit_price=limit, cloid="c1"),),
+    )
+
+
+def _reject_run_state(bt, cfg):
+    from hlanalysis.backtest.runner.hftbt_runner import _RunState, RunResult
+    from hlanalysis.backtest.core.data_source import QuestionDescriptor
+    q = QuestionDescriptor(
+        question_id="rej", question_idx=1, start_ts_ns=0, end_ts_ns=10_000_000_000,
+        leg_symbols=("yes", "no"), klass="priceBinary", underlying="BTC",
+    )
+    return _RunState(
+        hbt=bt, cfg=cfg, q=q, data_source=None, leg_to_asset={"yes": 0},
+        hedge_asset_no=None, stop_pct=None, fills_dir_active=False, result=RunResult(),
+    )
+
+
+def test_route_enter_rejects_when_book_moves_during_latency():
+    """Marketable buy at decision; the ask jumps above the limit before the order
+    reaches the exchange → no fill, reject counted, position stays None (re-fires)."""
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_enter
+
+    LAT_NS = 50_000_000  # 50ms
+    T_BOOK = 1_000_000
+    T_SUBMIT = 1_000_000_000
+    T_MOVE = T_SUBMIT + 1_000_000          # ask raised within the latency window
+    T_TRADE = T_SUBMIT + LAT_NS + 5_000_000
+
+    arr = np.concatenate([
+        _make_depth_clear_arr(0),
+        _depth_ev(T_BOOK, SELL_EVENT, 0.50, 100.0),
+        _depth_ev(T_MOVE, SELL_EVENT, 0.50, 0.0),     # clear the 0.50 ask
+        _depth_ev(T_MOVE, SELL_EVENT, 0.70, 100.0),   # ask now 0.70 (> limit 0.55)
+        _trade_ev(T_TRADE, BUY_EVENT, 0.70, 100.0),   # trade can't cross 0.55
+    ])
+    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
+                    order_latency_ms=50.0)
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(T_SUBMIT)
+    st = _reject_run_state(bt, cfg)
+    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.50,
+                                 ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T_BOOK)}
+    st.now_ns = T_SUBMIT
+
+    _route_enter(st, _enter_decision())
+    bt.close()
+
+    assert st.result.fills == [], "rejected order must not book a fill"
+    assert st.pos is None, "no position opened → strategy re-fires next scan"
+    assert st.result.n_rejects == 1
+
+
+def test_route_enter_no_reject_when_not_marketable():
+    """A non-crossing buy that doesn't fill is a plain no-op, not a reject."""
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_enter
+
+    T_BOOK = 1_000_000
+    T_SUBMIT = 1_000_000_000
+    arr = np.concatenate([
+        _make_depth_clear_arr(0),
+        _depth_ev(T_BOOK, SELL_EVENT, 0.60, 100.0),   # ask 0.60, above our 0.55 limit
+    ])
+    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
+                    order_latency_ms=50.0)
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(T_SUBMIT)
+    st = _reject_run_state(bt, cfg)
+    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.60,
+                                 ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T_BOOK)}
+    st.now_ns = T_SUBMIT
+
+    _route_enter(st, _enter_decision(limit=0.55))
+    bt.close()
+
+    assert st.result.fills == []
+    assert st.pos is None
+    assert st.result.n_rejects == 0
+
+
+def test_reject_then_refire_fills_on_next_scan():
+    """After a reject (no fill, pos None) the strategy re-fires; a later scan
+    where the book is marketable and a trade sweeps fills the order."""
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_enter
+
+    LAT_NS = 50_000_000
+    T_BOOK1 = 1_000_000
+    T_SUBMIT1 = 1_000_000_000
+    T_MOVE = T_SUBMIT1 + 1_000_000               # ask jumps away → reject #1
+    T_BOOK2 = 2_000_000_000                       # book recovers to 0.50
+    T_SUBMIT2 = 2_500_000_000
+    T_TRADE2 = T_SUBMIT2 + LAT_NS + 1_000_000     # trade sweeps after arrival → fill
+
+    arr = np.concatenate([
+        _make_depth_clear_arr(0),
+        _depth_ev(T_BOOK1, SELL_EVENT, 0.50, 10.0),
+        _depth_ev(T_MOVE, SELL_EVENT, 0.50, 0.0),
+        _depth_ev(T_MOVE, SELL_EVENT, 0.70, 10.0),
+        _depth_ev(T_BOOK2, SELL_EVENT, 0.70, 0.0),
+        _depth_ev(T_BOOK2, SELL_EVENT, 0.50, 10.0),
+        _trade_ev(T_TRADE2, BUY_EVENT, 0.50, 10.0),
+    ])
+    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
+                    order_latency_ms=50.0)
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(T_SUBMIT1)
+    st = _reject_run_state(bt, cfg)
+    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.50,
+                                 ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=T_BOOK1)}
+    st.now_ns = T_SUBMIT1
+    _route_enter(st, _enter_decision())
+    assert st.pos is None and st.result.n_rejects == 1, "first attempt must reject"
+
+    # Re-fire on the next scan once the book has recovered.
+    bt.elapse(T_SUBMIT2 - int(bt.current_timestamp))
+    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.50,
+                                 ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=T_BOOK2)}
+    st.now_ns = T_SUBMIT2
+    _route_enter(st, _enter_decision())
+    bt.close()
+
+    assert st.pos is not None, "re-fired order should fill once book is marketable"
+    assert len(st.result.fills) == 1
+    assert st.result.fills[0].side == "buy"
