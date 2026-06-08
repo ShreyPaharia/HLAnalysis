@@ -26,7 +26,7 @@ from diskcache.core import MODE_BINARY, UNKNOWN
 
 from ._fastpath_core import BUILD_VERSION as _BUILD_VERSION
 from ._fastpath_core import FastPathBundle, LegArrays, event_dtype
-from ..core.events import ReferenceEvent, SettlementEvent
+from ..core.events import ReferenceEvent, SettlementEvent, TradeEvent
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +119,19 @@ def _save(path: Path, b: FastPathBundle) -> None:
             col = np.ascontiguousarray(ev[name])
             payload[f"ev_{i}__{name}"] = _delta(col) if name in _DELTA_FIELDS else col
         payload[f"bts_{i}"] = _delta(np.ascontiguousarray(la.book_ts))
+        # Per-leg trade events (SHR-78): persist (ts, px, sz, side) so a cache
+        # HIT restores the recent_volume_usd inputs. Omitting these silently
+        # zeroed the volume gate on every cached run → 0 trades for any strategy
+        # with min_recent_volume_usd > 0. Column-split + delta-encoded ts, same
+        # as the book columns; side encoded buy=0/sell=1 to stay homogeneous.
+        trades = b.trade_events_per_leg.get(sym, []) if b.trade_events_per_leg else []
+        tr_ts = np.array([t.ts_ns for t in trades], dtype=np.int64)
+        payload[f"tr_{i}__ts"] = _delta(tr_ts)
+        payload[f"tr_{i}__px"] = np.array([t.price for t in trades], dtype=np.float64)
+        payload[f"tr_{i}__sz"] = np.array([t.size for t in trades], dtype=np.float64)
+        payload[f"tr_{i}__side"] = np.array(
+            [1 if t.side == "sell" else 0 for t in trades], dtype=np.int8
+        )
     # np.savez_compressed appends ".npz" to the path if not already present.
     # Use a tmp file that already ends in ".npz" so the written file
     # matches the tmp variable name, then atomically rename to final path.
@@ -159,6 +172,28 @@ def _load(path: Path) -> FastPathBundle:
             col = z[f"ev_{i}__{name}"]
             ev[name] = _undelta(col) if name in _DELTA_FIELDS else col
         leg_arrays[sym] = LegArrays(events=ev, book_ts=_undelta(z[f"bts_{i}"]))
+    # Per-leg trade events (SHR-78). Tolerate pre-v5 npz that predate trade
+    # persistence: a missing ``tr_*`` key → empty list (the BUILD_VERSION bump
+    # evicts those, but stay defensive in case of a hand-rolled/partial file).
+    trade_events_per_leg: dict[str, list[TradeEvent]] = {}
+    for i, sym in enumerate(legs):
+        if f"tr_{i}__ts" not in z.files:
+            trade_events_per_leg[sym] = []
+            continue
+        tr_ts = _undelta(z[f"tr_{i}__ts"])
+        tr_px = z[f"tr_{i}__px"]
+        tr_sz = z[f"tr_{i}__sz"]
+        tr_side = z[f"tr_{i}__side"]
+        trade_events_per_leg[sym] = [
+            TradeEvent(
+                ts_ns=int(tr_ts[j]),
+                symbol=sym,
+                side="sell" if int(tr_side[j]) == 1 else "buy",
+                price=float(tr_px[j]),
+                size=float(tr_sz[j]),
+            )
+            for j in range(len(tr_ts))
+        ]
     ref = [
         ReferenceEvent(
             ts_ns=int(r[0]),
@@ -183,6 +218,7 @@ def _load(path: Path) -> FastPathBundle:
         leg_arrays=leg_arrays,
         reference_events=ref,
         settlement_events=settle,
+        trade_events_per_leg=trade_events_per_leg,
     )
 
 

@@ -7,7 +7,7 @@ from hlanalysis.backtest.data._event_array_cache import (
     cached_bundle, cache_key, caching_enabled,
 )
 from hlanalysis.backtest.data._fastpath_core import FastPathBundle, LegArrays, event_dtype
-from hlanalysis.backtest.core.events import ReferenceEvent, SettlementEvent
+from hlanalysis.backtest.core.events import ReferenceEvent, SettlementEvent, TradeEvent
 
 
 @pytest.fixture(autouse=True)
@@ -263,6 +263,61 @@ def test_npz_disk_serializer_roundtrip(tmp_path):
         == [(r.ts_ns, r.symbol, r.high, r.low, r.close, r.open) for r in b.reference_events]
     assert [(s.ts_ns, s.question_idx, s.outcome, s.symbol) for s in got.settlement_events] \
         == [(s.ts_ns, s.question_idx, s.outcome, s.symbol) for s in b.settlement_events]
+
+
+def _bundle_with_trades():
+    """A bundle whose legs carry trade events — the recent_volume_usd inputs."""
+    arr = np.zeros(2, dtype=event_dtype)
+    return FastPathBundle(
+        leg_arrays={
+            "#0": LegArrays(events=arr, book_ts=np.array([1, 2], dtype=np.int64)),
+            "#1": LegArrays(events=arr.copy(), book_ts=np.array([1, 2], dtype=np.int64)),
+        },
+        reference_events=[],
+        settlement_events=[],
+        trade_events_per_leg={
+            "#0": [
+                TradeEvent(ts_ns=1_000, symbol="#0", side="buy", price=0.97, size=12.0),
+                TradeEvent(ts_ns=2_000, symbol="#0", side="sell", price=0.98, size=3.5),
+            ],
+            "#1": [],
+        },
+    )
+
+
+def _trade_tuples(b):
+    return {
+        sym: [(t.ts_ns, t.symbol, t.side, t.price, t.size) for t in trades]
+        for sym, trades in b.trade_events_per_leg.items()
+    }
+
+
+def test_roundtrip_preserves_trade_events(tmp_path):
+    """SHR-78 regression: a cache HIT must restore ``trade_events_per_leg`` so
+    the recent_volume_usd gate sees the same volume as a fresh build. Pre-fix the
+    npz dropped trades → cached runs read 0 volume → 0 trades for any strategy
+    with min_recent_volume_usd > 0."""
+    b = _bundle_with_trades()
+    cdir = tmp_path / "cache"; src = tmp_path / "a"; src.write_bytes(b"x")
+    cached_bundle(cdir, "q", [src], lambda: b)  # cold: writes
+
+    def _no_build():
+        raise AssertionError("should have hit the cache, not rebuilt")
+
+    got = cached_bundle(cdir, "q", [src], _no_build)  # warm: loads from disk
+    assert _trade_tuples(got) == _trade_tuples(b)
+
+
+def test_npz_disk_serializer_roundtrips_trades(tmp_path):
+    """The custom diskcache ``Disk`` must round-trip trade events too."""
+    import diskcache
+    from hlanalysis.backtest.data._event_array_cache import _NpzDisk
+
+    b = _bundle_with_trades()
+    with diskcache.Cache(str(tmp_path / "dc"), disk=_NpzDisk) as cache:
+        cache["k"] = b
+        got = cache["k"]
+    assert _trade_tuples(got) == _trade_tuples(b)
 
 
 def test_column_split_smaller_than_struct_layout(tmp_path):

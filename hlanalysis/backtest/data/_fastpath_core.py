@@ -23,7 +23,12 @@ from __future__ import annotations
 #     duplicate exchange timestamps (a price set then cleared within one ts).
 #     Bit-identical for unique-ts feeds; bumped so any dup-ts bundle cached
 #     under the old order is rebuilt.
-BUILD_VERSION = 4
+# v5: on-disk format now persists per-leg trade events (tr_*__{ts,px,sz,side})
+#     so a cache HIT restores the recent_volume_usd inputs (SHR-78). Pre-v5 npz
+#     carried no trades → the volume gate silently read 0 on every cached run
+#     (0 trades for any strategy with min_recent_volume_usd > 0). Bumped so
+#     those trade-less bundles are evicted and rebuilt with trades.
+BUILD_VERSION = 5
 
 import logging
 from dataclasses import dataclass
