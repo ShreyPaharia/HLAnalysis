@@ -177,6 +177,7 @@ def _run_config_from_args(
         fee_model=args.fee_model,
         fee_rate=args.fee_rate,
         book_depth_assumption=args.depth,
+        order_latency_ms=args.order_latency_ms,
     )
     if hedge_cfg is not None:
         kwargs["hedge_enabled"] = hedge_cfg["hedge_enabled"]
@@ -510,7 +511,22 @@ def _add_run_config_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--tick-size", type=float, default=0.001)
     parser.add_argument("--lot-size", type=float, default=1.0)
-    parser.add_argument("--depth", type=float, default=10_000.0)
+    parser.add_argument(
+        "--depth",
+        type=float,
+        default=None,
+        help="Optional explicit fill-size cap in lots (SHR-79). Default=None "
+        "(unlimited — the real recorded book governs fill size via "
+        "partial_fill_exchange). Use e.g. --depth 500 to hard-cap fills.",
+    )
+    parser.add_argument(
+        "--order-latency-ms",
+        type=float,
+        default=50.0,
+        help="Constant order round-trip latency in milliseconds (SHR-79). "
+        "Default=50 ms (empirical HL HIP-4 median). Set to 0 for legacy "
+        "zero-latency behaviour.",
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
