@@ -24,6 +24,7 @@ from hlanalysis.backtest.data.synthetic import (
     make_default_binary_question,
 )
 from hlanalysis.backtest.runner.hftbt_runner import RunConfig, run_one_question
+from hlanalysis.strategy.base import Strategy
 
 
 # ---------------------------------------------------------------------------
@@ -690,3 +691,184 @@ def test_run_config_from_args_depth_none_gives_unlimited():
     assert cfg.book_depth_assumption is None, (
         f"omitting --depth should give book_depth_assumption=None, got {cfg.book_depth_assumption}"
     )
+
+
+# ---------------------------------------------------------------------------
+# SHR-85: sim state/halt replay + daily-loss-cap + inventory caps
+# ---------------------------------------------------------------------------
+
+
+class _AlwaysEnterStrategy(Strategy):
+    """Test-only strategy: tries to ENTER (open or top-up) YES on every tick.
+
+    Unlike ``_DummyEnterStrategy`` it never stops firing, so halt-window /
+    inventory suppression has something to suppress on every scan tick.
+    """
+
+    name = "_always_enter_yes"
+
+    def __init__(self, size: float = 10.0):
+        self._size = size
+
+    def evaluate(self, *, question, books, reference_price, recent_returns,
+                 recent_volume_usd, position, now_ns, recent_hl_bars=()):
+        from hlanalysis.strategy.types import Action, Decision, OrderIntent
+        book = books.get(question.yes_symbol)
+        if book is None or book.ask_px is None:
+            return Decision(action=Action.HOLD)
+        intent = OrderIntent(
+            question_idx=question.question_idx,
+            symbol=question.yes_symbol,
+            side="buy",
+            size=self._size,
+            limit_price=min(1.0, book.ask_px + 0.05),
+            cloid=f"always-{now_ns}",
+        )
+        return Decision(action=Action.ENTER, intents=(intent,))
+
+
+def _entry_fill_timestamps(res, fill_ts) -> list[int]:
+    """Timestamps of non-settle BUY (entry) fills."""
+    out = []
+    for f in res.fills:
+        if f.side == "buy" and f.cloid != "settle" and not f.cloid.startswith("hedge"):
+            out.append(fill_ts[f.cloid])
+    return out
+
+
+def test_injected_halt_window_suppresses_entries_inside_it():
+    """A halt window passed to the runner must produce zero entries inside it,
+    while entries before/after the window still fire (exits stay exempt)."""
+    from hlanalysis.backtest.halt_replay import HaltWindow
+    from hlanalysis.backtest.runner.hftbt_runner import run_one_question
+
+    sq = make_default_binary_question(start_ts_ns=0)
+    ds = SyntheticDataSource()
+    ds.add_question(sq)
+    cfg = RunConfig(scanner_interval_seconds=60, slippage_bps=0.0, fee_taker=0.0)
+
+    # Question runs 0..600s; scan ticks at 60,120,...,540s. Halt 150s..330s.
+    halt = HaltWindow(start_ns=150 * 1_000_000_000, end_ns=330 * 1_000_000_000,
+                      reason="stale_data_halt")
+
+    # Run with the halt window. Capture fill timestamps via the fills parquet is
+    # overkill; instead run twice (with/without) and compare entry timestamps.
+    res = run_one_question(
+        _AlwaysEnterStrategy(size=10.0), ds, sq.descriptor, cfg,
+        strike=sq.strike, halt_windows=[halt],
+    )
+    # Reconstruct entry timestamps from the run's internal fill_ts is not exposed;
+    # assert instead that NO entry fill's recorded ts lands in the window by
+    # re-deriving from the fills' cloids which embed now_ns.
+    entered_ns = [
+        int(f.cloid.split("-")[1])
+        for f in res.fills
+        if f.cloid.startswith("always-")
+    ]
+    assert entered_ns, "expected at least one entry outside the halt window"
+    assert all(
+        not (halt.start_ns <= ts < halt.end_ns) for ts in entered_ns
+    ), f"entries leaked into the halt window: {entered_ns}"
+    # And at least one entry on either side of the window (suppression, not a
+    # blanket block).
+    assert any(ts < halt.start_ns for ts in entered_ns)
+    assert any(ts >= halt.end_ns for ts in entered_ns)
+
+
+def test_no_halt_window_enters_every_tick():
+    """Control: without a halt window the always-enter strategy fills on ticks
+    spanning the would-be window (so the suppression test is meaningful)."""
+    from hlanalysis.backtest.runner.hftbt_runner import run_one_question
+
+    sq = make_default_binary_question(start_ts_ns=0)
+    ds = SyntheticDataSource()
+    ds.add_question(sq)
+    cfg = RunConfig(scanner_interval_seconds=60, slippage_bps=0.0, fee_taker=0.0)
+    res = run_one_question(
+        _AlwaysEnterStrategy(size=10.0), ds, sq.descriptor, cfg, strike=sq.strike,
+    )
+    entered_ns = [
+        int(f.cloid.split("-")[1])
+        for f in res.fills
+        if f.cloid.startswith("always-")
+    ]
+    assert any(150 * 1_000_000_000 <= ts < 330 * 1_000_000_000 for ts in entered_ns), (
+        "control run should fill inside the would-be halt window"
+    )
+
+
+def _make_run_state(caps=None, halt_windows=()):
+    """A minimal _RunState for gate-wiring unit tests (no hftbacktest needed)."""
+    from hlanalysis.backtest.runner.hftbt_runner import _RunState, RunConfig
+    from hlanalysis.backtest.runner.result import RunResult
+    from hlanalysis.backtest.core.data_source import QuestionDescriptor
+
+    q = QuestionDescriptor(
+        question_id="gate-q", question_idx=1, start_ts_ns=0,
+        end_ts_ns=10_000_000_000, leg_symbols=("yes", "no"),
+        klass="priceBinary", underlying="BTC",
+    )
+    return _RunState(
+        hbt=None, cfg=RunConfig(), q=q, data_source=None, leg_to_asset={},
+        hedge_asset_no=None, stop_pct=None, fills_dir_active=False,
+        result=RunResult(), sim_risk_caps=caps, halt_windows=tuple(halt_windows),
+    )
+
+
+def test_runstate_daily_loss_cap_latches_and_resets_next_window():
+    """record_realized accumulates per daily window; once realized loss crosses
+    the cap the window stays halted (latched) even if a later win recovers it,
+    and the next daily window resumes."""
+    from datetime import datetime, timezone
+    from hlanalysis.backtest.halt_replay import SimRiskCaps
+
+    def ns(*a):
+        return int(datetime(*a, tzinfo=timezone.utc).timestamp() * 1e9)
+
+    caps = SimRiskCaps(daily_loss_cap_usd=100.0, daily_window_start_hour_utc=6)
+    st = _make_run_state(caps=caps)
+
+    day1_noon = ns(2026, 6, 8, 12, 0)
+    st.now_ns = day1_noon
+    # Within budget so far.
+    st.record_realized(day1_noon, -50.0)
+    assert st.entry_blocked(intent_notional=10.0, is_topup=False,
+                            held_notional=0.0, n_held=0) is None
+    # Cross the cap.
+    st.record_realized(day1_noon, -60.0)  # cumulative -110 < -100
+    assert st.entry_blocked(intent_notional=10.0, is_topup=False,
+                            held_notional=0.0, n_held=0) == "daily_loss_cap"
+    # A later WIN brings running PnL back above -cap, but the window stays halted.
+    st.record_realized(day1_noon, +80.0)  # cumulative -30, but floor latched
+    assert st.entry_blocked(intent_notional=10.0, is_topup=False,
+                            held_notional=0.0, n_held=0) == "daily_loss_cap"
+    # Next daily window (after 06:00 the following day) resumes.
+    day2_noon = ns(2026, 6, 9, 12, 0)
+    st.now_ns = day2_noon
+    assert st.entry_blocked(intent_notional=10.0, is_topup=False,
+                            held_notional=0.0, n_held=0) is None
+
+
+def test_runstate_inventory_cap_blocks_n_plus_1():
+    """The total-inventory cap blocks the entry that would push held notional
+    over the cap (the N+1 entry)."""
+    from hlanalysis.backtest.halt_replay import SimRiskCaps
+
+    caps = SimRiskCaps(max_total_inventory_usd=300.0)
+    st = _make_run_state(caps=caps)
+    st.now_ns = 1_000
+
+    # 250 already held; a 40-notional top-up fits (290 ≤ 300).
+    assert st.entry_blocked(intent_notional=40.0, is_topup=True,
+                            held_notional=250.0, n_held=1) is None
+    # A 100-notional entry would push to 350 → blocked.
+    assert st.entry_blocked(intent_notional=100.0, is_topup=True,
+                            held_notional=250.0, n_held=1) == "max_total_inventory"
+
+
+def test_runstate_no_caps_never_blocks():
+    """With no caps and no halt windows the gate is a no-op (backward compat)."""
+    st = _make_run_state(caps=None, halt_windows=())
+    st.now_ns = 42
+    assert st.entry_blocked(intent_notional=1e9, is_topup=False,
+                            held_notional=1e9, n_held=99) is None

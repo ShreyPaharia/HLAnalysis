@@ -71,6 +71,13 @@ from hlanalysis.strategy.base import Strategy
 from hlanalysis.strategy.types import Action, BookState, Position
 
 from ..core.data_source import DataSource, QuestionDescriptor
+from ..halt_replay import (
+    EntryGateInputs,
+    HaltWindow,
+    SimRiskCaps,
+    daily_window_start_ns,
+    entry_veto,
+)
 from ..core.events import BookSnapshot, ReferenceEvent, SettlementEvent, TradeEvent
 from ..core.question import build_question_view
 from ..data._fastpath_core import build_leg_event_array_from_snapshots
@@ -297,11 +304,62 @@ class _RunState:
     books: dict[str, BookState] = field(default_factory=dict)
     now_ns: int = 0
     current_diag: "DiagnosticRow | None" = None
+    # SHR-85 — sim state/halt replay + daily-loss-cap + inventory caps. The gate
+    # suppresses ENTRIES (exits stay exempt) the way the live RiskGate does. All
+    # default to "no caps / no windows" so existing callers are unaffected.
+    sim_risk_caps: "SimRiskCaps | None" = None
+    halt_windows: tuple[HaltWindow, ...] = ()
+    # Realized PnL accumulated per daily-window start (running) and its low-water
+    # floor (so a window that crossed the daily-loss cap stays latched-halted even
+    # if a later win recovers it — matching the live kill-switch latch).
+    realized_running_by_window: dict[int, float] = field(default_factory=dict)
+    realized_floor_by_window: dict[int, float] = field(default_factory=dict)
 
     def next_oid(self) -> int:
         oid = self._next_oid_counter
         self._next_oid_counter += 1
         return oid
+
+    def record_realized(self, now_ns: int, amount: float) -> None:
+        """Accumulate realized PnL into the daily window containing ``now_ns``.
+
+        No-op unless a daily-loss cap is configured. Updates both the running
+        total and the per-window floor (the minimum running PnL seen this window)
+        which the daily-loss gate reads so the halt latches for the rest of the
+        window."""
+        caps = self.sim_risk_caps
+        if caps is None or caps.daily_loss_cap_usd is None:
+            return
+        ws = daily_window_start_ns(now_ns, hour=caps.daily_window_start_hour_utc)
+        running = self.realized_running_by_window.get(ws, 0.0) + amount
+        self.realized_running_by_window[ws] = running
+        if running < self.realized_floor_by_window.get(ws, 0.0):
+            self.realized_floor_by_window[ws] = running
+
+    def entry_blocked(
+        self, *, intent_notional: float, is_topup: bool,
+        held_notional: float, n_held: int,
+    ) -> str | None:
+        """Return a veto reason if this entry would be suppressed, else ``None``.
+
+        Mirrors the live RiskGate entry-only caps via the shared
+        ``halt_replay.entry_veto``. Exits never call this."""
+        caps = self.sim_risk_caps
+        if caps is None and not self.halt_windows:
+            return None
+        caps = caps or SimRiskCaps()
+        ws = daily_window_start_ns(
+            self.now_ns, hour=caps.daily_window_start_hour_utc
+        )
+        inp = EntryGateInputs(
+            now_ns=self.now_ns,
+            intent_notional=intent_notional,
+            held_inventory_usd=held_notional,
+            n_held_positions=n_held,
+            is_topup=is_topup,
+            realized_pnl_window=self.realized_floor_by_window.get(ws, 0.0),
+        )
+        return entry_veto(caps, self.halt_windows, inp)
 
     def record_fill_from_order(
         self, oid: int, asset_no: int, symbol: str, side: str, cloid: str,
@@ -385,6 +443,11 @@ def _route_stop_loss(st: _RunState) -> None:
     st.result.fills.append(fill)
     st.fill_ts[cloid] = st.now_ns
     st.fill_question_idx[cloid] = st.q.question_idx
+    # SHR-85: a stop-loss is a closing reduce — realize PnL into the daily-loss
+    # window accumulator. Long-leg close realizes (sell_px - avg_entry)*size − fee.
+    st.record_realized(
+        st.now_ns, (fill.price - pos.avg_entry) * fill.size - fill.fee
+    )
     st.pos = None
 
 
@@ -462,6 +525,20 @@ def _route_enter(st: _RunState, decision: Any) -> None:
     if intent is None or asset_no is None or intent.symbol not in st.books:
         return
     book = st.books[intent.symbol]
+    # SHR-85 entry gate: suppress this ENTER if live would have been halted /
+    # capped at this instant (halt window, daily-loss cap, inventory caps).
+    # Notional uses the intent's limit price to match the live RiskGate's
+    # ``intent.size * intent.limit_price``.
+    is_topup = st.pos is not None and intent.symbol == st.pos.symbol
+    held_notional = abs(st.pos.qty) * st.pos.avg_entry if st.pos is not None else 0.0
+    n_held = 1 if st.pos is not None else 0
+    veto = st.entry_blocked(
+        intent_notional=intent.size * intent.limit_price,
+        is_topup=is_topup, held_notional=held_notional, n_held=n_held,
+    )
+    if veto is not None:
+        st.result.n_entries_suppressed += 1
+        return
     slipped = _slipped_buy_price(book, intent.limit_price, cfg.slippage_bps)
     # Submit IOC limit at the slipped/limit price.
     oid = st.next_oid()
@@ -535,10 +612,13 @@ def _route_exit(st: _RunState, decision: Any) -> None:
     # book_depth_assumption, keep the residual open so settlement (or a later
     # exit) closes it — but anything below one lot is unfillable, so treat it as
     # closed to avoid an infinite-exit loop.
-    new_pos, _ = apply_fill(
+    new_pos, realized = apply_fill(
         PositionState(pos.qty, pos.avg_entry), fill.side, fill.size, fill.price,
         close_atol=cfg.lot_size,
     )
+    # SHR-85: feed the realized PnL on this reduce into the daily-loss window
+    # accumulator (net of fee, matching live closedPnl semantics).
+    st.record_realized(st.now_ns, realized - fill.fee)
     if new_pos is None:
         st.pos = None
     else:
@@ -610,8 +690,15 @@ def run_one_question(
     fills_dir: Path | None = None,
     strike: float = 0.0,
     hedge_events: list[BookSnapshot] | None = None,
+    halt_windows: list[HaltWindow] | None = None,
+    sim_risk_caps: SimRiskCaps | None = None,
 ) -> RunResult:
-    """Run one question end-to-end through hftbacktest."""
+    """Run one question end-to-end through hftbacktest.
+
+    SHR-85: ``halt_windows`` (live halt periods to replay) and ``sim_risk_caps``
+    (daily-loss / inventory caps) make the sim stop ENTERING when live would have
+    stopped. Both default to off, so callers that don't pass them are unaffected;
+    exits are never suppressed (matching live)."""
 
     # SHR-57: log effective fee model/rate once at run start so it is never a
     # silent default. HL HIP-4 empirically has fee=0 across 767 live fills;
@@ -774,6 +861,8 @@ def run_one_question(
         stop_pct=stop_pct,
         fills_dir_active=fills_dir is not None,
         result=RunResult(),
+        sim_risk_caps=sim_risk_caps,
+        halt_windows=tuple(halt_windows) if halt_windows else (),
     )
 
     # --- Scan loop ---------------------------------------------------------
