@@ -231,3 +231,71 @@ These largely offset: in-window the sim's conservative misses (#1510, #1380,
   `data/sim/runs/v1_bucket_since0531_scan5/` (5 s sensitivity)
 - Reproduce: see "Inputs & method" above; set
   `HLBT_HL_DATA_ROOT=…/HLAnalysis/data`.
+
+---
+
+## Update 2026-06-09 — re-run after merging the SHR-78/79/80 fixes
+
+The execution-fidelity fixes landed on `main` (SHR-80 `dde69dd` reference-resample
+derivation; SHR-78 `f4181a1` real `recent_volume_usd`; SHR-79/56/57 `e5a642a`
+partial fills + 50 ms order latency) plus the canonical live-mirroring config
+`config/backtest/v1_hl_bucket_live.json`. I pulled them and re-ran. Three things
+changed the picture; **two caveats above are now corrected**.
+
+### A. Found & fixed a cache bug in the SHR-78 fix (`5a14cdb`)
+
+The merged SHR-78 wires real volume through the **dataclass** path but the npz
+**event-array cache** (`_event_array_cache.py` `_save`/`_load`) **dropped
+`trade_events_per_leg`**. Since the cache is default-ON, every cache *hit*
+returned empty trades → `recent_volume_usd = 0` → the live gate (`min_recent_volume_usd=100`)
+vetoed **everything**: the canonical config produced **0 trades** under normal
+(cached) operation, and only `--no-cache` worked. Fixed by persisting per-leg
+trade columns in the cache and bumping `BUILD_VERSION 4→5`. Post-fix, the
+canonical config with the default cache trades **16 / $36.32** (+2 regression
+tests; full suite 1241 green).
+
+### B. Live-faithful re-run (canonical config + cache + live cadence)
+
+The canonical `v1_hl_bucket_live.json` matches the live `strategy.yaml` v1 bucket
+params **exactly**. The only setting not expressible in a backtest config is
+live's **scanner cadence**: live runs `scan_min 0.2 s / scan_max 2.0 s`
+(event-driven), versus the sim's **60 s default**. Running the canonical config
+with the real gate (100), default cache, and `--scanner-interval-seconds 2`:
+
+| | PnL | fills | hit |
+| :-- | --: | --: | --: |
+| **Sim (live-faithful: gate 100, cache, 2 s)** | **$39.36** | 15 | 75 % |
+| Live in-window (05-31→06-07) | $45.22 | | |
+| Live total (incl 06-08 #2230) | $51.35 | | |
+
+Per-leg: `#1340` matches ($10.24 vs $10.23); `#1460` sim *better* ($6.75 vs
+$4.11, earlier entry); `#1380`/`#1610` sim *worse* (late gate/σ entries);
+`#1510` still **missed** (−$8.28); `#1670` still sim-only (+$10.56). Partial
+fills + 50 ms latency now reproduce live's "small first fill then climb" ladder
+(`#1290`: 4 fills, VWAP 0.9812).
+
+### C. Corrections to the caveats above
+
+- **Caveat 1 / the #1670 attribution is WRONG.** With SHR-78 working correctly
+  (real gate = 100, cache fixed), the sim **still trades 06-07 #1670**. So live's
+  skip of 06-07 is **not** the volume threshold — the volume gate does not change
+  the entry set at all on this corpus. Live skipped 06-07 for another reason
+  (most likely recorder-vs-engine trade visibility or engine state at that
+  instant), which the sim cannot see.
+- **Caveat 4 (#1510)** stands and is now stronger: the miss **persists at every
+  cadence and with the real gate** → it is the `safety_d` × σ-warm-up gate
+  divergence, not cadence or volume.
+- **Net:** the fixes improve fidelity (partial fills, latency, real gate) but do
+  **not** close the gap. The live-faithful sim is **$39.36 vs live $45.22
+  in-window**; the residual is `#1510` (σ-warm-up `safety_d` veto) and the
+  `#1380`/`#1610` gate-timing entries, **not** execution fidelity and **not** the
+  volume gate. v1 buckets remain genuinely profitable live; the sim under-states
+  them for those two structural reasons.
+
+### Post-fix artifacts
+
+- Canonical live config: `config/backtest/v1_hl_bucket_live.json`
+- Cache fix: `hlanalysis/backtest/data/_event_array_cache.py`,
+  `_fastpath_core.py` (`BUILD_VERSION 5`); tests in
+  `tests/unit/backtest/test_event_array_cache.py`.
+- Live-faithful run: `data/sim/runs/v1_bucket_livefaithful_2s/`.
