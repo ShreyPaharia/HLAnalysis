@@ -262,6 +262,9 @@ def _run_config_from_args(
         fee_rate=args.fee_rate,
         book_depth_assumption=args.depth,
         order_latency_ms=args.order_latency_ms,
+        scan_mode=getattr(args, "scan_mode", "fixed"),
+        scan_min_interval_seconds=getattr(args, "scan_min_interval_seconds", 0.2),
+        scan_max_interval_seconds=getattr(args, "scan_max_interval_seconds", 2.0),
     )
     if hedge_cfg is not None:
         kwargs["hedge_enabled"] = hedge_cfg["hedge_enabled"]
@@ -631,6 +634,35 @@ def _add_run_config_args(parser: argparse.ArgumentParser) -> None:
         help="Constant order round-trip latency in milliseconds (SHR-79). "
         "Default=50 ms (empirical HL HIP-4 median). Set to 0 for legacy "
         "zero-latency behaviour.",
+    )
+    # SHR-95: event-driven scan mode (mirrors live engine cadence).
+    parser.add_argument(
+        "--scan-mode",
+        choices=["fixed", "event"],
+        default="fixed",
+        dest="scan_mode",
+        help="Scan cadence mode. 'fixed' (default) evaluates every "
+        "--scanner-interval-seconds (legacy behaviour, back-compat). "
+        "'event' evaluates on each book/reference update, clamped between "
+        "--scan-min-interval-seconds (floor) and --scan-max-interval-seconds "
+        "(ceiling), mirroring the live engine's event-driven cadence.",
+    )
+    parser.add_argument(
+        "--scan-min-interval-seconds",
+        type=float,
+        default=0.2,
+        dest="scan_min_interval_seconds",
+        help="(event scan mode only) Minimum time between consecutive scans "
+        "in seconds. Mirrors live scan_min_interval_seconds=0.2. Default=0.2.",
+    )
+    parser.add_argument(
+        "--scan-max-interval-seconds",
+        type=float,
+        default=2.0,
+        dest="scan_max_interval_seconds",
+        help="(event scan mode only) Maximum time between consecutive scans "
+        "(idle-backoff ceiling) in seconds. Mirrors live scan_max_interval_seconds=2.0. "
+        "Default=2.0.",
     )
 
 

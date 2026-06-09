@@ -1167,3 +1167,299 @@ def test_reject_then_refire_fills_on_next_scan():
     assert st.pos is not None, "re-fired order should fill once book is marketable"
     assert len(st.result.fills) == 1
     assert st.result.fills[0].side == "buy"
+
+
+# ---------------------------------------------------------------------------
+# SHR-95: event-driven scan mode
+# ---------------------------------------------------------------------------
+#
+# Three tests:
+#   1. Event mode fires more scans than the fixed grid in an active window.
+#   2. A quiet window (no events) still fires once at the max-interval ceiling.
+#   3. Default (fixed) mode is byte-identical to the current fixed-grid behavior.
+
+
+class _CountingStrategy(Strategy):
+    """Test-only strategy: counts evaluate() calls and always HOLDs.
+
+    We use this to count scan-tick firings without the fill-path complications.
+    The call count is mutated in-place for easy inspection after the run.
+    """
+    name = "_counting_strategy"
+
+    def __init__(self):
+        self.call_count: int = 0
+        self.call_ts_ns: list[int] = []
+
+    def evaluate(self, *, question, books, reference_price, recent_returns,
+                 recent_volume_usd, position, now_ns, recent_hl_bars=()):
+        from hlanalysis.strategy.types import Action, Decision
+        self.call_count += 1
+        self.call_ts_ns.append(now_ns)
+        return Decision(action=Action.HOLD)
+
+
+def _make_dense_book_question(
+    *,
+    n_book_updates: int = 30,
+    duration_ns: int = 10 * 60 * 1_000_000_000,  # 10 min
+    update_stride_ns: int | None = None,
+) -> "tuple":
+    """Build a synthetic question whose YES leg has `n_book_updates` book
+    snapshots spread over `duration_ns`. Returns (SyntheticDataSource, sq).
+
+    We use the legacy ``events()`` path (no events_arrays) so we control the
+    exact book_ts array the runner sees — keeping the test independent of HL-
+    or PM-specific fast-path logic.
+    """
+    from hlanalysis.backtest.data.synthetic import (
+        SyntheticDataSource,
+        SyntheticQuestion,
+    )
+    from hlanalysis.backtest.core.data_source import QuestionDescriptor
+    from hlanalysis.backtest.core.events import (
+        BookSnapshot, ReferenceEvent, SettlementEvent,
+    )
+
+    start_ns: int = 0
+    end_ns: int = duration_ns
+    yes_sym = "ev-yes"
+    no_sym = "ev-no"
+
+    desc = QuestionDescriptor(
+        question_id="ev-q-0", question_idx=1,
+        start_ts_ns=start_ns, end_ts_ns=end_ns,
+        leg_symbols=(yes_sym, no_sym),
+        klass="priceBinary", underlying="BTC",
+    )
+
+    if update_stride_ns is None:
+        update_stride_ns = duration_ns // n_book_updates
+
+    # Build n_book_updates book snapshots; first one is 1ms after start.
+    snaps: list[BookSnapshot] = []
+    for i in range(n_book_updates):
+        t = start_ns + 1_000_000 + i * update_stride_ns
+        bid = 0.40 + 0.10 * (i / max(1, n_book_updates - 1))
+        ask = bid + 0.02
+        snaps.append(BookSnapshot(ts_ns=t, symbol=yes_sym,
+                                  bids=((round(bid, 4), 100.0),),
+                                  asks=((round(ask, 4), 100.0),)))
+        snaps.append(BookSnapshot(ts_ns=t, symbol=no_sym,
+                                  bids=((round(1.0 - ask, 4), 100.0),),
+                                  asks=((round(1.0 - bid, 4), 100.0),)))
+
+    # A few reference events spread over the window.
+    refs: list[ReferenceEvent] = [
+        ReferenceEvent(ts_ns=start_ns + int(j * duration_ns / 3),
+                       symbol="BTC", high=60_100.0, low=59_900.0, close=60_000.0)
+        for j in range(4)
+    ]
+
+    settle = [SettlementEvent(ts_ns=end_ns, question_idx=1, outcome="yes")]
+
+    sq = SyntheticQuestion(
+        descriptor=desc,
+        book_snapshots=tuple(snaps),
+        trades=(),
+        reference_events=tuple(refs),
+        settlement_events=tuple(settle),
+        outcome="yes",
+        strike=60_000.0,
+    )
+    ds = SyntheticDataSource()
+    ds.add_question(sq)
+    return ds, sq
+
+
+def test_event_mode_fires_more_scans_than_fixed_grid():
+    """Event-driven mode must produce more strategy evaluations than a fixed
+    2s grid over the same 10-minute active window.
+
+    Setup: 30 book updates, 1 every 20s. Fixed grid at 60s -> 9 scans in 10m.
+    Event mode (min=0.2s, max=60s) -> at most one scan per update (30 updates
+    in 10m) -- strictly more than 9 at the 60s fixed grid.
+    """
+    ds, sq = _make_dense_book_question(n_book_updates=30, duration_ns=10 * 60 * 1_000_000_000,
+                                       update_stride_ns=20 * 1_000_000_000)
+
+    fixed_strat = _CountingStrategy()
+    fixed_cfg = RunConfig(
+        scanner_interval_seconds=60,
+        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+    )
+    run_one_question(fixed_strat, ds, sq.descriptor, fixed_cfg, strike=sq.strike)
+
+    event_strat = _CountingStrategy()
+    event_cfg = RunConfig(
+        scan_mode="event",
+        scan_min_interval_seconds=0.2,
+        scan_max_interval_seconds=60.0,
+        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+    )
+    run_one_question(event_strat, ds, sq.descriptor, event_cfg, strike=sq.strike)
+
+    assert event_strat.call_count > fixed_strat.call_count, (
+        f"event mode ({event_strat.call_count} evals) must exceed fixed-grid "
+        f"({fixed_strat.call_count} evals) for 30 updates at 20s stride vs 60s grid"
+    )
+
+
+def test_event_mode_respects_min_interval_floor():
+    """No two consecutive scan ticks may be closer than scan_min_interval.
+
+    Setup: 20 book updates at 0.1s stride -- faster than the 0.2s floor.
+    Event mode should merge adjacent triggers so no gap < 0.2s appears.
+    """
+    min_s = 0.2
+    ds, sq = _make_dense_book_question(
+        n_book_updates=20,
+        duration_ns=5 * 60 * 1_000_000_000,
+        update_stride_ns=int(0.1 * 1_000_000_000),  # 100ms stride < 200ms floor
+    )
+
+    strat = _CountingStrategy()
+    cfg = RunConfig(
+        scan_mode="event",
+        scan_min_interval_seconds=min_s,
+        scan_max_interval_seconds=10.0,
+        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+    )
+    run_one_question(strat, ds, sq.descriptor, cfg, strike=sq.strike)
+
+    min_ns = int(min_s * 1_000_000_000)
+    ts = strat.call_ts_ns
+    assert len(ts) >= 2, "expected at least two scans"
+    gaps = [ts[i + 1] - ts[i] for i in range(len(ts) - 1)]
+    assert all(g >= min_ns - 1 for g in gaps), (
+        f"some consecutive scans were closer than scan_min_interval={min_s}s: "
+        f"min gap = {min(gaps) / 1e9:.4f}s"
+    )
+
+
+def test_event_mode_quiet_window_scans_at_max_interval():
+    """A question with NO book updates (completely quiet market) must still
+    trigger scans at the max_interval ceiling.
+
+    A 60s question with max_interval=10s and zero book events should produce
+    ~6 scans (the fixed-ceiling triggers), not zero.
+    """
+    from hlanalysis.backtest.data.synthetic import SyntheticDataSource, SyntheticQuestion
+    from hlanalysis.backtest.core.data_source import QuestionDescriptor
+    from hlanalysis.backtest.core.events import BookSnapshot, ReferenceEvent, SettlementEvent
+
+    duration_ns = 60 * 1_000_000_000  # 60s
+    max_s = 10.0
+    start_ns = 0
+    end_ns = duration_ns
+    yes_sym = "quiet-yes"
+    no_sym = "quiet-no"
+
+    desc = QuestionDescriptor(
+        question_id="quiet-q-0", question_idx=1,
+        start_ts_ns=start_ns, end_ts_ns=end_ns,
+        leg_symbols=(yes_sym, no_sym),
+        klass="priceBinary", underlying="BTC",
+    )
+    # One book snapshot at t=1ms so hftbacktest has non-empty depth.
+    snap = BookSnapshot(ts_ns=1_000_000, symbol=yes_sym,
+                        bids=((0.40, 100.0),), asks=((0.42, 100.0),))
+    snap_no = BookSnapshot(ts_ns=1_000_000, symbol=no_sym,
+                           bids=((0.58, 100.0),), asks=((0.60, 100.0),))
+    refs = [ReferenceEvent(ts_ns=0, symbol="BTC", high=60_100.0, low=59_900.0, close=60_000.0)]
+    settle = [SettlementEvent(ts_ns=end_ns, question_idx=1, outcome="yes")]
+
+    sq = SyntheticQuestion(
+        descriptor=desc,
+        book_snapshots=(snap, snap_no),
+        trades=(),
+        reference_events=tuple(refs),
+        settlement_events=tuple(settle),
+        outcome="yes",
+        strike=60_000.0,
+    )
+    ds_quiet = SyntheticDataSource()
+    ds_quiet.add_question(sq)
+
+    strat = _CountingStrategy()
+    cfg = RunConfig(
+        scan_mode="event",
+        scan_min_interval_seconds=0.2,
+        scan_max_interval_seconds=max_s,
+        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+    )
+    run_one_question(strat, ds_quiet, sq.descriptor, cfg, strike=sq.strike)
+
+    # With 60s window and 10s max ceiling, expect at least 5 scans.
+    assert strat.call_count >= 5, (
+        f"quiet market: expected >=5 scans from 10s max-ceiling in 60s window, "
+        f"got {strat.call_count}"
+    )
+
+
+def test_fixed_mode_is_default_and_unchanged():
+    """Default mode is 'fixed'; results are byte-identical to the pre-SHR-95 path.
+
+    Run the same synthetic question twice: once with an explicit
+    scan_mode='fixed' and once with the current default RunConfig (no scan_mode
+    field). Both must produce the same number of strategy evaluations.
+    """
+    ds, sq = _make_dense_book_question(n_book_updates=10,
+                                       duration_ns=10 * 60 * 1_000_000_000,
+                                       update_stride_ns=60 * 1_000_000_000)
+
+    strat_a = _CountingStrategy()
+    cfg_default = RunConfig(scanner_interval_seconds=60,
+                            slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0)
+    run_one_question(strat_a, ds, sq.descriptor, cfg_default, strike=sq.strike)
+
+    strat_b = _CountingStrategy()
+    cfg_explicit = RunConfig(scanner_interval_seconds=60, scan_mode="fixed",
+                             slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0)
+    run_one_question(strat_b, ds, sq.descriptor, cfg_explicit, strike=sq.strike)
+
+    assert strat_a.call_count == strat_b.call_count, (
+        f"default and explicit fixed mode must produce identical scan counts; "
+        f"got {strat_a.call_count} vs {strat_b.call_count}"
+    )
+    assert strat_a.call_count > 0, "fixed mode must scan at least once"
+
+
+def test_run_config_scan_mode_defaults():
+    """RunConfig must have scan_mode='fixed' (default), scan_min_interval_seconds=0.2,
+    and scan_max_interval_seconds=2.0 after SHR-95."""
+    cfg = RunConfig()
+    assert cfg.scan_mode == "fixed", (
+        f"scan_mode default must be 'fixed', got {cfg.scan_mode!r}"
+    )
+    assert cfg.scan_min_interval_seconds == pytest.approx(0.2), (
+        f"scan_min_interval_seconds default must be 0.2, got {cfg.scan_min_interval_seconds}"
+    )
+    assert cfg.scan_max_interval_seconds == pytest.approx(2.0), (
+        f"scan_max_interval_seconds default must be 2.0, got {cfg.scan_max_interval_seconds}"
+    )
+
+
+def test_cli_scan_mode_args_exist():
+    """--scan-mode, --scan-min-interval-seconds, --scan-max-interval-seconds
+    must be declared by _add_run_config_args and default correctly."""
+    import argparse
+    from hlanalysis.backtest.cli import _add_run_config_args, _run_config_from_args
+
+    p = argparse.ArgumentParser()
+    _add_run_config_args(p)
+
+    # Defaults
+    args = p.parse_args([])
+    assert args.scan_mode == "fixed"
+    assert args.scan_min_interval_seconds == pytest.approx(0.2)
+    assert args.scan_max_interval_seconds == pytest.approx(2.0)
+
+    # Explicit event-mode values propagate into RunConfig.
+    args2 = p.parse_args(["--scan-mode", "event",
+                           "--scan-min-interval-seconds", "0.5",
+                           "--scan-max-interval-seconds", "5.0"])
+    cfg = _run_config_from_args(args2, hedge_cfg=None)
+    assert cfg.scan_mode == "event"
+    assert cfg.scan_min_interval_seconds == pytest.approx(0.5)
+    assert cfg.scan_max_interval_seconds == pytest.approx(5.0)
