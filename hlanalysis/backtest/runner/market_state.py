@@ -8,8 +8,8 @@ same code — closing the train/serve skew by *reuse*, not a diff harness.
 This module keeps the runner's narrow, single-reference public surface so
 ``hftbt_runner.py`` needs no change:
 
-  * ``apply_l2`` / ``apply_trade`` / ``apply_reference`` map the runner's
-    ``core.events`` structs onto the shared core's ingest methods;
+  * ``apply_l2`` / ``apply_trade`` / ``apply_reference`` / ``apply_reference_tick``
+    map the runner's ``core.events`` structs onto the shared core's ingest methods;
   * ``recent_returns`` / ``recent_hl_bars`` / ``recent_returns_and_hl`` /
     ``recent_volume_usd`` / ``book`` / ``latest_btc_close`` delegate to it.
 
@@ -85,6 +85,24 @@ class MarketState:
     def apply_reference(self, ev: ReferenceEvent) -> None:
         self._core.apply_reference_bar(
             _REFERENCE_KEY, ts_ns=ev.ts_ns, high=ev.high, low=ev.low, close=ev.close
+        )
+
+    def apply_reference_tick(self, ev: ReferenceEvent) -> None:
+        """Feed a raw reference tick (H=L=C=mid) into the shared core's tick path.
+
+        Unlike ``apply_reference`` (which appends a pre-bucketed bar), this calls
+        ``apply_reference_tick`` on the shared core, which:
+          - sets ``last_mark`` to the tick price IMMEDIATELY (live-parity), and
+          - folds the tick into the current ``dt`` OHLC bucket in-place so σ is
+            computed from correctly-bucketed returns.
+
+        Used by the runner when ``HLHip4DataSource.reference_ticks == "raw"``
+        (SHR-93): the loader yields one ``ReferenceEvent`` per recorded tick and
+        the runner calls this method instead of ``apply_reference``, matching the
+        live engine path that also routes raw ticks through ``apply_reference_tick``.
+        """
+        self._core.apply_reference_tick(
+            _REFERENCE_KEY, ts_ns=ev.ts_ns, price=ev.close
         )
 
     def latest_btc_close(self) -> float | None:

@@ -213,6 +213,7 @@ class HLHip4DataSource:
         ref_source: Literal["hl_perp", "binance_perp"] = "hl_perp",
         reference_resample_seconds: int = 60,
         reference_warmup_seconds: int = 0,
+        reference_ticks: Literal["bars", "raw"] = "bars",
     ) -> None:
         self.data_root = Path(data_root)
         self.ref_event = ref_event
@@ -240,6 +241,17 @@ class HLHip4DataSource:
             )
         self.reference_warmup_seconds = int(reference_warmup_seconds)
         self._reference_warmup_ns = int(reference_warmup_seconds) * 1_000_000_000
+        # Reference-tick mode (SHR-93). "bars" (default) = pre-bucket raw ticks into
+        # OHLC bars of width reference_resample_seconds before emitting (the legacy
+        # path, σ-annualisation contract preserved). "raw" = emit one ReferenceEvent
+        # per raw recorded tick and let the shared MarketState bucket them via its
+        # ingest_tick path — making last_mark the instantaneous raw tick price, same
+        # as the live engine. Default "bars" keeps all existing results unchanged.
+        if reference_ticks not in ("bars", "raw"):
+            raise ValueError(
+                f"reference_ticks must be 'bars' or 'raw', got {reference_ticks!r}"
+            )
+        self.reference_ticks: Literal["bars", "raw"] = reference_ticks
         # Cached per-instance: question_id -> parsed metadata bundle.
         self._meta_cache: dict[str, _QuestionMeta] = {}
         # Cached per-instance: question_id -> settled outcome. resolved_outcome
@@ -402,6 +414,7 @@ class HLHip4DataSource:
                     reference_rows=ref_rows,
                     ref_event_kind=evt,
                     reference_resample_ns=self._reference_resample_ns,
+                    reference_ticks=self.reference_ticks,
                 )
             finally:
                 con.close()
@@ -436,6 +449,7 @@ class HLHip4DataSource:
             f"|ref={self.ref_event}"
             f"|refsrc={self.ref_source}"
             f"|warmup={self._reference_warmup_ns}"
+            f"|refticks={self.reference_ticks}"
         )
 
     def _fastpath_source_files(self, q: QuestionDescriptor) -> list[Path]:
@@ -571,6 +585,26 @@ class HLHip4DataSource:
             evt = fallback
         if not rows:
             return iter(())
+
+        # SHR-93: "raw" mode emits one ReferenceEvent per recorded tick — no
+        # pre-bucketing. The shared MarketState will bucket ticks on the fly
+        # via apply_reference_tick → ingest_tick, making last_mark the
+        # instantaneous raw price (matching the live engine path).
+        # "bars" mode (default) resamples to OHLC bars of width
+        # vol_sampling_dt_seconds (the pre-SHR-93 behaviour, unchanged).
+        if self.reference_ticks == "raw":
+            # Raw mode: one event per tick, H=L=C=mid, no bucketing.
+            if evt == "bbo":
+                def gen_bbo_raw_ticks() -> Iterator[tuple[int, ReferenceEvent]]:
+                    for ts, bid, ask in rows:
+                        mid = (float(bid) + float(ask)) / 2.0
+                        yield int(ts), ReferenceEvent(int(ts), "BTC", mid, mid, mid)
+                return gen_bbo_raw_ticks()
+            def gen_mark_raw_ticks() -> Iterator[tuple[int, ReferenceEvent]]:
+                for ts, px in rows:
+                    p = float(px)
+                    yield int(ts), ReferenceEvent(int(ts), "BTC", p, p, p)
+            return gen_mark_raw_ticks()
 
         # 2026-05-21: resample to OHLC bars of width vol_sampling_dt_seconds.
         # Why: the strategy's σ formula (`theta_harvester._sigma`) takes the LAST

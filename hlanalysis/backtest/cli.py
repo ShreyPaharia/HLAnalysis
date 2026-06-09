@@ -84,6 +84,7 @@ def _source_config_from_args(
             cache_root=cache_root or os.environ.get(_ENV_HL_DATA),
             hl_ref_source=getattr(args, "ref_source", None) or "hl_perp",
             hl_ref_event=getattr(args, "ref_event", None) or "bbo",
+            hl_ref_ticks=getattr(args, "reference_ticks", None) or "bars",
             reference_resample_seconds=reference_resample_seconds,
             reference_warmup_seconds=reference_warmup_seconds,
         )
@@ -697,6 +698,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         "`bbo` (default) reads bid/ask mid (bounces more → higher σ).",
     )
     pr.add_argument(
+        "--reference-ticks",
+        choices=["bars", "raw"],
+        default="bars",
+        dest="reference_ticks",
+        help="(hl_hip4 only) Reference-tick mode (SHR-93). `bars` (default) "
+        "pre-buckets raw ticks into OHLC bars of width vol_sampling_dt_seconds "
+        "before feeding the strategy — the pre-SHR-93 behaviour, existing "
+        "results unchanged. `raw` emits one event per recorded tick and lets "
+        "the shared MarketState bucket them, making last_mark the instantaneous "
+        "raw tick price (live-parity). Use `--reference-ticks raw` to close the "
+        "p_model timing gap on fast-moving markets.",
+    )
+    pr.add_argument(
         "--pm-reference-source",
         choices=["klines", "binance_bbo", "klines_1s"],
         default="klines",
@@ -862,6 +876,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="(hl_hip4 only) Reference warm-up prefix in seconds (SHR-92). "
         "Override the per-cell auto-derivation from vol_lookback_seconds. "
         "Pass 0 to disable warm-up entirely.",
+    )
+    pt.add_argument(
+        "--reference-ticks",
+        choices=["bars", "raw"],
+        default="bars",
+        dest="reference_ticks",
+        help="(hl_hip4 only) Reference-tick mode (SHR-93). `bars` (default) "
+        "pre-buckets raw ticks into OHLC bars — the pre-SHR-93 behaviour. "
+        "`raw` emits one event per recorded tick for live-parity last_mark.",
     )
     # Hedge leg flags (v5_delta_hedged only; safe to pass for other strategies
     # since hedge_enabled defaults to False when --hedge-data-path is omitted).

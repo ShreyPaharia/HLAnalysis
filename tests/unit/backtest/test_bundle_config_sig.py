@@ -21,6 +21,7 @@ def test_hl_config_sig_changes_with_each_bundle_param(tmp_path):
         {**base, "reference_resample_seconds": 5},   # dt
         {**base, "ref_event": "mark"},               # feed kind
         {**base, "ref_source": "binance_perp"},      # reference venue
+        {**base, "reference_ticks": "raw"},           # SHR-93: bars vs raw ticks
     ]
     sigs = {HLHip4DataSource(**v)._bundle_config_sig() for v in variants}
     assert sig not in sigs                 # each variant differs from baseline
