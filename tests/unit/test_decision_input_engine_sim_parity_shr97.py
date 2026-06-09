@@ -134,7 +134,10 @@ def _run_parity_check(*, source: str, dt: int, lookback: int = 3600) -> None:
     engine_ms.set_reference_source("BTC", cfg.reference_source)
 
     # --- Backtest path ---
-    from hlanalysis.backtest.runner.market_state import MarketState as BacktestMS
+    from hlanalysis.backtest.runner.market_state import (
+        MarketState as BacktestMS,
+        _REFERENCE_KEY,
+    )
     from hlanalysis.backtest.core.events import ReferenceEvent
 
     bt_ms = BacktestMS()
@@ -216,14 +219,19 @@ def _run_parity_check(*, source: str, dt: int, lookback: int = 3600) -> None:
         )
 
         # --- sigma (all three estimators) ---
+        # Engine reads its core keyed by the real symbol; the backtest adapter
+        # keys reference data under _REFERENCE_KEY and resolves dt from its single
+        # registered cadence (no explicit dt — matches the recent_returns read
+        # above). These are two DISTINCT cores fed independently — the comparison
+        # is meaningful only because each side reads its own core.
         for estimator in ("stdev", "bipower", "parkinson"):
             eng_sig = engine_ms._core.sigma(
                 sym, estimator=estimator, now_ns=now_ns,
                 lookback_seconds=lookback, dt=dt
             )
-            bt_sig = engine_ms._core.sigma(
-                sym, estimator=estimator, now_ns=now_ns,
-                lookback_seconds=lookback, dt=dt
+            bt_sig = bt_ms._core.sigma(
+                _REFERENCE_KEY, estimator=estimator, now_ns=now_ns,
+                lookback_seconds=lookback
             )
             assert eng_sig == bt_sig, (
                 f"sigma[{estimator}] mismatch @ {ctx}: engine={eng_sig} bt={bt_sig}"
