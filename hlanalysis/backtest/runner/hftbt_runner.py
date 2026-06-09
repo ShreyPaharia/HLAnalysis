@@ -231,6 +231,14 @@ class RunConfig:
     # Set to False to restore the pre-SHR-94 behaviour where fleeting levels
     # can fill (e.g. for isolated tests that don't supply snap_best arrays).
     ioc_marketability_recheck: bool = True
+    # SHR-95: event-driven scan mode. "fixed" (default) preserves legacy behaviour
+    # (scan every scanner_interval_seconds). "event" mirrors the live engine:
+    # evaluate on each book/reference event clamped between scan_min_interval_seconds
+    # (floor — never faster than live's 0.2s) and scan_max_interval_seconds (ceiling
+    # — quiet market still scans periodically at live's 2s idle-backoff).
+    scan_mode: str = "fixed"
+    scan_min_interval_seconds: float = 0.2
+    scan_max_interval_seconds: float = 2.0
 
     def effective_latency_model(self) -> "LatencyModel":
         """The latency model to wire into assets: the explicit ``latency_model``
@@ -276,6 +284,23 @@ def _stop_price(fill_price: float, stop_pct: float | None) -> float:
     """Thin alias over the shared ``position_math.stop_price`` (single source of
     truth shared with the live router)."""
     return stop_price(fill_price, stop_pct)
+
+
+def _sentinel_event_array(ts_ns: int) -> np.ndarray:
+    """Single no-op DEPTH_CLEAR event at ``ts_ns``.
+
+    Used to extend hftbacktest's data timeline to the question's end_ts_ns in
+    event-driven scan mode (SHR-95). Without at least one event at/near end_ts,
+    hbt.elapse() returns rc=1 (end-of-data) as soon as the last real event is
+    consumed — preventing the max-interval ceiling from firing over a quiet
+    window. This sentinel keeps the timeline alive without affecting book state.
+    """
+    arr = np.zeros(1, dtype=event_dtype)
+    flag = EXCH_EVENT | LOCAL_EVENT
+    arr[0]["ev"] = DEPTH_CLEAR_EVENT | flag | BUY_EVENT
+    arr[0]["exch_ts"] = ts_ns
+    arr[0]["local_ts"] = ts_ns
+    return arr
 
 
 def _initial_clear_array(start_ts_ns: int) -> np.ndarray:
@@ -1104,15 +1129,29 @@ def run_one_question(
     # otherwise GC frees it and the engine reads dangling memory (visible as
     # NaN bids/asks and a corrupted ``current_timestamp``). We hold the per-leg
     # arrays in ``_data_keepalive`` for the lifetime of this call.
+    # SHR-95: in event-driven mode append a no-op sentinel at end_ts_ns to each
+    # leg's event array. This extends hftbacktest's data timeline to the question
+    # end so max-interval ceiling scans can fire over quiet windows — without this,
+    # hbt.elapse() returns rc=1 (end-of-data) as soon as the last real event is
+    # consumed. Fixed-mode is unaffected (sentinel is not appended).
+    _event_mode_sentinel = (
+        _sentinel_event_array(q.end_ts_ns)
+        if cfg.scan_mode == "event"
+        else None
+    )
+
     assets = []
     leg_to_asset: dict[str, int] = {}
     _data_keepalive: list[np.ndarray] = []
     for i, sym in enumerate(q.leg_symbols):
         leg_arr = leg_event_arrays[sym]
         clear_arr = _initial_clear_array(q.start_ts_ns)
-        full = (
-            np.concatenate([clear_arr, leg_arr]) if len(leg_arr) > 0 else clear_arr
-        )
+        parts = [clear_arr]
+        if len(leg_arr) > 0:
+            parts.append(leg_arr)
+        if _event_mode_sentinel is not None:
+            parts.append(_event_mode_sentinel)
+        full = np.concatenate(parts) if len(parts) > 1 else parts[0]
         _data_keepalive.append(full)
         assets.append(
             _build_asset(full, cfg, start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns)
@@ -1182,17 +1221,75 @@ def run_one_question(
     )
 
     # --- Scan loop ---------------------------------------------------------
-    # Fixed 60s grid (mirrors `hl-sim`'s scan cadence in spirit; legacy
-    # ran event-driven but PM trade density is high enough that the two
-    # produce the same v2 P&L within 1e-5 USD). Event-driven was tried and
-    # did NOT close the v1 trade-count gap, so the simpler form stays.
+    # Two modes (SHR-95):
+    #
+    # "fixed" (default): advance hbt by scan_interval_ns every iteration —
+    #   the original fixed-grid behaviour. Back-compat: bit-identical to the
+    #   pre-SHR-95 scan cadence for all callers that don't opt into "event".
+    #
+    # "event": mirrors the live engine's event-driven cadence. On each loop
+    #   iteration we compute the next scan target as the earliest trigger among:
+    #     a) the next book/reference event timestamp (trigger on market activity)
+    #     b) last_scan_ns + max_interval_ns  (idle-backoff ceiling)
+    #   …then clamp it so it is at least last_scan_ns + min_interval_ns (floor).
+    #   This reproduces live's scan_min/scan_max interval semantics without
+    #   requiring changes to the hftbacktest asset or event array.
+    #
+    # Event-mode pre-build: merge all book-event timestamps + ref-event
+    # timestamps into one sorted int64 array used as the trigger schedule.
+
+    event_mode = cfg.scan_mode == "event"
+    _event_triggers: np.ndarray  # sorted int64, only used in event mode
+
+    if event_mode:
+        min_interval_ns = int(cfg.scan_min_interval_seconds * 1_000_000_000)
+        max_interval_ns = int(cfg.scan_max_interval_seconds * 1_000_000_000)
+        # Merge all leg book-update timestamps + reference event timestamps.
+        parts: list[np.ndarray] = []
+        for ts_arr in book_ts_per_leg.values():
+            if len(ts_arr) > 0:
+                parts.append(ts_arr.astype(np.int64))
+        if ref_events:
+            parts.append(np.array([r.ts_ns for r in ref_events], dtype=np.int64))
+        if parts:
+            _event_triggers = np.sort(np.concatenate(parts))
+        else:
+            _event_triggers = np.empty(0, dtype=np.int64)
+        _evt_idx: int = 0
+        _last_scan_ns: int = q.start_ts_ns
+    else:
+        min_interval_ns = 0  # unused in fixed mode
+        max_interval_ns = 0  # unused in fixed mode
+        _event_triggers = np.empty(0, dtype=np.int64)  # unused
+        _evt_idx = 0
+        _last_scan_ns = q.start_ts_ns
 
     while True:
-        rc = hbt.elapse(scan_interval_ns)
+        if event_mode:
+            # Determine how far to advance hbt to reach the next scan target.
+            # The ceiling is: last scan + max_interval (idle-backoff).
+            next_target = _last_scan_ns + max_interval_ns
+            # Pull the next event trigger that is strictly after last_scan_ns.
+            while _evt_idx < len(_event_triggers) and _event_triggers[_evt_idx] <= _last_scan_ns:
+                _evt_idx += 1
+            if _evt_idx < len(_event_triggers):
+                next_event_ts = int(_event_triggers[_evt_idx])
+                # Clamp to the max-interval ceiling.
+                next_target = min(next_target, next_event_ts)
+            # Enforce the min-interval floor.
+            next_target = max(next_target, _last_scan_ns + min_interval_ns)
+            # Advance hbt by the delta from its current position.
+            current_ts = int(hbt.current_timestamp)
+            delta_ns = max(1, next_target - current_ts)
+            rc = hbt.elapse(delta_ns)
+        else:
+            rc = hbt.elapse(scan_interval_ns)
         if rc != 0:
             break
 
         now_ns = int(hbt.current_timestamp)
+        if event_mode:
+            _last_scan_ns = now_ns
         if now_ns >= q.end_ts_ns:
             break
 
