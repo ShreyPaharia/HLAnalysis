@@ -157,6 +157,7 @@ def build_fast_path_bundle(
     reference_rows: list[tuple],
     ref_event_kind: Literal["bbo", "mark"],
     reference_resample_ns: int = _DEFAULT_REFERENCE_RESAMPLE_NS,
+    reference_ticks: Literal["bars", "raw"] = "bars",
 ) -> FastPathBundle:
     """Assemble the per-leg event arrays + reference + settlement events.
 
@@ -199,12 +200,11 @@ def build_fast_path_bundle(
             trade_events_per_leg[leg] = []
 
     # Reference events: already fetched as flat rows in legacy path. Convert
-    # here and resample to OHLC bars of width ``reference_resample_ns`` so
-    # σ-annualization in the strategy (which assumes vol_sampling_dt_seconds
-    # inter-sample spacing) is honest. Raw HL BBO/mark feeds tick ~1-6/s;
-    # without bucketing the strategy's last-N returns span ~5-30s of price
-    # action while the annualization treats them as `dt` apart. See
-    # hl_hip4.py::_resample_reference for the legacy-path twin and rationale.
+    # here and — in "bars" mode (default) — resample to OHLC bars of width
+    # ``reference_resample_ns`` so σ-annualization is honest. In "raw" mode
+    # (SHR-93), skip the resampling and emit one ReferenceEvent per tick
+    # (H=L=C=mid); the runner will bucket them via apply_reference_tick so
+    # last_mark is the instantaneous raw price, matching the live engine path.
     ref_events_raw: list[ReferenceEvent] = []
     if ref_event_kind == "bbo":
         for ts, bid, ask in reference_rows:
@@ -214,9 +214,15 @@ def build_fast_path_bundle(
         for ts, px in reference_rows:
             p = float(px)
             ref_events_raw.append(ReferenceEvent(int(ts), "BTC", p, p, p))
-    ref_events: list[ReferenceEvent] = _resample_reference_rows(
-        ref_events_raw, resample_ns=reference_resample_ns
-    )
+    if reference_ticks == "raw":
+        # Raw mode: emit ticks as-is (H=L=C already set above); no bucketing.
+        ref_events: list[ReferenceEvent] = ref_events_raw
+    else:
+        # Bars mode (default): resample to OHLC bars. See hl_hip4.py::_resample_reference
+        # for the generator-path twin and detailed rationale.
+        ref_events = _resample_reference_rows(
+            ref_events_raw, resample_ns=reference_resample_ns
+        )
 
     # Settlement events: per-leg.
     settle_events: list[SettlementEvent] = []
@@ -237,6 +243,7 @@ def build_fast_path_bundle(
         reference_events=ref_events,
         settlement_events=settle_events,
         trade_events_per_leg=trade_events_per_leg,
+        reference_events_are_raw_ticks=(reference_ticks == "raw"),
     )
 
 

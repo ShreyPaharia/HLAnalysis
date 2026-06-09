@@ -94,6 +94,12 @@ class SourceConfig:
     # directly are unaffected. The CLI auto-derives this from the strategy's max
     # vol_lookback_seconds for hl_hip4 runs.
     reference_warmup_seconds: int = 0
+    # HL HIP-4 reference-tick mode (SHR-93). "bars" (default) = pre-bucket raw ticks
+    # into OHLC bars of width reference_resample_seconds (pre-SHR-93 behaviour,
+    # existing results unchanged). "raw" = emit one ReferenceEvent per recorded tick
+    # and let the shared MarketState bucket them — making last_mark the instantaneous
+    # raw tick price (live-parity). Default "bars" keeps all existing results intact.
+    hl_ref_ticks: str = "bars"
 
     def with_reference_resample(self, seconds: int) -> "SourceConfig":
         """Return a copy with ``reference_resample_seconds`` replaced (per-cell)."""
@@ -141,6 +147,7 @@ class SourceConfig:
                 ref_event=self.hl_ref_event,  # type: ignore[arg-type]
                 reference_resample_seconds=self.reference_resample_seconds,
                 reference_warmup_seconds=self.reference_warmup_seconds,
+                reference_ticks=self.hl_ref_ticks,  # type: ignore[arg-type]
             )
         if self.kind == "pm_nba":
             from ..data.pm_nba import PolymarketNBADataSource

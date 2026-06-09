@@ -154,6 +154,11 @@ class FastPathBundle:
     # Per-leg trade events for MarketState volume accounting (SHR-78).
     # Empty dict for sources that don't record trades (e.g. PM synthetic).
     trade_events_per_leg: dict[str, list[TradeEvent]] = None  # type: ignore[assignment]
+    # SHR-93: when True, ``reference_events`` contains raw per-tick events
+    # (H=L=C=mid, one per recorded tick) rather than pre-bucketed OHLC bars.
+    # The runner routes them through ``MarketState.apply_reference_tick`` so
+    # last_mark is the instantaneous raw price. Default False = bars (legacy).
+    reference_events_are_raw_ticks: bool = False
 
     def __post_init__(self) -> None:
         # ``frozen=True`` + ``slots=True`` prevents direct assignment; use

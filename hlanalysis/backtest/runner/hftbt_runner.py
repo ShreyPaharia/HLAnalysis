@@ -896,11 +896,16 @@ def run_one_question(
     # (SHR-78). Drained incrementally in the scan loop alongside ref_events.
     all_trade_events: list[TradeEvent]
 
+    # SHR-93: True when the reference stream is raw per-tick events rather than
+    # pre-bucketed OHLC bars. The runner uses apply_reference_tick instead of
+    # apply_reference so last_mark is the instantaneous tick price (live-parity).
+    ref_events_are_raw_ticks: bool = False
     if bundle is not None:
         leg_event_arrays = {sym: legarr.events for sym, legarr in bundle.leg_arrays.items()}
         book_ts_per_leg = {sym: legarr.book_ts for sym, legarr in bundle.leg_arrays.items()}
         ref_events = bundle.reference_events
         settle_events = bundle.settlement_events
+        ref_events_are_raw_ticks = getattr(bundle, "reference_events_are_raw_ticks", False)
         # Fast path: trade events are pre-read in the bundle (SHR-78).
         raw: list[TradeEvent] = []
         for evs in bundle.trade_events_per_leg.values():
@@ -938,6 +943,11 @@ def run_one_question(
             raw_legacy.extend(evs)
         raw_legacy.sort(key=lambda t: t.ts_ns)
         all_trade_events = raw_legacy
+        # SHR-93: propagate the data source's reference_ticks mode to the scan loop
+        # so the slow events() path also uses apply_reference_tick for raw ticks.
+        ref_events_are_raw_ticks = (
+            getattr(data_source, "reference_ticks", "bars") == "raw"
+        )
 
     # Binary HIP-4 / PM markets settle relative to the reference price at
     # question start ("BTC > day_open"). When the caller hasn't supplied a
@@ -1042,9 +1052,17 @@ def run_one_question(
             break
 
         # Drain reference events up to now into MarketState.
-        while ref_idx < len(ref_events) and ref_events[ref_idx].ts_ns <= now_ns:
-            state.apply_reference(ref_events[ref_idx])
-            ref_idx += 1
+        # SHR-93: raw-tick mode (reference_ticks="raw") routes ticks through
+        # apply_reference_tick so last_mark is the instantaneous raw price
+        # (live-parity). Bar mode uses apply_reference (pre-bucketed OHLC bars).
+        if ref_events_are_raw_ticks:
+            while ref_idx < len(ref_events) and ref_events[ref_idx].ts_ns <= now_ns:
+                state.apply_reference_tick(ref_events[ref_idx])
+                ref_idx += 1
+        else:
+            while ref_idx < len(ref_events) and ref_events[ref_idx].ts_ns <= now_ns:
+                state.apply_reference(ref_events[ref_idx])
+                ref_idx += 1
 
         # Drain trade events up to now into MarketState for volume accounting
         # (SHR-78). Mirrors how ref_events are consumed above.
