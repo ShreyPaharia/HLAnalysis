@@ -397,26 +397,35 @@ class EngineRuntime:
         bar series exists and accumulates from the one shared feed. Multiple
         cadences per reference_symbol are supported (each bucketed independently).
         Conflicting σ sources for the same reference_symbol still raise (see
-        MarketState.set_reference_source)."""
+        MarketState.set_reference_source).
+
+        SHR-97: the default cadence and σ source are now resolved via
+        ``from_engine`` (the shared decision-input resolver). The output is
+        identical to the previous inline reads — this is a pure refactor,
+        bit-identical behaviour is guaranteed by the SHR-87 and SHR-97 gates.
+        """
+        from ..marketdata.decision_input import from_engine
+
         for slot in slots:
             sym = slot.cfg.reference_symbol
+            dic = from_engine(slot.cfg)
             self.market_state.set_reference_cadence(
                 sym,
-                sampling_dt_seconds=reference_sampling_dt_seconds(slot.cfg),
-                lookback_seconds=reference_vol_lookback_seconds(slot.cfg),
+                sampling_dt_seconds=dic.sampling_dt_seconds,
+                lookback_seconds=dic.vol_lookback_seconds,
             )
             for dt_s, _n in Scanner.cadence_by_class(slot.cfg).values():
                 self.market_state.set_reference_cadence(
                     sym,
                     sampling_dt_seconds=dt_s,
-                    lookback_seconds=reference_vol_lookback_seconds(slot.cfg),
+                    lookback_seconds=dic.vol_lookback_seconds,
                 )
             # Couple the σ/OHLC source (mark | bbo) per reference symbol. Unlike
             # the cadence (which now accepts multiple per symbol), the source is
             # fail-fast: slots sharing a symbol must agree on one σ source.
             # Default "mark" preserves HL behaviour bit-identically.
             self.market_state.set_reference_source(
-                sym, slot.cfg.reference_sigma_source,
+                sym, dic.reference_source,
             )
 
     # ---------- slot construction ----------
