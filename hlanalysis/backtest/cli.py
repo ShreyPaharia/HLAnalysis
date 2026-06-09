@@ -54,6 +54,7 @@ def _source_config_from_args(
     args: argparse.Namespace,
     *,
     reference_resample_seconds: int = 60,
+    reference_warmup_seconds: int = 0,
 ) -> SourceConfig:
     """Build the picklable :class:`SourceConfig` from parsed CLI args.
 
@@ -82,7 +83,9 @@ def _source_config_from_args(
             kind="hl_hip4",
             cache_root=cache_root or os.environ.get(_ENV_HL_DATA),
             hl_ref_source=getattr(args, "ref_source", None) or "hl_perp",
+            hl_ref_event=getattr(args, "ref_event", None) or "bbo",
             reference_resample_seconds=reference_resample_seconds,
+            reference_warmup_seconds=reference_warmup_seconds,
         )
     if name == "pm_nba":
         return SourceConfig(
@@ -92,6 +95,56 @@ def _source_config_from_args(
     if name == "synthetic":
         return SourceConfig(kind="synthetic", cache_root=cache_root)
     raise SystemExit(f"Unknown --data-source: {name}")
+
+
+def _derive_reference_warmup_seconds(params: dict, *, data_source: str) -> int:
+    """Auto-derive the reference warm-up window from ``params``.
+
+    For ``hl_hip4`` sources, returns the maximum ``vol_lookback_seconds`` across
+    all param classes so the reference buffer is warm enough for any class's
+    lookback at market open. For other sources (PM, synthetic), returns 0 because
+    PM derives σ differently and doesn't benefit from HL-style BBO warm-up.
+
+    Handles both:
+    - flat params dict: ``{"vol_lookback_seconds": 900}``
+    - per-class nested dict: ``{"binary": {"vol_lookback_seconds": 3600},
+                                 "bucket": {"vol_lookback_seconds": 900}}``
+    """
+    if data_source != "hl_hip4":
+        return 0
+    # Collect all vol_lookback_seconds values from flat or nested params.
+    values: list[int] = []
+    for v in params.values():
+        if isinstance(v, dict):
+            # Nested per-class params.
+            if "vol_lookback_seconds" in v:
+                values.append(int(v["vol_lookback_seconds"]))
+        elif isinstance(v, (int, float)):
+            pass  # handled below for flat case
+    # Flat case: top-level key.
+    if "vol_lookback_seconds" in params:
+        flat_val = params["vol_lookback_seconds"]
+        if isinstance(flat_val, (int, float)):
+            values.append(int(flat_val))
+    return max(values) if values else 0
+
+
+def _resolve_reference_warmup_seconds(
+    params: dict,
+    *,
+    data_source: str,
+    cli_override: int | None,
+) -> int:
+    """Resolve the effective reference warm-up window.
+
+    Priority (highest first):
+    1. ``cli_override`` when not None — the ``--reference-warmup-seconds`` flag was
+       explicitly passed (including 0 to disable).
+    2. Auto-derived from ``params`` via :func:`_derive_reference_warmup_seconds`.
+    """
+    if cli_override is not None:
+        return int(cli_override)
+    return _derive_reference_warmup_seconds(params, data_source=data_source)
 
 
 def assert_hl_cadence_match(source_config: "SourceConfig", params: dict) -> None:
@@ -266,9 +319,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     # in-process source here AND shipped (picklable) to subprocess workers, so
     # both build identically. Couple the reference downsampler to the strategy's
     # vol_sampling_dt_seconds — same param, same source-of-truth.
+    # SHR-92: auto-derive reference_warmup_seconds from vol_lookback_seconds
+    # (max across classes) so σ is warm at every market open. The
+    # --reference-warmup-seconds flag overrides; 0 explicitly disables.
+    _cli_warmup = getattr(args, "reference_warmup_seconds", None)
+    _warmup = _resolve_reference_warmup_seconds(
+        params, data_source=args.data_source, cli_override=_cli_warmup
+    )
     source_config = _source_config_from_args(
         args,
         reference_resample_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
+        reference_warmup_seconds=_warmup,
     )
     assert_hl_cadence_match(source_config, params)
     data_source = source_config.build()
@@ -415,7 +476,19 @@ def cmd_tune(args: argparse.Namespace) -> int:
     # SAME picklable SourceConfig to workers. The reference-resample cadence is a
     # sweepable param (vol_sampling_dt_seconds), so workers override it per cell;
     # the discover pass here doesn't depend on the cadence, so 60 is fine.
-    source_config = _source_config_from_args(args, reference_resample_seconds=60)
+    # SHR-92: auto-derive warmup from the grid's fixed vol_lookback_seconds if
+    # present, or from the max across the sweep range. Workers carry the warmup
+    # in the SourceConfig and apply it when building their per-cell source.
+    # The discover pass doesn't depend on warmup (no reference data loaded), so
+    # any value is safe here; workers derive the correct warmup from the grid params.
+    _cli_warmup_tune = getattr(args, "reference_warmup_seconds", None)
+    # For the discover source, use 0 (warmup irrelevant for discover).
+    # The per-cell warmup is derived from cell params in _run_one_cell.
+    source_config = _source_config_from_args(
+        args,
+        reference_resample_seconds=60,
+        reference_warmup_seconds=0,
+    )
     data_source = source_config.build()
     discover_kwargs: dict = {}
     if args.data_source == "polymarket" and args.kind != "both":
@@ -616,6 +689,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "`hl_perp` reads HL BBO/mark; `binance_perp` reads Binance perp BBO/mark.",
     )
     pr.add_argument(
+        "--ref-event",
+        choices=["bbo", "mark"],
+        default="bbo",
+        help="(hl_hip4 only) Which reference price stream feeds σ/p_model. "
+        "`mark` matches the LIVE engine (reference_sigma_source default = mark); "
+        "`bbo` (default) reads bid/ask mid (bounces more → higher σ).",
+    )
+    pr.add_argument(
         "--pm-reference-source",
         choices=["klines", "binance_bbo", "klines_1s"],
         default="klines",
@@ -655,6 +736,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         "produced by scripts/calibrate_pm_liquidity.py. When supplied, the "
         "synthetic book builder uses per-price-bucket half_spread/depth from "
         "the profile instead of the flat 0.005/10000 defaults.",
+    )
+    pr.add_argument(
+        "--reference-warmup-seconds",
+        type=int,
+        default=None,
+        dest="reference_warmup_seconds",
+        help="(hl_hip4 only) Reference warm-up prefix in seconds (SHR-92). "
+        "When > 0, pre-loads reference rows from [start - N, start) into "
+        "MarketState so σ is warm at market open. Default: auto-derived from "
+        "max(vol_lookback_seconds) across param classes. Pass 0 to disable.",
     )
     pr.add_argument("--workers", type=int, default=1,
                     help="Parallel worker processes for independent markets "
@@ -762,6 +853,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="(polymarket only) Fill-book source for the sweep. `synthetic` "
         "(default) builds a flat 1-level book per trade print + `1−p` parity "
         "(calibratable via --pm-liquidity-profile). `recorded` feeds real L2.",
+    )
+    pt.add_argument(
+        "--reference-warmup-seconds",
+        type=int,
+        default=None,
+        dest="reference_warmup_seconds",
+        help="(hl_hip4 only) Reference warm-up prefix in seconds (SHR-92). "
+        "Override the per-cell auto-derivation from vol_lookback_seconds. "
+        "Pass 0 to disable warm-up entirely.",
     )
     # Hedge leg flags (v5_delta_hedged only; safe to pass for other strategies
     # since hedge_enabled defaults to False when --hedge-data-path is omitted).

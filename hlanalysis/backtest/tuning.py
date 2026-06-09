@@ -203,6 +203,17 @@ def _run_one_cell(args: tuple) -> dict:
     _dt = int(params.get("vol_sampling_dt_seconds", 60))
     source_config = source_config.with_reference_resample(_dt)
 
+    # SHR-92: reference warm-up prefix. If the shipped SourceConfig already has
+    # a non-zero warmup (e.g. set via --reference-warmup-seconds by the operator),
+    # keep it. Otherwise auto-derive from this cell's vol_lookback_seconds so the
+    # warm-up window covers the full lookback regardless of which param cell wins.
+    # This mirrors how with_reference_resample overrides the cadence per cell.
+    if source_config.reference_warmup_seconds == 0:
+        from .cli import _derive_reference_warmup_seconds
+        _warmup = _derive_reference_warmup_seconds(params, data_source="hl_hip4")
+        if _warmup > 0:
+            source_config = source_config.with_reference_warmup(_warmup)
+
     # A sweep replays each question across many param cells; the built
     # event-array bundle is param-independent, so memoize it in-process to skip
     # cache_key (file stat) + npz inflate on every cell after the first.
