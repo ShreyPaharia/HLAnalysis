@@ -80,6 +80,26 @@ class MarketState:
     def book(self, symbol: str) -> BookState | None:
         return self._core.book(symbol)
 
+    # ---- cadence configuration ------------------------------------------
+
+    def set_reference_cadence(self, dt_seconds: int) -> None:
+        """Configure the OHLC bucket width for the reference feed.
+
+        Must be called BEFORE the first ``apply_reference_tick`` when using the
+        raw-tick path (SHR-96). The ``dt_seconds`` must match
+        ``vol_sampling_dt_seconds`` so the buffer produces dt-spaced bar
+        close-to-close returns — the same spacing the strategy assumes when
+        annualizing σ.
+
+        Without this call the buffer uses the 60s default, which inflates σ by
+        ``sqrt(60 / dt_seconds)`` when ``dt_seconds < 60``.
+
+        Re-registering the same ``dt`` is a no-op (shared core semantics).
+        """
+        self._core.set_reference_cadence(
+            _REFERENCE_KEY, sampling_dt_seconds=int(dt_seconds)
+        )
+
     # ---- reference HLC (kline-like) -------------------------------------
 
     def apply_reference(self, ev: ReferenceEvent) -> None:
