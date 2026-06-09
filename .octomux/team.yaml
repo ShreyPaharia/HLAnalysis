@@ -1,0 +1,16 @@
+name: hlanalysis
+base_branch: main
+schedule: '0 7 * * 1-5'
+notify_command: "bash scripts/tg-notify.sh"
+journal_dir: desk/journal
+incidents_dir: desk/incidents
+roster:
+  - role: lead
+    skeleton: desk-lead
+    model: claude-opus-4-8
+  - role: researcher
+    skeleton: researcher
+    model: claude-sonnet-4-6
+  - role: risk-ops
+    skeleton: risk-ops
+    model: claude-sonnet-4-6
