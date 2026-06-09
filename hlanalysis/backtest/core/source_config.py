@@ -72,6 +72,11 @@ class SourceConfig:
     cache_root: str | None = None
     # HL HIP-4 reference-price venue.
     hl_ref_source: str = "hl_perp"
+    # HL HIP-4 reference EVENT: which price stream σ/p_model read. "mark" matches
+    # the live engine (EngineConfig.reference_sigma_source default = "mark"); the
+    # historical sim default "bbo" reads bid/ask mid, which bounces more and reads
+    # a higher σ. Keyed into the event-array cache via hl_hip4.py's bundle sig.
+    hl_ref_event: str = "bbo"
     # Polymarket knobs.
     pm_flavor: str = "btc_updown"
     pm_reference_source: str = "klines"
@@ -82,10 +87,21 @@ class SourceConfig:
     # strategy's ``vol_sampling_dt_seconds``; ``tune`` overrides it per grid cell
     # via :meth:`with_reference_resample` because dt is a sweepable param.
     reference_resample_seconds: int = 60
+    # HL HIP-4 reference warm-up prefix (SHR-92). When > 0, the reference stream
+    # is widened to [start - warmup_ns, start) so σ is warm at market open,
+    # matching the live engine's continuous reference feed. Default 0 = disabled
+    # (cold-start legacy behaviour) so existing callers that construct the source
+    # directly are unaffected. The CLI auto-derives this from the strategy's max
+    # vol_lookback_seconds for hl_hip4 runs.
+    reference_warmup_seconds: int = 0
 
     def with_reference_resample(self, seconds: int) -> "SourceConfig":
         """Return a copy with ``reference_resample_seconds`` replaced (per-cell)."""
         return replace(self, reference_resample_seconds=int(seconds))
+
+    def with_reference_warmup(self, seconds: int) -> "SourceConfig":
+        """Return a copy with ``reference_warmup_seconds`` replaced."""
+        return replace(self, reference_warmup_seconds=int(seconds))
 
     def build(self) -> "DataSource":
         """Construct the concrete ``DataSource``. Called in the parent and in
@@ -122,7 +138,9 @@ class SourceConfig:
             return HLHip4DataSource(
                 data_root=Path(self.cache_root or "data"),
                 ref_source=self.hl_ref_source,  # type: ignore[arg-type]
+                ref_event=self.hl_ref_event,  # type: ignore[arg-type]
                 reference_resample_seconds=self.reference_resample_seconds,
+                reference_warmup_seconds=self.reference_warmup_seconds,
             )
         if self.kind == "pm_nba":
             from ..data.pm_nba import PolymarketNBADataSource

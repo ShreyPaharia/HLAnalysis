@@ -212,6 +212,7 @@ class HLHip4DataSource:
         ref_event: Literal["bbo", "mark"] = "bbo",
         ref_source: Literal["hl_perp", "binance_perp"] = "hl_perp",
         reference_resample_seconds: int = 60,
+        reference_warmup_seconds: int = 0,
     ) -> None:
         self.data_root = Path(data_root)
         self.ref_event = ref_event
@@ -230,6 +231,15 @@ class HLHip4DataSource:
             )
         self.reference_resample_seconds = int(reference_resample_seconds)
         self._reference_resample_ns = int(reference_resample_seconds) * 1_000_000_000
+        # Reference warm-up prefix: load reference rows in [start - warmup_ns, start)
+        # and feed them to MarketState before the first decision so σ is not cold at
+        # market open. 0 = disabled (cold-start legacy behaviour, default).
+        if reference_warmup_seconds < 0:
+            raise ValueError(
+                f"reference_warmup_seconds must be >= 0, got {reference_warmup_seconds}"
+            )
+        self.reference_warmup_seconds = int(reference_warmup_seconds)
+        self._reference_warmup_ns = int(reference_warmup_seconds) * 1_000_000_000
         # Cached per-instance: question_id -> parsed metadata bundle.
         self._meta_cache: dict[str, _QuestionMeta] = {}
         # Cached per-instance: question_id -> settled outcome. resolved_outcome
@@ -355,20 +365,32 @@ class HLHip4DataSource:
 
         def _build() -> FastPathBundle:
             date_list = _date_partitions_in_range(q.start_ts_ns, q.end_ts_ns)
+            # Reference warm-up: widen the reference query to include
+            # [start - warmup, start) rows so σ is not cold at market open.
+            ref_start_ns = q.start_ts_ns - self._reference_warmup_ns
+            ref_date_list = (
+                _date_partitions_in_range(ref_start_ns, q.end_ts_ns)
+                if self._reference_warmup_ns > 0
+                else date_list
+            )
             con = duckdb.connect()
             try:
                 # Reference rows: same query as ``_reference_iter`` but kept as
                 # raw fetchall tuples so the fast path can build the events list
                 # without going through the gen() generator.
                 evt = self.ref_event
-                ref_rows = self._reference_rows(con, evt, q.start_ts_ns, q.end_ts_ns, date_list)
+                ref_rows = self._reference_rows(
+                    con, evt, ref_start_ns, q.end_ts_ns, ref_date_list
+                )
                 if not ref_rows:
                     fallback = "mark" if evt == "bbo" else "bbo"
                     log.warning(
                         "HL perp BTC %s yielded 0 rows in [%d, %d); falling back to %s",
-                        evt, q.start_ts_ns, q.end_ts_ns, fallback,
+                        evt, ref_start_ns, q.end_ts_ns, fallback,
                     )
-                    ref_rows = self._reference_rows(con, fallback, q.start_ts_ns, q.end_ts_ns, date_list)
+                    ref_rows = self._reference_rows(
+                        con, fallback, ref_start_ns, q.end_ts_ns, ref_date_list
+                    )
                     evt = fallback
                 return build_fast_path_bundle(
                     con=con,
@@ -401,12 +423,19 @@ class HLHip4DataSource:
         ``ref_source`` is already keyed transitively (it changes the reference
         parquet paths in ``_fastpath_source_files``), but it is included here
         defensively so the contract holds even if that file-resolution is later
-        refactored. Keep this in sync with the params that flow into ``_build``.
+        refactored.
+
+        ``reference_warmup_seconds`` changes the reference event list (pre-start
+        events are included when warmup > 0) and must be in the sig so a cached
+        warmup=0 bundle is never served for a warmup=900 request.
+
+        Keep this in sync with the params that flow into ``_build``.
         """
         return (
             f"rrs={self._reference_resample_ns}"
             f"|ref={self.ref_event}"
             f"|refsrc={self.ref_source}"
+            f"|warmup={self._reference_warmup_ns}"
         )
 
     def _fastpath_source_files(self, q: QuestionDescriptor) -> list[Path]:
@@ -431,7 +460,17 @@ class HLHip4DataSource:
         return [Path(f) for f in files]
 
     def events(self, q: QuestionDescriptor) -> Iterator[MarketEvent]:
+        # Book/trade/settlement partitions: only in-window dates [start, end).
         date_list = _date_partitions_in_range(q.start_ts_ns, q.end_ts_ns)
+        # Reference query: extend to cover the warm-up prefix [start - warmup, start)
+        # so σ is warm at the first in-window scan. Book/trade/settlement are
+        # unaffected (they always start at q.start_ts_ns).
+        ref_start_ns = q.start_ts_ns - self._reference_warmup_ns
+        ref_date_list = (
+            _date_partitions_in_range(ref_start_ns, q.end_ts_ns)
+            if self._reference_warmup_ns > 0
+            else date_list
+        )
         # One shared duckdb connection per question. Previously each per-leg
         # iterator opened its own; that was 14+ connections for an 8-leg bucket.
         # Note: we tried batching all legs into a single ``read_parquet([...])``
@@ -444,7 +483,9 @@ class HLHip4DataSource:
             for leg in q.leg_symbols:
                 iters.append(self._book_iter(con, leg, q.start_ts_ns, q.end_ts_ns, date_list))
                 iters.append(self._trade_iter(con, leg, q.start_ts_ns, q.end_ts_ns, date_list))
-            iters.append(self._reference_iter(con, q.start_ts_ns, q.end_ts_ns, date_list))
+            iters.append(
+                self._reference_iter(con, ref_start_ns, q.end_ts_ns, ref_date_list)
+            )
             iters.append(self._settlement_iter(con, q, q.start_ts_ns, q.end_ts_ns, date_list))
             for _ts, ev in heapq.merge(*iters, key=lambda x: x[0]):
                 yield ev
