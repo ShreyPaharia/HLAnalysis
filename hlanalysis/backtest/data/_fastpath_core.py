@@ -28,10 +28,15 @@ from __future__ import annotations
 #     carried no trades → the volume gate silently read 0 on every cached run
 #     (0 trades for any strategy with min_recent_volume_usd > 0). Bumped so
 #     those trade-less bundles are evicted and rebuilt with trades.
-BUILD_VERSION = 5
+# v6: on-disk format now persists per-snapshot best-ask/bid (sba_{i}, sbb_{i})
+#     for the SHR-94 IOC marketability re-check. Pre-v6 npz lacked these arrays
+#     → the fleeting-level veto would silently be skipped for cached bundles
+#     (safe fall-back but less protective). Bumped so stale bundles are evicted
+#     and rebuilt with the snap_best arrays.
+BUILD_VERSION = 6
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from numba import njit
@@ -130,10 +135,23 @@ def _resample_reference_rows(
 
 @dataclass(frozen=True, slots=True)
 class LegArrays:
-    """Per-leg event array + the last book ts cursor needed by the runner."""
+    """Per-leg event array + the last book ts cursor needed by the runner.
+
+    ``snap_best_ask`` and ``snap_best_bid`` are parallel to ``book_ts``: the
+    best ask / best bid price at each recorded snapshot.  The runner uses them
+    for the SHR-94 IOC marketability re-check: before submitting an IOC, it
+    looks at the *next* snapshot that falls within ``[now, now + latency_ns]``
+    and vetoes fills on levels that are no longer marketable by the time the
+    order would reach the exchange.  ``nan`` signals "no data" (the
+    per-snapshot ask/bid wasn't recorded; skip the check for that snapshot).
+    """
 
     events: np.ndarray  # event_dtype array, sorted by exch_ts
     book_ts: np.ndarray  # int64 array of snapshot timestamps (for stale-book gate)
+    # Per-snapshot top-of-book for the SHR-94 fleeting-level check.
+    # Parallel to book_ts; nan when the snapshot had no book data.
+    snap_best_ask: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))  # float64, best ask price at each snapshot
+    snap_best_bid: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))  # float64, best bid price at each snapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +309,46 @@ def build_leg_event_array_from_columns(
     return arr
 
 
+def snap_best_from_columns(
+    book_cols: "dict[str, np.ndarray] | None",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extract per-snapshot best-ask and best-bid from flat book columns.
+
+    Returns ``(snap_best_ask, snap_best_bid)`` as float64 arrays of length
+    ``len(book_cols['ts'])``.  Entries are ``nan`` when the snapshot carried
+    no levels on that side (rare but possible on thin HIP-4 books).
+
+    These arrays are parallel to ``book_ts`` and stored in ``LegArrays`` for
+    the SHR-94 IOC marketability re-check in the runner.
+
+    HL HIP-4 parquet stores asks sorted best-first (ascending: lowest ask
+    first), so ``ask_px[ask_offsets[i]]`` is the best ask at snapshot ``i``.
+    Bids are best-first descending, so ``bid_px[bid_offsets[i]]`` is the best
+    bid.  Both conventions are enforced by the recorder's normaliser; in-memory
+    sources (synthetic, pm_nba) also write best-first via ``_snapshots_to_columns``.
+    """
+    if book_cols is None or len(book_cols["ts"]) == 0:
+        empty = np.zeros(0, dtype=np.float64)
+        return empty, empty
+    n = len(book_cols["ts"])
+    ask_px = book_cols["ask_px"]
+    ask_off = book_cols["ask_offsets"]
+    bid_px = book_cols["bid_px"]
+    bid_off = book_cols["bid_offsets"]
+    best_ask = np.full(n, np.nan, dtype=np.float64)
+    best_bid = np.full(n, np.nan, dtype=np.float64)
+    for i in range(n):
+        a_start = int(ask_off[i])
+        a_end = int(ask_off[i + 1])
+        if a_end > a_start:
+            best_ask[i] = ask_px[a_start]
+        b_start = int(bid_off[i])
+        b_end = int(bid_off[i + 1])
+        if b_end > b_start:
+            best_bid[i] = bid_px[b_start]
+    return best_ask, best_bid
+
+
 def _snapshots_to_columns(snapshots: list[BookSnapshot]) -> dict[str, np.ndarray]:
     """Flatten in-memory ``BookSnapshot`` dataclasses into the variable-length
     flat-column layout ``build_leg_event_array_from_columns`` consumes.
@@ -362,5 +420,6 @@ def build_leg_event_array_from_snapshots(
 __all__ = [
     "BUILD_VERSION", "LegArrays", "FastPathBundle",
     "build_leg_event_array_from_columns", "build_leg_event_array_from_snapshots",
+    "snap_best_from_columns",
     "_diff_clears", "_resample_reference_rows", "event_dtype",
 ]

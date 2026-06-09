@@ -1167,3 +1167,371 @@ def test_reject_then_refire_fills_on_next_scan():
     assert st.pos is not None, "re-fired order should fill once book is marketable"
     assert len(st.result.fills) == 1
     assert st.result.fills[0].side == "buy"
+
+
+# ---------------------------------------------------------------------------
+# SHR-94: IOC marketability re-check at send+latency (fleeting levels)
+# ---------------------------------------------------------------------------
+#
+# The HL book is sampled at discrete intervals (dt=5s or dt=60s). A level
+# present at snapshot[i] and absent at snapshot[i+1] appears persistent in
+# hftbacktest until the clearing event fires at ts[i+1]. With 50ms latency the
+# order arrives at the exchange at T+50ms, but if the next snapshot is at T+5s
+# (well after arrival) the clearing event hasn't fired and hftbacktest fills.
+# In live trading, a level that vanished within the sampling interval after it
+# was observed gets zero fills.
+#
+# These tests inject the per-snapshot best-ask/bid arrays (snap_best_ask_per_leg,
+# snap_best_bid_per_leg, book_ts_per_leg) into a _RunState directly and call
+# _route_enter / _route_exit to exercise the pre-flight veto logic.
+
+def _snap_run_state(
+    bt,
+    cfg,
+    *,
+    snap_best_ask_per_leg=None,
+    snap_best_bid_per_leg=None,
+    book_ts_per_leg=None,
+    book_idx=None,
+):
+    """Build a _RunState wired with the given per-snapshot arrays."""
+    from hlanalysis.backtest.runner.hftbt_runner import _RunState, RunResult
+    from hlanalysis.backtest.core.data_source import QuestionDescriptor
+
+    q = QuestionDescriptor(
+        question_id="shr94-q", question_idx=1, start_ts_ns=0, end_ts_ns=10_000_000_000,
+        leg_symbols=("yes", "no"), klass="priceBinary", underlying="BTC",
+    )
+    book_idx = book_idx if book_idx is not None else {"yes": 0}
+    return _RunState(
+        hbt=bt, cfg=cfg, q=q, data_source=None, leg_to_asset={"yes": 0},
+        hedge_asset_no=None, stop_pct=None, fills_dir_active=False, result=RunResult(),
+        snap_best_ask_per_leg=snap_best_ask_per_leg or {},
+        snap_best_bid_per_leg=snap_best_bid_per_leg or {},
+        book_ts_per_leg=book_ts_per_leg or {},
+        _book_idx=book_idx,
+    )
+
+
+def test_shr94_fleeting_ask_produces_no_fill():
+    """SHR-94: ask present at decision, gone by next snapshot within latency window
+    → IOC produces NO fill (matching live's zero-fill on fleeting level).
+
+    Scenario: ask=0.90 at decision time T.  The next book snapshot at T+2s
+    (within the 50ms latency window? No — T+2s > T+50ms, BUT the ask price at
+    that snapshot is 0.98 > 0.90 → the level fled).
+
+    Wait — the check fires when the next snapshot falls within [T, T+latency].
+    Let's use latency=2100ms so the next snapshot at T+2s IS within the window.
+    """
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_enter
+
+    LAT_MS = 2100.0  # 2.1s latency so the 2s snapshot falls inside
+    LAT_NS = int(LAT_MS * 1_000_000)
+    T = 1_000_000_000  # 1s decision
+    T_SNAP_NEXT = T + 2_000_000_000  # next snapshot 2s later, ask=0.98 (level fled)
+
+    # Build the event array: ask at 0.90, persists nominally (no explicit clear)
+    arr = np.concatenate([
+        _make_depth_clear_arr(0),
+        _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, 100.0),
+    ])
+    cfg = RunConfig(
+        tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
+        order_latency_ms=LAT_MS, ioc_marketability_recheck=True,
+    )
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(T)
+
+    # next snapshot shows ask=0.98 (fled from 0.90)
+    snap_best_ask = np.array([0.90, 0.98], dtype=np.float64)
+    book_ts = np.array([T - 5_000_000, T_SNAP_NEXT], dtype=np.int64)
+    # book_idx[sym]=1 means snapshot[1] is the NEXT unconsumed snapshot
+    book_idx = {"yes": 1}
+
+    st = _snap_run_state(
+        bt, cfg,
+        snap_best_ask_per_leg={"yes": snap_best_ask},
+        book_ts_per_leg={"yes": book_ts},
+        book_idx=book_idx,
+    )
+    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90,
+                                 ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T)}
+    st.now_ns = T
+
+    _route_enter(st, _enter_decision(limit=0.92))
+    bt.close()
+
+    assert st.result.fills == [], (
+        "fleeting ask (gone in next snapshot within latency window) must produce no fill"
+    )
+    assert st.pos is None, "no position opened on fleeting ask"
+    assert st.result.n_rejects == 1, (
+        "fleeting ask detected → counted as a reject (strategy re-fires next scan)"
+    )
+
+
+def test_shr94_stable_ask_fills_normally():
+    """SHR-94 regression: a genuinely deep and stable ask (present in the next
+    snapshot too) still fills as before — no regression introduced.
+    """
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_enter
+
+    LAT_MS = 50.0
+    LAT_NS = int(LAT_MS * 1_000_000)
+    T = 1_000_000_000
+    T_SNAP_NEXT = T + 5_000_000_000  # next snapshot 5s later, ask still at 0.90
+
+    arr = np.concatenate([
+        _make_depth_clear_arr(0),
+        _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, 100.0),
+    ])
+    cfg = RunConfig(
+        tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
+        order_latency_ms=LAT_MS, ioc_marketability_recheck=True,
+    )
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(T)
+
+    # Next snapshot at T+5s (outside the 50ms latency window)
+    snap_best_ask = np.array([0.90, 0.90], dtype=np.float64)
+    book_ts = np.array([T - 5_000_000, T_SNAP_NEXT], dtype=np.int64)
+    book_idx = {"yes": 1}
+
+    st = _snap_run_state(
+        bt, cfg,
+        snap_best_ask_per_leg={"yes": snap_best_ask},
+        book_ts_per_leg={"yes": book_ts},
+        book_idx=book_idx,
+    )
+    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90,
+                                 ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T)}
+    st.now_ns = T
+
+    _route_enter(st, _enter_decision(limit=0.92))
+    bt.close()
+
+    assert st.pos is not None, "stable deep ask should fill (no regression)"
+    assert len(st.result.fills) == 1
+    assert st.result.fills[0].side == "buy"
+    assert st.result.n_rejects == 0
+
+
+def test_shr94_fill_capped_at_displayed_depth():
+    """SHR-94: fill size capped at displayed book depth (ask_sz=7, order for 50).
+
+    This is the SHR-79 partial-fill guarantee: the ask depth is 7 units, so the
+    fill must be ≤ 7.  Verifies no over-fill beyond displayed depth even when
+    the level is stable.
+    """
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_enter
+
+    LAT_MS = 50.0
+    T = 1_000_000_000
+    ASK_DEPTH = 7.0
+
+    arr = np.concatenate([
+        _make_depth_clear_arr(0),
+        _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, ASK_DEPTH),
+    ])
+    cfg = RunConfig(
+        tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
+        order_latency_ms=LAT_MS, ioc_marketability_recheck=True,
+    )
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(T)
+
+    # Next snapshot outside latency window (ask stable)
+    snap_best_ask = np.array([0.90, 0.90], dtype=np.float64)
+    book_ts = np.array([T - 5_000_000, T + 5_000_000_000], dtype=np.int64)
+    book_idx = {"yes": 1}
+
+    st = _snap_run_state(
+        bt, cfg,
+        snap_best_ask_per_leg={"yes": snap_best_ask},
+        book_ts_per_leg={"yes": book_ts},
+        book_idx=book_idx,
+    )
+    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90,
+                                 ask_sz=ASK_DEPTH, last_trade_ts_ns=0, last_l2_ts_ns=T)}
+    st.now_ns = T
+
+    # Request 50 units — book only has 7
+    _route_enter(st, _enter_decision(size=50.0, limit=0.95))
+    bt.close()
+
+    assert len(st.result.fills) == 1
+    fill = st.result.fills[0]
+    assert fill.size <= ASK_DEPTH, (
+        f"fill size must not exceed displayed depth {ASK_DEPTH}; got {fill.size}"
+    )
+    assert st.pos is not None
+
+
+def test_shr94_no_snap_arrays_fills_as_before():
+    """SHR-94 back-compat: no snap_best arrays supplied (legacy/PM path) →
+    recheck is skipped and the order fills normally as in pre-SHR-94.
+    """
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_enter
+
+    LAT_MS = 50.0
+    T = 1_000_000_000
+
+    arr = np.concatenate([
+        _make_depth_clear_arr(0),
+        _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, 100.0),
+    ])
+    cfg = RunConfig(
+        tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
+        order_latency_ms=LAT_MS, ioc_marketability_recheck=True,
+    )
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(T)
+
+    # No snap_best arrays → empty dicts → check skipped
+    st = _snap_run_state(bt, cfg)
+    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90,
+                                 ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T)}
+    st.now_ns = T
+
+    _route_enter(st, _enter_decision(limit=0.92))
+    bt.close()
+
+    assert st.pos is not None, "no snap arrays → recheck skipped → fills normally"
+    assert len(st.result.fills) == 1
+    assert st.result.n_rejects == 0
+
+
+def test_shr94_recheck_disabled_fills_fleeting():
+    """With ioc_marketability_recheck=False, fleeting levels still fill (explicit
+    opt-out to restore pre-SHR-94 behaviour)."""
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_enter
+
+    LAT_MS = 2100.0
+    T = 1_000_000_000
+    T_SNAP_NEXT = T + 2_000_000_000
+
+    arr = np.concatenate([
+        _make_depth_clear_arr(0),
+        _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, 100.0),
+    ])
+    cfg = RunConfig(
+        tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
+        order_latency_ms=LAT_MS, ioc_marketability_recheck=False,  # recheck OFF
+    )
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(T)
+
+    snap_best_ask = np.array([0.90, 0.98], dtype=np.float64)
+    book_ts = np.array([T - 5_000_000, T_SNAP_NEXT], dtype=np.int64)
+    book_idx = {"yes": 1}
+
+    st = _snap_run_state(
+        bt, cfg,
+        snap_best_ask_per_leg={"yes": snap_best_ask},
+        book_ts_per_leg={"yes": book_ts},
+        book_idx=book_idx,
+    )
+    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90,
+                                 ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T)}
+    st.now_ns = T
+
+    _route_enter(st, _enter_decision(limit=0.92))
+    bt.close()
+
+    assert st.pos is not None, (
+        "recheck=False: fleeting level must fill (pre-SHR-94 behaviour restored)"
+    )
+    assert st.result.n_rejects == 0
+
+
+def test_shr94_snap_best_from_columns_basic():
+    """snap_best_from_columns extracts correct per-snapshot best ask/bid."""
+    from hlanalysis.backtest.data._fastpath_core import snap_best_from_columns
+
+    # 3 snapshots: s0=ask[0.5,0.6], s1=ask[0.4], s2=ask[]
+    ask_px = np.array([0.5, 0.6, 0.4], dtype=np.float64)
+    ask_off = np.array([0, 2, 3, 3], dtype=np.int64)  # lengths: [2, 1, 0]
+    bid_px = np.array([0.3, 0.35, 0.38], dtype=np.float64)
+    bid_off = np.array([0, 1, 2, 3], dtype=np.int64)  # lengths: [1, 1, 1]
+    book_cols = {
+        "ts": np.array([100, 200, 300], dtype=np.int64),
+        "ask_px": ask_px, "ask_sz": np.ones(3),
+        "ask_offsets": ask_off,
+        "bid_px": bid_px, "bid_sz": np.ones(3),
+        "bid_offsets": bid_off,
+    }
+    best_ask, best_bid = snap_best_from_columns(book_cols)
+
+    assert best_ask.shape == (3,)
+    assert best_bid.shape == (3,)
+    assert best_ask[0] == pytest.approx(0.5)  # first ask at s0
+    assert best_ask[1] == pytest.approx(0.4)  # first ask at s1
+    assert np.isnan(best_ask[2])              # no asks at s2
+    assert best_bid[0] == pytest.approx(0.3)
+    assert best_bid[1] == pytest.approx(0.35)
+    assert best_bid[2] == pytest.approx(0.38)
+
+
+def test_shr94_snap_best_none_input():
+    """snap_best_from_columns returns empty arrays when book_cols is None."""
+    from hlanalysis.backtest.data._fastpath_core import snap_best_from_columns
+
+    best_ask, best_bid = snap_best_from_columns(None)
+    assert len(best_ask) == 0
+    assert len(best_bid) == 0
+
+
+def test_shr94_is_fleeting_ask_function():
+    """_is_fleeting_ask unit test: next snapshot within window, ask higher → fleeting."""
+    from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_ask
+
+    T = 1_000_000_000
+    LAT_NS = 2_100_000_000  # 2.1s
+    # snapshot ts[0]=T, ts[1]=T+2s
+    book_ts = {"yes": np.array([T, T + 2_000_000_000], dtype=np.int64)}
+    # Next snapshot at idx=1 shows ask=0.98 > fill_price=0.90 → fleeting
+    snap_ask = {"yes": np.array([0.90, 0.98], dtype=np.float64)}
+    book_idx = {"yes": 1}  # cursor points to next unconsumed snapshot
+
+    assert _is_fleeting_ask("yes", 0.90, T, LAT_NS, snap_ask, book_ts, book_idx) is True
+
+
+def test_shr94_is_fleeting_ask_outside_window():
+    """Next snapshot is OUTSIDE the latency window → not fleeting (ask was stable)."""
+    from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_ask
+
+    T = 1_000_000_000
+    LAT_NS = 50_000_000  # 50ms
+    # Next snapshot at T+5s — far outside 50ms window
+    book_ts = {"yes": np.array([T, T + 5_000_000_000], dtype=np.int64)}
+    snap_ask = {"yes": np.array([0.90, 0.98], dtype=np.float64)}
+    book_idx = {"yes": 1}
+
+    # T+5s > T+50ms → not within window → not fleeting
+    assert _is_fleeting_ask("yes", 0.90, T, LAT_NS, snap_ask, book_ts, book_idx) is False
+
+
+def test_shr94_is_fleeting_ask_ask_still_present():
+    """Next snapshot within latency window but ask is STILL at same price → not fleeting."""
+    from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_ask
+
+    T = 1_000_000_000
+    LAT_NS = 2_100_000_000
+    book_ts = {"yes": np.array([T, T + 2_000_000_000], dtype=np.int64)}
+    # Next snapshot still shows ask=0.90 — not fleeting
+    snap_ask = {"yes": np.array([0.90, 0.90], dtype=np.float64)}
+    book_idx = {"yes": 1}
+
+    assert _is_fleeting_ask("yes", 0.90, T, LAT_NS, snap_ask, book_ts, book_idx) is False
+
+
+def test_shr94_run_config_has_ioc_marketability_recheck():
+    """RunConfig.ioc_marketability_recheck defaults to True."""
+    cfg = RunConfig()
+    assert cfg.ioc_marketability_recheck is True

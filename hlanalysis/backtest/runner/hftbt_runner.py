@@ -221,6 +221,16 @@ class RunConfig:
     hedge_lot_size: float = 0.001
     hedge_slippage_bps: float = 10.0
     hedge_fee_bps: float = 1.0
+    # SHR-94: IOC marketability re-check at send+latency.
+    # When True (default), the runner inspects the next recorded book snapshot
+    # within [now, now + latency_ns] before submitting an IOC. If that snapshot
+    # shows the ask has moved above the fill price (for a buy) or the bid has
+    # moved below (for a sell), the level is flagged as fleeting and the order
+    # is rejected without being submitted — matching live's zero-fill on levels
+    # that disappeared within the order's latency window.
+    # Set to False to restore the pre-SHR-94 behaviour where fleeting levels
+    # can fill (e.g. for isolated tests that don't supply snap_best arrays).
+    ioc_marketability_recheck: bool = True
 
     def effective_latency_model(self) -> "LatencyModel":
         """The latency model to wire into assets: the explicit ``latency_model``
@@ -400,6 +410,87 @@ def _classify_reject(book: BookState, side: str, submit_px: float) -> bool:
     return book.bid_px is not None and submit_px <= book.bid_px
 
 
+def _is_fleeting_ask(
+    sym: str,
+    fill_price: float,
+    now_ns: int,
+    latency_ns: int,
+    snap_best_ask_per_leg: "dict[str, np.ndarray]",
+    book_ts_per_leg: "dict[str, np.ndarray]",
+    book_idx: "dict[str, int]",
+) -> bool:
+    """SHR-94: was the ask at ``fill_price`` a fleeting level that will no
+    longer be present when the order arrives at the exchange?
+
+    Uses the per-leg snapshot top-of-book arrays (``snap_best_ask_per_leg``,
+    parallel to ``book_ts_per_leg``) to look at the *next* snapshot after
+    ``now_ns``.  If that snapshot (a) falls within the latency window
+    ``[now_ns, now_ns + latency_ns]`` AND (b) shows the best ask has moved
+    ABOVE ``fill_price``, the level is considered fleeting and the caller
+    should veto the IOC submission (counting a reject + re-fire next scan).
+
+    Returns ``False`` (not fleeting) when:
+    - No snapshot arrays for this leg (legacy / PM sources without snap_best).
+    - There is no *next* snapshot within the latency window (the level
+      persisted past the arrival time — fill is valid).
+    - The next snapshot's best ask is still ≤ ``fill_price`` (still marketable).
+    """
+    snap_ask = snap_best_ask_per_leg.get(sym)
+    ts_arr = book_ts_per_leg.get(sym)
+    if snap_ask is None or ts_arr is None or len(snap_ask) == 0 or len(ts_arr) == 0:
+        return False
+    # book_idx[sym] is the first snapshot index NOT YET consumed at now_ns
+    # (the scan loop advances it past all ts <= now_ns).
+    idx = book_idx.get(sym, 0)
+    if idx >= len(ts_arr):
+        return False  # no next snapshot
+    next_ts = int(ts_arr[idx])
+    # Only a snapshot that falls STRICTLY WITHIN the latency window can reveal
+    # a fleeting level. A snapshot AFTER arrival (next_ts > now_ns + latency_ns)
+    # means the book was stable through the latency window — fill is valid.
+    arrival_ns = now_ns + latency_ns
+    if next_ts > arrival_ns:
+        return False
+    # The next snapshot is within [now_ns, arrival_ns]. Check if the ask at
+    # that snapshot is worse (higher) than fill_price — fleeting!
+    next_ask = float(snap_ask[idx])
+    if np.isnan(next_ask):
+        return False  # no ask recorded at that snapshot — can't tell; allow fill
+    return next_ask > fill_price
+
+
+def _is_fleeting_bid(
+    sym: str,
+    fill_price: float,
+    now_ns: int,
+    latency_ns: int,
+    snap_best_bid_per_leg: "dict[str, np.ndarray]",
+    book_ts_per_leg: "dict[str, np.ndarray]",
+    book_idx: "dict[str, int]",
+) -> bool:
+    """SHR-94: was the bid at ``fill_price`` a fleeting level?
+
+    Symmetric to ``_is_fleeting_ask`` for the sell side: returns ``True`` if
+    the next snapshot within the latency window shows the best bid BELOW
+    ``fill_price`` (the bid has retreated and the level won't fill live).
+    """
+    snap_bid = snap_best_bid_per_leg.get(sym)
+    ts_arr = book_ts_per_leg.get(sym)
+    if snap_bid is None or ts_arr is None or len(snap_bid) == 0 or len(ts_arr) == 0:
+        return False
+    idx = book_idx.get(sym, 0)
+    if idx >= len(ts_arr):
+        return False
+    next_ts = int(ts_arr[idx])
+    arrival_ns = now_ns + latency_ns
+    if next_ts > arrival_ns:
+        return False
+    next_bid = float(snap_bid[idx])
+    if np.isnan(next_bid):
+        return False
+    return next_bid < fill_price
+
+
 # ---------------------------------------------------------------------------
 # Mutable run state + order-routing helpers
 # ---------------------------------------------------------------------------
@@ -450,6 +541,19 @@ class _RunState:
     # if a later win recovers it — matching the live kill-switch latch).
     realized_running_by_window: dict[int, float] = field(default_factory=dict)
     realized_floor_by_window: dict[int, float] = field(default_factory=dict)
+    # SHR-94: per-snapshot top-of-book arrays for IOC marketability re-check.
+    # Populated from LegArrays.snap_best_ask/bid (parallel to book_ts_per_leg).
+    # Empty dict (default) disables the check — synthetic / PM sources that
+    # don't supply snap_best arrays fall back to the pre-SHR-94 behaviour.
+    snap_best_ask_per_leg: "dict[str, np.ndarray]" = field(default_factory=dict)
+    snap_best_bid_per_leg: "dict[str, np.ndarray]" = field(default_factory=dict)
+    # book_ts_per_leg: per-leg snapshot timestamps, parallel to snap_best arrays.
+    # Injected from run_one_question; used by _is_fleeting_ask/bid.
+    book_ts_per_leg: "dict[str, np.ndarray]" = field(default_factory=dict)
+    # Per-leg snapshot cursor (shared with stale-book gate in the scan loop).
+    # Injected via the runner's book_idx dict — the _RunState doesn't own it
+    # directly; it's passed to _is_fleeting_level via the routing helpers.
+    _book_idx: "dict[str, int] | None" = None
 
     def next_oid(self) -> int:
         oid = self._next_oid_counter
@@ -680,6 +784,18 @@ def _route_enter(st: _RunState, decision: Any) -> None:
         st.result.n_entries_suppressed += 1
         return
     slipped = _slipped_buy_price(book, intent.limit_price, cfg.slippage_bps)
+    # SHR-94: pre-flight IOC marketability re-check at send+latency.
+    # If the next recorded book snapshot falls within the latency window and
+    # shows the ask above the fill price, the level is fleeting — veto the
+    # submit and count a reject (strategy re-fires next scan as with live).
+    if cfg.ioc_marketability_recheck and st._book_idx is not None:
+        latency_ns = int(cfg.order_latency_ms * 1_000_000)
+        if _is_fleeting_ask(
+            intent.symbol, slipped, st.now_ns, latency_ns,
+            st.snap_best_ask_per_leg, st.book_ts_per_leg, st._book_idx,
+        ):
+            st.result.n_rejects += 1
+            return
     # Submit IOC limit at the slipped/limit price.
     oid = st.next_oid()
     st.hbt.submit_buy_order(
@@ -741,6 +857,17 @@ def _route_exit(st: _RunState, decision: Any) -> None:
     book = st.books[intent.symbol]
     size = min(intent.size, abs(pos.qty))
     slipped = _slipped_sell_price(book, intent.limit_price, cfg.slippage_bps)
+    # SHR-94: pre-flight IOC marketability re-check at send+latency.
+    # If the next recorded book snapshot shows the bid has retreated below the
+    # fill price within the latency window, the level is fleeting — veto.
+    if cfg.ioc_marketability_recheck and st._book_idx is not None:
+        latency_ns = int(cfg.order_latency_ms * 1_000_000)
+        if _is_fleeting_bid(
+            intent.symbol, slipped, st.now_ns, latency_ns,
+            st.snap_best_bid_per_leg, st.book_ts_per_leg, st._book_idx,
+        ):
+            st.result.n_rejects += 1
+            return
     oid = st.next_oid()
     st.hbt.submit_sell_order(
         exit_asset_no, oid, slipped, size, hb_order.IOC, hb_order.LIMIT, True,
@@ -900,6 +1027,12 @@ def run_one_question(
     # pre-bucketed OHLC bars. The runner uses apply_reference_tick instead of
     # apply_reference so last_mark is the instantaneous tick price (live-parity).
     ref_events_are_raw_ticks: bool = False
+    # SHR-94: per-snapshot top-of-book arrays for the IOC marketability re-check.
+    # Populated from LegArrays when the fast path provides them; empty dict for
+    # the legacy path (synthetic / PM sources → recheck is skipped).
+    snap_best_ask_per_leg: dict[str, np.ndarray] = {}
+    snap_best_bid_per_leg: dict[str, np.ndarray] = {}
+
     if bundle is not None:
         leg_event_arrays = {sym: legarr.events for sym, legarr in bundle.leg_arrays.items()}
         book_ts_per_leg = {sym: legarr.book_ts for sym, legarr in bundle.leg_arrays.items()}
@@ -912,6 +1045,12 @@ def run_one_question(
             raw.extend(evs)
         raw.sort(key=lambda t: t.ts_ns)
         all_trade_events = raw
+        # SHR-94: extract per-snapshot best ask/bid for the fleeting-level check.
+        for sym, legarr in bundle.leg_arrays.items():
+            if len(legarr.snap_best_ask) > 0:
+                snap_best_ask_per_leg[sym] = legarr.snap_best_ask
+            if len(legarr.snap_best_bid) > 0:
+                snap_best_bid_per_leg[sym] = legarr.snap_best_bid
     else:
         book_events: dict[str, list[BookSnapshot]] = {sym: [] for sym in q.leg_symbols}
         trade_events: dict[str, list[TradeEvent]] = {sym: [] for sym in q.leg_symbols}
@@ -1013,6 +1152,14 @@ def run_one_question(
     need_diag = (diagnostics_dir is not None) or (fills_dir is not None)
     diag_rows: list[DiagnosticRow] = []
 
+    # Per-leg cursor into the book event stream tracks the latest L2 snap ts
+    # for the "stale data halt" gate AND (SHR-94) the next snapshot for the
+    # fleeting-level check. The cursor advances over book_ts_per_leg (an int64
+    # array of snapshot timestamps); the previous BookSnapshot list is no longer
+    # needed by the scan loop. Defined BEFORE _RunState so the _RunState's
+    # _book_idx field can alias the same dict.
+    book_idx: dict[str, int] = {sym: 0 for sym in q.leg_symbols}
+
     # All mutable position/fill bookkeeping lives in one struct so the routing
     # helpers (_route_enter/_route_exit/_route_hedge/_route_stop_loss/_settle)
     # can mutate it without a forest of nonlocal closures.
@@ -1028,6 +1175,10 @@ def run_one_question(
         result=RunResult(),
         sim_risk_caps=sim_risk_caps,
         halt_windows=tuple(halt_windows) if halt_windows else (),
+        snap_best_ask_per_leg=snap_best_ask_per_leg,
+        snap_best_bid_per_leg=snap_best_bid_per_leg,
+        book_ts_per_leg=book_ts_per_leg,
+        _book_idx=book_idx,
     )
 
     # --- Scan loop ---------------------------------------------------------
@@ -1035,12 +1186,6 @@ def run_one_question(
     # ran event-driven but PM trade density is high enough that the two
     # produce the same v2 P&L within 1e-5 USD). Event-driven was tried and
     # did NOT close the v1 trade-count gap, so the simpler form stays.
-
-    # Per-leg cursor into the book event stream tracks the latest L2 snap ts
-    # for the "stale data halt" gate. The cursor advances over book_ts_per_leg
-    # (an int64 array of snapshot timestamps); the previous BookSnapshot list
-    # is no longer needed by the scan loop.
-    book_idx: dict[str, int] = {sym: 0 for sym in q.leg_symbols}
 
     while True:
         rc = hbt.elapse(scan_interval_ns)
