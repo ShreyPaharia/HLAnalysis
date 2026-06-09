@@ -119,6 +119,9 @@ def _save(path: Path, b: FastPathBundle) -> None:
             col = np.ascontiguousarray(ev[name])
             payload[f"ev_{i}__{name}"] = _delta(col) if name in _DELTA_FIELDS else col
         payload[f"bts_{i}"] = _delta(np.ascontiguousarray(la.book_ts))
+        # SHR-94: per-snapshot best ask/bid for the IOC marketability re-check.
+        payload[f"sba_{i}"] = np.ascontiguousarray(la.snap_best_ask)
+        payload[f"sbb_{i}"] = np.ascontiguousarray(la.snap_best_bid)
         # Per-leg trade events (SHR-78): persist (ts, px, sz, side) so a cache
         # HIT restores the recent_volume_usd inputs. Omitting these silently
         # zeroed the volume gate on every cached run → 0 trades for any strategy
@@ -171,7 +174,15 @@ def _load(path: Path) -> FastPathBundle:
         for name in event_dtype.names:
             col = z[f"ev_{i}__{name}"]
             ev[name] = _undelta(col) if name in _DELTA_FIELDS else col
-        leg_arrays[sym] = LegArrays(events=ev, book_ts=_undelta(z[f"bts_{i}"]))
+        # SHR-94: restore snap_best arrays; tolerate pre-v6 npz (empty → recheck skipped).
+        sba = z[f"sba_{i}"] if f"sba_{i}" in z.files else np.zeros(0, dtype=np.float64)
+        sbb = z[f"sbb_{i}"] if f"sbb_{i}" in z.files else np.zeros(0, dtype=np.float64)
+        leg_arrays[sym] = LegArrays(
+            events=ev,
+            book_ts=_undelta(z[f"bts_{i}"]),
+            snap_best_ask=sba,
+            snap_best_bid=sbb,
+        )
     # Per-leg trade events (SHR-78). Tolerate pre-v5 npz that predate trade
     # persistence: a missing ``tr_*`` key → empty list (the BUILD_VERSION bump
     # evicts those, but stay defensive in case of a hand-rolled/partial file).
@@ -406,7 +417,10 @@ def _bundle_nbytes(b: FastPathBundle) -> int:
     event for the Python object overhead."""
     total = 0
     for la in b.leg_arrays.values():
-        total += int(la.events.nbytes) + int(la.book_ts.nbytes)
+        total += (
+            int(la.events.nbytes) + int(la.book_ts.nbytes)
+            + int(la.snap_best_ask.nbytes) + int(la.snap_best_bid.nbytes)
+        )
     total += (len(b.reference_events) + len(b.settlement_events)) * 64
     return total
 

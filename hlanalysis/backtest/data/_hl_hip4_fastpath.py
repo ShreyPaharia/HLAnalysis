@@ -38,6 +38,7 @@ from ._fastpath_core import (
     _diff_clears,  # noqa: F401  (kept importable for tests)
     _resample_reference_rows,
     build_leg_event_array_from_columns,
+    snap_best_from_columns,
     event_dtype,
 )
 
@@ -176,7 +177,13 @@ def build_fast_path_bundle(
             if _glob_has_files(trade_glob) else None
         arr = build_leg_event_array_from_columns(book_cols, trade_cols)
         book_ts = book_cols["ts"] if book_cols is not None else np.zeros(0, dtype=np.int64)
-        leg_arrays[leg] = LegArrays(events=arr, book_ts=book_ts)
+        snap_best_ask, snap_best_bid = snap_best_from_columns(book_cols)
+        leg_arrays[leg] = LegArrays(
+            events=arr,
+            book_ts=book_ts,
+            snap_best_ask=snap_best_ask,
+            snap_best_bid=snap_best_bid,
+        )
         # Convert trade columns → TradeEvent dataclasses for volume accounting.
         # The event array already consumed these for depth simulation; here we
         # just need (ts, px, sz) — no extra parquet I/O.
