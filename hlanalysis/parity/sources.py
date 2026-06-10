@@ -122,22 +122,34 @@ def _pair_for_market(
     return symbol, pair
 
 
+def _grouped(records, key: str) -> dict:
+    """Index ``records`` by the chosen join attribute (``question_idx`` or
+    ``symbol``). Last record wins on a collision (callers pass one per market)."""
+    return {getattr(m, key): m for m in records}
+
+
 def build_pairs(
     live: list[LiveMarket],
     sim: list[SimMarket],
     *,
+    key: str = "question_idx",
     sigma_rel_tol: float = DEFAULT_SIGMA_REL_TOL,
     ref_rel_tol: float = DEFAULT_REF_REL_TOL,
 ) -> list[DecisionPair]:
     """Match live and sim per-market records into one :class:`DecisionPair` per
-    market (keyed by ``question_idx``), deriving the halt / input-divergence
-    flags. Markets present on only one side become one-sided pairs."""
-    live_by_q = {m.question_idx: m for m in live}
-    sim_by_q = {m.question_idx: m for m in sim}
+    market, deriving the halt / input-divergence flags. Markets present on only
+    one side become one-sided pairs.
+
+    ``key`` selects the join attribute: ``"question_idx"`` (default) or
+    ``"symbol"``. Symbol keying is required when sim and live disagree on
+    question_idx (buckets) or venue fills carry the unattributed -1 placeholder
+    — the HL symbol is the stable shared identifier."""
+    live_by = _grouped(live, key)
+    sim_by = _grouped(sim, key)
     pairs: list[DecisionPair] = []
-    for q in sorted(set(live_by_q) | set(sim_by_q)):
+    for k in sorted(set(live_by) | set(sim_by), key=str):
         _, pair = _pair_for_market(
-            q, live_by_q.get(q), sim_by_q.get(q),
+            k, live_by.get(k), sim_by.get(k),
             sigma_rel_tol=sigma_rel_tol, ref_rel_tol=ref_rel_tol,
         )
         pairs.append(pair)
@@ -148,20 +160,25 @@ def reconcile_markets(
     live: list[LiveMarket],
     sim: list[SimMarket],
     *,
+    key: str = "question_idx",
     sigma_rel_tol: float = DEFAULT_SIGMA_REL_TOL,
     ref_rel_tol: float = DEFAULT_REF_REL_TOL,
 ) -> list[MarketParity]:
     """Convenience: match ``live``/``sim`` and reconcile each market (one
-    :class:`DecisionPair` per market, so each :class:`MarketParity` wraps one)."""
-    live_by_q = {m.question_idx: m for m in live}
-    sim_by_q = {m.question_idx: m for m in sim}
+    :class:`DecisionPair` per market, so each :class:`MarketParity` wraps one).
+    ``key`` selects the join attribute (see :func:`build_pairs`)."""
+    live_by = _grouped(live, key)
+    sim_by = _grouped(sim, key)
     out: list[MarketParity] = []
-    for q in sorted(set(live_by_q) | set(sim_by_q)):
+    for k in sorted(set(live_by) | set(sim_by), key=str):
+        lm, sm = live_by.get(k), sim_by.get(k)
         symbol, pair = _pair_for_market(
-            q, live_by_q.get(q), sim_by_q.get(q),
-            sigma_rel_tol=sigma_rel_tol, ref_rel_tol=ref_rel_tol,
+            k, lm, sm, sigma_rel_tol=sigma_rel_tol, ref_rel_tol=ref_rel_tol,
         )
-        out.append(reconcile_market(question_idx=q, symbol=symbol, pairs=[pair]))
+        # question_idx for reporting comes from a present record (the group key
+        # may itself be a symbol string when key="symbol").
+        qidx = lm.question_idx if lm is not None else sm.question_idx  # type: ignore[union-attr]
+        out.append(reconcile_market(question_idx=qidx, symbol=symbol, pairs=[pair]))
     return out
 
 
@@ -201,11 +218,19 @@ def _halt_active_from_json(halt_json: str | None) -> bool:
     return any(bool(d.get(k)) for k in _HALT_GATE_KEYS)
 
 
-def load_live_markets_from_db(db_path: Path | str) -> list[LiveMarket]:
+def load_live_markets_from_db(
+    db_path: Path | str, *, key: str = "question_idx",
+) -> list[LiveMarket]:
     """Build per-market :class:`LiveMarket` records from an engine state DB,
     read-only. Joins the trade journal (decisions + halt + σ/reference inputs),
     the venue Fill mirror (Σ ``closed_pnl``, fill count, traded flag), and the
-    settlement table (payout PnL) by ``question_idx``."""
+    settlement table (payout PnL).
+
+    ``key`` selects the rollup grain: ``"question_idx"`` (default, legacy) or
+    ``"symbol"``. Use ``"symbol"`` to reconcile against the backtest, because
+    venue fills carry the unattributed ``question_idx=-1`` placeholder (which
+    would collapse every such market into one bogus bucket) while the fill's
+    ``symbol`` is always the real HL market id."""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
@@ -218,59 +243,63 @@ def load_live_markets_from_db(db_path: Path | str) -> list[LiveMarket]:
             "SELECT question_idx, symbol, closed_pnl FROM fill"
         ).fetchall()
         settlements = con.execute(
-            "SELECT question_idx, realized_pnl FROM settlement"
+            "SELECT question_idx, symbol, realized_pnl FROM settlement"
         ).fetchall()
     finally:
         con.close()
 
-    closed_by_q: dict[int, float] = defaultdict(float)
-    nfills_by_q: dict[int, int] = defaultdict(int)
-    fill_symbol: dict[int, str] = {}
+    def gk(question_idx, symbol):
+        """The rollup key for a row, per ``key`` mode."""
+        return symbol if key == "symbol" else question_idx
+
+    closed_by: dict = defaultdict(float)
+    nfills_by: dict = defaultdict(int)
+    qidx_by: dict = {}
+    symbol_by: dict = {}
     for f in fills:
-        q = f["question_idx"]
-        closed_by_q[q] += f["closed_pnl"] or 0.0
-        nfills_by_q[q] += 1
-        fill_symbol.setdefault(q, f["symbol"])
+        k = gk(f["question_idx"], f["symbol"])
+        closed_by[k] += f["closed_pnl"] or 0.0
+        nfills_by[k] += 1
+        qidx_by.setdefault(k, f["question_idx"])
+        symbol_by.setdefault(k, f["symbol"])
 
-    settle_by_q: dict[int, float] = defaultdict(float)
+    settle_by: dict = defaultdict(float)
     for s in settlements:
-        settle_by_q[s["question_idx"]] += s["realized_pnl"] or 0.0
+        settle_by[gk(s["question_idx"], s["symbol"])] += s["realized_pnl"] or 0.0
 
-    # Per-question journal rollup: representative inputs (first decision), halt
-    # active on ANY decision, traded iff any decision reached a fill.
-    halt_by_q: dict[int, bool] = defaultdict(bool)
-    sigma_by_q: dict[int, float | None] = {}
-    ref_by_q: dict[int, float | None] = {}
-    symbol_by_q: dict[int, str] = {}
-    traded_by_q: dict[int, bool] = defaultdict(bool)
-    qs_in_journal: list[int] = []
+    # Per-key journal rollup: representative inputs (first decision), halt active
+    # on ANY decision, traded iff any decision reached a fill.
+    halt_by: dict = defaultdict(bool)
+    sigma_by: dict = {}
+    ref_by: dict = {}
+    traded_by: dict = defaultdict(bool)
+    ks_in_journal: list = []
     for r in journal:
-        q = r["question_idx"]
-        if q not in symbol_by_q:
-            qs_in_journal.append(q)
-            symbol_by_q[q] = r["symbol"] or ""
-            sigma_by_q[q] = r["sigma"]
-            ref_by_q[q] = r["reference_price"]
-        halt_by_q[q] = halt_by_q[q] or _halt_active_from_json(r["halt_json"])
-        traded_by_q[q] = traded_by_q[q] or (r["fill_ts_ns"] is not None)
+        k = gk(r["question_idx"], r["symbol"])
+        if k not in sigma_by:
+            ks_in_journal.append(k)
+            sigma_by[k] = r["sigma"]
+            ref_by[k] = r["reference_price"]
+            qidx_by.setdefault(k, r["question_idx"])
+            symbol_by.setdefault(k, r["symbol"] or "")
+        halt_by[k] = halt_by[k] or _halt_active_from_json(r["halt_json"])
+        traded_by[k] = traded_by[k] or (r["fill_ts_ns"] is not None)
 
-    # Union of questions seen in the journal or in the fills/settlement tables.
-    all_qs = set(qs_in_journal) | set(closed_by_q) | set(settle_by_q)
+    all_keys = set(ks_in_journal) | set(closed_by) | set(settle_by)
     out: list[LiveMarket] = []
-    for q in sorted(all_qs):
-        symbol = symbol_by_q.get(q) or fill_symbol.get(q, "")
-        realized = closed_by_q.get(q, 0.0) + settle_by_q.get(q, 0.0)
-        n_fills = nfills_by_q.get(q, 0)
-        traded = traded_by_q.get(q, False) or n_fills > 0
+    for k in sorted(all_keys, key=str):
+        realized = closed_by.get(k, 0.0) + settle_by.get(k, 0.0)
+        n_fills = nfills_by.get(k, 0)
+        traded = traded_by.get(k, False) or n_fills > 0
         out.append(
             LiveMarket(
-                question_idx=q,
-                symbol=symbol,
+                question_idx=qidx_by.get(k, -1),
+                symbol=symbol_by.get(k, ""),
                 realized_pnl=realized,
                 traded=traded,
-                halt_active=halt_by_q.get(q, False),
-                sigma=sigma_by_q.get(q),
-                reference_price=ref_by_q.get(q),
+                halt_active=halt_by.get(k, False),
+                sigma=sigma_by.get(k),
+                reference_price=ref_by.get(k),
                 n_fills=n_fills,
             )
         )
