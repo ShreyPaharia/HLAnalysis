@@ -337,6 +337,48 @@ feed-gap cap.)
 - **(d) Sim-fidelity only:** shared inventory cap (**SHR-91**) so backtest churn
   magnitude matches live. File as a new strategy ticket + SHR-91/SHR-79 (fidelity).
 
+## Live-vs-sim fill microstructure — why live executes better (and the cadence gap)
+
+(`tools/_live_vs_sim_micro.py`, v31, legs where both traded; spread = recorded book
+spread at each fill.)
+
+| leg | src | fills | cadence | max pos | sell-clip med/max | buy px | sell px | spr@buy | spr@sell |
+| :-- | :-- | --: | --: | --: | --: | --: | --: | --: | --: |
+| #1610 bkt | live | 11 | 1.9 s | 515 | 152/160 | 0.978 | **0.891** | 0.243 | **0.095** |
+| #1610 bkt | sim | 3 | — | 516 | 516/516 | 0.972 | **0.523** | 0.282 | **0.456** |
+| #1670 bkt | live | 48 | 1.2 s | 549 | 14/397 | 0.909 | **0.910** | 0.042 | **0.052** |
+| #1670 bkt | sim | 30 | 0.5 s | 543 | 70/388 | 0.947 | **0.800** | 0.152 | **0.140** |
+| #2280 bkt | live | 8 | 2.3 s | 523 | 132/317 | 0.900 | 0.910 | 0.090 | 0.082 |
+| #2280 bkt | sim | 15 | 0.4 s | 498 | 42/338 | 0.900 | 0.850 | 0.091 | 0.141 |
+| #2200 bin | live | 23 | 12 s | 569 | 124/528 | 0.951 | 0.965 | 0.004 | 0.002 |
+| #2200 bin | sim | 4 | 0.3 s | 576 | held | 0.868 | held | 0.009 | — |
+
+1. **What makes a sim fill "bad":** the sim executes the **full exit size in one
+   deterministic IOC** the instant an exit fires; on a bucket that instant is usually a
+   wide-book moment. Median spread-at-sell: **sim 0.14–0.46 vs live 0.05–0.10**. #1610:
+   sim dumps 516 sh @0.523; live sells the same leg @0.891.
+2. **Why live beats sim — NOT the inventory cap.** Peak inventory is ~equal (live 515 /
+   sim 516; live 549 / sim 543) — the earlier "cap throttles live" claim was wrong. The
+   driver is **execution quality**: live both buys and sells at much tighter spreads,
+   because a real IOC at the bid only completes when genuine liquidity is present —
+   fired into a wide/thin book it rejects / fills tiny and **re-fires when the book
+   tightens** (SHR-89). Live executes *around* the illiquidity; the sim executes *into*
+   it.
+3. **Cadence gap is real and cuts both ways.** Sim = few, large, sub-second deterministic
+   bursts (one sweep = many fills at one instant; #1610 = a single 516-sh dump). Live =
+   many small clips worked over seconds (#1670: 38 sells of ~14 sh). On **wide buckets**
+   the sim's coarse aggressive fills HURT (−$383 vs live −$133); on the **tight binary**
+   #2200 the sim's coarse cadence HELPED — it did 4 buys and **held** (+$75.74) while
+   live churned 23 fills (+$45.26), i.e. theta round-tripping is mildly negative even on
+   liquid books and the sim accidentally "held the winner."
+
+**Implication for the fidelity program:** the single highest-value fix is the **SHR-89
+execution model** — latency-gated reject/refire + top-of-book-limited (not full-sweep)
+fills. That one change would explain most of the bucket *and* binary divergence; it
+matters more than SHR-98 (entry veto) or SHR-91 (inventory cap, which the data shows is
+not the live/sim differentiator here). (n=3 on the #1610 sim row → cadence degenerate;
+spreads/prices still valid.)
+
 ## Caveats
 
 - **Per-kind isolation is structural, not incidental.** Comparing live (one shared
