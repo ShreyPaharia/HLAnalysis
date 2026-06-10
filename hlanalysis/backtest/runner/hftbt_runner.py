@@ -239,6 +239,18 @@ class RunConfig:
     scan_mode: str = "fixed"
     scan_min_interval_seconds: float = 0.2
     scan_max_interval_seconds: float = 2.0
+    # SHR-79/SHR-89: minimum inter-order re-fire floor (seconds). Live serializes
+    # one order per leg in flight — after dispatching an IOC for a leg the engine
+    # cannot dispatch another for that leg until the round-trip (submit -> ack ->
+    # reconcile) completes. Measured from the 2026-06-10 live HL fills
+    # (docs/research/2026-06-10-hl-live-fills-v1-v31-window.csv): distinct
+    # re-fired orders (new cloid) on the same (slot, symbol) are gapped a hard
+    # MINIMUM of ~0.73s (p10 ~0.90s; churny bucket #1670 median 1.31s).
+    # Without a floor the event-driven sim re-fires at the 0.2s scan cadence
+    # (5 Hz) and over-churns persistently-wide bucket books. The floor throttles
+    # re-fires on a leg to live cadence. Default 0.0 disables it (back-compat;
+    # the legacy no-floor A/B arm). The measured value for HL is ~0.75s.
+    min_inter_order_seconds: float = 0.0
 
     def effective_latency_model(self) -> "LatencyModel":
         """The latency model to wire into assets: the explicit ``latency_model``
@@ -435,6 +447,25 @@ def _classify_reject(book: BookState, side: str, submit_px: float) -> bool:
     return book.bid_px is not None and submit_px <= book.bid_px
 
 
+def _inter_order_blocked(
+    now_ns: int, last_order_ns: int | None, min_inter_order_ns: int
+) -> bool:
+    """SHR-79/SHR-89: would dispatching an order on this leg now violate the
+    minimum inter-order re-fire floor?
+
+    Returns ``True`` when a prior order was dispatched on this leg less than
+    ``min_inter_order_ns`` ago — the caller must suppress this submission and
+    let the strategy re-fire on a later scan (reproducing live's one-order-in-
+    flight serialization). Returns ``False`` when:
+    - the floor is disabled (``min_inter_order_ns <= 0``); or
+    - this is the first order on the leg (``last_order_ns is None``); or
+    - at least ``min_inter_order_ns`` has elapsed since the last dispatch.
+    """
+    if min_inter_order_ns <= 0 or last_order_ns is None:
+        return False
+    return (now_ns - last_order_ns) < min_inter_order_ns
+
+
 def _is_fleeting_ask(
     sym: str,
     fill_price: float,
@@ -551,6 +582,10 @@ class _RunState:
     fill_ts: dict[str, int] = field(default_factory=dict)
     fill_question_idx: dict[str, int] = field(default_factory=dict)
     fill_meta: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # SHR-79/SHR-89: per-leg timestamp (ns) of the last order DISPATCHED to the
+    # venue (filled, rejected, or fleeting-vetoed — any round-trip consumed).
+    # Read by the inter-order re-fire floor to throttle re-submission on a leg.
+    last_order_ns: dict[str, int] = field(default_factory=dict)
     _next_oid_counter: int = 1
     # Per-tick view, refreshed each scan before routing.
     books: dict[str, BookState] = field(default_factory=dict)
@@ -690,6 +725,10 @@ def _route_stop_loss(st: _RunState) -> None:
     if held_bid is None or held_bid > pos.stop_loss_price:
         return
     asset_no = st.leg_to_asset[pos.symbol]
+    # SHR-79/SHR-89: a stop-loss is a safety dispatch — it is never throttled by
+    # the inter-order floor (the stop must fire), but it does mark the leg's last
+    # dispatch so a follow-on enter/exit respects the one-order-in-flight floor.
+    st.last_order_ns[pos.symbol] = st.now_ns
     oid = st.next_oid()
     st.hbt.submit_sell_order(
         asset_no, oid, held_bid, abs(pos.qty), hb_order.IOC, hb_order.LIMIT, True,
@@ -808,6 +847,15 @@ def _route_enter(st: _RunState, decision: Any) -> None:
     if veto is not None:
         st.result.n_entries_suppressed += 1
         return
+    # SHR-79/SHR-89: minimum inter-order re-fire floor. Suppress re-submission on
+    # this leg until the floor has elapsed since the last dispatch (live
+    # serializes one order per leg in flight). Throttled re-fires re-evaluate on
+    # a later scan; the floor stamp below marks this dispatch.
+    min_io_ns = int(cfg.min_inter_order_seconds * 1_000_000_000)
+    if _inter_order_blocked(st.now_ns, st.last_order_ns.get(intent.symbol), min_io_ns):
+        st.result.n_refire_throttled += 1
+        return
+    st.last_order_ns[intent.symbol] = st.now_ns
     slipped = _slipped_buy_price(book, intent.limit_price, cfg.slippage_bps)
     # SHR-94: pre-flight IOC marketability re-check at send+latency.
     # If the next recorded book snapshot falls within the latency window and
@@ -881,6 +929,15 @@ def _route_exit(st: _RunState, decision: Any) -> None:
     exit_asset_no = st.leg_to_asset[intent.symbol]
     book = st.books[intent.symbol]
     size = min(intent.size, abs(pos.qty))
+    # SHR-79/SHR-89: minimum inter-order re-fire floor (see _route_enter). An
+    # exit re-fire within the floor is suppressed; the position stays open and
+    # the strategy re-fires on a later scan. Throttles the wide-bucket exit churn
+    # (the #1670 doom-loop) to live's one-order-in-flight cadence.
+    min_io_ns = int(cfg.min_inter_order_seconds * 1_000_000_000)
+    if _inter_order_blocked(st.now_ns, st.last_order_ns.get(intent.symbol), min_io_ns):
+        st.result.n_refire_throttled += 1
+        return
+    st.last_order_ns[intent.symbol] = st.now_ns
     slipped = _slipped_sell_price(book, intent.limit_price, cfg.slippage_bps)
     # SHR-94: pre-flight IOC marketability re-check at send+latency.
     # If the next recorded book snapshot shows the bid has retreated below the

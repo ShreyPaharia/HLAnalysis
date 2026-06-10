@@ -285,6 +285,7 @@ def _run_config_from_args(
         scan_mode=getattr(args, "scan_mode", None) or "fixed",
         scan_min_interval_seconds=getattr(args, "scan_min_interval_seconds", 0.2),
         scan_max_interval_seconds=getattr(args, "scan_max_interval_seconds", 2.0),
+        min_inter_order_seconds=getattr(args, "min_inter_order_seconds", 0.0),
     )
     if hedge_cfg is not None:
         kwargs["hedge_enabled"] = hedge_cfg["hedge_enabled"]
@@ -742,6 +743,17 @@ def _add_run_config_args(parser: argparse.ArgumentParser) -> None:
         help="(event scan mode only) Maximum time between consecutive scans "
         "(idle-backoff ceiling) in seconds. Mirrors live scan_max_interval_seconds=2.0. "
         "Default=2.0.",
+    )
+    parser.add_argument(
+        "--min-inter-order-seconds",
+        type=float,
+        default=0.0,
+        dest="min_inter_order_seconds",
+        help="(SHR-79/SHR-89) Minimum inter-order re-fire floor in seconds: after "
+        "dispatching an IOC for a leg, suppress further orders on that leg until "
+        "this many seconds elapse (live serializes one order per leg in flight). "
+        "Throttles wide-bucket exit churn to live cadence. Measured HL floor "
+        "~0.75s (live min 0.73s). Default=0.0 disables it (legacy no-floor A/B arm).",
     )
 
 
