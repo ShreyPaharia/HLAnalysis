@@ -157,3 +157,24 @@ def test_main_passes_gate_on_parity(tmp_path):
         "--run-ts-ns", "1",
     ])
     assert rc == 0
+
+
+def test_generate_report_by_symbol_matches_mismatched_question_idx(tmp_path):
+    """SHR-90: reconcile a backtest by symbol — live venue fills carry q=-1 and
+    the sim uses a different question_idx, but the symbol matches."""
+    from hlanalysis.engine.state import FILL_SOURCE_VENUE, Fill, StateDAL
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    # live: a venue fill on #10 with the unattributed -1 placeholder
+    dal.append_fill(Fill(
+        fill_id="f1", cloid="c1", question_idx=-1, symbol="#10", side="sell",
+        price=0.8, size=100.0, fee=0.0, ts_ns=1_000, closed_pnl=5.0,
+        source=FILL_SOURCE_VENUE,
+    ))
+    sim = [SimMarket(question_idx=1000001, symbol="#10", realized_pnl=2.0,
+                     traded=True, sigma=None, reference_price=None, n_fills=2)]
+    rep = generate_report([dal.db_path], sim, run_ts_ns=1, key="symbol")
+    s = rep.to_dict()["summary"]
+    # one matched market, residual = sim 2.0 - live 5.0 = -3.0
+    assert s["n_markets"] == 1
+    assert s["total_residual"] == pytest.approx(-3.0)
