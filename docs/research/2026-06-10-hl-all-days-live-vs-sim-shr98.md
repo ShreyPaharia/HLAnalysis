@@ -337,6 +337,19 @@ feed-gap cap.)
 - **(d) Sim-fidelity only:** shared inventory cap (**SHR-91**) so backtest churn
   magnitude matches live. File as a new strategy ticket + SHR-91/SHR-79 (fidelity).
 
+**Order-mechanics note (don't reach for the wrong knob).** The engine submits an **IOC
+limit order at the touch** (`exchange.order(…, price=limit, {"limit":{"tif":"Ioc"}})`,
+hl_client.py:306) — bid for exits, ask for entries. It does NOT use the SDK's
+`market_open`/`market_close`, so the SDK's `DEFAULT_SLIPPAGE = 0.05` (5%) never applies.
+The limit-at-touch is the only fill cap (can't fill worse than the touch; remainder
+cancels → re-fires = live's small clips). The engine's own slippage gate
+(`max_slippage_pct` + `_depth_walk_clamp`, risk.py) is **set only on PM slots (0.005);
+HL v1/v31 leave it 0 → disabled**, and crucially it is **limit-referenced**
+(`slip = (avg_px − limit)/limit`, risk.py:236) — since the strategy sets `limit = the
+wide bid`, `slip ≈ 0` and it always approves. So enabling it on HL is a **no-op against
+the doom loop**; the gate fix (a)/(c) must be **fair/mid-referenced** (limit vs fair),
+not limit-referenced.
+
 ## Live-vs-sim fill microstructure — why live executes better (and the cadence gap)
 
 (`tools/_live_vs_sim_micro.py`, v31, legs where both traded; spread = recorded book
