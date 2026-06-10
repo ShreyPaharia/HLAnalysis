@@ -35,6 +35,7 @@ from .report import write_single_run_report, write_tuning_report
 from .runner.hftbt_runner import RunConfig, run_one_question
 from .runner.parallel import run_questions_parallel
 from .runner.result import summarise_run
+from ..marketdata.decision_input import DecisionInputConfig, from_backtest_params
 
 # Cache/data-root location defaults. These are user-facing "where is my data"
 # knobs (documented on --cache-root): the parent resolves them once and bakes
@@ -55,6 +56,7 @@ def _source_config_from_args(
     *,
     reference_resample_seconds: int = 60,
     reference_warmup_seconds: int = 0,
+    resolved: DecisionInputConfig | None = None,
 ) -> SourceConfig:
     """Build the picklable :class:`SourceConfig` from parsed CLI args.
 
@@ -62,6 +64,14 @@ def _source_config_from_args(
     parent); every other construction knob is read straight off ``args``. The
     resulting config is used both to build the in-process source and to ship to
     spawn workers — one construction path, no env side-channel.
+
+    SHR-97: when ``resolved`` is provided (a ``DecisionInputConfig`` built from
+    ``from_backtest_params``), it supplies the live-faithful defaults for
+    ``hl_ref_event`` and ``hl_ref_ticks``. The CLI flags act as explicit
+    overrides: when the user passes ``--ref-event`` or ``--reference-ticks``
+    (non-None), that value wins; when omitted (None), the config-derived value
+    is used. This makes the default backtest wiring live-faithful (mark + raw)
+    while keeping the flags as A/B override knobs.
     """
     name = args.data_source
     cache_root = getattr(args, "cache_root", None)
@@ -79,12 +89,20 @@ def _source_config_from_args(
             reference_resample_seconds=reference_resample_seconds,
         )
     if name == "hl_hip4":
+        # SHR-97: derive live-faithful defaults from the resolver when provided;
+        # explicit CLI flags override. ref_event default was "bbo" (non-live);
+        # reference_ticks default was "bars" (non-live). Both now resolve to the
+        # config-derived live-faithful value (mark + raw) when not explicitly set.
+        _cli_ref_event = getattr(args, "ref_event", None)
+        _cli_ref_ticks = getattr(args, "reference_ticks", None)
+        _default_ref_event = (resolved.reference_source if resolved is not None else "mark")
+        _default_ref_ticks = (resolved.reference_ticks if resolved is not None else "raw")
         return SourceConfig(
             kind="hl_hip4",
             cache_root=cache_root or os.environ.get(_ENV_HL_DATA),
             hl_ref_source=getattr(args, "ref_source", None) or "hl_perp",
-            hl_ref_event=getattr(args, "ref_event", None) or "bbo",
-            hl_ref_ticks=getattr(args, "reference_ticks", None) or "bars",
+            hl_ref_event=_cli_ref_event or _default_ref_event,
+            hl_ref_ticks=_cli_ref_ticks or _default_ref_ticks,
             reference_resample_seconds=reference_resample_seconds,
             reference_warmup_seconds=reference_warmup_seconds,
         )
@@ -326,14 +344,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     # SHR-92: auto-derive reference_warmup_seconds from vol_lookback_seconds
     # (max across classes) so σ is warm at every market open. The
     # --reference-warmup-seconds flag overrides; 0 explicitly disables.
+    # SHR-97: resolve source/ticks from the shared DecisionInputConfig so the
+    # backtest derives live-faithful defaults (mark + raw) instead of hard-coding
+    # non-live defaults (bbo + bars). CLI flags remain as explicit A/B overrides.
     _cli_warmup = getattr(args, "reference_warmup_seconds", None)
     _warmup = _resolve_reference_warmup_seconds(
         params, data_source=args.data_source, cli_override=_cli_warmup
     )
+    _resolved = from_backtest_params(params, track_default_source="mark")
     source_config = _source_config_from_args(
         args,
         reference_resample_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
         reference_warmup_seconds=_warmup,
+        resolved=_resolved,
     )
     assert_hl_cadence_match(source_config, params)
     data_source = source_config.build()
@@ -486,12 +509,20 @@ def cmd_tune(args: argparse.Namespace) -> int:
     # The discover pass doesn't depend on warmup (no reference data loaded), so
     # any value is safe here; workers derive the correct warmup from the grid params.
     _cli_warmup_tune = getattr(args, "reference_warmup_seconds", None)
+    # SHR-97: build live-faithful defaults from the resolver. The discover pass
+    # doesn't depend on source/ticks, but the SourceConfig is shipped to workers;
+    # baking mark+raw here ensures workers start from the live-faithful baseline
+    # (they override dt per cell via with_reference_resample but keep ref_event +
+    # ref_ticks from the shipped config). Use an empty params dict so the
+    # resolver returns the track defaults (mark + raw, the live HL defaults).
+    _resolved_tune = from_backtest_params({}, track_default_source="mark")
     # For the discover source, use 0 (warmup irrelevant for discover).
     # The per-cell warmup is derived from cell params in _run_one_cell.
     source_config = _source_config_from_args(
         args,
         reference_resample_seconds=60,
         reference_warmup_seconds=0,
+        resolved=_resolved_tune,
     )
     data_source = source_config.build()
     discover_kwargs: dict = {}
@@ -724,23 +755,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     pr.add_argument(
         "--ref-event",
         choices=["bbo", "mark"],
-        default="bbo",
+        default=None,
         help="(hl_hip4 only) Which reference price stream feeds σ/p_model. "
-        "`mark` matches the LIVE engine (reference_sigma_source default = mark); "
-        "`bbo` (default) reads bid/ask mid (bounces more → higher σ).",
+        "`mark` (live-faithful default, SHR-97) matches the LIVE engine "
+        "(reference_sigma_source default = mark). `bbo` reads bid/ask mid "
+        "(bounces more → higher σ). Default: config-derived (mark).",
     )
     pr.add_argument(
         "--reference-ticks",
         choices=["bars", "raw"],
-        default="bars",
+        default=None,
         dest="reference_ticks",
-        help="(hl_hip4 only) Reference-tick mode (SHR-93). `bars` (default) "
-        "pre-buckets raw ticks into OHLC bars of width vol_sampling_dt_seconds "
-        "before feeding the strategy — the pre-SHR-93 behaviour, existing "
-        "results unchanged. `raw` emits one event per recorded tick and lets "
-        "the shared MarketState bucket them, making last_mark the instantaneous "
-        "raw tick price (live-parity). Use `--reference-ticks raw` to close the "
-        "p_model timing gap on fast-moving markets.",
+        help="(hl_hip4 only) Reference-tick mode (SHR-93). `raw` (live-faithful "
+        "default, SHR-97) emits one event per recorded tick and lets the shared "
+        "MarketState bucket them, making last_mark the instantaneous raw tick "
+        "price (live-parity). `bars` pre-buckets raw ticks into OHLC bars "
+        "(legacy A/B override). Default: config-derived (raw).",
     )
     pr.add_argument(
         "--pm-reference-source",
@@ -912,11 +942,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     pt.add_argument(
         "--reference-ticks",
         choices=["bars", "raw"],
-        default="bars",
+        default=None,
         dest="reference_ticks",
-        help="(hl_hip4 only) Reference-tick mode (SHR-93). `bars` (default) "
-        "pre-buckets raw ticks into OHLC bars — the pre-SHR-93 behaviour. "
-        "`raw` emits one event per recorded tick for live-parity last_mark.",
+        help="(hl_hip4 only) Reference-tick mode (SHR-93). `raw` (live-faithful "
+        "default, SHR-97) emits one event per recorded tick for live-parity. "
+        "`bars` pre-buckets raw ticks — the legacy A/B override. "
+        "Default: config-derived (raw).",
     )
     # Hedge leg flags (v5_delta_hedged only; safe to pass for other strategies
     # since hedge_enabled defaults to False when --hedge-data-path is omitted).

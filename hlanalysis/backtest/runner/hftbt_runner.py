@@ -1177,15 +1177,15 @@ def run_one_question(
     hbt = hb.HashMapMarketDepthBacktest(assets)
 
     state = MarketState()
-    # SHR-96: configure the OHLC bucket width before the first raw tick so the
-    # buffer produces dt-spaced returns matching the strategy's vol_sampling_dt_seconds.
-    # Without this, _OhlcBuffer defaults to 60s, inflating σ by sqrt(60/dt) when
-    # dt < 60 (e.g. dt=5s → ~3.46× inflation → σ ≈ 2.5 in event mode → 0 trades).
-    # In bars mode the buffer is irrelevant (apply_reference_bar appends pre-bucketed
-    # bars, and _last_bucket is only checked by ingest_tick), so this is a no-op there.
-    if ref_events_are_raw_ticks:
-        _ref_dt_s: int = int(getattr(data_source, "reference_resample_seconds", 60))
-        state.set_reference_cadence(_ref_dt_s)
+    # SHR-96 / SHR-97: always configure the OHLC bucket width, regardless of
+    # whether ticks are raw or pre-bucketed bars. In bars mode the shared core's
+    # _OhlcBuffer uses the registered bucket period for set_reference_cadence and
+    # the bar-append path doesn't call ingest_tick (so no OHLC coalescing occurs),
+    # making this registration a no-op for bars — but calling it unconditionally
+    # closes the SHR-96 class of bug (cadence left at 60s when ticks are raw)
+    # structurally: there is no longer a conditional branch that can be "off".
+    _ref_dt_s: int = int(getattr(data_source, "reference_resample_seconds", 60))
+    state.set_reference_cadence(_ref_dt_s)
     stop_pct = _strategy_stop_loss_pct(strategy)
     scan_interval_ns = cfg.scanner_interval_seconds * 1_000_000_000
 

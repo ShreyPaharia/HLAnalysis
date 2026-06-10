@@ -73,9 +73,12 @@ class SourceConfig:
     # HL HIP-4 reference-price venue.
     hl_ref_source: str = "hl_perp"
     # HL HIP-4 reference EVENT: which price stream σ/p_model read. "mark" matches
-    # the live engine (EngineConfig.reference_sigma_source default = "mark"); the
-    # historical sim default "bbo" reads bid/ask mid, which bounces more and reads
-    # a higher σ. Keyed into the event-array cache via hl_hip4.py's bundle sig.
+    # the live engine (EngineConfig.reference_sigma_source default = "mark") and is
+    # the live-faithful default derived by the CLI via DecisionInputConfig (SHR-97).
+    # The historical field default "bbo" is preserved here for existing callers that
+    # construct SourceConfig directly (workers, tests) — it does NOT affect CLI
+    # invocations where the resolver always derives "mark" as the default.
+    # Keyed into the event-array cache via hl_hip4.py's bundle sig.
     hl_ref_event: str = "bbo"
     # Polymarket knobs.
     pm_flavor: str = "btc_updown"
@@ -94,11 +97,15 @@ class SourceConfig:
     # directly are unaffected. The CLI auto-derives this from the strategy's max
     # vol_lookback_seconds for hl_hip4 runs.
     reference_warmup_seconds: int = 0
-    # HL HIP-4 reference-tick mode (SHR-93). "bars" (default) = pre-bucket raw ticks
-    # into OHLC bars of width reference_resample_seconds (pre-SHR-93 behaviour,
-    # existing results unchanged). "raw" = emit one ReferenceEvent per recorded tick
-    # and let the shared MarketState bucket them — making last_mark the instantaneous
-    # raw tick price (live-parity). Default "bars" keeps all existing results intact.
+    # HL HIP-4 reference-tick mode (SHR-93). "raw" = emit one ReferenceEvent per
+    # recorded tick and let the shared MarketState bucket them — making last_mark the
+    # instantaneous raw tick price (live-parity). This is the live-faithful default
+    # derived by the CLI via DecisionInputConfig (SHR-97).
+    # "bars" = pre-bucket raw ticks into OHLC bars of width reference_resample_seconds
+    # (legacy A/B override, available via --reference-ticks bars on the CLI).
+    # The field default "bars" is preserved here for existing callers that construct
+    # SourceConfig directly — it does NOT affect CLI invocations where the resolver
+    # derives "raw" as the default.
     hl_ref_ticks: str = "bars"
 
     def with_reference_resample(self, seconds: int) -> "SourceConfig":
