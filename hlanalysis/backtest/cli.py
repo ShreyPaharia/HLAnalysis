@@ -281,7 +281,8 @@ def _run_config_from_args(
         fee_rate=args.fee_rate,
         book_depth_assumption=args.depth,
         order_latency_ms=args.order_latency_ms,
-        scan_mode=getattr(args, "scan_mode", "fixed"),
+        # None (no --scan-mode and not a --slot run) → legacy 'fixed'.
+        scan_mode=getattr(args, "scan_mode", None) or "fixed",
         scan_min_interval_seconds=getattr(args, "scan_min_interval_seconds", 0.2),
         scan_max_interval_seconds=getattr(args, "scan_max_interval_seconds", 2.0),
     )
@@ -341,8 +342,20 @@ def _load_run_params(args: argparse.Namespace) -> dict:
                 f"--slot {args.slot!r} not found in {args.slot_config}; "
                 f"available: {sorted(by_alias)}"
             )
+        slot_cfg = by_alias[args.slot]
+        # Mirror the live engine's scan cadence so a slot run evaluates intraday
+        # exits (exit_safety_d / exit_edge) at the SAME granularity the engine
+        # runs. The legacy 60s `fixed` scan misses sub-minute exit triggers and
+        # badly misvalidates a slot (e.g. v31's mid-hold exits fire minutes late
+        # in fixed mode). Default to event-driven, with the floor/ceiling taken
+        # from the slot's live GlobalRiskConfig. An explicit --scan-mode wins
+        # (A/B override); `None` means "not passed".
+        if getattr(args, "scan_mode", None) is None:
+            args.scan_mode = "event"
+            args.scan_min_interval_seconds = slot_cfg.global_.scan_min_interval_seconds
+            args.scan_max_interval_seconds = slot_cfg.global_.scan_max_interval_seconds
         strategy_id, params = backtest_params_from_slot(
-            by_alias[args.slot], klass=getattr(args, "slot_class", None)
+            slot_cfg, klass=getattr(args, "slot_class", None)
         )
         args.strategy = strategy_id
         return params
@@ -704,13 +717,14 @@ def _add_run_config_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--scan-mode",
         choices=["fixed", "event"],
-        default="fixed",
+        default=None,
         dest="scan_mode",
-        help="Scan cadence mode. 'fixed' (default) evaluates every "
-        "--scanner-interval-seconds (legacy behaviour, back-compat). "
+        help="Scan cadence mode. Unset → 'fixed' for ad-hoc runs (legacy "
+        "behaviour) but 'event' for --slot runs (mirror the live engine's "
+        "cadence). 'fixed' evaluates every --scanner-interval-seconds. "
         "'event' evaluates on each book/reference update, clamped between "
         "--scan-min-interval-seconds (floor) and --scan-max-interval-seconds "
-        "(ceiling), mirroring the live engine's event-driven cadence.",
+        "(ceiling). Pass explicitly to override the --slot default.",
     )
     parser.add_argument(
         "--scan-min-interval-seconds",

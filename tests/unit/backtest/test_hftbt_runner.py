@@ -1814,11 +1814,14 @@ def test_cli_scan_mode_args_exist():
     p = argparse.ArgumentParser()
     _add_run_config_args(p)
 
-    # Defaults
+    # Defaults: --scan-mode parses to None (sentinel for "not passed") so the
+    # --slot path can default it to live's event cadence; for ad-hoc/tune runs
+    # _run_config_from_args resolves None → legacy 'fixed' (bit-identical).
     args = p.parse_args([])
-    assert args.scan_mode == "fixed"
+    assert args.scan_mode is None
     assert args.scan_min_interval_seconds == pytest.approx(0.2)
     assert args.scan_max_interval_seconds == pytest.approx(2.0)
+    assert _run_config_from_args(args, hedge_cfg=None).scan_mode == "fixed"
 
     # Explicit event-mode values propagate into RunConfig.
     args2 = p.parse_args(["--scan-mode", "event",
