@@ -49,6 +49,11 @@ class RunResult:
     # limit was unmarketable at fill time (book moved away / queue not swept
     # during latency δ). Each reject re-fires next scan — the modelled live churn.
     n_rejects: int = 0
+    # SHR-79/SHR-89: count of order dispatches suppressed by the minimum
+    # inter-order re-fire floor (min_inter_order_seconds). A throttled re-fire
+    # never reaches the venue; the strategy re-evaluates on a later scan. 0 when
+    # the floor is disabled (default).
+    n_refire_throttled: int = 0
 
 
 # ---------------------------------------------------------------------------

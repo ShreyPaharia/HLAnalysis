@@ -1831,3 +1831,261 @@ def test_cli_scan_mode_args_exist():
     assert cfg.scan_mode == "event"
     assert cfg.scan_min_interval_seconds == pytest.approx(0.5)
     assert cfg.scan_max_interval_seconds == pytest.approx(5.0)
+
+
+# ---------------------------------------------------------------------------
+# SHR-79 / SHR-89: minimum inter-order re-fire floor (min_inter_order_seconds)
+# ---------------------------------------------------------------------------
+#
+# Live serializes one order per leg in flight: after the engine submits an IOC
+# for a leg it cannot submit another for that leg until the round-trip
+# (submit -> ack -> reconcile) completes. Measured from the 2026-06-10 live
+# fills (docs/research/2026-06-10-hl-live-fills-v1-v31-window.csv): distinct
+# re-fired orders (new cloid) on the same (slot, symbol) are gapped a hard
+# MINIMUM of ~0.73s (p10 ~0.90s; churny bucket #1670 median 1.31s). Without a
+# floor the event-driven sim re-fires at the 0.2s scan cadence (5 Hz) and
+# over-churns persistently-wide bucket books (the #1670 doom-loop).
+#
+# The floor (RunConfig.min_inter_order_seconds) suppresses re-submission on a
+# leg until the floor has elapsed since the last dispatch on that leg. Default
+# 0.0 disables it (back-compat; the legacy no-floor A/B arm).
+
+def _exit_decision(symbol="yes", size=100.0, limit=0.50):
+    from hlanalysis.strategy.types import Action, Decision, OrderIntent
+    return Decision(
+        action=Action.EXIT,
+        intents=(OrderIntent(question_idx=1, symbol=symbol, side="sell",
+                             size=size, limit_price=limit, cloid="x1"),),
+    )
+
+
+def _held_position(symbol="yes", qty=100.0, avg_entry=0.60):
+    from hlanalysis.strategy.types import Position
+    return Position(
+        question_idx=1, symbol=symbol, qty=qty, avg_entry=avg_entry,
+        stop_loss_price=0.0, last_update_ts_ns=0,
+    )
+
+
+def test_run_config_min_inter_order_seconds_defaults_zero():
+    """RunConfig.min_inter_order_seconds defaults to 0.0 (floor disabled)."""
+    cfg = RunConfig()
+    assert cfg.min_inter_order_seconds == pytest.approx(0.0), (
+        f"default min_inter_order_seconds must be 0.0, got {cfg.min_inter_order_seconds}"
+    )
+
+
+def test_inter_order_blocked_disabled_when_floor_zero():
+    """With the floor at 0, no order is ever throttled (back-compat)."""
+    from hlanalysis.backtest.runner.hftbt_runner import _inter_order_blocked
+    assert _inter_order_blocked(now_ns=1_000, last_order_ns=999, min_inter_order_ns=0) is False
+
+
+def test_inter_order_blocked_first_order_not_blocked():
+    """The first order on a leg (no prior dispatch) is never throttled."""
+    from hlanalysis.backtest.runner.hftbt_runner import _inter_order_blocked
+    assert _inter_order_blocked(now_ns=1_000, last_order_ns=None,
+                                min_inter_order_ns=750_000_000) is False
+
+
+def test_inter_order_blocked_within_floor():
+    """A re-fire strictly inside the floor window is throttled."""
+    from hlanalysis.backtest.runner.hftbt_runner import _inter_order_blocked
+    floor = 750_000_000  # 0.75s
+    last = 1_000_000_000
+    assert _inter_order_blocked(now_ns=last + 200_000_000, last_order_ns=last,
+                                min_inter_order_ns=floor) is True
+
+
+def test_inter_order_blocked_at_or_after_floor():
+    """A re-fire at or after the floor boundary is allowed."""
+    from hlanalysis.backtest.runner.hftbt_runner import _inter_order_blocked
+    floor = 750_000_000
+    last = 1_000_000_000
+    assert _inter_order_blocked(now_ns=last + floor, last_order_ns=last,
+                                min_inter_order_ns=floor) is False
+    assert _inter_order_blocked(now_ns=last + floor + 1, last_order_ns=last,
+                                min_inter_order_ns=floor) is False
+
+
+def test_route_exit_throttled_within_floor_does_not_submit():
+    """An EXIT re-fire within the inter-order floor is suppressed before any
+    order reaches the venue: no oid consumed, no fill, position unchanged, and
+    the throttle counter increments."""
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_exit
+
+    T0 = 1_000_000_000
+    arr = np.concatenate([
+        _make_depth_clear_arr(0),
+        _depth_ev(1_000_000, BUY_EVENT, 0.50, 1000.0),
+    ])
+    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
+                    order_latency_ms=0.0, ioc_marketability_recheck=False,
+                    min_inter_order_seconds=0.75)
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(T0)
+    st = _reject_run_state(bt, cfg)
+    st.pos = _held_position()
+    st.books = {"yes": BookState(symbol="yes", bid_px=0.50, bid_sz=1000.0,
+                                 ask_px=None, ask_sz=None,
+                                 last_trade_ts_ns=0, last_l2_ts_ns=1_000_000)}
+    # A dispatch already happened 0.2s ago (within the 0.75s floor).
+    st.last_order_ns = {"yes": T0}
+    st.now_ns = T0 + 200_000_000
+
+    oid_before = st._next_oid_counter
+    _route_exit(st, _exit_decision())
+    bt.close()
+
+    assert st.result.fills == [], "throttled re-fire must not book a fill"
+    assert st._next_oid_counter == oid_before, "throttled re-fire must not submit an order"
+    assert st.result.n_refire_throttled == 1
+    assert st.pos is not None, "position stays open; strategy re-fires after the floor"
+
+
+def test_route_exit_allowed_after_floor_fills_on_replenished_book():
+    """Once the floor has elapsed the EXIT re-fire dispatches and fills against
+    replenished bid liquidity. Drives a real hftbacktest sell fill via a sweep
+    trade, and confirms an intervening within-floor re-fire is throttled."""
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_exit
+
+    T_BOOK = 1_000_000
+    T1 = 1_000_000_000
+    T_TRADE1 = T1 + 1_000_000
+    T2 = T1 + 200_000_000           # 0.2s — within the 0.75s floor
+    T3 = T1 + 800_000_000           # 0.8s — past the floor
+    T_REPLENISH = T3 - 1_000_000
+    T_TRADE3 = T3 + 1_000_000
+
+    # Bid liquidity at 0.50; a SELL sweep of (queue + my size) fills my resting
+    # sell. The bid is consumed by trade #1, then replenished before T3.
+    arr = np.concatenate([
+        _make_depth_clear_arr(0),
+        _depth_ev(T_BOOK, BUY_EVENT, 0.50, 1000.0),
+        _trade_ev(T_TRADE1, SELL_EVENT, 0.50, 1100.0),
+        _depth_ev(T_REPLENISH, BUY_EVENT, 0.50, 1000.0),
+        _trade_ev(T_TRADE3, SELL_EVENT, 0.50, 1100.0),
+    ])
+    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
+                    order_latency_ms=0.0, ioc_marketability_recheck=False,
+                    min_inter_order_seconds=0.75)
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+
+    def _book():
+        return {"yes": BookState(symbol="yes", bid_px=0.50, bid_sz=1000.0,
+                                 ask_px=None, ask_sz=None,
+                                 last_trade_ts_ns=0, last_l2_ts_ns=T_BOOK)}
+
+    st = _reject_run_state(bt, cfg)
+    st.pos = _held_position(qty=300.0)
+
+    # Scan 1 — first exit dispatches and fills (no prior dispatch on this leg).
+    # First elapse must be absolute: bt.current_timestamp is INT64_MAX until the
+    # first elapse, so a relative delta would underflow.
+    bt.elapse(T1)
+    st.books = _book(); st.now_ns = T1
+    _route_exit(st, _exit_decision(size=100.0))
+    assert len(st.result.fills) == 1, "first exit should fill"
+    assert st.result.n_refire_throttled == 0
+
+    # Scan 2 — re-fire 0.2s later is throttled by the floor (no new fill).
+    bt.elapse(T2 - int(bt.current_timestamp))
+    st.books = _book(); st.now_ns = T2
+    _route_exit(st, _exit_decision(size=100.0))
+    assert len(st.result.fills) == 1, "within-floor re-fire must not fill"
+    assert st.result.n_refire_throttled == 1
+
+    # Scan 3 — 0.8s after the first dispatch the floor has elapsed; re-fire
+    # dispatches and fills against the replenished book.
+    bt.elapse(T3 - int(bt.current_timestamp))
+    st.books = _book(); st.now_ns = T3
+    _route_exit(st, _exit_decision(size=100.0))
+    bt.close()
+
+    assert len(st.result.fills) == 2, "post-floor re-fire should fill on replenished book"
+    assert st.result.n_refire_throttled == 1
+    assert all(f.side == "sell" for f in st.result.fills)
+
+
+def test_route_enter_throttled_within_floor_does_not_submit():
+    """An ENTER re-fire within the floor is suppressed before reaching the venue."""
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_enter
+
+    T0 = 1_000_000_000
+    arr = np.concatenate([
+        _make_depth_clear_arr(0),
+        _depth_ev(1_000_000, SELL_EVENT, 0.50, 1000.0),
+    ])
+    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
+                    order_latency_ms=0.0, ioc_marketability_recheck=False,
+                    min_inter_order_seconds=0.75)
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(T0)
+    st = _reject_run_state(bt, cfg)
+    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None,
+                                 ask_px=0.50, ask_sz=1000.0,
+                                 last_trade_ts_ns=0, last_l2_ts_ns=1_000_000)}
+    st.last_order_ns = {"yes": T0}
+    st.now_ns = T0 + 200_000_000
+
+    oid_before = st._next_oid_counter
+    _route_enter(st, _enter_decision(symbol="yes", size=100.0, limit=0.55))
+    bt.close()
+
+    assert st.result.fills == []
+    assert st._next_oid_counter == oid_before, "throttled enter must not submit"
+    assert st.result.n_refire_throttled == 1
+    assert st.pos is None
+
+
+def test_route_exit_no_floor_allows_immediate_refire():
+    """With the floor disabled (0.0, default) a re-fire is never throttled —
+    the legacy A/B arm. A second exit 0.2s after the first is allowed to
+    dispatch (oid consumed)."""
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_exit
+
+    T0 = 1_000_000_000
+    arr = np.concatenate([
+        _make_depth_clear_arr(0),
+        _depth_ev(1_000_000, BUY_EVENT, 0.50, 1000.0),
+    ])
+    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
+                    order_latency_ms=0.0, ioc_marketability_recheck=False,
+                    min_inter_order_seconds=0.0)
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(T0)
+    st = _reject_run_state(bt, cfg)
+    st.pos = _held_position()
+    st.books = {"yes": BookState(symbol="yes", bid_px=0.50, bid_sz=1000.0,
+                                 ask_px=None, ask_sz=None,
+                                 last_trade_ts_ns=0, last_l2_ts_ns=1_000_000)}
+    st.last_order_ns = {"yes": T0}
+    st.now_ns = T0 + 200_000_000
+
+    oid_before = st._next_oid_counter
+    _route_exit(st, _exit_decision())
+    bt.close()
+
+    assert st._next_oid_counter == oid_before + 1, "floor disabled must allow dispatch"
+    assert st.result.n_refire_throttled == 0
+
+
+def test_cli_min_inter_order_seconds_arg():
+    """--min-inter-order-seconds is declared and defaults to 0.0."""
+    import argparse
+    from hlanalysis.backtest.cli import _add_run_config_args, _run_config_from_args
+
+    p = argparse.ArgumentParser()
+    _add_run_config_args(p)
+    args = p.parse_args([])
+    assert hasattr(args, "min_inter_order_seconds")
+    assert args.min_inter_order_seconds == pytest.approx(0.0)
+    assert _run_config_from_args(args, hedge_cfg=None).min_inter_order_seconds == pytest.approx(0.0)
+
+    args2 = p.parse_args(["--min-inter-order-seconds", "0.75"])
+    cfg = _run_config_from_args(args2, hedge_cfg=None)
+    assert cfg.min_inter_order_seconds == pytest.approx(0.75)
