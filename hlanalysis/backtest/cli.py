@@ -318,8 +318,41 @@ def _hedge_half_spread_for(args: argparse.Namespace) -> float:
     return float(getattr(args, "hedge_half_spread_bps", 1.0))
 
 
+def _load_run_params(args: argparse.Namespace) -> dict:
+    """Resolve the run's strategy params from either a live slot or a JSON file.
+
+    SHR-99: ``--slot <alias>`` sources params from the live ``strategy.yaml``
+    via the single converter (``backtest_params_from_slot``), so a sim run is
+    config-faithful by construction — no hand-reconstructed JSON to drift. The
+    converter sets ``args.strategy`` to the matching registry id. ``--config``
+    remains the explicit JSON path for ad-hoc params. The two are mutually
+    exclusive.
+    """
+    if getattr(args, "slot", None):
+        if getattr(args, "config", None):
+            raise SystemExit("--slot and --config are mutually exclusive")
+        from ..engine.config import load_strategies_config
+        from .slot_config import backtest_params_from_slot
+
+        cfgs = load_strategies_config(Path(args.slot_config))
+        by_alias = {c.account_alias: c for c in cfgs.strategies}
+        if args.slot not in by_alias:
+            raise SystemExit(
+                f"--slot {args.slot!r} not found in {args.slot_config}; "
+                f"available: {sorted(by_alias)}"
+            )
+        strategy_id, params = backtest_params_from_slot(
+            by_alias[args.slot], klass=getattr(args, "slot_class", None)
+        )
+        args.strategy = strategy_id
+        return params
+    if not getattr(args, "config", None) or not getattr(args, "strategy", None):
+        raise SystemExit("provide --slot, or both --strategy and --config")
+    return json.loads(Path(args.config).read_text())
+
+
 def cmd_run(args: argparse.Namespace) -> int:
-    params = json.loads(Path(args.config).read_text())
+    params = _load_run_params(args)
 
     # Event-array cache is default-ON. --fresh/--no-cache disables it for this
     # invocation; --rebuild-cache forces a one-time rebuild (still repopulates).
@@ -706,13 +739,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     ps.set_defaults(func=cmd_strategies)
 
     pr = sp.add_parser("run", help="Run one strategy config across discovered questions")
-    pr.add_argument("--strategy", required=True)
+    pr.add_argument("--strategy", default=None,
+                    help="Registry strategy id. Required unless --slot is given "
+                         "(--slot derives it from the live config).")
     pr.add_argument(
         "--data-source",
         required=True,
         choices=["synthetic", "polymarket", "hl_hip4", "pm_nba"],
     )
-    pr.add_argument("--config", required=True, help="JSON file of param dict")
+    pr.add_argument("--config", default=None,
+                    help="JSON file of param dict. Mutually exclusive with --slot.")
+    pr.add_argument(
+        "--slot", default=None,
+        help="(SHR-99) Run from a live strategy.yaml slot by account_alias "
+             "(e.g. v31). Sources the EXACT live decision config via the engine "
+             "config builders — no hand-written JSON to drift. Sets --strategy.",
+    )
+    pr.add_argument(
+        "--slot-config", default="config/strategy.yaml", dest="slot_config",
+        help="Path to the live strategy config for --slot (default "
+             "config/strategy.yaml).",
+    )
+    pr.add_argument(
+        "--slot-class", default=None, dest="slot_class",
+        help="(--slot only) Select a per-class override config (e.g. priceBucket) "
+             "matching the engine's per-question.klass resolution. Omit for the "
+             "slot default. Run one class per invocation (one σ cadence).",
+    )
     pr.add_argument("--out-dir", required=True)
     pr.add_argument("--start", default=None)
     pr.add_argument("--end", default=None)
