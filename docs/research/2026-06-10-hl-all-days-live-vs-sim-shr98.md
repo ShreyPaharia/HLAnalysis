@@ -161,9 +161,20 @@ The largest residuals are not phantom *entries* but phantom *exits*. Verified ex
 - Sim buys 305 @0.982, then **stop-loss sells all 305 @0.523**, re-buys @0.993, settles
   @1.00 → −$138. Live simply **held #1610 to settle → +$5.34**.
 - The recorded `#1610` book best-bid genuinely **crashed to 0.52332** (book is
-  best-first; not a worst-first bug) and **recovered to 0.99 within ~600 ms**. The sim,
+  best-first; not a worst-first bug) and **recovered to 0.99 within ~1.4 s**. The sim,
   replaying ticks, catches the V-shaped crash; live (discrete scan + network latency)
   rode through it.
+- **The crash is in the OUTCOME leg's own order book, not the reference.** At the
+  crash instant the `#1610` book was `bid 0.52332 / ask 0.97965` — a **one-sided bid
+  vacuum** (the ask, the fair-value ceiling, held at ~0.98; the spread blew from ~0.07
+  to ~0.46 wide, then re-tightened to 0.983/0.985). The HL perp BTC **reference** mark
+  at the same instant ticked **UP** (~59,820 → 60,866, through a ~4.4 s feed gap), i.e.
+  the *opposite* direction — and `#1610` is the YES/favorite (settles 1.0), so the
+  reference move would push fair value *toward 1.0*, not crash it. The bid vacuum is
+  therefore **decoupled from (and contrary to) the reference** — a pure outcome-book
+  liquidity flicker, not a repricing. v1's price stop (on the leg bid, ≈0.83) punched
+  through and the IOC sold 305 sh into the 0.523 bid; live's discrete scan skipped the
+  1.4 s vacuum.
 - **The SHR-98 veto guards the wrong direction here.** `_is_fleeting_bid` vetoes a sell
   only if the bid retreats *further below* the fill price within the window. A bid that
   is *anomalously low and reverts up* is not caught — so stop-outs into transient
