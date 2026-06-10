@@ -9,6 +9,7 @@ in-process and subprocess paths share ONE construction path.
 from __future__ import annotations
 
 import multiprocessing as mp
+import sys
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -17,6 +18,34 @@ from typing import Any, Callable
 from .hftbt_runner import RunConfig, run_one_question
 from ..core.data_source import QuestionDescriptor
 from ..core.source_config import SourceConfig
+
+
+def parent_package_root() -> str:
+    """Absolute path of the checkout the PARENT process imports hlanalysis from.
+
+    This is the directory that contains the ``hlanalysis/`` package, i.e.
+    ``Path(hlanalysis.__file__).parents[1]``. Computed in the parent so spawn
+    workers can be pinned to the SAME checkout (SHR-100).
+    """
+    import hlanalysis
+
+    return str(Path(hlanalysis.__file__).resolve().parents[1])
+
+
+def worker_path_init(package_root: str) -> None:
+    """ProcessPoolExecutor ``initializer``: pin the parent's checkout first.
+
+    A spawned worker starts a fresh interpreter whose ``sys.path`` may resolve
+    ``import hlanalysis`` to a DIFFERENT checkout than the parent — the venv
+    editable install is a ``.pth`` pointing at the main checkout, while the
+    parent may run from a git worktree. Without this, ``hl-bt run --workers>1``
+    and all of ``tune`` silently run MAIN's sim code while the parent built
+    config from the branch. Inserting the parent's package root at
+    ``sys.path[0]`` BEFORE any hlanalysis import in the worker forces the worker
+    onto the parent's code (SHR-100).
+    """
+    if package_root and (not sys.path or sys.path[0] != package_root):
+        sys.path.insert(0, package_root)
 
 
 def build_hedge_source(run_cfg: RunConfig, hedge_data_path: str | None,
@@ -150,7 +179,9 @@ def run_questions_parallel(
     if n_workers <= 1:
         return sorted((_run_question_worker(w) for w in work), key=lambda r: r.idx)
     with ProcessPoolExecutor(max_workers=n_workers,
-                             mp_context=mp.get_context("spawn")) as ex:
+                             mp_context=mp.get_context("spawn"),
+                             initializer=worker_path_init,
+                             initargs=(parent_package_root(),)) as ex:
         results = list(ex.map(_run_question_worker, work))
     return sorted(results, key=lambda r: r.idx)
 
@@ -159,5 +190,7 @@ __all__ = [
     "QResult",
     "build_hedge_source",
     "build_strategy_for_run",
+    "parent_package_root",
     "run_questions_parallel",
+    "worker_path_init",
 ]

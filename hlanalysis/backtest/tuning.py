@@ -32,6 +32,7 @@ from .core.data_source import DataSource, QuestionDescriptor
 from .core.registry import build as build_strategy
 from .core.source_config import SourceConfig
 from .runner.hftbt_runner import RunConfig, run_one_question
+from .runner.parallel import parent_package_root, worker_path_init
 from .runner.result import RunSummary, summarise_run
 from .runner.walkforward import walk_forward_splits
 
@@ -319,7 +320,8 @@ def run_tuning_parallel(
     _set_inproc_memo_worker_env(n_workers)
 
     with log_path.open("a") as f, ProcessPoolExecutor(
-        max_workers=n_workers, mp_context=mp.get_context("spawn")
+        max_workers=n_workers, mp_context=mp.get_context("spawn"),
+        initializer=worker_path_init, initargs=(parent_package_root(),),
     ) as ex:
         for row in ex.map(_run_one_cell, work):
             f.write(json.dumps(row, default=str) + "\n")
