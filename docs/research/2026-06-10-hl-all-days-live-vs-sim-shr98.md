@@ -25,20 +25,25 @@ For the per-market method and live-mirror details this extends, see
    (veto-ON) vs $960 (veto-OFF)** — a ~1.5% improvement. **12 of 16 cells are
    bit-identical ON/OFF.**
 4. **The dominant residual is a different failure mode the veto does not address:**
-   the sim's **stop-loss / exit fills against transient recorded-book dislocations**
-   (verified best-bid crashes to 0.52 / 0.80 that revert up within ~0.6 s) that the
-   live engine rode through. This, **amplified by per-run inventory isolation** (the
-   sim has no shared cross-market inventory cap, so it over-enters), drives the big
-   bucket divergences (−$138, −$229, −$383). All **unchanged by the veto.**
+   the sim **over-churns persistently-wide, illiquid BUCKET books** (median spread
+   0.13–0.34 vs ~0.005 on binary legs — a structural property of the bucket markets,
+   confirmed by a 124-fill book-width scan), buying near the ask and selling near the
+   bid, bleeding the full spread each round-trip. **Amplified by per-run inventory
+   isolation** (no shared cross-market cap → sim over-enters). Drives the −$229 / −$383
+   bucket losses, all **unchanged by the veto.** A *separate, rarer* mode — a true
+   sudden bid-vacuum that trips a stop — appears once (06-06 #1610, −$138) and is
+   **confounded by a live engine OOM-restart** (see below).
 5. **v1 (buy-and-hold) tracks live within a few dollars on clean days** (06-08:
    sim +6.68 vs live +9.20). **v31 (theta churn) diverges materially on every bucket
    and on 06-09 binary.**
 
 **Verdict:** SHR-98 is correct and safe (no v1 regression, kills the phantom entry
 spikes it targets) but is a *small* lever on HL fidelity. The fidelity program's
-open frontier for HL theta is **SHR-89** (execution: stop/exit fills into transient
-book dislocations + latency) and **SHR-91** (shared cross-market inventory cap),
-not the fleeting-entry veto.
+open frontier for HL theta is **SHR-79/SHR-91** (the sim over-churns persistently-wide,
+illiquid bucket books with no shared inventory cap) plus **SHR-89** (the rarer
+sudden-vacuum stop fills) — not the fleeting-entry veto. A confound to control for:
+**live-engine OOM downtime** (06-06) means some live cells reflect an engine that was
+*not running*, not strategy behavior.
 
 ---
 
@@ -155,8 +160,31 @@ artifact, not the lever that closes HL theta fidelity.
 
 ## Why the big divergences remain (root cause, verified)
 
-**1. Stop-loss / exit fills into transient recorded-book dislocations — the −$100s.**
-The largest residuals are not phantom *entries* but phantom *exits*. Verified example,
+**0. Book-width scan across all 124 sim fills (`tools/_book_widening_scan.py`) — what
+actually drives the bucket losses.** A clean split by leg type:
+
+| leg type | median spread at fills | wide fills (≥0.10) |
+| :-- | :-- | :-- |
+| **binary** (#1591/#1640/#2200/#2250) | **0.001–0.009** (tight) | **0 / 84** |
+| **bucket** (#1610/#1670/#2230/#2280) | **0.13–0.34** (wide) | 43 / 40 |
+
+- **Binary leg books are tight and liquid** — no binary fill lands on a wide book.
+  Binary divergences are churn/inventory (v31) and single-fill tick (v1), *not* width.
+- **All 43 wide-book fills are bucket legs, and 40 of 43 are STRUCTURAL** — the bucket
+  markets are *persistently* wide/illiquid (±30 s baseline spread ≈ 0.13–0.20), not
+  momentary spikes. The −$383 (06-07 #1670) and −$229 (06-06 #1610) come from the theta
+  strategy **round-tripping across that full width** (buying near the ask 0.92–0.97,
+  selling near the bid 0.60–0.85). Live saw the same wide book and churned it too
+  (live #1670 06-07: 48 fills, −$133) but its inventory cap throttled the churn (live
+  $1,465 vs sim $2,482 notional). → **SHR-79** (IOC fill eats the full wide spread) +
+  **SHR-91** (no cap → more round-trips), *not* transient-flicker latency.
+- **Only 3 of 124 fills are genuine LOCALIZED SPIKES** (≥2.5× the local baseline), and
+  two are the 06-06 #1610 bid vacuum below (0.07 baseline → 0.456) — i.e. the
+  sudden-widening-from-a-system-disruption case is **real but isolated to that one
+  OOM-confounded market**, not the general driver.
+
+**1. The one true transient spike: stop-loss into a sudden bid vacuum (06-06 #1610).**
+Verified example,
 **06-06 v1 bucket #1610** (sim −$138.40, live +$5.34, same winning leg):
 - Sim buys 305 @0.982, then **stop-loss sells all 305 @0.523**, re-buys @0.993, settles
   @1.00 → −$138. Live simply **held #1610 to settle → +$5.34**.
