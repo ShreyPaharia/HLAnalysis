@@ -335,7 +335,7 @@ feed-gap cap.)
 - **(c)** Equivalently, a spread-aware exit gate: suppress `exit_safety_d`/`exit_edge`
   liquidations on an illiquid bucket favorite; defer to settlement.
 - **(d) Sim-fidelity only:** shared inventory cap (**SHR-91**) so backtest churn
-  magnitude matches live. File as a new strategy ticket + SHR-91/SHR-79 (fidelity).
+  magnitude matches live. Filed as **SHR-102** (strategy); related SHR-79/SHR-89/SHR-91 (sim fidelity).
 
 **Order-mechanics note (don't reach for the wrong knob).** The engine submits an **IOC
 limit order at the touch** (`exchange.order(…, price=limit, {"limit":{"tif":"Ioc"}})`,
