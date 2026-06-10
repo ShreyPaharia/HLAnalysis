@@ -172,12 +172,17 @@ actually drives the bucket losses.** A clean split by leg type:
   Binary divergences are churn/inventory (v31) and single-fill tick (v1), *not* width.
 - **All 43 wide-book fills are bucket legs, and 40 of 43 are STRUCTURAL** — the bucket
   markets are *persistently* wide/illiquid (±30 s baseline spread ≈ 0.13–0.20), not
-  momentary spikes. The −$383 (06-07 #1670) and −$229 (06-06 #1610) come from the theta
-  strategy **round-tripping across that full width** (buying near the ask 0.92–0.97,
-  selling near the bid 0.60–0.85). Live saw the same wide book and churned it too
-  (live #1670 06-07: 48 fills, −$133) but its inventory cap throttled the churn (live
-  $1,465 vs sim $2,482 notional). → **SHR-79** (IOC fill eats the full wide spread) +
-  **SHR-91** (no cap → more round-trips), *not* transient-flicker latency.
+  momentary spikes. The −$383 (06-07 #1670) and −$229 (06-06 #1610) come from a theta
+  **doom loop** on the wide book (detailed below).
+- **This doom loop is REAL ON LIVE, not a sim artifact.** Live #1670 06-07 ran the
+  identical loop and lost real money: `buy 359+112 @0.950 → sell 98 @0.710 (−$23.5),
+  sell 255 @0.667 (−$71.9) → buy 78 @0.964 → sell @0.656/0.643/0.624/0.600 → buy
+  413 @0.947 …` — live's −$133 on #1670 is this exact pathology. The sim reproduces it
+  *faithfully* and amplifies it to −$383 via no inventory cap (bigger positions to dump)
+  + scan-timing differences (samples the wide book at worse bids). The backtest
+  **surfaced a real live strategy defect**, it did not invent one. → root cause is a
+  **missing spread/liquidity gate** (strategy), amplified by **SHR-91** (no cap) +
+  **SHR-79** (full-size IOC eats the spread); *not* transient-flicker latency.
 - **Only 3 of 124 fills are genuine LOCALIZED SPIKES** (≥2.5× the local baseline), and
   two are the 06-06 #1610 bid vacuum below (0.07 baseline → 0.456) — i.e. the
   sudden-widening-from-a-system-disruption case is **real but isolated to that one
@@ -273,6 +278,34 @@ only by which tick the lone partial-fill ladder snaps to. → **SHR-79**, bounde
 v1 on the two clean config-stable days (06-08) is the only place sim ≈ live.
 
 ---
+
+## Follow-up (NOT fixed here): theta bucket doom-loop — a real LIVE money-loser
+
+The book-width scan surfaced a genuine strategy defect, **not** a sim-only artifact.
+On a persistently-wide bucket book the theta strategy round-trips at a loss:
+
+1. Entry edge = `p_win − ask − fee − half_spread_assumption`, and live config sets
+   **`half_spread_assumption = 0.005`** (config/strategy.yaml:287/493/707) — ~30–70× too
+   small for a 0.14–0.36-wide bucket book, so it does not gate wide entries.
+2. `p_win` (model fair) sits near/above the ask ⇒ **buy at the ask** (~0.95).
+3. A risk gate (`exit_safety_d`) fires ⇒ `_exit_intent` IOC-sells the **whole position
+   at `limit = best_bid`** (theta_harvester.py:935) ⇒ on a wide book that's 0.60–0.71.
+4. `p_win` still > ask ⇒ **re-enter at the ask** ⇒ repeat. Each cycle eats ~(ask−bid).
+
+**Live evidence (v31 #1670, 06-07):** `sell 98 @0.710 (−$23.5)`, `sell 255 @0.667
+(−$71.9)`, then re-buys @0.95–0.96 and more sells @0.60–0.66 — live's −$133 on #1670 is
+this loop. The strategy's entry "edge" never accounts for the round-trip spread it will
+pay on exit.
+
+**Recommended fix (strategy-level, fixes live P&L):**
+- **(a)** Dynamic spread/liquidity gate: use the real `(ask−bid)/2` instead of the
+  static 0.005, or hard-skip entry when `(ask−bid)` exceeds the edge budget.
+- **(b)** Don't IOC-dump winners at the bid — hold an illiquid bucket favorite to
+  settlement (v1-style) or exit passively / in top-of-book clips.
+- **(c)** Spread-aware exit gate: suppress `exit_safety_d`/`exit_edge` liquidations when
+  the only fill price (bid) is far below fair; defer to time/settlement.
+- **(d)** Sim-fidelity only: shared inventory cap (**SHR-91**) so backtest churn
+  magnitude matches live. File as a new ticket (strategy) + SHR-91/SHR-79 (fidelity).
 
 ## Caveats
 
