@@ -100,13 +100,21 @@ class SlotRecon:
 
     @property
     def total_true_pnl(self) -> float:
-        """The STRATEGY's PnL: outcome-markets only. HL venue_realized_pnl is the
-        outcome-only realized closedPnl (excludes the operator's perp/spot trades
-        on the same account); PM realized lives in the local ledger and is already
-        outcome-only. NOT the HL portfolio `allTime` PnL — that nets in unrelated
-        HYPE/perp/spot activity (see account_pnl_all_time, shown for context)."""
-        base = self.venue_realized_pnl if self.venue_realized_pnl is not None else self.realized_pnl
-        return base + self.open_mtm
+        """The STRATEGY's lifetime PnL: outcome-markets only.
+
+        Sourced from the local DB realized (``realized_pnl``), which is the
+        COMPLETE lifetime figure: for HL it is the durable venue mirror (every
+        outcome fill HL has ever reported, booked tid-keyed into the Fill table
+        by the reconcile loop — SHR-74), and for PM it is the authoritative
+        local settlement/fill ledger (already outcome-only). We do NOT use
+        ``venue_realized_pnl`` here: that is a fresh ``user_fills`` re-fetch, and
+        HL's fill API returns only a recent slice of history, so it silently
+        under-reports lifetime PnL once old fills age out (v31 was understated by
+        ~$171). ``venue_realized_pnl`` is retained only as a windowed
+        reconciliation cross-check (see compare_slot's pnl_mismatch). NOT the HL
+        portfolio `allTime` PnL either — that nets in unrelated HYPE/perp/spot
+        activity (see account_pnl_all_time, shown for context)."""
+        return self.realized_pnl + self.open_mtm
 
     @property
     def window_total_pnl(self) -> float:
@@ -172,9 +180,19 @@ def compare_slot(
             if sym not in db_by_sym:
                 drift.append(Drift("orphan", sym, 0.0, v_qty))
 
+    # Reconcile local vs venue realized on the TRAILING WINDOW only, never
+    # all-time. HL's fill API (user_fills_by_time) returns just a recent slice
+    # of history, so a fresh all-time re-fetch (venue_realized_pnl) silently
+    # under-reports once old fills age out of the API — while the durable local
+    # mirror keeps them. Comparing all-time therefore flags a permanent, growing
+    # FALSE drift equal to the truncation gap (v31: +$171 across 62 aged-out
+    # fills). Within the trailing window BOTH sources are complete, so a
+    # divergence there is a REAL discrepancy (a missed/extra recent fill). The
+    # window must stay within HL's fill-API retention; the 24h default is well
+    # inside it. PM has no venue realized (window is None) → never flags here.
     pnl_mismatch = (
-        venue_realized_pnl is not None
-        and abs(db_realized_pnl - venue_realized_pnl) > pnl_tolerance
+        venue_realized_pnl_window is not None
+        and abs(realized_pnl_window - venue_realized_pnl_window) > pnl_tolerance
     )
 
     return SlotRecon(
@@ -436,13 +454,17 @@ def gather_slot(
         except Exception:  # noqa: BLE001
             fills_count = None
 
-    # PM windowed local realized (dal.realized_pnl_since supports a cutoff).
+    # Windowed local realized (dal.realized_pnl_since supports a cutoff).
+    # Computed for BOTH tracks: it is the local side of the windowed drift check
+    # (compare_slot). For HL it sums the venue-mirrored fills within the window;
+    # for PM the local settlement/fill ledger. Within HL's fill-API retention
+    # this equals the venue windowed figure, so any divergence is a real recent
+    # discrepancy rather than the all-time API-truncation gap.
     realized_pnl_window: float = 0.0
-    if not fetch_venue_realized:
-        try:
-            realized_pnl_window = dal.realized_pnl_since(window_start_ns)
-        except Exception:  # noqa: BLE001
-            realized_pnl_window = 0.0
+    try:
+        realized_pnl_window = dal.realized_pnl_since(window_start_ns)
+    except Exception:  # noqa: BLE001
+        realized_pnl_window = 0.0
 
     return compare_slot(
         alias=alias, db_positions=db_positions, db_realized_pnl=db_realized,

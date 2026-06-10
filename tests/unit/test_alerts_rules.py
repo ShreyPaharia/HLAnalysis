@@ -164,6 +164,40 @@ async def test_order_rejected_alerts_with_error_text():
 
 
 @pytest.mark.asyncio
+async def test_order_rejected_fak_no_match_is_suppressed():
+    # A marketable IOC (FAK) that finds no resting match is killed by PM and
+    # self-heals on the next scan — it must NOT page. A genuine reject on the
+    # same leg still alerts (proving we suppress the FAK case specifically, not
+    # all rejects for that symbol).
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    await bus.publish(OrderRejected(
+        ts_ns=1, cloid="hla-1", question_idx=10, symbol="#551",
+        side="buy", size=15.0, price=0.87,
+        error=("no orders found to match with FAK order. FAK orders are "
+               "partially filled or killed if no match is found."),
+    ))
+    await bus.publish(OrderRejected(
+        ts_ns=2, cloid="hla-2", question_idx=10, symbol="#551",
+        side="buy", size=15.0, price=0.87,
+        error="Insufficient margin",
+    ))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    rej_msgs = [m for m in tg.messages if "REJECTED" in m]
+    assert len(rej_msgs) == 1                       # FAK no-match suppressed
+    assert "Insufficient margin" in rej_msgs[0]
+    assert not any("no orders found to match" in m for m in tg.messages)
+
+
+@pytest.mark.asyncio
 async def test_reconcile_drift_distinct_events_alert():
     # Different (case, question_idx, cloid) tuples should each get their own
     # alert — dedupe only collapses identical events.

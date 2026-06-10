@@ -217,7 +217,7 @@ def test_format_daily_summary_single_message():
     recon = [
         SlotRecon(alias="v1_pm", realized_pnl=2.17, open_mtm=0.0,
                   account_value_usd=121.0, positions_known=True, fills_count=8),
-        SlotRecon(alias="v31", realized_pnl=0.0, open_mtm=0.0,
+        SlotRecon(alias="v31", realized_pnl=138.12, open_mtm=0.0,
                   account_value_usd=1299.0, positions_known=True,
                   venue_realized_pnl=138.12, fills_count=527),
     ]
@@ -239,7 +239,7 @@ def test_format_daily_summary_splits_hl_by_klass():
     recon = [
         SlotRecon(alias="v1_pm", realized_pnl=2.17, open_mtm=0.0,
                   account_value_usd=121.0, positions_known=True, fills_count=8),
-        SlotRecon(alias="v31", realized_pnl=0.0, open_mtm=18.12,
+        SlotRecon(alias="v31", realized_pnl=120.0, open_mtm=18.12,
                   account_value_usd=1299.0, positions_known=True,
                   venue_realized_pnl=120.0, fills_count=527,
                   klass_breakdown={
@@ -358,24 +358,47 @@ def test_gather_slot_unmapped_fill_is_unknown():
     assert r.klass_breakdown["unknown"].fills == 1
 
 
-def test_compare_slot_flags_pnl_mismatch_and_prefers_venue():
-    # Local ledger says -421 (corrupted by bad settlement rows); venue says +198.
+def test_compare_slot_flags_pnl_mismatch_on_windowed_divergence():
+    # Within the trailing window (where HL's fill API is COMPLETE) the local
+    # mirror and the venue re-fetch disagree by >$1 → a REAL recent discrepancy
+    # (a missed/extra fill in the last 24h), which must flag drift.
     r = compare_slot(
         alias="v1",
         db_positions=[],
-        db_realized_pnl=-421.49,
+        db_realized_pnl=384.72,
         venue=ClearinghouseState(positions=(), account_value_usd=0.0),
         qty_tolerance=1e-6,
-        venue_realized_pnl=198.41,
+        venue_realized_pnl=213.08,            # all-time re-fetch (truncated)
+        venue_realized_pnl_window=20.0,       # last-24h venue (complete)
+        realized_pnl_window=25.5,             # last-24h local mirror — diverges
         pnl_tolerance=1.0,
     )
-    assert r.pnl_mismatch is True          # local vs venue diverge > $1
+    assert r.pnl_mismatch is True          # windowed local vs venue diverge > $1
     assert r.has_drift is True             # pnl mismatch counts as drift
-    assert r.venue_realized_pnl == 198.41
-    # total_true_pnl prefers the authoritative venue figure, not the local one
-    assert r.total_true_pnl == 198.41      # + open_mtm 0
     text = format_report([r])
     assert "pnl_mismatch" in text and "DRIFT" in text
+
+
+def test_compare_slot_alltime_truncation_gap_is_not_drift():
+    # HL ages old fills out of its fill API: the all-time local mirror
+    # (complete, +384.72) exceeds the all-time venue re-fetch (truncated,
+    # +213.08) by the aged-out gap. The trailing window (both complete) AGREES,
+    # so this is NOT drift — and the headline PnL uses the durable mirror, never
+    # the truncated re-fetch. (Reproduces the live v31 false DRIFT, 2026-06-10.)
+    r = compare_slot(
+        alias="v31",
+        db_positions=[],
+        db_realized_pnl=384.72,               # durable mirror (complete)
+        venue=ClearinghouseState(positions=(), account_value_usd=1374.0),
+        qty_tolerance=1e-6,
+        venue_realized_pnl=213.08,            # all-time re-fetch (truncated)
+        venue_realized_pnl_window=12.5,       # last-24h venue (complete)
+        realized_pnl_window=12.5,             # last-24h local — matches
+        pnl_tolerance=1.0,
+    )
+    assert r.pnl_mismatch is False
+    assert r.has_drift is False
+    assert r.total_true_pnl == 384.72         # durable mirror, NOT 213.08
 
 
 def test_compare_slot_no_pnl_mismatch_within_tolerance():
@@ -385,12 +408,14 @@ def test_compare_slot_no_pnl_mismatch_within_tolerance():
         db_realized_pnl=100.0,
         venue=ClearinghouseState(positions=(), account_value_usd=50.0),
         qty_tolerance=1e-6,
-        venue_realized_pnl=100.4,          # within $1 tolerance
+        venue_realized_pnl=100.4,
+        venue_realized_pnl_window=30.0,
+        realized_pnl_window=30.4,          # within $1 window tolerance
         pnl_tolerance=1.0,
     )
     assert r.pnl_mismatch is False
     assert r.has_drift is False
-    assert r.total_true_pnl == 100.4       # still prefers venue
+    assert r.total_true_pnl == 100.0       # durable local mirror
 
 
 def test_strategy_pnl_is_outcome_only_not_full_account():
@@ -504,7 +529,7 @@ def test_format_daily_summary_desk_footer_dual_totals():
                   venue_realized_pnl=100.0,
                   venue_realized_pnl_window=20.0,
                   fills_count=10, fills_count_window=2),
-        SlotRecon(alias="v31", realized_pnl=0.0, open_mtm=2.0,
+        SlotRecon(alias="v31", realized_pnl=50.0, open_mtm=2.0,
                   account_value_usd=800.0, positions_known=True,
                   venue_realized_pnl=50.0,
                   venue_realized_pnl_window=10.0,

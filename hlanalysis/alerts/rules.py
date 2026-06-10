@@ -196,6 +196,21 @@ class AlertRules:
                 lines.append(f"<code>q={ev.question_idx}</code> <code>{_e(ev.symbol)}</code>")
                 return f"exit:{ev.question_idx}:{ev.reason}", "\n".join(lines)
             case OrderRejected():
+                # A marketable IOC (FAK) order that finds no resting match is
+                # KILLED by PM ("no orders found to match with FAK order. FAK
+                # orders are partially filled or killed if no match is found").
+                # That is expected microstructure — the book ticked past our
+                # limit between read and send — and it self-heals: the next scan
+                # re-prices and the entry fills. Don't page on it. A genuine
+                # pathological case (price never marketable) trips the
+                # per-(question, side) reject circuit-breaker (SHR-45), which
+                # alerts separately, so suppressing the single reject is safe.
+                if ev.error and "no orders found to match" in ev.error.lower():
+                    logger.debug(
+                        "suppressing self-healing FAK no-match reject "
+                        "q={} sym={}", ev.question_idx, _e(ev.symbol),
+                    )
+                    return None
                 notional = ev.size * ev.price
                 lines = ["❌ <b>ORDER REJECTED</b>"]
                 lines.append(
