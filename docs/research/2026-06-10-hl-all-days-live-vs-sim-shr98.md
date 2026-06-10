@@ -173,8 +173,23 @@ The largest residuals are not phantom *entries* but phantom *exits*. Verified ex
   reference move would push fair value *toward 1.0*, not crash it. The bid vacuum is
   therefore **decoupled from (and contrary to) the reference** — a pure outcome-book
   liquidity flicker, not a repricing. v1's price stop (on the leg bid, ≈0.83) punched
-  through and the IOC sold 305 sh into the 0.523 bid; live's discrete scan skipped the
-  1.4 s vacuum.
+  through and the IOC sold 305 sh into the 0.523 bid.
+- **Why live didn't stop out — VERIFIED from engine logs: the live engine was DOWN
+  (OOM crash-loop) during the exact 24 s window.** Live held the *identical* position
+  (305 sh @0.98248, entered ~04:19 UTC, within 26 s of the sim's entry) — so this is
+  not an entry-timing difference. Engine journald around the crash:
+  `05:54:35 kernel oom-killer → Killed process (duckdb, rss 530MB) under
+  hl-recorder-sync` → `05:54:37 hl-engine start-pre timed out, Terminating` →
+  `05:54:43 Scheduled restart, restart counter at 23` → **`05:54:49 #1610 bid vacuum
+  (engine not running)`** → `05:55:01 Started` → `05:55:08 reconcile_drift`. The engine
+  was OOM-crash-looping (the known hourly-OOM pattern, fixed+deployed *later* on 06-06:
+  +1 G swap + duckdb `memory_limit=256 MB`), so no scanner evaluated the stop; by
+  recovery the book was back to ~0.98. **This confounds the −$138 cell:** the sim
+  assumes a continuously-running engine, but live physically could not act. Had the
+  engine been up, its known *"IOC stop walks down book"* behavior might have stopped
+  out too — so the sim's stop-out is not necessarily *wrong*, just unobservable in this
+  downtime-confounded live sample. → reliability gap (engine OOM availability), not only
+  SHR-89.
 - **The SHR-98 veto guards the wrong direction here.** `_is_fleeting_bid` vetoes a sell
   only if the bid retreats *further below* the fill price within the window. A bid that
   is *anomalously low and reverts up* is not caught — so stop-outs into transient
@@ -244,8 +259,17 @@ v1 on the two clean config-stable days (06-08) is the only place sim ≈ live.
 - **Live window PnL = Σ(closedPnl−fee)** over the window, settlement included. For v31
   (closes intraday) this is fill-driven; for v1 (holds) it includes the settlement leg.
 - **Corpus ends 06-09**; 06-10 not recorded.
+- **Engine OOM downtime confounds the live side (esp. 06-06).** The box was OOM
+  crash-looping on the morning of 06-06 (restart counter 23; fixed+deployed later that
+  day). At 05:54:37→05:55:01 the engine was DOWN — verified via journald — which is
+  exactly why the 06-06 v1 #1610 stop didn't fire (no scanner running), and likely
+  suppresses other 06-06/06-07 live decisions the sim makes. **The sim assumes 100%
+  engine uptime; live did not have it.** Any 06-06/06-07 divergence may be partly
+  availability, not strategy/execution fidelity. Treat those days' absolute Δ with
+  caution; 06-08/06-09 (post-OOM-fix) are the cleaner comparison.
 - **06-07 was a v31-only live day** (v1 had zero fills); 06-06/06-09 binary had no live
-  v1 fills either — those Δ rows are phantom-entry comparisons, not execution gaps.
+  v1 fills either — those Δ rows are phantom-entry comparisons, not execution gaps (and
+  the missing live activity may itself be OOM downtime).
 
 ---
 
