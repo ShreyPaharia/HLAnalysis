@@ -297,15 +297,45 @@ On a persistently-wide bucket book the theta strategy round-trips at a loss:
 this loop. The strategy's entry "edge" never accounts for the round-trip spread it will
 pay on exit.
 
-**Recommended fix (strategy-level, fixes live P&L):**
-- **(a)** Dynamic spread/liquidity gate: use the real `(ask−bid)/2` instead of the
-  static 0.005, or hard-skip entry when `(ask−bid)` exceeds the edge budget.
-- **(b)** Don't IOC-dump winners at the bid — hold an illiquid bucket favorite to
-  settlement (v1-style) or exit passively / in top-of-book clips.
-- **(c)** Spread-aware exit gate: suppress `exit_safety_d`/`exit_edge` liquidations when
-  the only fill price (bid) is far below fair; defer to time/settlement.
-- **(d)** Sim-fidelity only: shared inventory cap (**SHR-91**) so backtest churn
-  magnitude matches live. File as a new ticket (strategy) + SHR-91/SHR-79 (fidelity).
+### Book-dynamics analysis — is the illiquidity transient or persistent?
+
+(`tools/_book_dynamics.py`, time-weighted over each market's full ~24 h window, 60 s
+feed-gap cap.)
+
+| leg | tradeable (<0.05) | wide (≥0.10) | median wide-episode | p90 episode | longest | % wide-time in episodes >60 s |
+| :-- | --: | --: | --: | --: | --: | --: |
+| 0606 #1610 | **2.7%** | 88.5% | 50 s | 46 min | **2.6 h** | 99.5% |
+| 0607 #1670 | 32.4% | 19.3% | 2.2 s | 9 min | 1.9 h | 99.1% |
+| 0608 #2230 | 15.4% | 59.0% | 55 s | 16 min | **4.8 h** | 99.3% |
+| 0609 #2280 | 16.4% | 48.9% | 5.4 min | 52 min | 1.9 h | 99.8% |
+| 0608 #2200 (binary) | **100%** | 0% | — | — | — | 0% |
+
+- **The illiquidity is STRUCTURAL and LONG, not a 5–10 s flicker.** ~**99% of the
+  wide-spread *time*** on every bucket leg is in episodes **longer than 60 s** —
+  typical episodes run minutes, p90 9–52 min, longest 2–5 **hours**. Three of four
+  bucket markets are cheaply tradeable only 2.7–16% of the day; binary legs are tight
+  100% of the day.
+- **Liquidity is heterogeneous across markets and across the session.** Hour-into-window
+  median spread shows #1670/#2230 are **liquid early, then widen sharply in the final
+  hours before the 06:00 settle** (MMs pull bids on the near-certain favorite as it
+  resolves); #1610 is wide all day; #2200 (binary) is always tight.
+
+**Recommended fix (strategy-level, fixes live P&L) — informed by the dynamics:**
+- **(a) ENTRY → decision-time dynamic spread gate, NOT a blanket bucket ban.** Use the
+  live `(ask−bid)/2` instead of the static 0.005, or skip entry when `(ask−bid)` exceeds
+  the edge budget. A dynamic gate auto-skips the all-day-wide #1610 yet still trades
+  #1670/#2230's liquid early window — a hard "never trade buckets" would forfeit that
+  genuine 15–32% tradeable window.
+- **(b) EXIT → hold the favorite to settlement; do NOT "wait out" the spread.** Because
+  wide episodes last **minutes-to-hours** (not seconds), once a held favorite's book
+  goes wide near settlement the bid will not recover before 06:00 — "dynamically widen
+  the exit and wait" is infeasible. The only non-bleeding exit is to not cross the wide
+  spread at all (hold to settlement, v1-style). The doom loop *is* the strategy
+  repeatedly crossing a spread that never tightens back.
+- **(c)** Equivalently, a spread-aware exit gate: suppress `exit_safety_d`/`exit_edge`
+  liquidations on an illiquid bucket favorite; defer to settlement.
+- **(d) Sim-fidelity only:** shared inventory cap (**SHR-91**) so backtest churn
+  magnitude matches live. File as a new strategy ticket + SHR-91/SHR-79 (fidelity).
 
 ## Caveats
 
