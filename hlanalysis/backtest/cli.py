@@ -281,6 +281,9 @@ def _run_config_from_args(
         fee_rate=args.fee_rate,
         book_depth_assumption=args.depth,
         order_latency_ms=args.order_latency_ms,
+        ioc_fleeting_persistence_seconds=getattr(
+            args, "ioc_fleeting_persistence_seconds", 2.0),
+        ioc_fleeting_min_revert=getattr(args, "ioc_fleeting_min_revert", 0.02),
         scan_mode=getattr(args, "scan_mode", "fixed"),
         scan_min_interval_seconds=getattr(args, "scan_min_interval_seconds", 0.2),
         scan_max_interval_seconds=getattr(args, "scan_max_interval_seconds", 2.0),
@@ -699,6 +702,26 @@ def _add_run_config_args(parser: argparse.ArgumentParser) -> None:
         help="Constant order round-trip latency in milliseconds (SHR-79). "
         "Default=50 ms (empirical HL HIP-4 median). Set to 0 for legacy "
         "zero-latency behaviour.",
+    )
+    parser.add_argument(
+        "--ioc-fleeting-persistence-seconds",
+        type=float,
+        default=2.0,
+        help="SHR-98: seconds a marketable level must persist after a decision "
+        "to be treated as live-hittable. A level that reverts to an "
+        "unmarketable price within this window is vetoed as a fleeting "
+        "(phantom) fill on HL's change-driven book. Default=2.0. Set to 0 to "
+        "effectively disable the fleeting re-check (restores pre-SHR-98 fills).",
+    )
+    parser.add_argument(
+        "--ioc-fleeting-min-revert",
+        type=float,
+        default=0.02,
+        help="SHR-98: minimum adverse reversion (price/probability units) for a "
+        "reverting level to count as a phantom spike. Separates genuine phantom "
+        "fills (#2230: 0.90→0.98, revert 0.08) from near-settlement "
+        "microstructure (sub-cent ticks that are real fills). Default=0.02. Set "
+        "0 to veto on any reversion within the persistence window.",
     )
     # SHR-95: event-driven scan mode (mirrors live engine cadence).
     parser.add_argument(

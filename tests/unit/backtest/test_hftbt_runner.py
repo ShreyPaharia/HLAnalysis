@@ -1499,22 +1499,25 @@ def test_shr94_is_fleeting_ask_function():
     snap_ask = {"yes": np.array([0.90, 0.98], dtype=np.float64)}
     book_idx = {"yes": 1}  # cursor points to next unconsumed snapshot
 
-    assert _is_fleeting_ask("yes", 0.90, T, LAT_NS, snap_ask, book_ts, book_idx) is True
+    assert _is_fleeting_ask("yes", 0.90, T, LAT_NS, 0.0, snap_ask, book_ts, book_idx) is True
 
 
 def test_shr94_is_fleeting_ask_outside_window():
-    """Next snapshot is OUTSIDE the latency window → not fleeting (ask was stable)."""
+    """SHR-98: the next recorded change is BEYOND the persistence window. On a
+    change-driven feed that means the level held unchanged through the whole
+    window → it was stable/live-hittable → NOT fleeting.
+    """
     from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_ask
 
     T = 1_000_000_000
-    LAT_NS = 50_000_000  # 50ms
-    # Next snapshot at T+5s — far outside 50ms window
-    book_ts = {"yes": np.array([T, T + 5_000_000_000], dtype=np.int64)}
-    snap_ask = {"yes": np.array([0.90, 0.98], dtype=np.float64)}
-    book_idx = {"yes": 1}
+    PERSIST_NS = 50_000_000  # 50ms window
+    # Next recorded change at T+5s — far beyond the 50ms window. The level was
+    # therefore stable for 5s before reverting to 0.98 → live could have hit it.
+    book_ts = {"yes": np.array([T + 5_000_000_000], dtype=np.int64)}
+    snap_ask = {"yes": np.array([0.98], dtype=np.float64)}
+    book_idx = {"yes": 0}
 
-    # T+5s > T+50ms → not within window → not fleeting
-    assert _is_fleeting_ask("yes", 0.90, T, LAT_NS, snap_ask, book_ts, book_idx) is False
+    assert _is_fleeting_ask("yes", 0.90, T, PERSIST_NS, 0.0, snap_ask, book_ts, book_idx) is False
 
 
 def test_shr94_is_fleeting_ask_ask_still_present():
@@ -1528,13 +1531,251 @@ def test_shr94_is_fleeting_ask_ask_still_present():
     snap_ask = {"yes": np.array([0.90, 0.90], dtype=np.float64)}
     book_idx = {"yes": 1}
 
-    assert _is_fleeting_ask("yes", 0.90, T, LAT_NS, snap_ask, book_ts, book_idx) is False
+    assert _is_fleeting_ask("yes", 0.90, T, LAT_NS, 0.0, snap_ask, book_ts, book_idx) is False
 
 
 def test_shr94_run_config_has_ioc_marketability_recheck():
     """RunConfig.ioc_marketability_recheck defaults to True."""
     cfg = RunConfig()
     assert cfg.ioc_marketability_recheck is True
+
+
+# ---------------------------------------------------------------------------
+# SHR-98: fleeting re-check must fire on HL's change-driven (burst) book, where
+# a level can persist across two sub-second snapshots then revert. SHR-94 keyed
+# the veto window on the ~50ms order latency, so on dt=5-60s books the next
+# snapshot was always far past the window and the gate never fired → phantom
+# fills on ~1s transients (v31 #2230: ask 0.90 for ~1.1s, then 0.98, +$20 that
+# live got 0 fills on). The fix uses a wall-clock *persistence* window and
+# scans every snapshot inside it for the level reverting.
+#
+# Real #2230 mechanics (recorded book, snapshots are change-driven):
+#   t=+0.000s best_ask=0.90  ← sim fill 1 here
+#   t=+0.545s best_ask=0.90  ← sim fill 2 here
+#   t=+1.088s best_ask=0.98  ← level gone (reverted) ~1.1s after appearing
+# A persistence window of 2s sees the 0.98 revert within the window → veto both.
+# ---------------------------------------------------------------------------
+
+# Persistence window used by the route-level integration tests below: 2s,
+# matching the RunConfig default. The transient reverts ~1.1s out (inside it);
+# a stable level's next change is 5s out (outside it).
+_PERSIST_NS = 2_000_000_000
+
+
+def test_shr98_subsecond_transient_ask_no_fill():
+    """SHR-98: an ask that appears, holds across two sub-second snapshots, then
+    reverts to an unmarketable price ~1.1s later (inside the persistence window)
+    must NOT fill — matching live's zero-fill on the v31 #2230 bucket transient.
+    """
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_enter
+
+    T = 1_000_000_000
+    arr = np.concatenate([
+        _make_depth_clear_arr(0),
+        _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, 100.0),
+    ])
+    cfg = RunConfig(
+        tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
+        order_latency_ms=50.0, ioc_marketability_recheck=True,
+        ioc_fleeting_persistence_seconds=2.0,
+    )
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(T)
+
+    # Current snapshot (idx 0) marketable; next (idx 1, +0.545s) still 0.90;
+    # then (idx 2, +1.088s) reverts to 0.98 → gone within the 2s window.
+    snap_best_ask = np.array([0.90, 0.90, 0.98], dtype=np.float64)
+    book_ts = np.array(
+        [T - 5_000_000, T + 545_000_000, T + 1_088_000_000], dtype=np.int64)
+    book_idx = {"yes": 1}  # next unconsumed snapshot is idx 1
+
+    st = _snap_run_state(
+        bt, cfg,
+        snap_best_ask_per_leg={"yes": snap_best_ask},
+        book_ts_per_leg={"yes": book_ts},
+        book_idx=book_idx,
+    )
+    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90,
+                                 ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T)}
+    st.now_ns = T
+
+    _route_enter(st, _enter_decision(limit=0.92))
+    bt.close()
+
+    assert st.result.fills == [], (
+        "sub-second transient ask (reverts to 0.98 within the persistence "
+        "window) must produce no fill — live got 0 fills on #2230"
+    )
+    assert st.pos is None, "no position opened on a sub-second transient ask"
+    assert st.result.n_rejects == 1, "transient detected → counted as a reject"
+
+
+def test_shr98_is_fleeting_ask_reverts_within_window():
+    """Unit: best ask reverts above fill_price at a snapshot inside the
+    persistence window (even though the IMMEDIATE next snapshot is still
+    marketable) → fleeting. This is the exact #2230 shape SHR-94 missed."""
+    from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_ask
+
+    T = 1_000_000_000
+    book_ts = {"yes": np.array(
+        [T + 545_000_000, T + 1_088_000_000], dtype=np.int64)}
+    snap_ask = {"yes": np.array([0.90, 0.98], dtype=np.float64)}
+    book_idx = {"yes": 0}
+
+    # +0.545s still 0.90 (ok), +1.088s 0.98 > 0.92 within 2s → fleeting.
+    assert _is_fleeting_ask("yes", 0.92, T, _PERSIST_NS, 0.0, snap_ask, book_ts, book_idx) is True
+
+
+def test_shr98_stable_ask_next_change_beyond_window_fills():
+    """SHR-98 non-regression: on a change-driven feed, a snapshot whose next
+    recorded change is BEYOND the persistence window was a STABLE level (no book
+    change for seconds) → live-hittable → NOT fleeting. This is the case the old
+    latency gate handled correctly and must keep filling (deep/stable v1)."""
+    from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_ask
+
+    T = 1_000_000_000
+    # Next recorded change is 5s out and shows the level gone — but 5s of no
+    # change means the 0.90 was stable for 5s → hittable.
+    book_ts = {"yes": np.array([T + 5_000_000_000], dtype=np.int64)}
+    snap_ask = {"yes": np.array([0.98], dtype=np.float64)}
+    book_idx = {"yes": 0}
+
+    assert _is_fleeting_ask("yes", 0.92, T, _PERSIST_NS, 0.0, snap_ask, book_ts, book_idx) is False
+
+
+def test_shr98_stable_ask_marketable_through_window_fills():
+    """SHR-98 non-regression: an ask that stays marketable through every
+    snapshot in the persistence window → NOT fleeting → fills."""
+    from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_ask
+
+    T = 1_000_000_000
+    book_ts = {"yes": np.array(
+        [T + 500_000_000, T + 1_000_000_000, T + 1_500_000_000], dtype=np.int64)}
+    snap_ask = {"yes": np.array([0.90, 0.90, 0.90], dtype=np.float64)}
+    book_idx = {"yes": 0}
+
+    assert _is_fleeting_ask("yes", 0.92, T, _PERSIST_NS, 0.0, snap_ask, book_ts, book_idx) is False
+
+
+def test_shr98_is_fleeting_bid_reverts_within_window():
+    """SHR-98 (sell side): a bid that retreats below fill_price within the
+    persistence window → fleeting."""
+    from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_bid
+
+    T = 1_000_000_000
+    book_ts = {"yes": np.array(
+        [T + 500_000_000, T + 1_100_000_000], dtype=np.int64)}
+    snap_bid = {"yes": np.array([0.90, 0.82], dtype=np.float64)}  # retreats
+    book_idx = {"yes": 0}
+
+    assert _is_fleeting_bid("yes", 0.88, T, _PERSIST_NS, 0.0, snap_bid, book_ts, book_idx) is True
+
+
+# ---------------------------------------------------------------------------
+# SHR-98 magnitude guard: a reverting level is only a phantom if the reversion
+# is meaningfully adverse (> fill_price + min_revert). This separates the v31
+# #2230 phantom (filled 0.90, reverts to 0.98 → 0.08) from ordinary near-
+# settlement microstructure (v1 #2200: filled 0.99, book ticks to 0.99027 →
+# 0.00027 after the resting size is consumed — a REAL fill live also got).
+# Empirically all legitimate HL near-settlement reverts are ≤ ~0.008; #2230
+# is 0.08; default min_revert=0.02 sits clear of both.
+# ---------------------------------------------------------------------------
+
+
+def test_shr98_large_revert_within_window_is_fleeting():
+    """A revert well above fill_price + min_revert (the #2230 0.90→0.98 shape)
+    → fleeting."""
+    from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_ask
+
+    T = 1_000_000_000
+    book_ts = {"yes": np.array([T + 500_000_000, T + 1_100_000_000], dtype=np.int64)}
+    snap_ask = {"yes": np.array([0.90, 0.98], dtype=np.float64)}  # reverts 0.08
+    book_idx = {"yes": 0}
+
+    # fill 0.90, reverts to 0.98 → 0.08 > min_revert 0.02 → fleeting.
+    assert _is_fleeting_ask("yes", 0.90, T, _PERSIST_NS, 0.02, snap_ask, book_ts, book_idx) is True
+
+
+def test_shr98_subcent_revert_within_window_is_not_fleeting():
+    """A sub-cent revert (the v1/v31 #2200 near-settlement shape: filled ~0.99,
+    book ticks back to 0.99027 after the resting size is taken) is a REAL fill,
+    NOT a phantom — must NOT be vetoed even though it reverts within the window.
+    """
+    from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_ask
+
+    T = 1_000_000_000
+    book_ts = {"yes": np.array([T + 332_000_000, T + 546_000_000], dtype=np.int64)}
+    snap_ask = {"yes": np.array([0.99027, 0.99027], dtype=np.float64)}
+    book_idx = {"yes": 0}
+
+    # fill 0.99, reverts to 0.99027 → 0.00027 < min_revert 0.02 → NOT fleeting.
+    assert _is_fleeting_ask("yes", 0.99, T, _PERSIST_NS, 0.02, snap_ask, book_ts, book_idx) is False
+
+
+def test_shr98_subcent_revert_bid_is_not_fleeting():
+    """Sell-side mirror: a sub-cent bid tick-back within the window is a real
+    fill, not a phantom."""
+    from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_bid
+
+    T = 1_000_000_000
+    book_ts = {"yes": np.array([T + 332_000_000, T + 546_000_000], dtype=np.int64)}
+    snap_bid = {"yes": np.array([0.00973, 0.00973], dtype=np.float64)}
+    book_idx = {"yes": 0}
+
+    # fill 0.01, bid ticks to 0.00973 → 0.00027 < min_revert 0.02 → NOT fleeting.
+    assert _is_fleeting_bid("yes", 0.01, T, _PERSIST_NS, 0.02, snap_bid, book_ts, book_idx) is False
+
+
+def test_shr98_near_settlement_microstructure_fill_not_vetoed():
+    """SHR-98 non-regression (route level): a v1 #2200-style near-settlement
+    entry where the book ticks back a sub-cent within the window must still FILL
+    under the default magnitude guard — live got these fills."""
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_enter
+
+    T = 1_000_000_000
+    arr = np.concatenate([
+        _make_depth_clear_arr(0),
+        _depth_ev(T - 5_000_000, SELL_EVENT, 0.99, 300.0),
+    ])
+    cfg = RunConfig(
+        tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
+        order_latency_ms=50.0, ioc_marketability_recheck=True,
+        ioc_fleeting_persistence_seconds=2.0, ioc_fleeting_min_revert=0.02,
+    )
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+    bt.elapse(T)
+
+    # Book ticks 0.99 → 0.99027 within the window (sub-cent → real fill).
+    snap_best_ask = np.array([0.99, 0.99027, 0.99027], dtype=np.float64)
+    book_ts = np.array([T - 5_000_000, T + 332_000_000, T + 546_000_000], dtype=np.int64)
+    book_idx = {"yes": 1}
+
+    st = _snap_run_state(
+        bt, cfg,
+        snap_best_ask_per_leg={"yes": snap_best_ask},
+        book_ts_per_leg={"yes": book_ts},
+        book_idx=book_idx,
+    )
+    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.99,
+                                 ask_sz=300.0, last_trade_ts_ns=0, last_l2_ts_ns=T)}
+    st.now_ns = T
+
+    _route_enter(st, _enter_decision(size=300.0, limit=0.99))
+    bt.close()
+
+    assert st.pos is not None, "near-settlement sub-cent tick-back must still fill"
+    assert len(st.result.fills) == 1
+    assert st.result.n_rejects == 0
+
+
+def test_shr98_run_config_has_fleeting_persistence_seconds():
+    """RunConfig fleeting knobs default to (2.0s, 0.02)."""
+    assert RunConfig().ioc_fleeting_persistence_seconds == 2.0
+    assert RunConfig().ioc_fleeting_min_revert == 0.02
+
+
 # SHR-95: event-driven scan mode
 # ---------------------------------------------------------------------------
 #

@@ -221,16 +221,40 @@ class RunConfig:
     hedge_lot_size: float = 0.001
     hedge_slippage_bps: float = 10.0
     hedge_fee_bps: float = 1.0
-    # SHR-94: IOC marketability re-check at send+latency.
-    # When True (default), the runner inspects the next recorded book snapshot
-    # within [now, now + latency_ns] before submitting an IOC. If that snapshot
-    # shows the ask has moved above the fill price (for a buy) or the bid has
-    # moved below (for a sell), the level is flagged as fleeting and the order
-    # is rejected without being submitted — matching live's zero-fill on levels
-    # that disappeared within the order's latency window.
+    # SHR-94/SHR-98: IOC fleeting-level re-check.
+    # When True (default), before submitting an IOC the runner scans the
+    # recorded book snapshots within a persistence window after the decision
+    # time. If the marketable level vanishes within that window (the best ask
+    # moves above the fill price for a buy, or the best bid below it for a
+    # sell), the level is flagged as fleeting and the order is rejected without
+    # being submitted — matching live's zero-fill on transient levels.
+    # SHR-98: HL's book feed is change-driven (a snapshot holds until the next
+    # one), so a snapshot whose successor is seconds away was a STABLE level
+    # (live-hittable). A level that reverts within a short window was a flicker
+    # live could not hold. The window is therefore a wall-clock *persistence*
+    # window (ioc_fleeting_persistence_seconds), NOT the order latency — the
+    # original SHR-94 latency window (~50ms) never fired on dt=5-60s books and
+    # let single/double-snapshot transients (e.g. v31 #2230) fill as phantoms.
     # Set to False to restore the pre-SHR-94 behaviour where fleeting levels
     # can fill (e.g. for isolated tests that don't supply snap_best arrays).
     ioc_marketability_recheck: bool = True
+    # SHR-98: how long (seconds) the marketable level must persist after the
+    # decision to be treated as live-hittable. A level that reverts to an
+    # unmarketable price within this window is a veto candidate. Default 2.0s ≈
+    # the live HL scan/hold horizon; deep/stable levels (present for many
+    # seconds) are unaffected. Only consulted when ioc_marketability_recheck is
+    # True and snap_best arrays are supplied (HL HIP-4 fast path).
+    ioc_fleeting_persistence_seconds: float = 2.0
+    # SHR-98: minimum adverse reversion (in price/probability units) required to
+    # treat a reverting level as a phantom spike. The reverting best ask must
+    # exceed fill_price + this margin (best bid below fill_price − this) to veto.
+    # This separates the v31 #2230 phantom (filled 0.90, book reverts to 0.98 →
+    # 0.08 spike that live got 0 fills on) from ordinary near-settlement
+    # microstructure (v1/v31 fills at ~0.99 where the book ticks back a sub-cent
+    # after the resting size is consumed — real fills live also got). Empirical:
+    # legitimate HL near-settlement reverts are ≤ ~0.008; #2230 is 0.08. Default
+    # 0.02 sits well clear of both. Set 0.0 to veto on any reversion.
+    ioc_fleeting_min_revert: float = 0.02
     # SHR-95: event-driven scan mode. "fixed" (default) preserves legacy behaviour
     # (scan every scanner_interval_seconds). "event" mirrors the live engine:
     # evaluate on each book/reference event clamped between scan_min_interval_seconds
@@ -439,81 +463,99 @@ def _is_fleeting_ask(
     sym: str,
     fill_price: float,
     now_ns: int,
-    latency_ns: int,
+    persistence_ns: int,
+    min_revert: float,
     snap_best_ask_per_leg: "dict[str, np.ndarray]",
     book_ts_per_leg: "dict[str, np.ndarray]",
     book_idx: "dict[str, int]",
 ) -> bool:
-    """SHR-94: was the ask at ``fill_price`` a fleeting level that will no
-    longer be present when the order arrives at the exchange?
+    """SHR-94/SHR-98: was the ask at ``fill_price`` a fleeting phantom level that
+    live could not have hit?
 
     Uses the per-leg snapshot top-of-book arrays (``snap_best_ask_per_leg``,
-    parallel to ``book_ts_per_leg``) to look at the *next* snapshot after
-    ``now_ns``.  If that snapshot (a) falls within the latency window
-    ``[now_ns, now_ns + latency_ns]`` AND (b) shows the best ask has moved
-    ABOVE ``fill_price``, the level is considered fleeting and the caller
-    should veto the IOC submission (counting a reject + re-fire next scan).
+    parallel to ``book_ts_per_leg``). ``book_idx[sym]`` is the first snapshot
+    index NOT YET consumed at ``now_ns`` (the scan loop advances it past all
+    ts ≤ now_ns), i.e. the *next* recorded snapshot.
 
-    Returns ``False`` (not fleeting) when:
-    - No snapshot arrays for this leg (legacy / PM sources without snap_best).
-    - There is no *next* snapshot within the latency window (the level
-      persisted past the arrival time — fill is valid).
-    - The next snapshot's best ask is still ≤ ``fill_price`` (still marketable).
+    SHR-98: HL's book feed is **change-driven** — a recorded snapshot holds
+    until the next one is recorded. The level we are about to fill against
+    persists until the first future snapshot whose best ask reverts to an
+    unmarketable price. Two conditions must both hold for a veto:
+
+    1. **Persistence**: the reversion happens within the persistence window
+       ``[now_ns, now_ns + persistence_ns]`` — i.e. the level did not stay put
+       long enough to be reliably hittable. (A level whose next recorded change
+       is seconds away was STABLE through the window → live-hittable.)
+    2. **Magnitude**: the reverted best ask is more than ``min_revert`` ABOVE
+       ``fill_price``. This is what separates a genuine phantom spike (v31 #2230:
+       filled 0.90, book reverts to 0.98 — a 0.08 favourable spike that live got
+       zero fills on) from ordinary near-settlement microstructure (v1/v31 fills
+       at ~0.99 where the book ticks back a sub-cent after the resting size is
+       consumed — those are real fills live also got, and must NOT be vetoed).
+
+    This replaces the original SHR-94 gate, which keyed the window on the order
+    latency (~50ms). On dt=5-60s books the next snapshot is essentially always
+    far past 50ms, so the gate never fired and ~1s transients filled as phantoms.
+
+    Returns ``False`` (not fleeting) when no recorded snapshot within the window
+    shows the ask reverting above ``fill_price + min_revert``. NaN asks (no ask
+    recorded at a snapshot) are skipped — they can't prove the level fled.
     """
     snap_ask = snap_best_ask_per_leg.get(sym)
     ts_arr = book_ts_per_leg.get(sym)
     if snap_ask is None or ts_arr is None or len(snap_ask) == 0 or len(ts_arr) == 0:
         return False
-    # book_idx[sym] is the first snapshot index NOT YET consumed at now_ns
-    # (the scan loop advances it past all ts <= now_ns).
     idx = book_idx.get(sym, 0)
-    if idx >= len(ts_arr):
-        return False  # no next snapshot
-    next_ts = int(ts_arr[idx])
-    # Only a snapshot that falls STRICTLY WITHIN the latency window can reveal
-    # a fleeting level. A snapshot AFTER arrival (next_ts > now_ns + latency_ns)
-    # means the book was stable through the latency window — fill is valid.
-    arrival_ns = now_ns + latency_ns
-    if next_ts > arrival_ns:
-        return False
-    # The next snapshot is within [now_ns, arrival_ns]. Check if the ask at
-    # that snapshot is worse (higher) than fill_price — fleeting!
-    next_ask = float(snap_ask[idx])
-    if np.isnan(next_ask):
-        return False  # no ask recorded at that snapshot — can't tell; allow fill
-    return next_ask > fill_price
+    horizon_ns = now_ns + persistence_ns
+    threshold = fill_price + min_revert
+    n = min(len(snap_ask), len(ts_arr))
+    # Scan forward over every recorded snapshot within the persistence window.
+    # The first one whose best ask reverts meaningfully (> fill_price +
+    # min_revert) proves the favourable level was a phantom spike → fleeting.
+    i = idx
+    while i < n and int(ts_arr[i]) <= horizon_ns:
+        a = float(snap_ask[i])
+        if not np.isnan(a) and a > threshold:
+            return True
+        i += 1
+    return False
 
 
 def _is_fleeting_bid(
     sym: str,
     fill_price: float,
     now_ns: int,
-    latency_ns: int,
+    persistence_ns: int,
+    min_revert: float,
     snap_best_bid_per_leg: "dict[str, np.ndarray]",
     book_ts_per_leg: "dict[str, np.ndarray]",
     book_idx: "dict[str, int]",
 ) -> bool:
-    """SHR-94: was the bid at ``fill_price`` a fleeting level?
+    """SHR-94/SHR-98: was the bid at ``fill_price`` a fleeting phantom level?
 
-    Symmetric to ``_is_fleeting_ask`` for the sell side: returns ``True`` if
-    the next snapshot within the latency window shows the best bid BELOW
-    ``fill_price`` (the bid has retreated and the level won't fill live).
+    Symmetric to ``_is_fleeting_ask`` for the sell side. Returns ``True``
+    (fleeting, veto) if a recorded snapshot within the persistence window
+    ``[now_ns, now_ns + persistence_ns]`` shows the best bid retreating more
+    than ``min_revert`` BELOW ``fill_price`` (a meaningful adverse spike the
+    level could not hold). A bid that stays marketable through the window — or
+    whose next recorded change is beyond it (a stable, change-driven snapshot),
+    or that only ticks back within ``min_revert`` — is live-hittable → fill.
     """
     snap_bid = snap_best_bid_per_leg.get(sym)
     ts_arr = book_ts_per_leg.get(sym)
     if snap_bid is None or ts_arr is None or len(snap_bid) == 0 or len(ts_arr) == 0:
         return False
     idx = book_idx.get(sym, 0)
-    if idx >= len(ts_arr):
-        return False
-    next_ts = int(ts_arr[idx])
-    arrival_ns = now_ns + latency_ns
-    if next_ts > arrival_ns:
-        return False
-    next_bid = float(snap_bid[idx])
-    if np.isnan(next_bid):
-        return False
-    return next_bid < fill_price
+    horizon_ns = now_ns + persistence_ns
+    threshold = fill_price - min_revert
+    n = min(len(snap_bid), len(ts_arr))
+    i = idx
+    while i < n and int(ts_arr[i]) <= horizon_ns:
+        b = float(snap_bid[i])
+        if not np.isnan(b) and b < threshold:
+            return True
+        i += 1
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -809,14 +851,15 @@ def _route_enter(st: _RunState, decision: Any) -> None:
         st.result.n_entries_suppressed += 1
         return
     slipped = _slipped_buy_price(book, intent.limit_price, cfg.slippage_bps)
-    # SHR-94: pre-flight IOC marketability re-check at send+latency.
-    # If the next recorded book snapshot falls within the latency window and
-    # shows the ask above the fill price, the level is fleeting — veto the
-    # submit and count a reject (strategy re-fires next scan as with live).
+    # SHR-94/SHR-98: pre-flight IOC fleeting-level re-check.
+    # If a recorded book snapshot within the persistence window shows the ask
+    # reverting above the fill price, the level was a flicker live could not
+    # hold — veto the submit and count a reject (strategy re-fires next scan).
     if cfg.ioc_marketability_recheck and st._book_idx is not None:
-        latency_ns = int(cfg.order_latency_ms * 1_000_000)
+        persistence_ns = int(cfg.ioc_fleeting_persistence_seconds * 1_000_000_000)
         if _is_fleeting_ask(
-            intent.symbol, slipped, st.now_ns, latency_ns,
+            intent.symbol, slipped, st.now_ns, persistence_ns,
+            cfg.ioc_fleeting_min_revert,
             st.snap_best_ask_per_leg, st.book_ts_per_leg, st._book_idx,
         ):
             st.result.n_rejects += 1
@@ -882,13 +925,14 @@ def _route_exit(st: _RunState, decision: Any) -> None:
     book = st.books[intent.symbol]
     size = min(intent.size, abs(pos.qty))
     slipped = _slipped_sell_price(book, intent.limit_price, cfg.slippage_bps)
-    # SHR-94: pre-flight IOC marketability re-check at send+latency.
-    # If the next recorded book snapshot shows the bid has retreated below the
-    # fill price within the latency window, the level is fleeting — veto.
+    # SHR-94/SHR-98: pre-flight IOC fleeting-level re-check (sell side).
+    # If a recorded snapshot within the persistence window shows the bid
+    # retreating below the fill price, the level was a flicker — veto.
     if cfg.ioc_marketability_recheck and st._book_idx is not None:
-        latency_ns = int(cfg.order_latency_ms * 1_000_000)
+        persistence_ns = int(cfg.ioc_fleeting_persistence_seconds * 1_000_000_000)
         if _is_fleeting_bid(
-            intent.symbol, slipped, st.now_ns, latency_ns,
+            intent.symbol, slipped, st.now_ns, persistence_ns,
+            cfg.ioc_fleeting_min_revert,
             st.snap_best_bid_per_leg, st.book_ts_per_leg, st._book_idx,
         ):
             st.result.n_rejects += 1
