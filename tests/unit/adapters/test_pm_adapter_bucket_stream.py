@@ -14,6 +14,7 @@ import asyncio
 import json
 
 import pytest
+import requests.exceptions
 import websockets.exceptions
 
 from hlanalysis.adapters.polymarket import PolymarketAdapter
@@ -143,4 +144,61 @@ def test_updown_series_still_emits_per_market_binaries():
     classes = [dict(zip(m.keys, m.values)).get("class") for m in metas]
     assert classes == ["priceBinary", "priceBinary"], (
         f"expected 2 priceBinary metas (one per sub-market), got: {classes}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-subscription Gamma-poll failure isolation
+# ---------------------------------------------------------------------------
+
+
+def _sub(*, klass: str, series: str, underlying: str) -> Subscription:
+    return Subscription(
+        venue="polymarket",
+        product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB,
+        symbol="*",
+        channels=("trades", "book"),
+        match={"class": klass, "series_slug": series, "underlying": underlying},
+    )
+
+
+def _run_poll_multi(gamma: GammaClient, subs: list[Subscription]) -> list[QuestionMetaEvent]:
+    """Drive one Gamma poll over several subscriptions; collect QuestionMetaEvents."""
+    adapter = PolymarketAdapter(ws_factory=lambda url: _FakeWS(), gamma_client=gamma)
+    metas: list[QuestionMetaEvent] = []
+
+    async def _drain() -> None:
+        try:
+            async for ev in adapter.stream(subs):
+                if isinstance(ev, QuestionMetaEvent):
+                    metas.append(ev)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+
+    asyncio.run(asyncio.wait_for(_drain(), timeout=5.0))
+    return metas
+
+
+def test_one_series_http_error_does_not_starve_other_series():
+    """A 500 on one series' Gamma fetch must not abort the whole poll cycle:
+    every *other* subscription must still emit its QuestionMetaEvents. The bad
+    series is listed FIRST so that, without per-subscription isolation, it would
+    starve the good series entirely (the live `eth-up-or-down-daily` 500 that
+    suppressed the BTC multi-strike buckets)."""
+    def _http_get(url, params):
+        if params.get("series_slug") == "eth-up-or-down-daily":
+            raise requests.exceptions.HTTPError("500 Server Error: boom")
+        return _bucket_event()
+
+    gamma = GammaClient(http_get=_http_get)
+    subs = [
+        _sub(klass="priceBinary", series="eth-up-or-down-daily", underlying="ETH"),
+        _sub(klass="priceBucket", series="btc-multi-strikes-weekly", underlying="BTC"),
+    ]
+    metas = _run_poll_multi(gamma, subs)
+    bucket_metas = [m for m in metas if dict(zip(m.keys, m.values)).get("class") == "priceBucket"]
+    assert len(bucket_metas) == 1, (
+        f"good series starved by the bad series' 500: expected 1 priceBucket "
+        f"meta, got {len(bucket_metas)}"
     )

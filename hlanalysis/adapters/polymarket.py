@@ -93,77 +93,92 @@ class PolymarketAdapter(BaseWsAdapter):
         active_tokens: set[str] = set()
         known_conditions: dict[str, dict] = {}
 
+        async def _poll_one_series(sub: Subscription, series_str: str) -> None:
+            # Per-subscription underlying (BTC / ETH / NVDA / NBA / …).
+            # Default to "BTC" only for legacy single-subscription configs.
+            underlying = (sub.match or {}).get("underlying", "BTC")
+            if not isinstance(underlying, str):
+                underlying = underlying[0] if underlying else "BTC"
+            # Offload ONLY the blocking 30s requests.get to a worker thread;
+            # all cache mutation (known_conditions / active_tokens) and
+            # queue puts below stay on the event-loop thread to avoid races.
+            klass = (sub.match or {}).get("class")
+            if not isinstance(klass, str):
+                klass = klass[0] if klass else "priceBinary"
+            events = await asyncio.to_thread(
+                self._gamma.fetch_events,
+                series_slug=series_str, closed=False,
+            )
+            if klass == "priceBucket":
+                # Group the entire multi-strike event into one priceBucket
+                # QuestionMetaEvent; subscribe ALL leg tokens so the WS
+                # receives book/trade frames for every leg. Per-leg
+                # settlement uses parse_gamma_market_to_settlement which
+                # names the winning token, routed by leg-symbol membership.
+                for ev in events:
+                    cond_id = str(ev.get("id") or ev.get("slug") or "")
+                    is_new = cond_id not in known_conditions
+                    known_conditions[cond_id] = ev
+                    if is_new:
+                        qmeta = parse_gamma_event_to_bucket_question_meta(
+                            ev, series_slug=series_str,
+                            local_recv_ts=time.time_ns(),
+                            underlying=underlying,
+                        )
+                        if qmeta is not None:
+                            await queue.put(qmeta)
+                            for mk in ev.get("markets") or []:
+                                toks = _json_decode(mk.get("clobTokenIds") or "[]")
+                                active_tokens.update(str(t) for t in toks)
+                    # Per-leg settlement: each sub-market resolves
+                    # independently; _mark_settled routes by leg-symbol.
+                    for mk in ev.get("markets") or []:
+                        settle = parse_gamma_market_to_settlement(
+                            mk, series_slug=series_str,
+                            local_recv_ts=time.time_ns(),
+                        )
+                        if settle is not None:
+                            await queue.put(settle)
+                return
+            for mk in self._gamma.iter_binary_markets(events):
+                cond_id = str(mk["conditionId"])
+                is_new = cond_id not in known_conditions
+                known_conditions[cond_id] = mk
+                if is_new:
+                    qmeta = parse_gamma_market_to_question_meta(
+                        mk, series_slug=series_str,
+                        local_recv_ts=time.time_ns(),
+                        underlying=underlying,
+                    )
+                    await queue.put(qmeta)
+                    toks = _json_decode(mk["clobTokenIds"])
+                    active_tokens.update(str(t) for t in toks)
+                settle = parse_gamma_market_to_settlement(
+                    mk, series_slug=series_str,
+                    local_recv_ts=time.time_ns(),
+                )
+                if settle is not None:
+                    await queue.put(settle)
+
         async def _gamma_poll_once() -> None:
             for sub in pm_subs:
                 series = (sub.match or {}).get("series_slug")
                 if not series:
                     continue
                 series_str = series if isinstance(series, str) else series[0]
-                # Per-subscription underlying (BTC / ETH / NVDA / NBA / …).
-                # Default to "BTC" only for legacy single-subscription configs.
-                underlying = (sub.match or {}).get("underlying", "BTC")
-                if not isinstance(underlying, str):
-                    underlying = underlying[0] if underlying else "BTC"
-                # Offload ONLY the blocking 30s requests.get to a worker thread;
-                # all cache mutation (known_conditions / active_tokens) and
-                # queue puts below stay on the event-loop thread to avoid races.
-                klass = (sub.match or {}).get("class")
-                if not isinstance(klass, str):
-                    klass = klass[0] if klass else "priceBinary"
-                events = await asyncio.to_thread(
-                    self._gamma.fetch_events,
-                    series_slug=series_str, closed=False,
-                )
-                if klass == "priceBucket":
-                    # Group the entire multi-strike event into one priceBucket
-                    # QuestionMetaEvent; subscribe ALL leg tokens so the WS
-                    # receives book/trade frames for every leg. Per-leg
-                    # settlement uses parse_gamma_market_to_settlement which
-                    # names the winning token, routed by leg-symbol membership.
-                    for ev in events:
-                        cond_id = str(ev.get("id") or ev.get("slug") or "")
-                        is_new = cond_id not in known_conditions
-                        known_conditions[cond_id] = ev
-                        if is_new:
-                            qmeta = parse_gamma_event_to_bucket_question_meta(
-                                ev, series_slug=series_str,
-                                local_recv_ts=time.time_ns(),
-                                underlying=underlying,
-                            )
-                            if qmeta is not None:
-                                await queue.put(qmeta)
-                                for mk in ev.get("markets") or []:
-                                    toks = _json_decode(mk.get("clobTokenIds") or "[]")
-                                    active_tokens.update(str(t) for t in toks)
-                        # Per-leg settlement: each sub-market resolves
-                        # independently; _mark_settled routes by leg-symbol.
-                        for mk in ev.get("markets") or []:
-                            settle = parse_gamma_market_to_settlement(
-                                mk, series_slug=series_str,
-                                local_recv_ts=time.time_ns(),
-                            )
-                            if settle is not None:
-                                await queue.put(settle)
-                    continue
-                for mk in self._gamma.iter_binary_markets(events):
-                    cond_id = str(mk["conditionId"])
-                    is_new = cond_id not in known_conditions
-                    known_conditions[cond_id] = mk
-                    if is_new:
-                        qmeta = parse_gamma_market_to_question_meta(
-                            mk, series_slug=series_str,
-                            local_recv_ts=time.time_ns(),
-                            underlying=underlying,
-                        )
-                        await queue.put(qmeta)
-                        toks = _json_decode(mk["clobTokenIds"])
-                        active_tokens.update(str(t) for t in toks)
-                    settle = parse_gamma_market_to_settlement(
-                        mk, series_slug=series_str,
-                        local_recv_ts=time.time_ns(),
+                # Isolate per-subscription failures: an intermittent Gamma 500
+                # (or any parse error) on ONE series must not abort the whole
+                # poll cycle and starve the remaining subscriptions. Without
+                # this, a `eth-up-or-down-daily` 500 silently suppressed the BTC
+                # multi-strike bucket subscriptions for the rest of the cycle.
+                try:
+                    await _poll_one_series(sub, series_str)
+                except Exception:
+                    log.exception(
+                        "gamma poll failed for series=%s; skipping it this "
+                        "cycle so other subscriptions still poll", series_str,
                     )
-                    if settle is not None:
-                        await queue.put(settle)
+                    continue
 
         async def _gamma_loop() -> None:
             while True:
