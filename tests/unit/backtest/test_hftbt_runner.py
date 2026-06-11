@@ -2089,3 +2089,122 @@ def test_cli_min_inter_order_seconds_arg():
     args2 = p.parse_args(["--min-inter-order-seconds", "0.75"])
     cfg = _run_config_from_args(args2, hedge_cfg=None)
     assert cfg.min_inter_order_seconds == pytest.approx(0.75)
+
+
+# ---------------------------------------------------------------------------
+# SHR-89a: outcome-book events trigger scans in event mode
+# ---------------------------------------------------------------------------
+#
+# The live engine re-evaluates the strategy on every OUTCOME-BOOK L2 update
+# (the binary/bucket market's own order book events). The sim must mirror this
+# so scan timing aligns with live decisions.
+#
+# Proof: build a question whose ONLY events are outcome-book updates (zero
+# reference events). In event mode the sim must fire a scan for each book
+# update; in fixed mode it fires only on the coarse grid. The outcome-book
+# trigger coverage must be strictly higher in event mode.
+
+
+def _make_outcome_book_only_question(
+    *,
+    n_book_updates: int = 10,
+    duration_ns: int = 10 * 60 * 1_000_000_000,
+    update_stride_ns: int | None = None,
+):
+    """Synthetic question with OUTCOME-BOOK updates and NO reference events.
+
+    Isolates the outcome-book trigger path: event mode must fire on
+    book_ts_per_leg even when ref_events is empty.
+    """
+    from hlanalysis.backtest.data.synthetic import SyntheticDataSource, SyntheticQuestion
+    from hlanalysis.backtest.core.data_source import QuestionDescriptor
+    from hlanalysis.backtest.core.events import BookSnapshot, SettlementEvent
+
+    if update_stride_ns is None:
+        update_stride_ns = duration_ns // n_book_updates
+
+    start_ns = 0
+    end_ns = duration_ns
+    yes_sym = "ob-yes"
+    no_sym = "ob-no"
+
+    desc = QuestionDescriptor(
+        question_id="ob-q-0", question_idx=1,
+        start_ts_ns=start_ns, end_ts_ns=end_ns,
+        leg_symbols=(yes_sym, no_sym),
+        klass="priceBinary", underlying="BTC",
+    )
+
+    snaps: list[BookSnapshot] = []
+    for i in range(n_book_updates):
+        t = start_ns + 1_000_000 + i * update_stride_ns
+        bid = round(0.40 + 0.10 * (i / max(1, n_book_updates - 1)), 4)
+        ask = round(bid + 0.02, 4)
+        snaps.append(BookSnapshot(ts_ns=t, symbol=yes_sym,
+                                  bids=((bid, 100.0),),
+                                  asks=((ask, 100.0),)))
+        snaps.append(BookSnapshot(ts_ns=t, symbol=no_sym,
+                                  bids=((round(1.0 - ask, 4), 100.0),),
+                                  asks=((round(1.0 - bid, 4), 100.0),)))
+
+    settle = [SettlementEvent(ts_ns=end_ns, question_idx=1, outcome="yes")]
+
+    sq = SyntheticQuestion(
+        descriptor=desc,
+        book_snapshots=tuple(snaps),
+        trades=(),
+        reference_events=(),   # NO reference events — outcome-book only
+        settlement_events=tuple(settle),
+        outcome="yes",
+        strike=60_000.0,
+    )
+    ds = SyntheticDataSource()
+    ds.add_question(sq)
+    return ds, sq
+
+
+def test_event_mode_triggers_on_outcome_book_updates_not_only_reference():
+    """Event mode must fire a scan on each outcome-book update even when there
+    are zero reference events (SHR-89a).
+
+    A question with 10 outcome-book updates spread over 10 minutes has its
+    book events at known timestamps.  With NO reference events:
+    - Fixed mode at 5-min grid fires <= 3 scans in 10 min.
+    - Event mode (max=5min) fires >= 10 scans (one per book update).
+
+    Proves book_ts_per_leg IS included in _event_triggers (not just ref_events).
+    """
+    n = 10
+    duration_ns = 10 * 60 * 1_000_000_000   # 10 min
+    stride_ns   = duration_ns // n            # 1 book update/min
+    ds, sq = _make_outcome_book_only_question(
+        n_book_updates=n, duration_ns=duration_ns, update_stride_ns=stride_ns,
+    )
+
+    # Fixed grid at 5 min — only fires on the time-based grid, ignores book events.
+    fixed_strat = _CountingStrategy()
+    fixed_cfg = RunConfig(
+        scanner_interval_seconds=300.0,
+        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+    )
+    run_one_question(fixed_strat, ds, sq.descriptor, fixed_cfg, strike=sq.strike)
+
+    # Event mode max_interval=5min: without outcome-book triggers this would
+    # also fire <=3 scans; WITH them it fires >=10.
+    event_strat = _CountingStrategy()
+    event_cfg = RunConfig(
+        scan_mode="event",
+        scan_min_interval_seconds=0.2,
+        scan_max_interval_seconds=300.0,
+        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+    )
+    run_one_question(event_strat, ds, sq.descriptor, event_cfg, strike=sq.strike)
+
+    assert event_strat.call_count >= n, (
+        f"event mode with {n} outcome-book updates (no ref events) must fire "
+        f"at least {n} scans; got {event_strat.call_count}"
+    )
+    assert event_strat.call_count > fixed_strat.call_count, (
+        f"event mode ({event_strat.call_count}) must exceed fixed-grid "
+        f"({fixed_strat.call_count}) when driven purely by outcome-book updates"
+    )
