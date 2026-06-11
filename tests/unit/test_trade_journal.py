@@ -124,15 +124,56 @@ def test_updates_to_unknown_cloid_are_noops(tmp_path):
     assert j.dal.get_journal_row("ghost") is None
 
 
-def test_sigma_falls_back_to_returns_stdev_when_no_diag(tmp_path):
+def test_sigma_is_null_when_no_annualized_sigma_in_diagnostics(tmp_path):
+    """Exit rows (and any row whose diagnostics carry no vol/sigma field) must
+    record sigma=NULL, NOT fall back to the raw returns stdev.  The two scales
+    (annualised ≈ 0.4; returns-stdev ≈ 0.0002) are incomparable, so a
+    mixed-scale column silently corrupts every consumer that compares rows."""
+    j = _journal(tmp_path)
+    # Simulate an exit decision: non-empty recent_returns but diagnostics that
+    # carry NO 'sigma'/'vol'/'vol_sigma' field (typical for exit triggers).
+    j.record_decision(
+        cloid="hla-v1-exit-1", question_idx=3, decision_ts_ns=1, action="exit",
+        recent_returns=(0.001, -0.002, 0.0015, -0.0005),
+        diagnostics=(Diagnostic("warn", "exit_safety_d_below_min",
+                                (("safety_d", "0.35"), ("threshold", "0.50"))),),
+    )
+    row = j.dal.get_journal_row("hla-v1-exit-1")
+    # sigma must be NULL — not the raw returns stdev (≈ 0.0013).
+    assert row.sigma is None
+
+
+def test_sigma_is_null_when_no_diagnostics_and_no_returns(tmp_path):
+    """Truly empty decision (no diagnostics, no returns) → sigma NULL."""
     j = _journal(tmp_path)
     j.record_decision(
         cloid="hla-v1-3", question_idx=3, decision_ts_ns=1, action="enter",
-        recent_returns=(0.0, 0.0, 0.0),
     )
     row = j.dal.get_journal_row("hla-v1-3")
-    # No diagnostic vol/sigma field, constant returns → stdev 0.0.
-    assert row.sigma == pytest.approx(0.0)
+    assert row.sigma is None
+
+
+def test_sigma_annualized_from_enter_diagnostics_unchanged(tmp_path):
+    """Enter rows with the 'edge' diagnostic block must still record the
+    annualised σ — the fix must not regress the happy path."""
+    j = _journal(tmp_path)
+    j.record_decision(
+        cloid="hla-v1-enter-1", question_idx=4, decision_ts_ns=2,
+        action="enter", side="buy", symbol="@30",
+        recent_returns=(0.001, -0.002, 0.0015),
+        diagnostics=(
+            Diagnostic("info", "edge", (
+                ("p_model", "0.9200"),
+                ("edge_yes", "0.0350"),
+                ("edge_no", "-1000000000.0000"),
+                ("sigma", "0.4123"),
+                ("tau_yr", "0.000027378"),
+                ("ln_sk", "-0.0012"),
+            )),
+        ),
+    )
+    row = j.dal.get_journal_row("hla-v1-enter-1")
+    assert row.sigma == pytest.approx(0.4123)
 
 
 def test_writes_are_best_effort_and_never_raise(tmp_path, monkeypatch):
