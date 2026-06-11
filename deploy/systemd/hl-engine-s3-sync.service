@@ -1,0 +1,18 @@
+[Unit]
+Description=Daily consistent snapshot of engine state.db + gate logs to S3
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ec2-user
+# ARCHIVE_BUCKET comes from the recorder env (same co-located bucket).
+EnvironmentFile=/etc/hl-recorder/env
+# Yield to the engine/recorder on the t4g.micro: lowest CPU + idle IO so the
+# nightly sqlite .backup + gzip never contends with the latency-sensitive
+# stop-loss path or the recorder's writes.
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/opt/hl-recorder/scripts/sync-engine-to-s3.sh
+StandardOutput=journal
+StandardError=journal
