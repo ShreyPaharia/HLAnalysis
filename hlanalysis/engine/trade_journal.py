@@ -71,9 +71,19 @@ def _returns_summary(recent_returns) -> dict | None:
 
 
 def _sigma_from(diagnostics, recent_returns) -> float | None:
-    """The σ the strategy reasoned about: pull it from a diagnostic field when
-    present (the strategy's own estimate), else fall back to the stdev of the
-    recent_returns window so the row still carries a vol proxy."""
+    """The annualised σ the strategy reasoned about.
+
+    Only the evaluate() diagnostics carry an annualised vol (tagged under one of
+    the keys in ``_SIGMA_FIELD_KEYS``).  Entry decisions surface it in the
+    "edge" diagnostic block; exit decisions typically do NOT — their diagnostics
+    name the gate that fired (e.g. "exit_safety_d_below_min") and carry no vol
+    field.
+
+    The function returns ``None`` when no annualised σ is available.  The
+    former fallback to ``statistics.pstdev(recent_returns)`` produced a
+    raw-returns stdev (≈ 0.0002) on exit rows while entry rows stored an
+    annualised value (≈ 0.40), making the column incomparable across row types
+    and silently corrupting any consumer that compared them."""
     for d in diagnostics or ():
         for k, v in d.fields:
             if k in _SIGMA_FIELD_KEYS:
@@ -81,11 +91,6 @@ def _sigma_from(diagnostics, recent_returns) -> float | None:
                     return float(v)
                 except (TypeError, ValueError):
                     continue
-    rs = list(recent_returns or ())
-    if len(rs) > 1:
-        return statistics.pstdev(rs)
-    if len(rs) == 1:
-        return 0.0
     return None
 
 
