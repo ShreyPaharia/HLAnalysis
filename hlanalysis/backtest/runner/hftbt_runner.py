@@ -251,6 +251,18 @@ class RunConfig:
     # re-fires on a leg to live cadence. Default 0.0 disables it (back-compat;
     # the legacy no-floor A/B arm). The measured value for HL is ~0.75s.
     min_inter_order_seconds: float = 0.0
+    # SHR-89b: wall-clock persistence marketability re-check.
+    # The SHR-94 IOC re-check vetoes a fill if the next snapshot within the
+    # order-latency window (~50ms) shows the ask retreated. On HL, snapshots
+    # are seconds apart so the next snapshot is almost never within 50ms.
+    # When ioc_fleeting_persistence_seconds > 0 a complementary check is
+    # applied: if the ask level at fill_price appeared in the CURRENT snapshot
+    # but NOT the previous snapshot (i.e. it has been present for fewer than
+    # persistence_seconds), the IOC is vetoed (the level is "new/fleeting").
+    # Default 0.0 disables it (back-compat; same as setting ioc_marketability_recheck
+    # to the old latency-window-only behaviour). Measured HL value: 2.0s
+    # (docs/research/2026-06-11-ioc-refire-floor-hl-fill-model.md, #2230 analysis).
+    ioc_fleeting_persistence_seconds: float = 0.0
     # SHR-91: shared cross-market inventory caps. When set, run_questions_parallel
     # creates a SharedInventoryLedger for the in-process path so the concurrent /
     # total-inventory gates see positions from ALL questions that were live at a
@@ -481,22 +493,27 @@ def _is_fleeting_ask(
     snap_best_ask_per_leg: "dict[str, np.ndarray]",
     book_ts_per_leg: "dict[str, np.ndarray]",
     book_idx: "dict[str, int]",
+    persistence_ns: int = 0,
 ) -> bool:
-    """SHR-94: was the ask at ``fill_price`` a fleeting level that will no
-    longer be present when the order arrives at the exchange?
+    """SHR-94 + SHR-89b: was the ask at ``fill_price`` a fleeting level?
 
-    Uses the per-leg snapshot top-of-book arrays (``snap_best_ask_per_leg``,
-    parallel to ``book_ts_per_leg``) to look at the *next* snapshot after
-    ``now_ns``.  If that snapshot (a) falls within the latency window
-    ``[now_ns, now_ns + latency_ns]`` AND (b) shows the best ask has moved
-    ABOVE ``fill_price``, the level is considered fleeting and the caller
-    should veto the IOC submission (counting a reject + re-fire next scan).
+    Two complementary checks:
 
-    Returns ``False`` (not fleeting) when:
-    - No snapshot arrays for this leg (legacy / PM sources without snap_best).
-    - There is no *next* snapshot within the latency window (the level
-      persisted past the arrival time — fill is valid).
-    - The next snapshot's best ask is still ≤ ``fill_price`` (still marketable).
+    **SHR-94 (latency-window check):** looks at the *next* snapshot within the
+    order-latency window ``[now_ns, now_ns + latency_ns]``. If it shows the
+    ask has moved ABOVE ``fill_price``, the level is fleeting. Effective when
+    HL snapshots are more frequent than the latency (~50ms).
+
+    **SHR-89b (wall-clock persistence check, ``persistence_ns > 0``):** checks
+    the *current* snapshot's prior snapshot. If the ask at ``fill_price`` just
+    appeared (present in the current snapshot but ABSENT in the previous one),
+    the level has been live for fewer nanoseconds than ``persistence_ns`` →
+    fleeting. This catches HL's burst-sampled book where the next snapshot is
+    seconds away (making the SHR-94 window never fire).
+
+    Either check may veto the IOC independently. Returns ``False`` when:
+    - No snapshot arrays for this leg.
+    - persistence_ns=0 AND no next snapshot within the latency window.
     """
     snap_ask = snap_best_ask_per_leg.get(sym)
     ts_arr = book_ts_per_leg.get(sym)
@@ -505,6 +522,30 @@ def _is_fleeting_ask(
     # book_idx[sym] is the first snapshot index NOT YET consumed at now_ns
     # (the scan loop advances it past all ts <= now_ns).
     idx = book_idx.get(sym, 0)
+
+    # SHR-89b: wall-clock persistence check on the CURRENT (most-recently-
+    # consumed) snapshot. current_idx = idx - 1 (last consumed snapshot).
+    if persistence_ns > 0:
+        current_idx = idx - 1
+        if current_idx >= 0:
+            current_ask = float(snap_ask[current_idx])
+            if not np.isnan(current_ask) and current_ask <= fill_price:
+                # The ask is marketable at the current snapshot. Check if it
+                # appeared here for the first time (no prior snapshot) or if
+                # the previous snapshot had a DIFFERENT ask.
+                if current_idx == 0:
+                    # First-ever snapshot: the level just appeared → fleeting.
+                    return True
+                prev_ask = float(snap_ask[current_idx - 1])
+                if np.isnan(prev_ask) or prev_ask > fill_price:
+                    # Previous snapshot had no marketable ask at fill_price:
+                    # the level is new. Check persistence duration.
+                    current_ts = int(ts_arr[current_idx])
+                    prev_ts = int(ts_arr[current_idx - 1])
+                    if current_ts - prev_ts < persistence_ns:
+                        return True  # level just appeared; within persistence window
+
+    # SHR-94: forward-looking latency-window check.
     if idx >= len(ts_arr):
         return False  # no next snapshot
     next_ts = int(ts_arr[idx])
@@ -530,18 +571,38 @@ def _is_fleeting_bid(
     snap_best_bid_per_leg: "dict[str, np.ndarray]",
     book_ts_per_leg: "dict[str, np.ndarray]",
     book_idx: "dict[str, int]",
+    persistence_ns: int = 0,
 ) -> bool:
-    """SHR-94: was the bid at ``fill_price`` a fleeting level?
+    """SHR-94 + SHR-89b: was the bid at ``fill_price`` a fleeting level?
 
-    Symmetric to ``_is_fleeting_ask`` for the sell side: returns ``True`` if
-    the next snapshot within the latency window shows the best bid BELOW
-    ``fill_price`` (the bid has retreated and the level won't fill live).
+    Symmetric to ``_is_fleeting_ask`` for the sell side.
+
+    **SHR-94:** next snapshot within latency window shows bid BELOW fill_price.
+    **SHR-89b:** bid just appeared in the current snapshot (not in the prior
+    one) and has been present for fewer than ``persistence_ns`` nanoseconds.
     """
     snap_bid = snap_best_bid_per_leg.get(sym)
     ts_arr = book_ts_per_leg.get(sym)
     if snap_bid is None or ts_arr is None or len(snap_bid) == 0 or len(ts_arr) == 0:
         return False
     idx = book_idx.get(sym, 0)
+
+    # SHR-89b: wall-clock persistence check (bid side).
+    if persistence_ns > 0:
+        current_idx = idx - 1
+        if current_idx >= 0:
+            current_bid = float(snap_bid[current_idx])
+            if not np.isnan(current_bid) and current_bid >= fill_price:
+                if current_idx == 0:
+                    return True
+                prev_bid = float(snap_bid[current_idx - 1])
+                if np.isnan(prev_bid) or prev_bid < fill_price:
+                    current_ts = int(ts_arr[current_idx])
+                    prev_ts = int(ts_arr[current_idx - 1])
+                    if current_ts - prev_ts < persistence_ns:
+                        return True
+
+    # SHR-94: forward-looking latency-window check.
     if idx >= len(ts_arr):
         return False
     next_ts = int(ts_arr[idx])
@@ -890,9 +951,11 @@ def _route_enter(st: _RunState, decision: Any) -> None:
     # submit and count a reject (strategy re-fires next scan as with live).
     if cfg.ioc_marketability_recheck and st._book_idx is not None:
         latency_ns = int(cfg.order_latency_ms * 1_000_000)
+        persistence_ns = int(cfg.ioc_fleeting_persistence_seconds * 1_000_000_000)
         if _is_fleeting_ask(
             intent.symbol, slipped, st.now_ns, latency_ns,
             st.snap_best_ask_per_leg, st.book_ts_per_leg, st._book_idx,
+            persistence_ns=persistence_ns,
         ):
             st.result.n_rejects += 1
             return
@@ -975,9 +1038,11 @@ def _route_exit(st: _RunState, decision: Any) -> None:
     # fill price within the latency window, the level is fleeting — veto.
     if cfg.ioc_marketability_recheck and st._book_idx is not None:
         latency_ns = int(cfg.order_latency_ms * 1_000_000)
+        persistence_ns = int(cfg.ioc_fleeting_persistence_seconds * 1_000_000_000)
         if _is_fleeting_bid(
             intent.symbol, slipped, st.now_ns, latency_ns,
             st.snap_best_bid_per_leg, st.book_ts_per_leg, st._book_idx,
+            persistence_ns=persistence_ns,
         ):
             st.result.n_rejects += 1
             return
