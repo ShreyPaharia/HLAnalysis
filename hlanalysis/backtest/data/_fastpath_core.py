@@ -33,7 +33,14 @@ from __future__ import annotations
 #     → the fleeting-level veto would silently be skipped for cached bundles
 #     (safe fall-back but less protective). Bumped so stale bundles are evicted
 #     and rebuilt with the snap_best arrays.
-BUILD_VERSION = 6
+# v7: on-disk format now persists ``reference_events_are_raw_ticks`` as the
+#     ``__ref_raw_ticks__`` scalar. Pre-v7 npz always loaded the flag as False,
+#     so a bundle built with ``reference_ticks="raw"`` (raw/event path) read back
+#     as False on a cache hit, causing the runner to call ``apply_reference``
+#     (bar path) instead of ``apply_reference_tick`` (raw-tick path). That
+#     inflated σ on every cache-hit run → far fewer qualifying trades
+#     (74 → 3 on v31 binary 2026-06-10).
+BUILD_VERSION = 7
 
 import logging
 from dataclasses import dataclass, field

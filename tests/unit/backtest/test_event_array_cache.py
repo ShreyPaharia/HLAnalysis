@@ -466,3 +466,82 @@ def test_size_cap_evicts_oldest(tmp_path, monkeypatch):
         return _realistic_bundle()
     cached_bundle(cdir, "q0", [src], _rebuild, config_sig="s0")
     assert calls["n"] == 1
+
+
+# --- SHR-97: reference_events_are_raw_ticks round-trip --------------------
+
+
+def _bundle_raw_ticks() -> FastPathBundle:
+    """A bundle with ``reference_events_are_raw_ticks=True`` (the raw/event path).
+
+    Pre-v7 serialization dropped this flag → cache hit always loaded False →
+    runner called apply_reference (bar path) instead of apply_reference_tick →
+    inflated σ → 74 trades collapsed to 3 on v31 binary.
+    """
+    arr = np.zeros(2, dtype=event_dtype)
+    ts0 = 1_700_000_000_000_000_000
+    return FastPathBundle(
+        leg_arrays={"#0": LegArrays(events=arr, book_ts=np.array([ts0], dtype=np.int64))},
+        reference_events=[
+            ReferenceEvent(ts_ns=ts0 + i * 5_000_000_000, symbol="BTC",
+                           high=100.0, low=100.0, close=100.0)
+            for i in range(3)
+        ],
+        settlement_events=[],
+        reference_events_are_raw_ticks=True,
+    )
+
+
+def test_roundtrip_preserves_reference_events_are_raw_ticks_true(tmp_path):
+    """SHR-97 regression: a cache HIT on the raw-tick path must restore
+    ``reference_events_are_raw_ticks=True``, not silently downgrade to False.
+
+    Pre-v7 _save() omitted the ``__ref_raw_ticks__`` scalar → _load() always
+    returned False → the runner called apply_reference (bar OHLC path) on
+    raw per-tick events, computing a much higher σ → far fewer qualifying
+    trades (74 → 3 on v31 binary 2026-06-10)."""
+    b = _bundle_raw_ticks()
+    assert b.reference_events_are_raw_ticks is True
+    cdir = tmp_path / "cache"
+    src = tmp_path / "a"
+    src.write_bytes(b"x")
+    cached_bundle(cdir, "q", [src], lambda: b)  # cold: writes
+
+    def _no_build():
+        raise AssertionError("should have hit the cache, not rebuilt")
+
+    got = cached_bundle(cdir, "q", [src], _no_build)  # warm: loads from disk
+    assert got.reference_events_are_raw_ticks is True, (
+        "cache hit must restore reference_events_are_raw_ticks=True "
+        "(pre-v7 bug: flag silently dropped → apply_reference called instead of "
+        "apply_reference_tick → σ inflated → 74 trades became 3)"
+    )
+
+
+def test_roundtrip_preserves_reference_events_are_raw_ticks_false(tmp_path):
+    """Complementary: the default False value also round-trips correctly."""
+    b = _bundle()  # reference_events_are_raw_ticks defaults to False
+    assert b.reference_events_are_raw_ticks is False
+    cdir = tmp_path / "cache"
+    src = tmp_path / "a"
+    src.write_bytes(b"x")
+    cached_bundle(cdir, "q", [src], lambda: b)
+
+    def _no_build():
+        raise AssertionError("should have hit the cache, not rebuilt")
+
+    got = cached_bundle(cdir, "q", [src], _no_build)
+    assert got.reference_events_are_raw_ticks is False
+
+
+def test_npz_disk_serializer_roundtrips_raw_ticks_flag(tmp_path):
+    """The custom diskcache ``Disk`` must round-trip reference_events_are_raw_ticks
+    via ``_NpzDisk`` (the direct ``_save`` / ``_load`` path used by diskcache)."""
+    import diskcache
+    from hlanalysis.backtest.data._event_array_cache import _NpzDisk
+
+    b = _bundle_raw_ticks()
+    with diskcache.Cache(str(tmp_path / "dc"), disk=_NpzDisk) as cache:
+        cache["k"] = b
+        got = cache["k"]
+    assert got.reference_events_are_raw_ticks is True

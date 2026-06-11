@@ -107,6 +107,12 @@ def _save(path: Path, b: FastPathBundle) -> None:
             ],
             dtype=object,
         ),
+        # SHR-97: persist the reference_events_are_raw_ticks flag so a cache hit
+        # on the raw-tick path ("--reference-ticks raw") restores True, not False.
+        # Pre-v7 npz lacked this key → the runner called apply_reference (bar path)
+        # instead of apply_reference_tick (raw-tick path) on every cache hit,
+        # inflating σ and collapsing 74 trades → 3 on v31 binary.
+        "__ref_raw_ticks__": np.array([bool(b.reference_events_are_raw_ticks)], dtype=bool),
     }
     for i, sym in enumerate(legs):
         la = b.leg_arrays[sym]
@@ -225,11 +231,15 @@ def _load(path: Path) -> FastPathBundle:
         )
         for r in z["__settle__"]
     ]
+    # SHR-97: restore reference_events_are_raw_ticks. Tolerate pre-v7 npz that
+    # predate this key (BUILD_VERSION bump evicts those, but stay defensive).
+    ref_raw_ticks = bool(z["__ref_raw_ticks__"][0]) if "__ref_raw_ticks__" in z.files else False
     return FastPathBundle(
         leg_arrays=leg_arrays,
         reference_events=ref,
         settlement_events=settle,
         trade_events_per_leg=trade_events_per_leg,
+        reference_events_are_raw_ticks=ref_raw_ticks,
     )
 
 
