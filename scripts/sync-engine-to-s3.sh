@@ -54,7 +54,32 @@ LOG_UNIT="${LOG_UNIT:-hl-engine}"
 S3_ENGINE_PREFIX="${S3_ENGINE_PREFIX:-engine}"
 S3_BASE="${ENGINE_SYNC_S3_BASE:-s3://$BUCKET/$S3_ENGINE_PREFIX}"
 SQLITE3="${SQLITE3:-sqlite3}"
+# The t4g.micro box ships NO sqlite3 CLI (by design — analysis uses .venv python),
+# so the consistent snapshot falls back to Python's online backup API when the CLI
+# is absent. Tests can still force the CLI path by exporting SQLITE3.
+PYBIN="${PYBIN:-/opt/hl-recorder/.venv/bin/python}"
 JOURNALCTL="${JOURNALCTL:-journalctl}"
+
+# Consistent online snapshot of a live-written sqlite db → $2. Prefers the
+# sqlite3 CLI `.backup` (folds the WAL, committed rows only); falls back to the
+# Python sqlite3 module's Connection.backup() when the CLI is unavailable. Both
+# use SQLite's online backup API, so a concurrent engine writer is safe.
+sqlite_backup() {  # sqlite_backup <src_db> <dest_file>
+  local src="$1" dest="$2"
+  if command -v "$SQLITE3" >/dev/null 2>&1; then
+    "$SQLITE3" "$src" ".timeout 10000" ".backup '$dest'"
+    return $?
+  fi
+  "$PYBIN" - "$src" "$dest" <<'PYEOF'
+import sqlite3, sys
+src, dest = sys.argv[1], sys.argv[2]
+s = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=10)
+d = sqlite3.connect(dest)
+with d:
+    s.backup(d)
+d.close(); s.close()
+PYEOF
+}
 
 # Signal, not noise. The raw hl-engine journal is dominated by the 1 Hz PnL poll,
 # HL 429s, and reject spam (~97 MB/day). Keep only operationally interesting
@@ -105,9 +130,9 @@ for i in "${!SLOT_DBS[@]}"; do
   echo "==> slot $alias"
 
   # Consistent snapshot via the online backup API (folds the WAL, committed rows
-  # only). `.timeout` waits out a transient writer lock instead of failing.
+  # only). Waits out a transient writer lock instead of failing.
   snap="$TMP/$alias-state.db"
-  if "$SQLITE3" "$db" ".timeout 10000" ".backup '$snap'"; then
+  if sqlite_backup "$db" "$snap"; then
     gzip -c "$snap" > "$snap.gz"
     put "$snap.gz" "$alias/state.db.gz"
     rm -f "$snap" "$snap.gz"
