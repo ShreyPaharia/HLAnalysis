@@ -251,6 +251,13 @@ class RunConfig:
     # re-fires on a leg to live cadence. Default 0.0 disables it (back-compat;
     # the legacy no-floor A/B arm). The measured value for HL is ~0.75s.
     min_inter_order_seconds: float = 0.0
+    # SHR-91: shared cross-market inventory caps. When set, run_questions_parallel
+    # creates a SharedInventoryLedger for the in-process path so the concurrent /
+    # total-inventory gates see positions from ALL questions that were live at a
+    # given timestamp — matching the live engine's single per-slot ledger. Also
+    # passed to run_one_question for the daily-loss cap and existing SHR-85 gates.
+    # None (default) disables cross-question state (back-compat).
+    sim_risk_caps: "SimRiskCaps | None" = None
 
     def effective_latency_model(self) -> "LatencyModel":
         """The latency model to wire into assets: the explicit ``latency_model``
@@ -614,6 +621,15 @@ class _RunState:
     # Injected via the runner's book_idx dict — the _RunState doesn't own it
     # directly; it's passed to _is_fleeting_level via the routing helpers.
     _book_idx: "dict[str, int] | None" = None
+    # SHR-91: cross-question inventory visible to the entry gate.
+    # Populated by run_questions_parallel from the SharedInventoryLedger
+    # (positions held in OTHER questions that were live at now_ns). Defaults to
+    # zero so all existing callers are unaffected.
+    extra_held_notional: float = 0.0
+    extra_n_held: int = 0
+    # SHR-91: timestamp when the current position opened (None = no position).
+    # Used to record position_windows when a position closes.
+    _pos_open_ts_ns: "int | None" = None
 
     def next_oid(self) -> int:
         oid = self._next_oid_counter
@@ -643,7 +659,13 @@ class _RunState:
         """Return a veto reason if this entry would be suppressed, else ``None``.
 
         Mirrors the live RiskGate entry-only caps via the shared
-        ``halt_replay.entry_veto``. Exits never call this."""
+        ``halt_replay.entry_veto``. Exits never call this.
+
+        SHR-91: ``extra_held_notional`` and ``extra_n_held`` (cross-question
+        positions from the SharedInventoryLedger) are added to the totals so
+        the concurrent / inventory caps are evaluated against the full set of
+        positions that were live at ``now_ns`` across ALL questions, matching
+        the live engine's single per-slot ledger."""
         caps = self.sim_risk_caps
         if caps is None and not self.halt_windows:
             return None
@@ -654,8 +676,8 @@ class _RunState:
         inp = EntryGateInputs(
             now_ns=self.now_ns,
             intent_notional=intent_notional,
-            held_inventory_usd=held_notional,
-            n_held_positions=n_held,
+            held_inventory_usd=held_notional + self.extra_held_notional,
+            n_held_positions=n_held + self.extra_n_held,
             is_topup=is_topup,
             realized_pnl_window=self.realized_floor_by_window.get(ws, 0.0),
         )
@@ -752,6 +774,11 @@ def _route_stop_loss(st: _RunState) -> None:
     st.record_realized(
         st.now_ns, (fill.price - pos.avg_entry) * fill.size - fill.fee
     )
+    # SHR-91: record the completed position window for the shared-inventory ledger.
+    if st._pos_open_ts_ns is not None:
+        notional = abs(pos.qty) * pos.avg_entry
+        st.result.position_windows.append((st._pos_open_ts_ns, st.now_ns, notional))
+    st._pos_open_ts_ns = None
     st.pos = None
 
 
@@ -903,6 +930,10 @@ def _route_enter(st: _RunState, decision: Any) -> None:
     prev = PositionState(st.pos.qty, st.pos.avg_entry) if st.pos is not None else None
     new_pos, _ = apply_fill(prev, "buy", fill.size, fill.price)
     assert new_pos is not None
+    # SHR-91: stamp the position open time on the first ENTER (prev=None means
+    # no prior position; top-ups keep the existing open timestamp).
+    if prev is None:
+        st._pos_open_ts_ns = st.now_ns
     st.pos = Position(
         question_idx=st.pos.question_idx if st.pos is not None else q.question_idx,
         symbol=intent.symbol, qty=new_pos.qty, avg_entry=new_pos.avg_entry,
@@ -978,6 +1009,11 @@ def _route_exit(st: _RunState, decision: Any) -> None:
     # accumulator (net of fee, matching live closedPnl semantics).
     st.record_realized(st.now_ns, realized - fill.fee)
     if new_pos is None:
+        # SHR-91: position fully closed — record window for shared-inventory ledger.
+        if st._pos_open_ts_ns is not None:
+            notional = abs(pos.qty) * pos.avg_entry
+            st.result.position_windows.append((st._pos_open_ts_ns, st.now_ns, notional))
+        st._pos_open_ts_ns = None
         st.pos = None
     else:
         st.pos = Position(
@@ -1012,6 +1048,11 @@ def _settle(st: _RunState) -> None:
         st.fill_question_idx["settle"] = pos.question_idx
         if st.fills_dir_active:
             st.fill_meta["settle"] = {"resolved_outcome": outcome}
+        # SHR-91: record the settled position window for the shared-inventory ledger.
+        if st._pos_open_ts_ns is not None:
+            notional = abs(pos.qty) * pos.avg_entry
+            st.result.position_windows.append((st._pos_open_ts_ns, q.end_ts_ns, notional))
+        st._pos_open_ts_ns = None
         st.pos = None
 
     # Mark any open hedge residual to the last observed hedge mid and book a
@@ -1050,13 +1091,28 @@ def run_one_question(
     hedge_events: list[BookSnapshot] | None = None,
     halt_windows: list[HaltWindow] | None = None,
     sim_risk_caps: SimRiskCaps | None = None,
+    extra_held_notional: float = 0.0,
+    extra_n_held: int = 0,
 ) -> RunResult:
     """Run one question end-to-end through hftbacktest.
 
     SHR-85: ``halt_windows`` (live halt periods to replay) and ``sim_risk_caps``
     (daily-loss / inventory caps) make the sim stop ENTERING when live would have
     stopped. Both default to off, so callers that don't pass them are unaffected;
-    exits are never suppressed (matching live)."""
+    exits are never suppressed (matching live).
+
+    SHR-91: ``extra_held_notional`` and ``extra_n_held`` carry cross-question
+    inventory from the SharedInventoryLedger (positions held in other questions
+    that overlapped in real time). Added to the current question's held inventory
+    inside ``entry_blocked`` so the concurrent / total-inventory caps see the
+    full picture. Default 0 (no cross-question state) preserves existing callers."""
+
+    # SHR-91: the sim_risk_caps kwarg takes precedence over cfg.sim_risk_caps;
+    # fall back to the config field when the kwarg is not explicitly supplied.
+    # This allows the in-process parallel runner to pass per-question caps that
+    # override (or supplement) the config-level caps.
+    if sim_risk_caps is None:
+        sim_risk_caps = cfg.sim_risk_caps
 
     # SHR-57: log effective fee model/rate once at run start so it is never a
     # silent default. HL HIP-4 empirically has fee=0 across 767 live fills;
@@ -1284,6 +1340,8 @@ def run_one_question(
         snap_best_bid_per_leg=snap_best_bid_per_leg,
         book_ts_per_leg=book_ts_per_leg,
         _book_idx=book_idx,
+        extra_held_notional=extra_held_notional,
+        extra_n_held=extra_n_held,
     )
 
     # --- Scan loop ---------------------------------------------------------

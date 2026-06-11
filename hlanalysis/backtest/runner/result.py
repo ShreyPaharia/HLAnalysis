@@ -54,6 +54,13 @@ class RunResult:
     # never reaches the venue; the strategy re-evaluates on a later scan. 0 when
     # the floor is disabled (default).
     n_refire_throttled: int = 0
+    # SHR-91: completed position windows for the cross-question shared-inventory
+    # ledger. Each entry is (open_ts_ns, close_ts_ns, notional_usd). Populated
+    # whenever a position opens and subsequently closes (via exit, stop-loss, or
+    # settlement). The in-process run_questions_parallel path feeds these into a
+    # SharedInventoryLedger so later questions see prior concurrent positions when
+    # evaluating the max_concurrent_positions / max_total_inventory caps.
+    position_windows: list[tuple[int, int, float]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
