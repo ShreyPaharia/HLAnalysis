@@ -129,7 +129,9 @@ def load_sim(sim_run: Path) -> list[SimTick]:
     diag = sim_run / "diagnostics.parquet"
     if not diag.exists():
         raise SystemExit(f"sim diagnostics not found: {diag}")
-    df = duckdb.sql(
+    # Isolated connection: a failure here must not poison a shared global
+    # duckdb transaction used by other callers (e.g. the daily report).
+    df = duckdb.connect().execute(
         f"""SELECT ts_ns, question_idx, action, sigma, ref_price,
                    p_model, edge_yes, edge_no
             FROM read_parquet('{diag}') ORDER BY ts_ns"""

@@ -1,4 +1,4 @@
-.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy deploy-recorder deploy-engine engine-local install-engine-on-ec2 push-engine-secrets ssh-ec2 status engine-status logs engine-logs engine-diag reconcile-report engine-events query data-summary pull-data help
+.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy deploy-recorder deploy-engine engine-local install-engine-on-ec2 push-engine-secrets ssh-ec2 status engine-status logs engine-logs engine-diag reconcile-report engine-events query data-summary pull-data daily-report help
 
 # Stack name
 STACK_NAME=HLRecorderStack
@@ -308,6 +308,15 @@ logs:
 # Pull all archived parquet data from S3 to local ./data/
 pull-data:
 	@./scripts/pull-data.sh
+
+# Daily HL sim-vs-live fidelity report (SSM-free). Pulls recorded market data +
+# the engine state.db/journal from S3, runs the live-faithful sim for each
+# (slot, kind) cell of the last fully-settled day, compares PnL + activity +
+# decision fidelity (replay harness) + book regime + health, and writes a
+# markdown report under docs/research/. Override ARGS to change slots/day, e.g.
+#   make daily-report ARGS="--day 2026-06-10 --slots v1,v31"
+daily-report:
+	@uv run python tools/daily_report.py --pull $(ARGS)
 
 # Help
 help:
