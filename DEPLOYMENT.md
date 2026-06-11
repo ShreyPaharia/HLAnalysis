@@ -662,3 +662,53 @@ systemctl list-timers hl-daily-report.timer   # verify next run
 Manual send: `systemctl start hl-daily-report.service` (or run the module with
 `--summary` directly). The report reads only (no DB writes); TG creds come from
 `deploy.alerts.telegram` (env `TG_BOT_TOKEN`/`TG_CHAT_ID`).
+
+### Daily engine S3 sync (SSM-free analysis)
+
+`hl-engine-s3-sync.timer` runs `scripts/sync-engine-to-s3.sh` at **06:45 UTC
+daily** (after settlement + the desk report), pushing a *consistent* snapshot of
+each slot's operational data to the **same archive bucket** under a separate
+`engine/` prefix. This replaces the slow per-run SSM `user_fills` dumps: analysts
+pull it locally and query `state.db` directly.
+
+Per slot alias under `/opt/hl-recorder/data/engine/<alias>/`, it uploads to
+`s3://$BUCKET/engine/date=YYYY-MM-DD/<alias>/`:
+
+- `state.db.gz` — a SQLite **`.backup`** snapshot (online backup API: folds the
+  live WAL, committed rows only), NOT a `cp` (a raw copy of `.db`+`-wal` of a
+  live-writing engine can be torn/corrupt-on-read). Stale `state.db.bak-*` and
+  the live `-wal`/`-shm` are excluded by naming the file exactly.
+- `gate_decisions.jsonl.gz` — the live decision log.
+- `engine/log-filtered.gz` — journald `hl-engine` lines matching the signal
+  regex (WARN/ERROR/halt/reject/FEED STALE/drift/…). KB/day, **not** the ~97
+  MB/day raw 1 Hz PnL-poll + 429 + reject noise (piped `journalctl|grep|gzip`,
+  never buffered). The top-level (un-namespaced) `state.db` lands under `_root/`.
+
+The unit is niced (`Nice=19` / `IOSchedulingClass=idle`) so the nightly
+`.backup`+gzip never contends with the engine on the t4g.micro. Idempotent —
+re-running overwrites that day's `date=` prefix in place.
+
+**Enable on the box** (operator, via SSM as root — files are version-controlled
+at `deploy/systemd/`):
+
+```
+cp deploy/systemd/hl-engine-s3-sync.{service,timer} /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now hl-engine-s3-sync.timer
+systemctl list-timers hl-engine-s3-sync.timer    # verify next run
+systemctl start hl-engine-s3-sync.service        # optional: backfill today now
+journalctl -u hl-engine-s3-sync.service -n 30 --no-pager
+```
+
+**Pull + inspect locally** (zero SSM):
+
+```
+scripts/pull-engine.sh                                   # -> ./data/engine/
+scripts/inspect_engine_state.py ./data/engine --date 2026-06-10 --alias v1
+```
+
+Footprint: ~5–10 MB/day Tier 1 (5 slots × ~1–2 MB gzipped `state.db` + tiny gate
+logs) + KB/day filtered logs → ~0.15–0.3 GB/month, **< $0.01/month** S3 storage
+on top of the existing bucket; daily PUTs are negligible. Retention is optional
+(the DBs are tiny); add an `engine/`-prefixed lifecycle expiry (e.g. 90 days) only
+if desired. **Risk:** `state.db` contains live fills/positions — the bucket stays
+private (no public access), same as the recorder archive.

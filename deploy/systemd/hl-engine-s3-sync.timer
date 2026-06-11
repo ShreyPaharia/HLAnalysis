@@ -1,0 +1,12 @@
+[Unit]
+Description=Sync engine operational data to S3 daily at 06:45 UTC
+
+[Timer]
+# After the 06:00 UTC HIP-4 settlement and the 06:30 daily report, so the
+# snapshot captures the just-settled day's fills/settlements.
+OnCalendar=*-*-* 06:45:00 UTC
+Persistent=true
+RandomizedDelaySec=2m
+
+[Install]
+WantedBy=timers.target
