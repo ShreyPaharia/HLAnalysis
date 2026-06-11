@@ -242,6 +242,10 @@ class ThetaParams(BaseModel):
     momentum_mr_tau_gate: float = 1.0
     momentum_mr_alpha_tilt: float = 0.5
     momentum_mr_jr_trust_weight: bool = False
+    # SHR-102: bucket doom-loop fix (flag-gated, off by default).
+    # See ThetaHarvesterConfig.entry_spread_gate / exit_spread_hold for semantics.
+    entry_spread_gate: bool = False
+    exit_spread_hold: float = 0.0
 
 
 class StrategyConfig(BaseModel):

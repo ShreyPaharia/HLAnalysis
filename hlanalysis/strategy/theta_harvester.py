@@ -292,6 +292,23 @@ class ThetaHarvesterConfig:
     # jump fraction over the same lookback as the indicator. Throttles the tilt
     # when the underlying is gapping (BPV diverges from RV). Default off.
     momentum_mr_jr_trust_weight: bool = False
+    # === SHR-102: bucket doom-loop fix (flag-gated, OFF BY DEFAULT) ===
+    # (a) Dynamic entry spread gate. When True, entry is suppressed when the
+    # live book's half-spread (ask−bid)/2 of the chosen leg exceeds the net
+    # fair-value edge budget: (p_win − mid − fee − edge_buffer). This is a
+    # FAIR/MID-REFERENCED check, not limit-referenced — the existing
+    # max_slippage_pct gate is limit-referenced and is a no-op on the doom loop
+    # (limit == wide bid → slip ≈ 0). The dynamic gate auto-skips persistently-
+    # wide illiquid bucket books while still trading the same market when its
+    # book tightens to a tradeable window. False preserves pre-SHR-102 behavior.
+    entry_spread_gate: bool = False
+    # (b)/(c) Exit hold-to-settle. When > 0, suppress exit_safety_d and
+    # exit_edge liquidations on a held leg whose book half-spread exceeds this
+    # threshold — hold the position to settlement instead of crossing a spread
+    # that won't tighten in time. The hard stop-loss gate ALWAYS fires regardless
+    # of this setting (never disabled by exit_spread_hold). 0.0 disables (legacy
+    # behavior). Typical value for HL bucket legs: 0.05–0.10.
+    exit_spread_hold: float = 0.0
 
 
 class ThetaHarvesterStrategy(Strategy):
@@ -560,6 +577,34 @@ class ThetaHarvesterStrategy(Strategy):
         )
         effective_edge = chosen_edge - gamma_lambda * chosen_phi
 
+        # SHR-102 (a): dynamic entry spread gate. When enabled, compare the
+        # chosen leg's live half-spread to the net fair-value edge budget. The
+        # check is FAIR/MID-REFERENCED (not limit-referenced) as required by
+        # the order-mechanics note in the research doc: the existing slippage
+        # gate is limit-referenced (limit == wide bid → slip ≈ 0 → no-op).
+        #
+        # gate fires when: live_half_spread > (p_win − mid − fee) − edge_buffer
+        # equivalently: the round-trip spread cost > the gross fair-value edge
+        # above the buffer. This auto-skips illiquid bucket books while still
+        # entering during their tradeable (tight-spread) windows.
+        if self.cfg.entry_spread_gate:
+            _bid = chosen_book.bid_px
+            _ask = chosen_book.ask_px
+            if _bid is not None and _ask is not None and _ask > _bid:
+                live_half_spread = (_ask - _bid) / 2.0
+                mid = (_bid + _ask) / 2.0
+                fee_entry = fee_per_share(self.cfg, chosen_p, side="entry")
+                fair_edge = chosen_p - mid - fee_entry
+                edge_budget = fair_edge - self.cfg.edge_buffer
+                if live_half_spread > edge_budget:
+                    return Decision(action=Action.HOLD, diagnostics=(
+                        Diagnostic("info", "entry_spread_too_wide", (
+                            ("half_spread", f"{live_half_spread:.4f}"),
+                            ("edge_budget", f"{edge_budget:.4f}"),
+                            ("fair_edge", f"{fair_edge:.4f}"),
+                        )),
+                    ))
+
         # v3.5: momentum / MR gate — skip if regime == "mr" and aligned-signed
         # score < -tau_gate. Computed AFTER favorite is chosen so we know which
         # side to align to.
@@ -783,13 +828,28 @@ class ThetaHarvesterStrategy(Strategy):
         # variance are cut sooner than the raw-edge gate would suggest.
         lo, hi = _winning_region(question, position.symbol)
 
+        # SHR-102 (b)/(c): exit hold-to-settle. When enabled, suppress
+        # exit_safety_d and exit_edge liquidations on a held leg whose book is
+        # persistently wide — hold to settlement instead of crossing a spread
+        # that is unlikely to tighten before resolution. The hard stop-loss
+        # (Rule 1 above) ALWAYS fires; this gate only suppresses model-driven
+        # soft exits. Time-stop and take-profit are also unaffected.
+        #
+        # Condition: exit_spread_hold > 0 AND live half-spread > threshold.
+        _spread_hold_active = False
+        if self.cfg.exit_spread_hold > 0.0 and held.bid_px is not None and held.ask_px is not None:
+            held_half_spread = (held.ask_px - held.bid_px) / 2.0
+            if held_half_spread > self.cfg.exit_spread_hold:
+                _spread_hold_active = True
+
         # Rule 2.5 (v3.1.1+): σ-normalized mid-hold distance exit. Fires BEFORE
         # the bid collapses, catching cases where BTC has drifted close to the
         # adverse boundary while the held leg's bid is still stale-positive.
         # Mirrors v1's exit_safety_d but uses v3.1's Itô-corrected d-machinery
         # (drift-aware). Skipped when σ·√τ is non-positive or the leg has no
         # contiguous winning region (middle-bucket NO).
-        if self.cfg.exit_safety_d > 0.0:
+        # Skipped when _spread_hold_active (SHR-102 hold-to-settle).
+        if self.cfg.exit_safety_d > 0.0 and not _spread_hold_active:
             safety_d = _safety_d_for_region(
                 reference_price=reference_price, lo=lo, hi=hi,
                 sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
@@ -864,16 +924,22 @@ class ThetaHarvesterStrategy(Strategy):
         # Empirical: symmetric gamma penalty triggers premature exits during
         # transient drift through near-strike regions that would otherwise
         # recover (HL 9-question test 2026-05-19, net -$3 to -$10/question).
-        if exit_now:
+        # SHR-102: when _spread_hold_active, suppress exit_edge (hold-to-settle).
+        if exit_now and not _spread_hold_active:
             return self._exit_intent(question, position, held, reason="exit_edge")
 
-        return Decision(action=Action.HOLD, diagnostics=(
-            Diagnostic("info", "hold", (
-                ("edge_held", f"{edge_held:.4f}"),
-                ("held_p", f"{held_p:.4f}"),
-                ("tau_s", f"{tau_s:.0f}"),
-            )),
-        ))
+        hold_diags: tuple = (Diagnostic("info", "hold", (
+            ("edge_held", f"{edge_held:.4f}"),
+            ("held_p", f"{held_p:.4f}"),
+            ("tau_s", f"{tau_s:.0f}"),
+        )),)
+        if _spread_hold_active:
+            held_half_spread_val = (held.ask_px - held.bid_px) / 2.0  # type: ignore[operator]
+            hold_diags = (Diagnostic("info", "hold_spread_too_wide", (
+                ("half_spread", f"{held_half_spread_val:.4f}"),
+                ("exit_spread_hold", f"{self.cfg.exit_spread_hold:.4f}"),
+            )),) + hold_diags
+        return Decision(action=Action.HOLD, diagnostics=hold_diags)
 
     def _evaluate_topup(
         self, *, question: QuestionView, books: Mapping[str, BookState],
@@ -996,6 +1062,9 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         momentum_mr_tau_gate=float(params.get("momentum_mr_tau_gate", 1.0)),
         momentum_mr_alpha_tilt=float(params.get("momentum_mr_alpha_tilt", 0.5)),
         momentum_mr_jr_trust_weight=bool(params.get("momentum_mr_jr_trust_weight", False)),
+        # SHR-102: doom-loop fix (off by default)
+        entry_spread_gate=bool(params.get("entry_spread_gate", False)),
+        exit_spread_hold=float(params.get("exit_spread_hold", 0.0)),
     )
     return ThetaHarvesterStrategy(cfg)
 
