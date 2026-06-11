@@ -2089,3 +2089,354 @@ def test_cli_min_inter_order_seconds_arg():
     args2 = p.parse_args(["--min-inter-order-seconds", "0.75"])
     cfg = _run_config_from_args(args2, hedge_cfg=None)
     assert cfg.min_inter_order_seconds == pytest.approx(0.75)
+
+
+# ---------------------------------------------------------------------------
+# SHR-89a: outcome-book events trigger scans in event mode
+# ---------------------------------------------------------------------------
+#
+# The live engine re-evaluates the strategy on every OUTCOME-BOOK L2 update
+# (the binary/bucket market's own order book events). The sim must mirror this
+# so scan timing aligns with live decisions.
+#
+# Proof: build a question whose ONLY events are outcome-book updates (zero
+# reference events). In event mode the sim must fire a scan for each book
+# update; in fixed mode it fires only on the coarse grid. The outcome-book
+# trigger coverage must be strictly higher in event mode.
+
+
+def _make_outcome_book_only_question(
+    *,
+    n_book_updates: int = 10,
+    duration_ns: int = 10 * 60 * 1_000_000_000,
+    update_stride_ns: int | None = None,
+):
+    """Synthetic question with OUTCOME-BOOK updates and NO reference events.
+
+    Isolates the outcome-book trigger path: event mode must fire on
+    book_ts_per_leg even when ref_events is empty.
+    """
+    from hlanalysis.backtest.data.synthetic import SyntheticDataSource, SyntheticQuestion
+    from hlanalysis.backtest.core.data_source import QuestionDescriptor
+    from hlanalysis.backtest.core.events import BookSnapshot, SettlementEvent
+
+    if update_stride_ns is None:
+        update_stride_ns = duration_ns // n_book_updates
+
+    start_ns = 0
+    end_ns = duration_ns
+    yes_sym = "ob-yes"
+    no_sym = "ob-no"
+
+    desc = QuestionDescriptor(
+        question_id="ob-q-0", question_idx=1,
+        start_ts_ns=start_ns, end_ts_ns=end_ns,
+        leg_symbols=(yes_sym, no_sym),
+        klass="priceBinary", underlying="BTC",
+    )
+
+    snaps: list[BookSnapshot] = []
+    for i in range(n_book_updates):
+        t = start_ns + 1_000_000 + i * update_stride_ns
+        bid = round(0.40 + 0.10 * (i / max(1, n_book_updates - 1)), 4)
+        ask = round(bid + 0.02, 4)
+        snaps.append(BookSnapshot(ts_ns=t, symbol=yes_sym,
+                                  bids=((bid, 100.0),),
+                                  asks=((ask, 100.0),)))
+        snaps.append(BookSnapshot(ts_ns=t, symbol=no_sym,
+                                  bids=((round(1.0 - ask, 4), 100.0),),
+                                  asks=((round(1.0 - bid, 4), 100.0),)))
+
+    settle = [SettlementEvent(ts_ns=end_ns, question_idx=1, outcome="yes")]
+
+    sq = SyntheticQuestion(
+        descriptor=desc,
+        book_snapshots=tuple(snaps),
+        trades=(),
+        reference_events=(),   # NO reference events — outcome-book only
+        settlement_events=tuple(settle),
+        outcome="yes",
+        strike=60_000.0,
+    )
+    ds = SyntheticDataSource()
+    ds.add_question(sq)
+    return ds, sq
+
+
+def test_event_mode_triggers_on_outcome_book_updates_not_only_reference():
+    """Event mode must fire a scan on each outcome-book update even when there
+    are zero reference events (SHR-89a).
+
+    A question with 10 outcome-book updates spread over 10 minutes has its
+    book events at known timestamps.  With NO reference events:
+    - Fixed mode at 5-min grid fires <= 3 scans in 10 min.
+    - Event mode (max=5min) fires >= 10 scans (one per book update).
+
+    Proves book_ts_per_leg IS included in _event_triggers (not just ref_events).
+    """
+    n = 10
+    duration_ns = 10 * 60 * 1_000_000_000   # 10 min
+    stride_ns   = duration_ns // n            # 1 book update/min
+    ds, sq = _make_outcome_book_only_question(
+        n_book_updates=n, duration_ns=duration_ns, update_stride_ns=stride_ns,
+    )
+
+    # Fixed grid at 5 min — only fires on the time-based grid, ignores book events.
+    fixed_strat = _CountingStrategy()
+    fixed_cfg = RunConfig(
+        scanner_interval_seconds=300.0,
+        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+    )
+    run_one_question(fixed_strat, ds, sq.descriptor, fixed_cfg, strike=sq.strike)
+
+    # Event mode max_interval=5min: without outcome-book triggers this would
+    # also fire <=3 scans; WITH them it fires >=10.
+    event_strat = _CountingStrategy()
+    event_cfg = RunConfig(
+        scan_mode="event",
+        scan_min_interval_seconds=0.2,
+        scan_max_interval_seconds=300.0,
+        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+    )
+    run_one_question(event_strat, ds, sq.descriptor, event_cfg, strike=sq.strike)
+
+    assert event_strat.call_count >= n, (
+        f"event mode with {n} outcome-book updates (no ref events) must fire "
+        f"at least {n} scans; got {event_strat.call_count}"
+    )
+    assert event_strat.call_count > fixed_strat.call_count, (
+        f"event mode ({event_strat.call_count}) must exceed fixed-grid "
+        f"({fixed_strat.call_count}) when driven purely by outcome-book updates"
+    )
+
+
+# ---------------------------------------------------------------------------
+# SHR-89b: wall-clock persistence marketability re-check
+# ---------------------------------------------------------------------------
+#
+# The current SHR-94 IOC marketability re-check vetoes a fill if the NEXT
+# snapshot within the order latency window (~50ms) shows the ask retreated.
+# On HL, book snapshots are seconds apart so the next snapshot is almost
+# never within 50ms — the check rarely fires.
+#
+# The wall-clock persistence re-check (ioc_fleeting_persistence_seconds) uses
+# a different criterion: if the ask level appeared in the CURRENT snapshot but
+# NOT in the previous snapshot (i.e. it's been present for less than
+# persistence_seconds), it is "fleeting" and the IOC is vetoed.
+#
+# PR #15 root cause: the #2230 0.90 spike appeared in exactly 2 snapshots
+# 0.545s apart. With persistence=2.0s, the first fill is also vetoed because
+# the 0.90 ask had not been present for 2s in the prior snapshot.
+
+
+def test_run_config_ioc_fleeting_persistence_seconds_default_zero():
+    """RunConfig.ioc_fleeting_persistence_seconds defaults to 0.0 (disabled)."""
+    cfg = RunConfig()
+    assert hasattr(cfg, "ioc_fleeting_persistence_seconds"), (
+        "RunConfig must have ioc_fleeting_persistence_seconds field"
+    )
+    assert cfg.ioc_fleeting_persistence_seconds == pytest.approx(0.0), (
+        "ioc_fleeting_persistence_seconds must default to 0.0 (disabled)"
+    )
+
+
+def test_is_fleeting_ask_persistence_new_level_is_fleeting():
+    """_is_fleeting_ask with persistence_seconds > 0: an ask level that appeared
+    in the CURRENT snapshot but was absent in the PREVIOUS snapshot is flagged
+    as fleeting (it has been present for less than persistence_seconds).
+
+    Snapshot timeline:
+      snap[0] at t=0: ask = 0.98 (no 0.90 level)
+      snap[1] at t=1s: ask = 0.90  ← new level, appeared 1s ago
+    Decision at t=1s: fill_price = 0.90; persistence = 2.0s → FLEETING (1s < 2s).
+    """
+    from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_ask
+
+    snap_ask = np.array([0.98, 0.90], dtype=np.float64)
+    ts_arr = np.array([0, 1_000_000_000], dtype=np.int64)  # t=0, t=1s
+    sym = "yes"
+    now_ns = 1_000_000_000  # at the second snapshot
+    # book_idx[sym] = 2 (both snapshots consumed: ts[0]=0 <= now, ts[1]=1s <= now)
+    book_idx = {sym: 2}
+
+    result = _is_fleeting_ask(
+        sym, 0.90, now_ns,
+        latency_ns=50_000_000,   # 50ms latency (standard)
+        snap_best_ask_per_leg={sym: snap_ask},
+        book_ts_per_leg={sym: ts_arr},
+        book_idx=book_idx,
+        persistence_ns=2_000_000_000,  # 2s persistence
+    )
+    assert result is True, (
+        "ask appeared 1s ago (< 2s persistence): must be flagged as fleeting"
+    )
+
+
+def test_is_fleeting_ask_persistence_persistent_level_not_fleeting():
+    """_is_fleeting_ask with persistence_seconds > 0: an ask level that was
+    already present in the PREVIOUS snapshot is NOT fleeting.
+
+    Snapshot timeline:
+      snap[0] at t=0: ask = 0.90
+      snap[1] at t=3s: ask = 0.90  ← same level, present for 3s
+    Decision at t=3s: fill_price=0.90; persistence=2.0s → NOT fleeting (3s > 2s).
+    """
+    from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_ask
+
+    snap_ask = np.array([0.90, 0.90], dtype=np.float64)
+    ts_arr = np.array([0, 3_000_000_000], dtype=np.int64)  # t=0, t=3s
+    sym = "yes"
+    now_ns = 3_000_000_000
+    book_idx = {sym: 2}
+
+    result = _is_fleeting_ask(
+        sym, 0.90, now_ns,
+        latency_ns=50_000_000,
+        snap_best_ask_per_leg={sym: snap_ask},
+        book_ts_per_leg={sym: ts_arr},
+        book_idx=book_idx,
+        persistence_ns=2_000_000_000,
+    )
+    assert result is False, (
+        "ask present for 3s (>= 2s persistence): must NOT be flagged as fleeting"
+    )
+
+
+def test_is_fleeting_ask_persistence_zero_disables_check():
+    """With persistence_ns=0, the persistence check is skipped entirely — the
+    function falls back to the SHR-94 latency-window behaviour (which returns
+    False when the next snapshot is beyond the latency window)."""
+    from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_ask
+
+    snap_ask = np.array([0.98, 0.90], dtype=np.float64)
+    ts_arr = np.array([0, 1_000_000_000], dtype=np.int64)
+    sym = "yes"
+    now_ns = 1_000_000_000
+    book_idx = {sym: 2}
+
+    # With persistence disabled (0), the new level is NOT vetoed.
+    result = _is_fleeting_ask(
+        sym, 0.90, now_ns,
+        latency_ns=50_000_000,
+        snap_best_ask_per_leg={sym: snap_ask},
+        book_ts_per_leg={sym: ts_arr},
+        book_idx=book_idx,
+        persistence_ns=0,  # disabled
+    )
+    assert result is False, (
+        "persistence=0 must disable the check (legacy SHR-94 latency path only)"
+    )
+
+
+def test_is_fleeting_ask_persistence_first_snapshot_is_fleeting():
+    """An ask that appears in the FIRST snapshot (no prior snapshot to compare
+    against) is considered fleeting when persistence_seconds > 0."""
+    from hlanalysis.backtest.runner.hftbt_runner import _is_fleeting_ask
+
+    snap_ask = np.array([0.90], dtype=np.float64)
+    ts_arr = np.array([1_000_000_000], dtype=np.int64)  # only one snapshot
+    sym = "yes"
+    now_ns = 1_000_000_000
+    book_idx = {sym: 1}  # one snapshot consumed
+
+    result = _is_fleeting_ask(
+        sym, 0.90, now_ns,
+        latency_ns=50_000_000,
+        snap_best_ask_per_leg={sym: snap_ask},
+        book_ts_per_leg={sym: ts_arr},
+        book_idx=book_idx,
+        persistence_ns=2_000_000_000,
+    )
+    assert result is True, (
+        "ask in first snapshot only (no prior reference): must be flagged as fleeting"
+    )
+
+
+def test_run_config_fleeting_persistence_wires_into_ioc_veto():
+    """When ioc_fleeting_persistence_seconds > 0, a fleeting ask level (newly
+    appeared in the latest snapshot) is vetoed by the IOC submit path.
+
+    Setup: two book snapshots 1s apart; ask moves from 0.98 → 0.90 in snap[1].
+    Decision at t=snap[1]+epsilon with persistence=2s: the 0.90 ask must be
+    vetoed (appeared 1s ago < 2s persistence), n_rejects incremented.
+    """
+    T0_NS = 0
+    T1_NS = 1_000_000_000  # 1s later
+
+    arr = np.concatenate([
+        _make_depth_clear_arr(T0_NS),
+        _depth_ev(T0_NS + 1_000_000, SELL_EVENT, 0.98, 100.0),  # snap[0]: ask=0.98
+        _depth_ev(T0_NS + 1_000_000, BUY_EVENT,  0.90, 100.0),  # snap[0]: bid=0.90
+        _make_depth_clear_arr(T1_NS),
+        _depth_ev(T1_NS + 1_000_000, SELL_EVENT, 0.90, 200.0),  # snap[1]: ask=0.90 (new!)
+        _depth_ev(T1_NS + 1_000_000, BUY_EVENT,  0.80, 100.0),  # snap[1]: bid=0.80
+    ])
+
+    # snap_best_ask arrays: snap[0]=0.98, snap[1]=0.90 (1s gap)
+    snap_ask = np.array([0.98, 0.90], dtype=np.float64)
+    snap_bid = np.array([0.90, 0.80], dtype=np.float64)
+    ts_arr   = np.array([T0_NS + 1_000_000, T1_NS + 1_000_000], dtype=np.int64)
+    sym = "yes"
+
+    cfg = RunConfig(
+        tick_size=0.001, lot_size=1.0,
+        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=50.0,
+        ioc_marketability_recheck=True,
+        ioc_fleeting_persistence_seconds=2.0,   # 2s persistence gate
+    )
+    from hlanalysis.backtest.runner.hftbt_runner import _build_asset
+    asset = _build_asset(arr, cfg)
+    bt = hb.HashMapMarketDepthBacktest([asset])
+
+    # Advance to t=T1_NS + 2ms (past snap[1])
+    bt.elapse(T1_NS + 2_000_000)
+    now_ns = int(bt.current_timestamp)
+
+    book_idx = {sym: 2}  # both snapshots consumed
+
+    st = _reject_run_state(bt, cfg)
+    st.snap_best_ask_per_leg = {sym: snap_ask}
+    st.book_ts_per_leg = {sym: ts_arr}
+    st._book_idx = book_idx
+    st.now_ns = now_ns
+    st.books = {"yes": BookState(
+        symbol="yes", bid_px=0.80, bid_sz=100.0, ask_px=0.90, ask_sz=200.0,
+        last_trade_ts_ns=0, last_l2_ts_ns=T1_NS,
+    )}
+
+    from hlanalysis.backtest.runner.hftbt_runner import _route_enter
+    # Entry at 0.90 ask: without persistence gate this would fill; with 2s gate → vetoed.
+    from hlanalysis.strategy.types import OrderIntent
+
+    class _FakeDecision:
+        intents = (OrderIntent(
+            question_idx=1, symbol="yes", side="buy",
+            size=50.0, limit_price=0.90, cloid="test-cloid",
+        ),)
+        action = None
+
+    _route_enter(st, _FakeDecision())
+    bt.close()
+
+    assert st.result.n_rejects == 1, (
+        f"fleeting 0.90 ask (appeared 1s ago, persistence=2s) must be vetoed; "
+        f"got n_rejects={st.result.n_rejects}"
+    )
+    assert st.pos is None, "no fill must have occurred"
+
+
+def test_cli_ioc_fleeting_persistence_seconds_arg():
+    """--ioc-fleeting-persistence-seconds is declared and defaults to 0.0."""
+    import argparse
+    from hlanalysis.backtest.cli import _add_run_config_args, _run_config_from_args
+
+    p = argparse.ArgumentParser()
+    _add_run_config_args(p)
+    args = p.parse_args([])
+    assert hasattr(args, "ioc_fleeting_persistence_seconds")
+    assert args.ioc_fleeting_persistence_seconds == pytest.approx(0.0)
+    assert _run_config_from_args(args, hedge_cfg=None).ioc_fleeting_persistence_seconds == pytest.approx(0.0)
+
+    args2 = p.parse_args(["--ioc-fleeting-persistence-seconds", "2.0"])
+    cfg = _run_config_from_args(args2, hedge_cfg=None)
+    assert cfg.ioc_fleeting_persistence_seconds == pytest.approx(2.0)

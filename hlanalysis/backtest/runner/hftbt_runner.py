@@ -251,6 +251,25 @@ class RunConfig:
     # re-fires on a leg to live cadence. Default 0.0 disables it (back-compat;
     # the legacy no-floor A/B arm). The measured value for HL is ~0.75s.
     min_inter_order_seconds: float = 0.0
+    # SHR-89b: wall-clock persistence marketability re-check.
+    # The SHR-94 IOC re-check vetoes a fill if the next snapshot within the
+    # order-latency window (~50ms) shows the ask retreated. On HL, snapshots
+    # are seconds apart so the next snapshot is almost never within 50ms.
+    # When ioc_fleeting_persistence_seconds > 0 a complementary check is
+    # applied: if the ask level at fill_price appeared in the CURRENT snapshot
+    # but NOT the previous snapshot (i.e. it has been present for fewer than
+    # persistence_seconds), the IOC is vetoed (the level is "new/fleeting").
+    # Default 0.0 disables it (back-compat; same as setting ioc_marketability_recheck
+    # to the old latency-window-only behaviour). Measured HL value: 2.0s
+    # (docs/research/2026-06-11-ioc-refire-floor-hl-fill-model.md, #2230 analysis).
+    ioc_fleeting_persistence_seconds: float = 0.0
+    # SHR-91: shared cross-market inventory caps. When set, run_questions_parallel
+    # creates a SharedInventoryLedger for the in-process path so the concurrent /
+    # total-inventory gates see positions from ALL questions that were live at a
+    # given timestamp — matching the live engine's single per-slot ledger. Also
+    # passed to run_one_question for the daily-loss cap and existing SHR-85 gates.
+    # None (default) disables cross-question state (back-compat).
+    sim_risk_caps: "SimRiskCaps | None" = None
 
     def effective_latency_model(self) -> "LatencyModel":
         """The latency model to wire into assets: the explicit ``latency_model``
@@ -474,22 +493,27 @@ def _is_fleeting_ask(
     snap_best_ask_per_leg: "dict[str, np.ndarray]",
     book_ts_per_leg: "dict[str, np.ndarray]",
     book_idx: "dict[str, int]",
+    persistence_ns: int = 0,
 ) -> bool:
-    """SHR-94: was the ask at ``fill_price`` a fleeting level that will no
-    longer be present when the order arrives at the exchange?
+    """SHR-94 + SHR-89b: was the ask at ``fill_price`` a fleeting level?
 
-    Uses the per-leg snapshot top-of-book arrays (``snap_best_ask_per_leg``,
-    parallel to ``book_ts_per_leg``) to look at the *next* snapshot after
-    ``now_ns``.  If that snapshot (a) falls within the latency window
-    ``[now_ns, now_ns + latency_ns]`` AND (b) shows the best ask has moved
-    ABOVE ``fill_price``, the level is considered fleeting and the caller
-    should veto the IOC submission (counting a reject + re-fire next scan).
+    Two complementary checks:
 
-    Returns ``False`` (not fleeting) when:
-    - No snapshot arrays for this leg (legacy / PM sources without snap_best).
-    - There is no *next* snapshot within the latency window (the level
-      persisted past the arrival time — fill is valid).
-    - The next snapshot's best ask is still ≤ ``fill_price`` (still marketable).
+    **SHR-94 (latency-window check):** looks at the *next* snapshot within the
+    order-latency window ``[now_ns, now_ns + latency_ns]``. If it shows the
+    ask has moved ABOVE ``fill_price``, the level is fleeting. Effective when
+    HL snapshots are more frequent than the latency (~50ms).
+
+    **SHR-89b (wall-clock persistence check, ``persistence_ns > 0``):** checks
+    the *current* snapshot's prior snapshot. If the ask at ``fill_price`` just
+    appeared (present in the current snapshot but ABSENT in the previous one),
+    the level has been live for fewer nanoseconds than ``persistence_ns`` →
+    fleeting. This catches HL's burst-sampled book where the next snapshot is
+    seconds away (making the SHR-94 window never fire).
+
+    Either check may veto the IOC independently. Returns ``False`` when:
+    - No snapshot arrays for this leg.
+    - persistence_ns=0 AND no next snapshot within the latency window.
     """
     snap_ask = snap_best_ask_per_leg.get(sym)
     ts_arr = book_ts_per_leg.get(sym)
@@ -498,6 +522,30 @@ def _is_fleeting_ask(
     # book_idx[sym] is the first snapshot index NOT YET consumed at now_ns
     # (the scan loop advances it past all ts <= now_ns).
     idx = book_idx.get(sym, 0)
+
+    # SHR-89b: wall-clock persistence check on the CURRENT (most-recently-
+    # consumed) snapshot. current_idx = idx - 1 (last consumed snapshot).
+    if persistence_ns > 0:
+        current_idx = idx - 1
+        if current_idx >= 0:
+            current_ask = float(snap_ask[current_idx])
+            if not np.isnan(current_ask) and current_ask <= fill_price:
+                # The ask is marketable at the current snapshot. Check if it
+                # appeared here for the first time (no prior snapshot) or if
+                # the previous snapshot had a DIFFERENT ask.
+                if current_idx == 0:
+                    # First-ever snapshot: the level just appeared → fleeting.
+                    return True
+                prev_ask = float(snap_ask[current_idx - 1])
+                if np.isnan(prev_ask) or prev_ask > fill_price:
+                    # Previous snapshot had no marketable ask at fill_price:
+                    # the level is new. Check persistence duration.
+                    current_ts = int(ts_arr[current_idx])
+                    prev_ts = int(ts_arr[current_idx - 1])
+                    if current_ts - prev_ts < persistence_ns:
+                        return True  # level just appeared; within persistence window
+
+    # SHR-94: forward-looking latency-window check.
     if idx >= len(ts_arr):
         return False  # no next snapshot
     next_ts = int(ts_arr[idx])
@@ -523,18 +571,38 @@ def _is_fleeting_bid(
     snap_best_bid_per_leg: "dict[str, np.ndarray]",
     book_ts_per_leg: "dict[str, np.ndarray]",
     book_idx: "dict[str, int]",
+    persistence_ns: int = 0,
 ) -> bool:
-    """SHR-94: was the bid at ``fill_price`` a fleeting level?
+    """SHR-94 + SHR-89b: was the bid at ``fill_price`` a fleeting level?
 
-    Symmetric to ``_is_fleeting_ask`` for the sell side: returns ``True`` if
-    the next snapshot within the latency window shows the best bid BELOW
-    ``fill_price`` (the bid has retreated and the level won't fill live).
+    Symmetric to ``_is_fleeting_ask`` for the sell side.
+
+    **SHR-94:** next snapshot within latency window shows bid BELOW fill_price.
+    **SHR-89b:** bid just appeared in the current snapshot (not in the prior
+    one) and has been present for fewer than ``persistence_ns`` nanoseconds.
     """
     snap_bid = snap_best_bid_per_leg.get(sym)
     ts_arr = book_ts_per_leg.get(sym)
     if snap_bid is None or ts_arr is None or len(snap_bid) == 0 or len(ts_arr) == 0:
         return False
     idx = book_idx.get(sym, 0)
+
+    # SHR-89b: wall-clock persistence check (bid side).
+    if persistence_ns > 0:
+        current_idx = idx - 1
+        if current_idx >= 0:
+            current_bid = float(snap_bid[current_idx])
+            if not np.isnan(current_bid) and current_bid >= fill_price:
+                if current_idx == 0:
+                    return True
+                prev_bid = float(snap_bid[current_idx - 1])
+                if np.isnan(prev_bid) or prev_bid < fill_price:
+                    current_ts = int(ts_arr[current_idx])
+                    prev_ts = int(ts_arr[current_idx - 1])
+                    if current_ts - prev_ts < persistence_ns:
+                        return True
+
+    # SHR-94: forward-looking latency-window check.
     if idx >= len(ts_arr):
         return False
     next_ts = int(ts_arr[idx])
@@ -614,6 +682,15 @@ class _RunState:
     # Injected via the runner's book_idx dict — the _RunState doesn't own it
     # directly; it's passed to _is_fleeting_level via the routing helpers.
     _book_idx: "dict[str, int] | None" = None
+    # SHR-91: cross-question inventory visible to the entry gate.
+    # Populated by run_questions_parallel from the SharedInventoryLedger
+    # (positions held in OTHER questions that were live at now_ns). Defaults to
+    # zero so all existing callers are unaffected.
+    extra_held_notional: float = 0.0
+    extra_n_held: int = 0
+    # SHR-91: timestamp when the current position opened (None = no position).
+    # Used to record position_windows when a position closes.
+    _pos_open_ts_ns: "int | None" = None
 
     def next_oid(self) -> int:
         oid = self._next_oid_counter
@@ -643,7 +720,13 @@ class _RunState:
         """Return a veto reason if this entry would be suppressed, else ``None``.
 
         Mirrors the live RiskGate entry-only caps via the shared
-        ``halt_replay.entry_veto``. Exits never call this."""
+        ``halt_replay.entry_veto``. Exits never call this.
+
+        SHR-91: ``extra_held_notional`` and ``extra_n_held`` (cross-question
+        positions from the SharedInventoryLedger) are added to the totals so
+        the concurrent / inventory caps are evaluated against the full set of
+        positions that were live at ``now_ns`` across ALL questions, matching
+        the live engine's single per-slot ledger."""
         caps = self.sim_risk_caps
         if caps is None and not self.halt_windows:
             return None
@@ -654,8 +737,8 @@ class _RunState:
         inp = EntryGateInputs(
             now_ns=self.now_ns,
             intent_notional=intent_notional,
-            held_inventory_usd=held_notional,
-            n_held_positions=n_held,
+            held_inventory_usd=held_notional + self.extra_held_notional,
+            n_held_positions=n_held + self.extra_n_held,
             is_topup=is_topup,
             realized_pnl_window=self.realized_floor_by_window.get(ws, 0.0),
         )
@@ -752,6 +835,11 @@ def _route_stop_loss(st: _RunState) -> None:
     st.record_realized(
         st.now_ns, (fill.price - pos.avg_entry) * fill.size - fill.fee
     )
+    # SHR-91: record the completed position window for the shared-inventory ledger.
+    if st._pos_open_ts_ns is not None:
+        notional = abs(pos.qty) * pos.avg_entry
+        st.result.position_windows.append((st._pos_open_ts_ns, st.now_ns, notional))
+    st._pos_open_ts_ns = None
     st.pos = None
 
 
@@ -863,9 +951,11 @@ def _route_enter(st: _RunState, decision: Any) -> None:
     # submit and count a reject (strategy re-fires next scan as with live).
     if cfg.ioc_marketability_recheck and st._book_idx is not None:
         latency_ns = int(cfg.order_latency_ms * 1_000_000)
+        persistence_ns = int(cfg.ioc_fleeting_persistence_seconds * 1_000_000_000)
         if _is_fleeting_ask(
             intent.symbol, slipped, st.now_ns, latency_ns,
             st.snap_best_ask_per_leg, st.book_ts_per_leg, st._book_idx,
+            persistence_ns=persistence_ns,
         ):
             st.result.n_rejects += 1
             return
@@ -903,6 +993,10 @@ def _route_enter(st: _RunState, decision: Any) -> None:
     prev = PositionState(st.pos.qty, st.pos.avg_entry) if st.pos is not None else None
     new_pos, _ = apply_fill(prev, "buy", fill.size, fill.price)
     assert new_pos is not None
+    # SHR-91: stamp the position open time on the first ENTER (prev=None means
+    # no prior position; top-ups keep the existing open timestamp).
+    if prev is None:
+        st._pos_open_ts_ns = st.now_ns
     st.pos = Position(
         question_idx=st.pos.question_idx if st.pos is not None else q.question_idx,
         symbol=intent.symbol, qty=new_pos.qty, avg_entry=new_pos.avg_entry,
@@ -944,9 +1038,11 @@ def _route_exit(st: _RunState, decision: Any) -> None:
     # fill price within the latency window, the level is fleeting — veto.
     if cfg.ioc_marketability_recheck and st._book_idx is not None:
         latency_ns = int(cfg.order_latency_ms * 1_000_000)
+        persistence_ns = int(cfg.ioc_fleeting_persistence_seconds * 1_000_000_000)
         if _is_fleeting_bid(
             intent.symbol, slipped, st.now_ns, latency_ns,
             st.snap_best_bid_per_leg, st.book_ts_per_leg, st._book_idx,
+            persistence_ns=persistence_ns,
         ):
             st.result.n_rejects += 1
             return
@@ -978,6 +1074,11 @@ def _route_exit(st: _RunState, decision: Any) -> None:
     # accumulator (net of fee, matching live closedPnl semantics).
     st.record_realized(st.now_ns, realized - fill.fee)
     if new_pos is None:
+        # SHR-91: position fully closed — record window for shared-inventory ledger.
+        if st._pos_open_ts_ns is not None:
+            notional = abs(pos.qty) * pos.avg_entry
+            st.result.position_windows.append((st._pos_open_ts_ns, st.now_ns, notional))
+        st._pos_open_ts_ns = None
         st.pos = None
     else:
         st.pos = Position(
@@ -1012,6 +1113,11 @@ def _settle(st: _RunState) -> None:
         st.fill_question_idx["settle"] = pos.question_idx
         if st.fills_dir_active:
             st.fill_meta["settle"] = {"resolved_outcome": outcome}
+        # SHR-91: record the settled position window for the shared-inventory ledger.
+        if st._pos_open_ts_ns is not None:
+            notional = abs(pos.qty) * pos.avg_entry
+            st.result.position_windows.append((st._pos_open_ts_ns, q.end_ts_ns, notional))
+        st._pos_open_ts_ns = None
         st.pos = None
 
     # Mark any open hedge residual to the last observed hedge mid and book a
@@ -1050,13 +1156,28 @@ def run_one_question(
     hedge_events: list[BookSnapshot] | None = None,
     halt_windows: list[HaltWindow] | None = None,
     sim_risk_caps: SimRiskCaps | None = None,
+    extra_held_notional: float = 0.0,
+    extra_n_held: int = 0,
 ) -> RunResult:
     """Run one question end-to-end through hftbacktest.
 
     SHR-85: ``halt_windows`` (live halt periods to replay) and ``sim_risk_caps``
     (daily-loss / inventory caps) make the sim stop ENTERING when live would have
     stopped. Both default to off, so callers that don't pass them are unaffected;
-    exits are never suppressed (matching live)."""
+    exits are never suppressed (matching live).
+
+    SHR-91: ``extra_held_notional`` and ``extra_n_held`` carry cross-question
+    inventory from the SharedInventoryLedger (positions held in other questions
+    that overlapped in real time). Added to the current question's held inventory
+    inside ``entry_blocked`` so the concurrent / total-inventory caps see the
+    full picture. Default 0 (no cross-question state) preserves existing callers."""
+
+    # SHR-91: the sim_risk_caps kwarg takes precedence over cfg.sim_risk_caps;
+    # fall back to the config field when the kwarg is not explicitly supplied.
+    # This allows the in-process parallel runner to pass per-question caps that
+    # override (or supplement) the config-level caps.
+    if sim_risk_caps is None:
+        sim_risk_caps = cfg.sim_risk_caps
 
     # SHR-57: log effective fee model/rate once at run start so it is never a
     # silent default. HL HIP-4 empirically has fee=0 across 767 live fills;
@@ -1284,6 +1405,8 @@ def run_one_question(
         snap_best_bid_per_leg=snap_best_bid_per_leg,
         book_ts_per_leg=book_ts_per_leg,
         _book_idx=book_idx,
+        extra_held_notional=extra_held_notional,
+        extra_n_held=extra_n_held,
     )
 
     # --- Scan loop ---------------------------------------------------------

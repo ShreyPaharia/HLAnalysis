@@ -20,6 +20,57 @@ from ..core.data_source import QuestionDescriptor
 from ..core.source_config import SourceConfig
 
 
+# ---------------------------------------------------------------------------
+# SHR-91: Shared cross-market inventory ledger
+# ---------------------------------------------------------------------------
+
+
+class SharedInventoryLedger:
+    """Tracks position windows from previously-simulated questions.
+
+    The in-process (n_workers<=1) ``run_questions_parallel`` loop runs questions
+    sequentially, but live runs them concurrently under one per-slot inventory
+    ledger (``max_total_inventory_usd`` / ``max_concurrent_positions``). Without
+    a shared ledger the sim over-enters notional that live had no room for.
+
+    Usage:
+      1. Call ``record(open_ts_ns, close_ts_ns, notional)`` after each question
+         finishes to register its position windows.
+      2. Call ``count_at(ts_ns)`` before each question's scan to get
+         ``(total_notional, n_positions)`` that were live at that timestamp from
+         all previously-recorded questions. Pass these as ``extra_held_notional``
+         and ``extra_n_held`` to ``_RunState`` so ``entry_blocked`` adds them to
+         the current question's held inventory.
+
+    ``count_at`` is O(W) where W is the total number of recorded windows.
+    For typical HL runs (tens of questions, one position each) this is fast.
+    """
+
+    __slots__ = ("_windows",)
+
+    def __init__(self) -> None:
+        # Each entry: (open_ts_ns, close_ts_ns, notional_usd)
+        self._windows: list[tuple[int, int, float]] = []
+
+    def record(self, *, open_ts_ns: int, close_ts_ns: int, notional: float) -> None:
+        """Register a completed position window from a finished question."""
+        self._windows.append((open_ts_ns, close_ts_ns, notional))
+
+    def count_at(self, ts_ns: int) -> tuple[float, int]:
+        """Total held notional and number of positions active at ``ts_ns``.
+
+        A window ``[open, close)`` is active when ``open <= ts_ns < close``.
+        Returns ``(total_notional_usd, n_positions)``.
+        """
+        total = 0.0
+        n = 0
+        for open_ts, close_ts, notional in self._windows:
+            if open_ts <= ts_ns < close_ts:
+                total += notional
+                n += 1
+        return total, n
+
+
 def parent_package_root() -> str:
     """Absolute path of the checkout the PARENT process imports hlanalysis from.
 
@@ -95,7 +146,13 @@ def _run_question_worker(args: tuple) -> QResult:
      diag_dir, fills_dir, hedge_data_path, hedge_half_spread_bps) = args
 
     data_source = source_config.build()
-    run_cfg = RunConfig(**run_cfg_kwargs)
+    # SHR-91: asdict() serialises SimRiskCaps as a plain dict for pickling.
+    # Reconstruct it before passing to RunConfig so the type is correct.
+    raw_kw = dict(run_cfg_kwargs)
+    if isinstance(raw_kw.get("sim_risk_caps"), dict):
+        from ..halt_replay import SimRiskCaps as _SimRiskCaps
+        raw_kw["sim_risk_caps"] = _SimRiskCaps(**raw_kw["sim_risk_caps"])
+    run_cfg = RunConfig(**raw_kw)
     strategy = build_strategy_for_run(strategy_id, params)
 
     # Wide window: cache-driven sources (PM) filter by end_ts ∈ [start,end);
@@ -155,16 +212,43 @@ def run_questions_parallel(
     if n_workers <= 1 and data_source is not None and strategy is not None:
         results: list[QResult] = []
         hedge_source = build_hedge_source(run_cfg, hedge_data_path, hedge_half_spread_bps)
+        # SHR-91: shared inventory ledger for the sequential in-process path.
+        # When inventory caps are configured, track cross-question positions so
+        # later questions see inventory from prior concurrent questions (matching
+        # the live engine's single per-slot ledger). Only activated when caps are
+        # set; default None preserves bit-identical behaviour for existing callers.
+        caps = run_cfg.sim_risk_caps
+        ledger: SharedInventoryLedger | None = None
+        if caps is not None and (
+            caps.max_total_inventory_usd is not None
+            or caps.max_concurrent_positions is not None
+        ):
+            ledger = SharedInventoryLedger()
         for i, q in enumerate(descriptors):
             hedge_events = None
             if hedge_source is not None:
                 hedge_events = list(hedge_source.book_events(
                     start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns))
+            # SHR-91: query the ledger at this question's start to compute how
+            # much inventory from prior questions is already "in the market" at
+            # the question's open time.
+            extra_notional, extra_n = 0.0, 0
+            if ledger is not None:
+                extra_notional, extra_n = ledger.count_at(q.start_ts_ns)
             res = run_one_question(
                 strategy, data_source, q, run_cfg,
                 diagnostics_dir=diagnostics_dir, fills_dir=fills_dir,
                 strike=strike_for(q), hedge_events=hedge_events,
+                extra_held_notional=extra_notional,
+                extra_n_held=extra_n,
             )
+            # SHR-91: register this question's completed position windows so
+            # subsequent questions can see them in the ledger.
+            if ledger is not None:
+                for open_ts, close_ts, notional in getattr(res, "position_windows", ()):
+                    ledger.record(
+                        open_ts_ns=open_ts, close_ts_ns=close_ts, notional=notional,
+                    )
             results.append(QResult(i, res.realized_pnl_usd or 0.0, len(res.fills),
                                    data_source.resolved_outcome(q)))
         return results
@@ -188,6 +272,7 @@ def run_questions_parallel(
 
 __all__ = [
     "QResult",
+    "SharedInventoryLedger",
     "build_hedge_source",
     "build_strategy_for_run",
     "parent_package_root",

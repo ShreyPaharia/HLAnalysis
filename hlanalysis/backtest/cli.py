@@ -286,6 +286,7 @@ def _run_config_from_args(
         scan_min_interval_seconds=getattr(args, "scan_min_interval_seconds", 0.2),
         scan_max_interval_seconds=getattr(args, "scan_max_interval_seconds", 2.0),
         min_inter_order_seconds=getattr(args, "min_inter_order_seconds", 0.0),
+        ioc_fleeting_persistence_seconds=getattr(args, "ioc_fleeting_persistence_seconds", 0.0),
     )
     if hedge_cfg is not None:
         kwargs["hedge_enabled"] = hedge_cfg["hedge_enabled"]
@@ -754,6 +755,18 @@ def _add_run_config_args(parser: argparse.ArgumentParser) -> None:
         "this many seconds elapse (live serializes one order per leg in flight). "
         "Throttles wide-bucket exit churn to live cadence. Measured HL floor "
         "~0.75s (live min 0.73s). Default=0.0 disables it (legacy no-floor A/B arm).",
+    )
+    parser.add_argument(
+        "--ioc-fleeting-persistence-seconds",
+        type=float,
+        default=0.0,
+        dest="ioc_fleeting_persistence_seconds",
+        help="(SHR-89b) Wall-clock persistence IOC marketability re-check. When > 0 "
+        "and ioc_marketability_recheck is enabled, veto IOC submits where the ask/bid "
+        "level just appeared in the current snapshot (absent in the prior one) AND has "
+        "been present for fewer than this many seconds. Catches HL's burst-sampled book "
+        "where the SHR-94 latency window never fires (snapshots are seconds apart). "
+        "Default=0.0 disables (legacy behaviour).",
     )
 
 
