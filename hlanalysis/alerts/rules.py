@@ -33,6 +33,34 @@ class _TelegramLike(Protocol):
     async def send(self, text: str, *, markdown: bool = True) -> bool: ...
 
 
+# RiskVeto reasons that reflect ordinary *market conditions* — the gate is
+# correctly declining to trade an illiquid/quiet/mispriced market — rather than
+# an engine or risk-state problem. They re-fire on every scan when a slot is
+# pointed at a thin market (the v31_pm_eth_ms ETH-multistrike incident
+# 2026-06-12 emitted ≈240/h), require no operator action, and self-heal when the
+# market moves. They are still logged (`logger.info` in the router) and journaled
+# (SHR-83), so diagnostics keep full visibility — only the Telegram page is
+# suppressed. Mirrors the OrderRejected FAK no-match suppression below.
+#
+# Reasons NOT in this set page by default (fail-safe): engine/risk-state vetoes
+# (daily_loss_cap, kill_switch_active, max_*_usd / max_concurrent_positions,
+# stale_reconcile, stale_reference, opposite_leg_held, size_invalid) and any
+# newly-added reason stay visible until explicitly classified as benign.
+_BENIGN_VETO_REASONS = frozenset({
+    "low_volume",            # market notional below floor (thin book)
+    "stale_data",            # the trading leg's book has gone quiet (PM favorites do)
+    "strike_distance",       # favorite too far from the reference price
+    "tte_out_of_window",     # outside the slot's time-to-expiry window
+    "depth_walk_no_fill",    # no level marketable at our limit (book ticked away)
+    "depth_walk_slip",       # at-limit fill would exceed the slippage cap
+    "order_below_min_notional",  # effective size clamped below the min-notional floor
+    "post_exit_cooldown",    # churn guard — re-entry too soon after an exit
+    "settled",               # market already cash-settled
+    "allowlist_no_match",    # question not in this slot's allowlist
+    "blocklist",             # question explicitly blocked
+})
+
+
 class AlertRules:
     """Subscribes to the EventBus and forwards a curated subset to Telegram.
 
@@ -135,6 +163,16 @@ class AlertRules:
             case RiskHalt():
                 return f"halt:{ev.reason}", f"<b>RISK HALT</b> {_e(ev.reason)}"
             case RiskVeto():
+                # Market-condition vetoes are the gate working as designed on a
+                # thin/quiet market — they re-fire every scan and require no
+                # operator action. Suppress from Telegram (still logged +
+                # journaled in the router) so they don't flood the channel.
+                if ev.reason in _BENIGN_VETO_REASONS:
+                    logger.debug(
+                        "suppressing benign risk veto reason={} q={} detail={}",
+                        ev.reason, ev.question_idx, ev.detail,
+                    )
+                    return None
                 # Include question_idx in the dedupe key so identical reasons
                 # on different questions don't collapse into one alert.
                 return f"veto:{ev.reason}:{ev.question_idx}", (

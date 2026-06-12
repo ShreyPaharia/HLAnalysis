@@ -103,6 +103,45 @@ async def test_risk_veto_dedupes_within_window():
 
 
 @pytest.mark.asyncio
+async def test_benign_market_condition_vetoes_are_suppressed():
+    """Market-condition vetoes (low_volume, stale_data, strike_distance, …)
+    fire every scan when a slot is pointed at a thin/quiet market — the gate
+    correctly declining to trade. They require no operator action and would
+    flood Telegram (≈240/h at the 60s dedupe), so they must NOT page. They are
+    still logged + journaled in the router. Engine/risk-state vetoes
+    (daily_loss_cap, max_position_usd, …) still page.
+    """
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    # The exact flood reported in the v31_pm_eth_ms incident 2026-06-12.
+    await bus.publish(RiskVeto(
+        ts_ns=1, account_alias="v31_pm_eth_ms", reason="low_volume",
+        question_idx=1992648867, detail={"usd": "93"},
+    ))
+    await bus.publish(RiskVeto(
+        ts_ns=2, account_alias="v31_pm_eth_ms", reason="stale_data",
+        question_idx=488649311,
+    ))
+    # An actionable risk-state veto on the same slot must still page.
+    await bus.publish(RiskVeto(
+        ts_ns=3, account_alias="v31_pm_eth_ms", reason="daily_loss_cap",
+        question_idx=743427003,
+    ))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert not any("low_volume" in m for m in tg.messages)
+    assert not any("stale_data" in m for m in tg.messages)
+    assert any("daily_loss_cap" in m for m in tg.messages)
+
+
+@pytest.mark.asyncio
 async def test_entry_and_exit_format_pnl():
     tg = _FakeTelegram()
     bus = EventBus()
