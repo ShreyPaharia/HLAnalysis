@@ -908,6 +908,11 @@ class EngineRuntime:
                     venue_fill_source=(
                         FILL_SOURCE_ROUTER if is_pm else FILL_SOURCE_VENUE
                     ),
+                    # Suppress venue_orphan/venue_absent drift for settled
+                    # questions: PM auto-redeems ~15 min post-settle, and the
+                    # venue keeps showing the winning shares until then — that
+                    # gap floods the alert channel (incident 2026-06-12).
+                    settled_qidxs=self.market_state.settled_question_idxs(),
                     journal=slot.journal,
                 )
                 res = rec.run(

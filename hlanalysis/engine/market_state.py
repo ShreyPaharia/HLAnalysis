@@ -522,6 +522,17 @@ class MarketState:
     def all_questions(self) -> list[QuestionView]:
         return list(self._questions.values())
 
+    def settled_question_idxs(self) -> set[int]:
+        """Question idxs currently marked settled. The reconciler uses this to
+        suppress venue_orphan / venue_absent drift during the settlement→
+        redemption gap: a PM market keeps reporting the winning shares on the
+        venue for ~15 min after settlement until Polymarket auto-redeems them
+        on-chain, while the engine's local row is already gone. That's
+        expected (pending redemption), not position drift. Settled questions
+        are retained ~6h post-settle before eviction, so this set covers the
+        whole redemption window (incident 2026-06-12 q700064348)."""
+        return {idx for idx, q in self._questions.items() if q.settled}
+
     def symbol_to_question_map(self) -> dict[str, int]:
         """sym → question_idx for every known leg. Cached, invalidated on
         QuestionMetaEvent ingestion. The reconciler uses this every cycle to

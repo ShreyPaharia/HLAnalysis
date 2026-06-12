@@ -564,3 +564,77 @@ def test_venue_orphan_position_without_mapping_does_not_corrupt_db(dal):
         and (d.detail or {}).get("symbol") == "#999"
         for d in res.drift_events
     )
+
+
+def test_settled_qidx_suppresses_venue_orphan_alert(dal):
+    # Settlement→redemption gap (incident 2026-06-12 q700064348). After a PM
+    # market settles, the engine deletes its local position at settlement, but
+    # Polymarket keeps reporting the winning shares for ~15 min until it
+    # auto-redeems them on-chain. Without this guard the reconciler fires a
+    # `venue_orphan_alert_only` DRIFT every 15s cycle for that whole window.
+    # A settled qidx is pending auto-redemption — expected, not drift: suppress
+    # the alert AND don't adopt (adopting resurrects a position about to be
+    # redeemed). The 6h RedemptionTimeout watchdog backstops a stuck redeem.
+    venue = ClearinghouseState(
+        positions=(VenuePosition(
+            symbol="tok", qty=51.0102, avg_entry=0.98, unrealized_pnl=0.0),),
+        account_value_usd=0,
+    )
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 700064348},
+        apply_position_changes=False, settled_qidxs={700064348},
+    ).run(venue_open=[], venue_state=venue, now_ns=2)
+    assert not any(d.case == "position_mismatch" for d in res.drift_events)
+    assert dal.get_position(700064348) is None  # not adopted
+
+
+def test_settled_qidx_skips_apply_mode_adoption(dal):
+    # Even in apply mode (restart / HL), a settled qidx must NOT be adopted from
+    # the venue — the winning shares are pending auto-redemption and adopting
+    # them resurrects a position that's about to vanish (then can't be sold).
+    venue = ClearinghouseState(
+        positions=(VenuePosition(
+            symbol="tok", qty=51.0102, avg_entry=0.98, unrealized_pnl=0.0),),
+        account_value_usd=0,
+    )
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 700064348},
+        settled_qidxs={700064348},
+    ).run(venue_open=[], venue_state=venue, now_ns=2)
+    assert dal.get_position(700064348) is None
+    assert not any(d.case == "position_mismatch" for d in res.drift_events)
+
+
+def test_unsettled_qidx_still_alerts_venue_orphan(dal):
+    # Guard against over-suppression: a venue orphan whose qidx is NOT settled
+    # must still alert (the settled-suppression must be narrowly scoped).
+    venue = ClearinghouseState(
+        positions=(VenuePosition(
+            symbol="tok", qty=5.0, avg_entry=0.4, unrealized_pnl=0.0),),
+        account_value_usd=0,
+    )
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 99},
+        apply_position_changes=False, settled_qidxs={700064348},
+    ).run(venue_open=[], venue_state=venue, now_ns=2)
+    assert any(
+        d.detail.get("resolution") == "venue_orphan_alert_only"
+        for d in res.drift_events
+    )
+
+
+def test_settled_qidx_suppresses_venue_absent_alert(dal):
+    # The mirror window: local still holds the settled position but the venue
+    # has already dropped it (redeemed). In alert-only (PM) mode that normally
+    # fires `venue_absent_alert_only` every cycle; suppress it for a settled
+    # qidx (expected post-settlement, not drift).
+    dal.upsert_position(Position(
+        question_idx=700064348, symbol="tok", qty=51.0102, avg_entry=0.98,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
+    ))
+    venue = ClearinghouseState(positions=(), account_value_usd=0)
+    res = Reconciler(
+        dal, fills_lookup=lambda _: [], symbol_to_question={"tok": 700064348},
+        apply_position_changes=False, settled_qidxs={700064348},
+    ).run(venue_open=[], venue_state=venue, now_ns=2)
+    assert not any(d.case == "position_mismatch" for d in res.drift_events)

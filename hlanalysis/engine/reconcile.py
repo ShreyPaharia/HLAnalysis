@@ -87,6 +87,7 @@ class Reconciler:
         account_alias: str = "",
         apply_position_changes: bool = True,
         venue_fill_source: str = FILL_SOURCE_ROUTER,
+        settled_qidxs: frozenset[int] | set[int] | None = None,
         journal=None,
     ) -> None:
         self.dal = dal
@@ -118,6 +119,17 @@ class Reconciler:
         # Stamped onto every ReconcileDrift this Reconciler emits so alerts
         # carry the account that detected the drift.
         self.account_alias = account_alias
+        # Question idxs the engine knows have settled. During the
+        # settlement→redemption gap a PM market keeps reporting the winning
+        # shares on the venue (~15 min until Polymarket auto-redeems them
+        # on-chain) while the engine's local row is already gone — that's
+        # expected, not position drift. We suppress the venue_orphan /
+        # venue_absent alert-only DRIFT for these qidxs (and never adopt them:
+        # adopting a position about to be redeemed resurrects an un-sellable
+        # phantom). A genuinely-stuck redemption is caught by the 6h
+        # RedemptionTimeout watchdog, not this per-cycle alert (incident
+        # 2026-06-12 q700064348 flooded ~240/h through the gap).
+        self._settled_qidxs: frozenset[int] = frozenset(settled_qidxs or ())
 
     def run(
         self,
@@ -316,7 +328,7 @@ class Reconciler:
                 if apply:
                     vanished.append((qidx, lp.symbol, lp))
                     self.dal.delete_position(qidx)
-                else:
+                elif qidx not in self._settled_qidxs:
                     drift.append(ReconcileDrift(
                         ts_ns=now_ns, account_alias=self.account_alias,
                         case="position_mismatch", question_idx=qidx,
@@ -373,6 +385,13 @@ class Reconciler:
                 ))
                 continue
             if qidx in local_by_qidx:
+                continue
+            if qidx in self._settled_qidxs:
+                # Settled, pending Polymarket auto-redemption — the venue keeps
+                # showing the winning shares until the on-chain redeem (~15 min
+                # post-settle) clears them. Not drift, and must NOT be adopted
+                # (resurrecting a position about to be redeemed strands an
+                # un-sellable phantom). See _settled_qidxs note.
                 continue
             if apply:
                 self.dal.upsert_position(Position(
