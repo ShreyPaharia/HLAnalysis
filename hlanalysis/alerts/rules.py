@@ -77,6 +77,26 @@ _BENIGN_VETO_REASONS = frozenset({
 })
 
 
+# PM reconcile drift resolutions that are informational and PERSISTENT: the
+# condition (a venue position we don't track, a local position the data-api
+# can't see, a qty that disagrees with the laggy indexer) re-fires on every
+# reconcile cycle — every 15s in prod — for the entire lifetime of the position,
+# because PM is alert-only by design (we never auto-adopt/vanish from the
+# flapping data-api live; see reconcile.py). The default 60s dedupe window only
+# collapses a minute of repeats, so a position that stays diverged for hours
+# pages ~60×/hour indefinitely (incident 2026-06-12 v1_pm q=700064348:
+# venue_orphan_alert_only on a 51-share 0.98 favorite). These get the long
+# `persistent_dedupe_window_s` so the operator is paged once, then reminded only
+# periodically — kept visible (not silenced) because an untracked real position
+# still needs eventual manual resolution or settlement. Mirrors the benign
+# RiskVeto / throttled stale-halt suppression.
+_PERSISTENT_DRIFT_RESOLUTIONS = frozenset({
+    "venue_orphan_alert_only",
+    "venue_absent_alert_only",
+    "qty_mismatch_alert_only",
+})
+
+
 class AlertRules:
     """Subscribes to the EventBus and forwards a curated subset to Telegram.
 
@@ -89,11 +109,16 @@ class AlertRules:
         bus: EventBus,
         telegram: _TelegramLike,
         dedupe_window_s: int = 60,
+        persistent_dedupe_window_s: int = 3600,
         venue_by_alias: Mapping[str, str] | None = None,
     ) -> None:
         self._bus = bus
         self._tg = telegram
         self._dedupe_window_s = dedupe_window_s
+        # Long window for persistent, no-immediate-action PM alert-only drift
+        # (see _PERSISTENT_DRIFT_RESOLUTIONS). Defaults to 1h: one page when the
+        # divergence appears, then an hourly heartbeat instead of every cycle.
+        self._persistent_dedupe_window_s = persistent_dedupe_window_s
         self._last_sent: dict[str, float] = {}
         # alias → short venue tag rendered in the alert prefix
         # (e.g. {"v31": "HL", "v31_pm": "PM"}). Empty mapping reverts to
@@ -134,11 +159,18 @@ class AlertRules:
             except Exception as e:
                 logger.exception("alert rule error: {}", e)
 
+    def _window_for_key(self, key: str) -> float:
+        # Persistent PM alert-only drift carries its resolution as the key's
+        # final `:`-segment; those get the long window so they don't flood.
+        if any(key.endswith(f":{r}") for r in _PERSISTENT_DRIFT_RESOLUTIONS):
+            return self._persistent_dedupe_window_s
+        return self._dedupe_window_s
+
     def _is_deduped(self, key: str) -> bool:
         last = self._last_sent.get(key)
         if last is None:
             return False
-        return (time.monotonic() - last) < self._dedupe_window_s
+        return (time.monotonic() - last) < self._window_for_key(key)
 
     def _format(self, ev: BusEvent) -> tuple[str | None, str] | None:
         match ev:
@@ -201,10 +233,17 @@ class AlertRules:
                     f"qty={ev.qty} trigger=${ev.trigger_px:.4f}"
                 )
             case ReconcileDrift():
-                # Dedupe identical drift events (same case + question + cloid)
-                # within the window. Without a key, every reconcile cycle
-                # re-fires the same alert.
-                key = f"drift:{ev.case}:{ev.question_idx}:{ev.cloid or ''}"
+                # Dedupe identical drift events (same case + question + cloid +
+                # resolution) within the window. Without a key, every reconcile
+                # cycle re-fires the same alert. The resolution is the key's
+                # final segment so _window_for_key can route persistent PM
+                # alert-only drift to the long window (kills the every-cycle
+                # flood) while loud/actionable drift keeps the short window.
+                resolution = (ev.detail or {}).get("resolution", "")
+                key = (
+                    f"drift:{ev.case}:{ev.question_idx}:{ev.cloid or ''}"
+                    f":{resolution}"
+                )
                 return key, (
                     f"<b>DRIFT</b> {_e(ev.case)} cloid={_e(ev.cloid)} "
                     f"q={ev.question_idx} {_e(str(ev.detail))}"

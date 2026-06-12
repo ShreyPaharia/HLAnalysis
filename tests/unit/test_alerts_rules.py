@@ -411,6 +411,73 @@ async def test_reconcile_drift_dedupes_repeated_identical_events():
 
 
 @pytest.mark.asyncio
+async def test_persistent_pm_alert_only_drift_uses_long_window():
+    # Incident 2026-06-12 (v1_pm q=700064348): a venue position the engine
+    # isn't tracking locally (avg 0.98, 51 sh) emits `venue_orphan_alert_only`
+    # every 15s reconcile cycle. PM is alert-only by design (we never auto-adopt
+    # from the laggy data-api), so this informational drift re-fires for the
+    # WHOLE lifetime of the position — the 60s dedupe window only collapses a
+    # minute of repeats, leaving ~60 alerts/hour indefinitely. These persistent
+    # alert-only resolutions must use a much longer dedupe window so they page
+    # once then go quiet. Here the *default* window is 0 (nothing deduped) and
+    # only the long persistent window suppresses the repeats → exactly one page.
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(
+        bus=bus, telegram=tg, dedupe_window_s=0,
+        persistent_dedupe_window_s=3600,
+    )
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    for i in range(5):
+        await bus.publish(ReconcileDrift(
+            ts_ns=i, account_alias="v1_pm", case="position_mismatch",
+            question_idx=700064348,
+            detail={"resolution": "venue_orphan_alert_only",
+                    "symbol": "43761417231391599644293018968888110210404891"
+                              "057977651038733001703497855505316",
+                    "qty": "51.0102", "avg_entry": "0.98"},
+        ))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    drift_msgs = [m for m in tg.messages if "DRIFT" in m]
+    assert len(drift_msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_loud_drift_still_uses_default_window():
+    # The long-window throttle must apply ONLY to the persistent PM alert-only
+    # resolutions — a genuinely actionable drift (local_ghost, qty mismatch in
+    # apply mode) must keep the short default window so it isn't silenced for an
+    # hour. With the default window at 0, every loud drift pages.
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(
+        bus=bus, telegram=tg, dedupe_window_s=0,
+        persistent_dedupe_window_s=3600,
+    )
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    for i in range(5):
+        await bus.publish(ReconcileDrift(
+            ts_ns=i, account_alias="v1", case="local_ghost",
+            cloid="hla-v1-deadbeef", question_idx=42,
+        ))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    drift_msgs = [m for m in tg.messages if "DRIFT" in m]
+    assert len(drift_msgs) == 5
+
+
+@pytest.mark.asyncio
 async def test_memory_halt_formats_with_rss_and_ceiling():
     """MemoryHalt must reach Telegram with MB-converted RSS and ceiling values
     and a clear 'HALT' indicator so the operator knows the engine self-halted."""
