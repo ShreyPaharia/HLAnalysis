@@ -210,6 +210,15 @@ class ThetaHarvesterParams(BaseModel):
     # === SHR-102: bucket doom-loop fix (flag-gated, OFF BY DEFAULT) ===
     entry_spread_gate: bool = False
     exit_spread_hold: float = 0.0
+    # === one-sided-quote guard (flag-gated, OFF BY DEFAULT) ===
+    # When True, the favorite gate requires a two-sided quote (both bid_px and
+    # ask_px present) on the chosen leg. A one-sided ask-only quote (e.g. stale
+    # ask at 0.99 with no bid) can pass the favorite_threshold on the ask alone
+    # — the _mid fallback returns ask_px when bid is absent. When this flag is
+    # True, ask-only legs are excluded from the favorite-gate comparison instead,
+    # preventing a stale high ask from triggering a spurious entry. Default False
+    # preserves the current behavior exactly (bit-identical live when off).
+    require_two_sided_entry: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +379,15 @@ class ThetaHarvesterConfig:
     # of this setting (never disabled by exit_spread_hold). 0.0 disables (legacy
     # behavior). Typical value for HL bucket legs: 0.05–0.10.
     exit_spread_hold: float = 0.0
+    # === one-sided-quote guard (flag-gated, OFF BY DEFAULT) ===
+    # When True, the favorite gate requires a two-sided quote (both bid_px and
+    # ask_px present) on the chosen leg. A one-sided ask-only quote (e.g. stale
+    # ask at 0.99 with no bid) can pass the favorite_threshold on the ask alone
+    # — the _mid fallback returns ask_px when bid is absent. When this flag is
+    # True, ask-only legs are excluded from the favorite-gate comparison instead,
+    # preventing a stale high ask from triggering a spurious entry. Default False
+    # preserves the current behavior exactly (bit-identical live when off).
+    require_two_sided_entry: bool = False
 
 
 class ThetaHarvesterStrategy(Strategy):
@@ -605,10 +623,16 @@ class ThetaHarvesterStrategy(Strategy):
         # naturally collapses to "exactly one side passes" because YES+NO=1.
         # Buckets: filter to legs whose mid ≥ threshold; if no leg passes,
         # HOLD with diagnostic.
+        # When require_two_sided_entry is True, ask-only legs are excluded from
+        # the comparison entirely — a one-sided stale ask (e.g. 0.99) cannot
+        # pass the threshold on the ask alone. Default False preserves legacy
+        # _mid fallback behavior (bit-identical when off).
         if self.cfg.favorite_threshold > 0.0:
             def _mid(b: BookState) -> float:
                 if b.bid_px is not None and b.ask_px is not None:
                     return (b.bid_px + b.ask_px) / 2.0
+                if self.cfg.require_two_sided_entry:
+                    return 0.0  # one-sided quote fails the favorite gate
                 return b.ask_px if b.ask_px is not None else (b.bid_px or 0.0)
             per_leg = [t for t in per_leg if _mid(t[3]) >= self.cfg.favorite_threshold]
             if not per_leg:
@@ -1070,9 +1094,27 @@ class ThetaHarvesterStrategy(Strategy):
 
 from hlanalysis.backtest.core.registry import register  # noqa: E402
 
+# Single source of truth for optional-knob defaults in the backtest builder.
+# build_v3_theta_harvester uses _D.<field> instead of repeating literal defaults
+# so changing a default in ThetaHarvesterParams automatically propagates here.
+_D = ThetaHarvesterParams()
+
 
 @register("v3_theta_harvester")
 def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
+    # Required fields (no default in ThetaHarvesterParams — must be in params):
+    #   vol_lookback_seconds, edge_buffer, stop_loss_pct, exit_edge_threshold,
+    #   take_profit_price.
+    # Semi-required fields (not in ThetaHarvesterParams, but have backtest
+    #   legacy defaults kept as literals here):
+    #   vol_sampling_dt_seconds, vol_clip_min/max, fee_taker,
+    #   half_spread_assumption, drift_lookback_seconds, drift_blend,
+    #   max_position_usd, favorite_threshold, tte_min/max_seconds,
+    #   time_stop_seconds.
+    # Optional-knob fields (canonical defaults live in _D = ThetaHarvesterParams()):
+    #   all fields declared in ThetaHarvesterParams.  Any new optional knob
+    #   added to ThetaHarvesterParams automatically gets the right default here
+    #   without touching this function — that is the single-source guarantee.
     cfg = ThetaHarvesterConfig(
         vol_lookback_seconds=int(params["vol_lookback_seconds"]),
         vol_sampling_dt_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
@@ -1091,41 +1133,44 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         exit_edge_threshold=float(params["exit_edge_threshold"]),
         take_profit_price=(float(params["take_profit_price"]) if params.get("take_profit_price") is not None else None),
         time_stop_seconds=int(params.get("time_stop_seconds", 0)),
-        edge_max=(float(params["edge_max"]) if params.get("edge_max") is not None else None),
+        # --- optional knobs: defaults derived from _D (ThetaHarvesterParams) ---
+        edge_max=(
+            float(params["edge_max"]) if params.get("edge_max") is not None else _D.edge_max
+        ),
         min_distance_pct=(
             float(params["min_distance_pct"])
             if params.get("min_distance_pct") is not None
-            else None
+            else _D.min_distance_pct
         ),
-        min_bid_notional_usd=float(params.get("min_bid_notional_usd", 0.0)),
+        min_bid_notional_usd=float(params.get("min_bid_notional_usd", _D.min_bid_notional_usd)),
         gamma_lambda=(
             float(params["gamma_lambda"])
             if params.get("gamma_lambda") is not None
-            else None
+            else _D.gamma_lambda
         ),
-        topup_enabled=bool(params.get("topup_enabled", True)),
-        topup_threshold_pct=float(params.get("topup_threshold_pct", 0.2)),
-        topup_min_notional_usd=float(params.get("topup_min_notional_usd", 11.0)),
-        exit_safety_d=float(params.get("exit_safety_d", 0.0)),
-        vol_estimator=str(params.get("vol_estimator", "sample_std")),
+        topup_enabled=bool(params.get("topup_enabled", _D.topup_enabled)),
+        topup_threshold_pct=float(params.get("topup_threshold_pct", _D.topup_threshold_pct)),
+        topup_min_notional_usd=float(params.get("topup_min_notional_usd", _D.topup_min_notional_usd)),
+        exit_safety_d=float(params.get("exit_safety_d", _D.exit_safety_d)),
+        vol_estimator=str(params.get("vol_estimator", _D.vol_estimator)),
         lm_threshold=(
             float(params["lm_threshold"])
-            if params.get("lm_threshold") is not None else None
+            if params.get("lm_threshold") is not None else _D.lm_threshold
         ),
-        exit_take_profit_mode=bool(params.get("exit_take_profit_mode", False)),
-        exit_fee=float(params.get("exit_fee", 0.0007)),
-        fee_model=str(params.get("fee_model", "flat")),
-        fee_rate=float(params.get("fee_rate", 0.0)),
-        momentum_mr_enabled=bool(params.get("momentum_mr_enabled", False)),
-        momentum_mr_indicator=str(params.get("momentum_mr_indicator", "z_ret")),
-        momentum_mr_lookback_min=int(params.get("momentum_mr_lookback_min", 15)),
-        momentum_mr_mode=str(params.get("momentum_mr_mode", "gate")),
-        momentum_mr_tau_gate=float(params.get("momentum_mr_tau_gate", 1.0)),
-        momentum_mr_alpha_tilt=float(params.get("momentum_mr_alpha_tilt", 0.5)),
-        momentum_mr_jr_trust_weight=bool(params.get("momentum_mr_jr_trust_weight", False)),
-        # SHR-102: doom-loop fix (off by default)
-        entry_spread_gate=bool(params.get("entry_spread_gate", False)),
-        exit_spread_hold=float(params.get("exit_spread_hold", 0.0)),
+        exit_take_profit_mode=bool(params.get("exit_take_profit_mode", _D.exit_take_profit_mode)),
+        exit_fee=float(params.get("exit_fee", _D.exit_fee)),
+        fee_model=str(params.get("fee_model", _D.fee_model)),
+        fee_rate=float(params.get("fee_rate", _D.fee_rate)),
+        momentum_mr_enabled=bool(params.get("momentum_mr_enabled", _D.momentum_mr_enabled)),
+        momentum_mr_indicator=str(params.get("momentum_mr_indicator", _D.momentum_mr_indicator)),
+        momentum_mr_lookback_min=int(params.get("momentum_mr_lookback_min", _D.momentum_mr_lookback_min)),
+        momentum_mr_mode=str(params.get("momentum_mr_mode", _D.momentum_mr_mode)),
+        momentum_mr_tau_gate=float(params.get("momentum_mr_tau_gate", _D.momentum_mr_tau_gate)),
+        momentum_mr_alpha_tilt=float(params.get("momentum_mr_alpha_tilt", _D.momentum_mr_alpha_tilt)),
+        momentum_mr_jr_trust_weight=bool(params.get("momentum_mr_jr_trust_weight", _D.momentum_mr_jr_trust_weight)),
+        entry_spread_gate=bool(params.get("entry_spread_gate", _D.entry_spread_gate)),
+        exit_spread_hold=float(params.get("exit_spread_hold", _D.exit_spread_hold)),
+        require_two_sided_entry=bool(params.get("require_two_sided_entry", _D.require_two_sided_entry)),
     )
     return ThetaHarvesterStrategy(cfg)
 
