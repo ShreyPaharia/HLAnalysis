@@ -768,6 +768,105 @@ async def test_close_settled_hl_winning_leg_survives_wrong_settled_symbol(tmp_pa
     assert ev.realized_pnl == pytest.approx(5.34)  # venue truth, not −$299 loss
 
 
+@pytest.mark.asyncio
+async def test_close_settled_hl_defers_until_settlement_fill_ingested(tmp_path):
+    """The strategy emits the settlement EXIT the instant `settled` flips, which
+    races ahead of HL's settlement closedPnl fill — closing then publishes a
+    misleading $0 Telegram Exit. Defer the close until venue PnL is non-zero
+    (the fill has been ingested), then publish exactly one correct Exit."""
+    from hlanalysis.engine.risk_events import Exit
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    sub = bus.subscribe()
+    cfg = _strategy_cfg()
+    client = HLClient(account_address="0x", api_secret_key="0x",
+                      base_url="x", paper_mode=True)
+    client.realized_pnl_for_symbol = lambda sym, *, since_ts_ns=0: 0.0  # fill not in yet
+    client.paper_mode = False  # exercise the LIVE defer path (paper has no venue lag)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
+                    strategy_cfg=cfg)
+    dal.upsert_position(Position(
+        question_idx=42, symbol="@30", qty=10.0, avg_entry=0.6,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=0.0,
+    ))
+    settled_q = replace(_q(), settled=True, settled_symbol="@30")
+    await router._close_settled(42, now_ns=100, question=settled_q)
+    assert dal.get_position(42) is not None     # deferred — NOT closed
+    assert sub.qsize() == 0                       # no $0 Exit published
+    # settlement fill lands → venue PnL now available
+    client.realized_pnl_for_symbol = lambda sym, *, since_ts_ns=0: 4.0
+    await router._close_settled(42, now_ns=200, question=settled_q)
+    assert dal.get_position(42) is None
+    ev = await asyncio.wait_for(sub.get(), timeout=0.5)
+    assert isinstance(ev, Exit) and ev.reason == "settlement"
+    assert ev.realized_pnl == pytest.approx(4.0)  # one correct message, not $0
+
+
+@pytest.mark.asyncio
+async def test_close_settled_pm_defers_until_winner_known(tmp_path):
+    """PM: `settled` can flip (meta poll) before the winning leg is resolved;
+    settlement_pnl_usd then falls back to prior_realized (≈$0). Defer until the
+    winner (settled_symbol) is known so the Exit carries the real PnL."""
+    from hlanalysis.engine.risk_events import Exit
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    sub = bus.subscribe()
+    cfg = _strategy_cfg()
+    client = HLClient(account_address="0x", api_secret_key="0x",
+                      base_url="x", paper_mode=True)
+    client.settlement_reported_as_fill = False  # PM-like: settle via redeem, not a fill
+    client.paper_mode = False  # exercise the LIVE defer path
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
+                    strategy_cfg=cfg)
+    dal.upsert_position(Position(
+        question_idx=42, symbol="@30", qty=50.0, avg_entry=0.98,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
+    ))
+    settled_no_winner = replace(_q(), settled=True)  # settled, winner unknown
+    await router._close_settled(42, now_ns=100, question=settled_no_winner)
+    assert dal.get_position(42) is not None     # deferred
+    assert sub.qsize() == 0
+    settled_winner = replace(_q(), settled=True, settled_symbol="@30")  # @30 won
+    await router._close_settled(42, now_ns=200, question=settled_winner)
+    assert dal.get_position(42) is None
+    ev = await asyncio.wait_for(sub.get(), timeout=0.5)
+    assert isinstance(ev, Exit) and ev.reason == "settlement"
+    assert ev.realized_pnl == pytest.approx(50.0 * (1.0 - 0.98))  # +$1.00, not $0
+
+
+@pytest.mark.asyncio
+async def test_close_settled_defer_times_out_to_avoid_wedge(tmp_path):
+    """If the PnL source never arrives, the position must not stay wedged open
+    forever — after the defer timeout, close with the best-available PnL."""
+    from hlanalysis.engine.risk_events import Exit
+    from hlanalysis.engine.router import _SETTLEMENT_DEFER_TIMEOUT_NS
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    sub = bus.subscribe()
+    cfg = _strategy_cfg()
+    client = HLClient(account_address="0x", api_secret_key="0x",
+                      base_url="x", paper_mode=True)
+    client.settlement_reported_as_fill = False
+    client.paper_mode = False  # exercise the LIVE defer path
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
+                    strategy_cfg=cfg)
+    dal.upsert_position(Position(
+        question_idx=42, symbol="@30", qty=50.0, avg_entry=0.98,
+        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
+    ))
+    settled_no_winner = replace(_q(), settled=True)
+    await router._close_settled(42, now_ns=100, question=settled_no_winner)  # defer
+    assert dal.get_position(42) is not None
+    later = 100 + _SETTLEMENT_DEFER_TIMEOUT_NS + 1
+    await router._close_settled(42, now_ns=later, question=settled_no_winner)  # timed out
+    assert dal.get_position(42) is None  # closed with fallback rather than wedged
+    ev = await asyncio.wait_for(sub.get(), timeout=0.5)
+    assert isinstance(ev, Exit) and ev.reason == "settlement"
+
+
 class _CountingExec:
     """ExecutionClient stand-in that auto-fills like paper mode but records
     every PlaceRequest, so a test can assert a reduce-only re-fire against a

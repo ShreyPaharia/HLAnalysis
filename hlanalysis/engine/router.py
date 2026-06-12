@@ -34,6 +34,28 @@ _PM_BALANCE_SHORTFALL_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# How long _close_settled will defer publishing a settlement Exit while the
+# PnL source (PM winning leg / HL settlement closedPnl fill) lags the `settled`
+# flag. The strategy emits the settlement EXIT the instant `question.settled`
+# flips, which can race AHEAD of the venue delivering that source — publishing
+# then yields a misleading $0 Telegram alert. We retry next tick until the
+# source lands, but cap the wait so a never-arriving source can't wedge the
+# position open: after the cap we close with the best-available PnL (the prior
+# behaviour). Settled markets resolve their PnL source in seconds-to-minutes,
+# so 5 min is generous; the 6h RedemptionTimeout watchdog backstops a stuck
+# PM redemption independently. (Incident 2026-06-12: HL legs settling at $0.)
+_SETTLEMENT_DEFER_TIMEOUT_NS = 300 * 1_000_000_000
+
+
+def _pm_settlement_winner_known(qv: QuestionView | None) -> bool:
+    """True once the winning leg of a settled PM market is known, so
+    ``settlement_pnl_usd`` can compute the real PnL instead of falling back to
+    ``prior_realized`` (≈$0). ``settled`` can flip True (meta poll) before the
+    SettlementEvent resolves the winner, hence the separate check."""
+    return qv is not None and qv.settled and bool(
+        qv.settled_symbols or qv.settled_symbol or qv.settled_side
+    )
+
 
 def _pm_balance_shortfall(error: str | None) -> bool:
     """True iff a PM CLOB rejection authoritatively reports the on-chain CTF
@@ -110,6 +132,14 @@ class Router:
         # the first scan tick after restart sees an empty map and lets
         # re-entries through within the cooldown window.
         self._last_exit_ts: dict[int, int] = self._load_cooldowns()
+        # Per-question timestamp of the first deferred settlement-close attempt
+        # (ns). _close_settled defers publishing the settlement Exit while the
+        # PnL source lags the `settled` flag; this bounds that wait to
+        # _SETTLEMENT_DEFER_TIMEOUT_NS so a never-arriving source can't wedge a
+        # settled position open. In-memory only: a restart re-derives it on the
+        # next settled scan, and the settled market is closed by reconcile/
+        # redemption regardless.
+        self._settled_first_seen: dict[int, int] = {}
         # Reject circuit-breaker (incident 2026-06-04). A stale-open position
         # whose exit can never fill (price out of band / shares already gone)
         # re-fires every scan tick — 1,200+ identical rejects in ~1h, flooding
@@ -693,6 +723,52 @@ class Router:
         p = self.dal.get_position(question_idx)
         if p is None:
             return
+        is_hl = getattr(self.exec_client, "settlement_reported_as_fill", True)
+        # Defer the close until the settlement PnL source has landed. The
+        # strategy emits this EXIT the instant `question.settled` flips, which
+        # can race AHEAD of the venue delivering the PnL source — the winning
+        # leg (PM) or the settlement closedPnl fill (HL). Closing then publishes
+        # a $0 settlement Exit (the daily-loss gate self-heals later from venue
+        # truth; the Telegram alert does not). So retry next tick until the
+        # source is ready, bounded by _SETTLEMENT_DEFER_TIMEOUT_NS so a
+        # never-arriving source can't wedge the position open. (Incident
+        # 2026-06-12: HL legs settling at $0 because the closedPnl fill lagged
+        # the settled flag.)
+        if is_hl:
+            from .scanner import Scanner
+            window_start_ns = Scanner._daily_window_start_ns(
+                now_ns, hour=self.strategy_cfg.global_.daily_window_start_hour_utc,
+            )
+            venue_realized = self.exec_client.realized_pnl_for_symbol(
+                p.symbol, since_ts_ns=window_start_ns,
+            )
+            # HL binaries pay 0/1 to legs and avg is strictly between, so a held
+            # leg's settlement closedPnl is never exactly 0 — venue_realized==0
+            # means the settlement fill hasn't been ingested yet.
+            ready = venue_realized != 0.0
+        else:
+            ready = _pm_settlement_winner_known(question)
+        # Paper/sim has no real venue lag — the settlement closedPnl fill is
+        # never synthesized and the winner is deterministic, so deferring would
+        # just stall the loop until the timeout. Only defer in live mode.
+        paper = getattr(self.exec_client, "paper_mode", False)
+        if not ready and not paper:
+            first = self._settled_first_seen.setdefault(question_idx, now_ns)
+            if now_ns - first <= _SETTLEMENT_DEFER_TIMEOUT_NS:
+                logger.info(
+                    "settlement_close_deferred qidx={} symbol={} venue={} — PnL "
+                    "source not ready (winner/closedPnl lagging settled flag); "
+                    "retry next tick",
+                    question_idx, p.symbol, "hl" if is_hl else "pm",
+                )
+                return
+            logger.warning(
+                "settlement_close_defer_timeout qidx={} symbol={} venue={} — PnL "
+                "source still missing after {}s; closing with best-available PnL",
+                question_idx, p.symbol, "hl" if is_hl else "pm",
+                _SETTLEMENT_DEFER_TIMEOUT_NS // 1_000_000_000,
+            )
+        self._settled_first_seen.pop(question_idx, None)
         # Settlement closes are conceptually exits too — stamp the cooldown so
         # we don't immediately re-enter on a question whose post-settlement
         # rollover gets ingested in the same tick.
@@ -703,20 +779,13 @@ class Router:
         # the winning leg and 0.0 elsewhere, so the alert's PnL is
         # `qty * (payout - avg_entry) + prior_realized` — see render.
         self.dal.delete_position(question_idx)
-        if getattr(self.exec_client, "settlement_reported_as_fill", True):
+        if is_hl:
             # HL: settlement is a venue fill (dir="Settlement", closedPnl set),
             # so source realized PnL from the venue — it matches HL exactly and
             # avoids re-deriving a winning leg, which mislabels multi-leg
             # buckets (a winner booked as a total loss). Do NOT persist:
             # realized_pnl_since already counts this fill, so persisting would
             # double-count it in the daily-loss gate.
-            from .scanner import Scanner
-            window_start_ns = Scanner._daily_window_start_ns(
-                now_ns, hour=self.strategy_cfg.global_.daily_window_start_hour_utc,
-            )
-            venue_realized = self.exec_client.realized_pnl_for_symbol(
-                p.symbol, since_ts_ns=window_start_ns,
-            )
             # SHR-88: book the HL settlement through the shared position_math
             # settle() with the venue-truth `closedPnl` override. The payoff
             # indices are unused under the override (HL gives us no clean winner
