@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import StrategyConfig, match_question
+from ..risk.caps import (
+    concurrent_cap_exceeded,
+    daily_loss_exceeded,
+    inventory_cap_exceeded,
+)
 from ..strategy.types import BookState, OrderIntent, Position, QuestionView
 
 
@@ -87,21 +92,27 @@ class RiskGate:
                                 {"notional": f"{notional:.2f}", "cap": f"{matched.max_position_usd}"})
 
         # 3. Global inventory cap
-        new_total = inp.live_orders_total_notional + notional + sum(
+        held_plus_orders = inp.live_orders_total_notional + sum(
             abs(p.qty) * p.avg_entry for p in inp.positions
         )
-        if new_total > self.cfg.global_.max_total_inventory_usd:
+        if inventory_cap_exceeded(
+            held_plus_orders, notional, self.cfg.global_.max_total_inventory_usd
+        ):
+            new_total = held_plus_orders + notional
             return RiskVerdict(False, "max_total_inventory",
                                 {"new_total": f"{new_total:.2f}"})
 
         # 4. Concurrent-positions cap
-        if len(inp.positions) >= self.cfg.global_.max_concurrent_positions:
-            # Allow if the intent targets an existing position (top-up); reject otherwise.
-            if not any(p.question_idx == intent.question_idx for p in inp.positions):
-                return RiskVerdict(False, "max_concurrent_positions")
+        is_topup = any(p.question_idx == intent.question_idx for p in inp.positions)
+        if concurrent_cap_exceeded(
+            len(inp.positions), is_topup, self.cfg.global_.max_concurrent_positions
+        ):
+            return RiskVerdict(False, "max_concurrent_positions")
 
         # 5. Daily loss cap
-        if inp.realized_pnl_today < -self.cfg.global_.daily_loss_cap_usd:
+        if daily_loss_exceeded(
+            inp.realized_pnl_today, self.cfg.global_.daily_loss_cap_usd
+        ):
             return RiskVerdict(False, "daily_loss_cap")
 
         # 7. TTE bounds

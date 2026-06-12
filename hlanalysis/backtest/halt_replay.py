@@ -24,7 +24,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+
+from hlanalysis.risk.caps import (
+    concurrent_cap_exceeded as _concurrent_cap_exceeded,
+    daily_loss_exceeded as _daily_loss_exceeded,
+    daily_window_start_ns as _shared_daily_window_start_ns,
+    inventory_cap_exceeded as _inventory_cap_exceeded,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -66,16 +72,12 @@ def in_halt_window(
 def daily_window_start_ns(now_ns: int, *, hour: int) -> int:
     """Most-recent ``HH:00:00`` UTC boundary at-or-before ``now_ns``.
 
-    Identical semantics to ``engine.scanner.Scanner._daily_window_start_ns`` so
-    the sim's daily-loss window lines up with the live engine's. Kept as a local
-    pure copy rather than importing the engine to avoid a backtest→engine
-    dependency (the same reason ``position_math`` lives in ``marketdata``).
+    Re-exports ``hlanalysis.risk.caps.daily_window_start_ns`` so callers that
+    import from this module continue to work unchanged.  The canonical
+    implementation now lives in the shared ``hlanalysis.risk`` package so the
+    engine scanner, the live risk gate, and this sim module all share one copy.
     """
-    dt = datetime.fromtimestamp(now_ns / 1e9, tz=timezone.utc)
-    boundary = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
-    if dt < boundary:
-        boundary = boundary - timedelta(days=1)
-    return int(boundary.timestamp() * 1e9)
+    return _shared_daily_window_start_ns(now_ns, hour=hour)
 
 
 # ---------------------------------------------------------------------------
@@ -131,26 +133,19 @@ def entry_veto(
         return f"halt_window:{w.reason}"
 
     # Daily loss cap (entry-only; exits are never gated).
-    if (
-        caps.daily_loss_cap_usd is not None
-        and inp.realized_pnl_window < -caps.daily_loss_cap_usd
-    ):
+    if _daily_loss_exceeded(inp.realized_pnl_window, caps.daily_loss_cap_usd):
         return "daily_loss_cap"
 
     # Global inventory cap: held notional + this entry must stay under the cap.
-    if (
-        caps.max_total_inventory_usd is not None
-        and inp.held_inventory_usd + inp.intent_notional
-        > caps.max_total_inventory_usd
+    if _inventory_cap_exceeded(
+        inp.held_inventory_usd, inp.intent_notional, caps.max_total_inventory_usd
     ):
         return "max_total_inventory"
 
     # Concurrent-positions cap: a NEW position past the cap is blocked; a top-up
     # to an already-held slot is allowed (matches the live gate).
-    if (
-        caps.max_concurrent_positions is not None
-        and not inp.is_topup
-        and inp.n_held_positions >= caps.max_concurrent_positions
+    if _concurrent_cap_exceeded(
+        inp.n_held_positions, inp.is_topup, caps.max_concurrent_positions
     ):
         return "max_concurrent_positions"
 

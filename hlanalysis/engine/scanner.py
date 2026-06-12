@@ -571,14 +571,8 @@ class Scanner:
     def _daily_window_start_ns(now_ns: int, *, hour: int) -> int:
         """Most-recent timestamp at HH:00:00 UTC at-or-before `now_ns`.
 
-        If `now_ns` is already past today's HH:00 UTC, returns today's HH:00.
-        Otherwise rolls back to yesterday's HH:00. This is the cutoff the
-        daily-loss gate uses to query HL fills with — it must be a stable
-        boundary so the same fill never appears in two consecutive windows.
+        Delegates to the canonical implementation in ``hlanalysis.risk.caps``
+        so the engine, the sim, and the risk gate all share one copy.
         """
-        from datetime import datetime, timezone, timedelta
-        dt = datetime.fromtimestamp(now_ns / 1e9, tz=timezone.utc)
-        boundary = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if dt < boundary:
-            boundary = boundary - timedelta(days=1)
-        return int(boundary.timestamp() * 1_000_000_000)
+        from hlanalysis.risk.caps import daily_window_start_ns
+        return daily_window_start_ns(now_ns, hour=hour)
