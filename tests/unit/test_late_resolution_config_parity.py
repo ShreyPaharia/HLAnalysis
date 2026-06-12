@@ -7,8 +7,14 @@ that DROPPED fields the backtest builder ``build_v1_late_resolution`` forwards
 (``drift_aware_d``, ``exit_bid_floor``, ``exit_safety_d_5m``,
 ``exit_vol_lookback_5m_seconds``). A knob set in the live YAML silently fell back
 to the dataclass default → the live engine ran a *different* strategy than the
-backtest that justified it. These tests pin ``AllowlistEntry`` and
-``LateResolutionConfig`` together and assert reflection-based forwarding.
+backtest that justified it.
+
+R6.1 (single-source param schema): ``AllowlistEntry`` now inherits from
+``LateResolutionParams`` for all optional LR knobs.  Adding a new optional knob
+requires two edits: (1) add to ``LateResolutionParams`` → ``AllowlistEntry``
+inherits automatically; (2) add the same field to ``LateResolutionConfig`` → the
+parity test below enforces both name and default match.
+``test_single_source_property`` is the structural guard for that invariant.
 """
 from __future__ import annotations
 
@@ -19,7 +25,7 @@ from pydantic import ValidationError
 
 from hlanalysis.engine.config import AllowlistEntry, GlobalRiskConfig
 from hlanalysis.engine.runtime import _late_resolution_config_from_entry
-from hlanalysis.strategy.late_resolution import LateResolutionConfig
+from hlanalysis.strategy.late_resolution import LateResolutionConfig, LateResolutionParams
 
 # Fields the engine sources from the strategy GLOBAL block, not the allowlist
 # entry. Everything else on LateResolutionConfig must be settable per entry.
@@ -157,3 +163,69 @@ def test_defaults_unchanged_when_knobs_unset() -> None:
     assert cfg.exit_bid_floor == 0.0
     assert cfg.exit_safety_d_5m == 0.0
     assert cfg.exit_vol_lookback_5m_seconds == 300
+
+
+def test_single_source_property() -> None:
+    """R6.1 structural guard: LateResolutionParams IS the single source of truth
+    for all optional late_resolution knobs.
+
+    This test asserts two invariants that together guarantee a new optional knob
+    added to LateResolutionParams (one edit) automatically propagates everywhere:
+
+    1. AllowlistEntry inherits ALL LateResolutionParams fields (so a new field
+       declared in LateResolutionParams is immediately settable in the live YAML
+       with no second edit on AllowlistEntry).
+
+    2. Every LateResolutionParams field also appears on LateResolutionConfig with
+       the SAME default value (so the canonical default declared once in
+       LateResolutionParams is the default in both the YAML validation model and
+       the runtime strategy config).  Violation = train/serve skew.
+
+    The remaining "second edit" when adding a knob: add the field to
+    LateResolutionConfig (the frozen dataclass used at runtime).  That edit is
+    unavoidable — the dataclass is the runtime type — but the test below makes it
+    mandatory and enforced.
+    """
+    params_fields = LateResolutionParams.model_fields
+    dataclass_fields = {f.name: f for f in dataclasses.fields(LateResolutionConfig)}
+    ae_fields = AllowlistEntry.model_fields
+
+    # Invariant 1: every LateResolutionParams field appears on AllowlistEntry
+    # (guaranteed by inheritance, but an explicit check catches if someone
+    # accidentally re-declares a field on AllowlistEntry with a different type).
+    missing_from_ae = set(params_fields) - set(ae_fields)
+    assert not missing_from_ae, (
+        f"LateResolutionParams fields not inherited by AllowlistEntry: "
+        f"{sorted(missing_from_ae)}"
+    )
+
+    # Invariant 2: every LateResolutionParams field appears in LateResolutionConfig
+    # with the same default — canonical default in one place only.
+    missing_from_lr: list[str] = []
+    default_mismatch: list[str] = []
+    for name, pydantic_field in params_fields.items():
+        if name not in dataclass_fields:
+            missing_from_lr.append(name)
+            continue
+        dc_field = dataclass_fields[name]
+        if dc_field.default is dataclasses.MISSING:
+            # Required field on the dataclass — not expected for LateResolutionParams
+            # entries (they are all optional). Flag it so a developer notices.
+            default_mismatch.append(
+                f"{name}: LateResolutionParams has default "
+                f"{pydantic_field.default!r} but LateResolutionConfig has no default"
+            )
+            continue
+        if dc_field.default != pydantic_field.default:
+            default_mismatch.append(
+                f"{name}: LateResolutionParams default={pydantic_field.default!r} "
+                f"!= LateResolutionConfig default={dc_field.default!r}"
+            )
+    assert not missing_from_lr, (
+        f"LateResolutionParams fields not present in LateResolutionConfig: "
+        f"{sorted(missing_from_lr)}"
+    )
+    assert not default_mismatch, (
+        "Default mismatch between LateResolutionParams and LateResolutionConfig:\n"
+        + "\n".join(f"  {m}" for m in default_mismatch)
+    )

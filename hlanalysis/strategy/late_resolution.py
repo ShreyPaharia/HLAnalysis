@@ -3,8 +3,10 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
+from pydantic import BaseModel, ConfigDict
 
 from ._numba.vol import (
     ewma_std as _nb_ewma_std,
@@ -68,6 +70,64 @@ def _safety_d_for_region(
             d -= mu * tte_min
         return d / sigma_window
     return None
+
+
+class LateResolutionParams(BaseModel):
+    """Pydantic model declaring every *optional* late_resolution knob with its
+    canonical default.  This is the SINGLE SOURCE OF TRUTH for those defaults:
+
+    * ``AllowlistEntry`` (engine/config.py) inherits from this model — adding
+      a knob here automatically makes it settable in the live YAML with no
+      separate declaration on ``AllowlistEntry``.
+    * ``LateResolutionConfig`` (the frozen dataclass below) carries the same
+      field with the same default for the runtime strategy — enforced by
+      ``tests/unit/test_late_resolution_config_parity.py``.
+
+    Adding one new knob therefore requires exactly two edits:
+      1. Add the field here (with its canonical default).
+      2. Add the same field to LateResolutionConfig below.
+    AllowlistEntry automatically inherits step 1; the parity test enforces step 2.
+
+    Fields NOT declared here (they stay on AllowlistEntry directly):
+    * ``match``, ``min_distance_pct``, ``entry_cooldown_seconds`` — router/
+      allowlist machinery; not meaningful in LateResolutionConfig.
+    * ``max_position_usd``, ``stop_loss_pct``, ``tte_min_seconds``,
+      ``tte_max_seconds``, ``price_extreme_threshold``,
+      ``distance_from_strike_usd_min``, ``vol_max`` — required fields (no
+      defaults) that AllowlistEntry and LateResolutionConfig both require.
+    * ``max_strike_distance_pct``, ``min_recent_volume_usd``,
+      ``stale_data_halt_seconds`` — global-sourced: the live builder reads
+      these from the strategy's ``global_`` block, not the allowlist entry.
+    """
+    model_config = ConfigDict(frozen=True)
+
+    # === entry filters ===
+    price_extreme_max: float = 1.0
+    min_safety_d: float = 0.0
+    vol_lookback_seconds: int = 1800
+    exit_safety_d: float = 0.0
+    vol_ewma_lambda: float = 0.0
+    vol_estimator: Literal["stdev", "parkinson"] = "stdev"
+    vol_sampling_dt_seconds: int = 60
+    # === near-strike size cap ===
+    size_cap_near_strike_pct: float = 0.0
+    size_cap_max_dist_pct: float = 1.5
+    size_cap_min_ask: float = 0.88
+    # === entry-gate price source & spoof filter ===
+    use_bid_for_entry_gate: bool = False
+    min_bid_notional_usd: float = 0.0
+    # === position topup ===
+    topup_enabled: bool = True
+    topup_threshold_pct: float = 0.2
+    topup_min_notional_usd: float = 11.0
+    # === fee model ===
+    fee_model: Literal["flat", "pm_binary"] = "flat"
+    fee_rate: float = 0.0
+    # === mid-hold exits ===
+    exit_bid_floor: float = 0.0
+    drift_aware_d: bool = False
+    exit_safety_d_5m: float = 0.0
+    exit_vol_lookback_5m_seconds: int = 300
 
 
 @dataclass(frozen=True, slots=True)

@@ -10,6 +10,7 @@ from typing import Annotated, Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..strategy.late_resolution import LateResolutionParams
 
 _ENV_RE = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
@@ -34,11 +35,17 @@ def _substitute_env(raw: Any) -> Any:
     return raw
 
 
-class AllowlistEntry(BaseModel):
+class AllowlistEntry(LateResolutionParams):
+    # Inherits all optional late_resolution knobs from LateResolutionParams —
+    # the single source of truth for those defaults. Adding a new late_resolution
+    # knob to LateResolutionParams automatically makes it settable here without
+    # any edit to this class.
+    #
     # extra='forbid' makes a typo'd or unsupported knob fail loudly at load
     # instead of being silently dropped → train/serve skew (the SHR-65 pattern,
     # extended to v1). `tests/unit/test_late_resolution_config_parity.py` pins
-    # this model to LateResolutionConfig so every strategy knob stays settable.
+    # LateResolutionParams to LateResolutionConfig so every strategy knob stays
+    # settable and both sources agree on the canonical defaults.
     model_config = ConfigDict(frozen=True, extra="forbid")
     match: dict[str, str | list[str]]
     max_position_usd: float
@@ -53,43 +60,6 @@ class AllowlistEntry(BaseModel):
     price_extreme_threshold: float
     distance_from_strike_usd_min: float
     vol_max: float
-    # Optional safety-gate params; defaults preserve pre-gate behavior so older
-    # YAMLs continue to load. Calibration in v1-safety-best (May 2026) showed
-    # these together lift full-year PnL on PM BTC daily Up/Down from $5 → $560.
-    price_extreme_max: float = 1.0
-    min_safety_d: float = 0.0
-    vol_lookback_seconds: int = 1800
-    # Mid-hold safety_d exit threshold (0 = disabled) and EWMA decay for σ
-    # (0 = legacy sample stdev). Layered on top of the entry gates above.
-    exit_safety_d: float = 0.0
-    vol_ewma_lambda: float = 0.0
-    # σ estimator for the safety_d + vol_max gates. "stdev" = close-to-close
-    # sample std (legacy). "parkinson" = range-based (H/L), ~5× more
-    # sample-efficient and robust to bid-ask bounce on dense reference bars —
-    # the v1 cadence validation (2026-05-30) found it lifts HL PnL ~+$48 at the
-    # current 60s cadence. See LateResolutionConfig.vol_estimator.
-    vol_estimator: Literal["stdev", "parkinson"] = "stdev"
-    # Reference-bar cadence (seconds) the strategy's σ math assumes. Couples to
-    # the live MarketState mark-bucket period via runtime.reference_sampling_dt_seconds.
-    # Default 60 preserves legacy 1m bucketing. Mirrors theta's
-    # vol_sampling_dt_seconds so v1+v31 can move in lockstep on the shared BTC
-    # feed (see summeries/v1_cadence_validation_2026_05_30.md).
-    vol_sampling_dt_seconds: int = 60
-    # Targeted size cap (Plan: v1-buckets-and-sizing). Defaults preserve pre-cap
-    # behavior (pct=0 disables). See LateResolutionConfig docstring.
-    size_cap_near_strike_pct: float = 0.0
-    size_cap_max_dist_pct: float = 1.5
-    size_cap_min_ask: float = 0.88
-    # When True, late_resolution gates entry on bid_px instead of ask_px.
-    # Sizing and IOC limit still use ask. Recommended for HL HIP-4 only —
-    # PM corpus has tight enough spreads that this is a no-op there. See
-    # LateResolutionConfig.use_bid_for_entry_gate.
-    use_bid_for_entry_gate: bool = False
-    # Minimum bid notional (bid_px × bid_sz) in USD for the favourite-leg
-    # filter to accept an entry. Catches single-share spoof bids that pass
-    # a numeric bid_px threshold but represent no real buying interest. 0
-    # disables (legacy behavior); set to ~$10–20 for a meaningful filter.
-    min_bid_notional_usd: float = 0.0
     # Veto entries when |reference_price − question.strike| / reference_price
     # is below this fraction. Only meaningful on priceBinary questions.
     # PM corpus tuning showed v3.1 entries below 0.20% lose -$7.68/entry
@@ -99,37 +69,6 @@ class AllowlistEntry(BaseModel):
     # Post-exit cooldown in seconds. Router refuses to enter on a question
     # for this long after a position close. 0 disables (legacy behavior).
     entry_cooldown_seconds: int = 0
-    # Strategy-side position topup knobs. When a held position is under-filled
-    # (e.g. IOC partial-fill on a thin HL HIP-4 book), the strategy emits a
-    # second ENTER intent at the current ask to top up. Exit-eval runs first;
-    # exits always win over topup. See strategy modules' _evaluate_topup for
-    # the full gate flow.
-    topup_enabled: bool = True
-    topup_threshold_pct: float = 0.2          # trigger when shortfall ≥ 20% of target
-    topup_min_notional_usd: float = 11.0      # HL per-order min is $10; buffer 11
-    # Fee model declaration (mirrors ThetaParams). Plumbed through to
-    # LateResolutionConfig so a `v1_pm` slot can declare fee_model: pm_binary
-    # alongside the v31_pm slot. The strategy gates don't read these — v1 has
-    # no edge formula — but the backtest runner picks the curve via
-    # --fee-model/--fee-rate, and surfacing them here keeps the live YAML
-    # honest about what fee curve the slot expects.
-    fee_model: Literal["flat", "pm_binary"] = "flat"
-    fee_rate: float = 0.0
-    # --- Fields below were declared on LateResolutionConfig and forwarded by the
-    # backtest builder build_v1_late_resolution, but the live builder dropped
-    # them (it was a hand-maintained getattr subset) → live/sim divergence. Now
-    # declared here so they round-trip through YAML and the reflection-based
-    # live builder forwards them. Defaults mirror LateResolutionConfig so the
-    # effective live behavior is unchanged unless a knob is explicitly set. See
-    # LateResolutionConfig for each field's semantics.
-    #
-    # Hard bid-level stop (0 = disabled).
-    exit_bid_floor: float = 0.0
-    # Drift-corrected safety_d distance (False = symmetric |ln S/K|).
-    drift_aware_d: bool = False
-    # Auxiliary fast-σ mid-hold exit and its lookback (0 = disabled).
-    exit_safety_d_5m: float = 0.0
-    exit_vol_lookback_5m_seconds: int = 300
 
 
 class GlobalRiskConfig(BaseModel):
