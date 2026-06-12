@@ -373,7 +373,16 @@ class PMClient:
         else:
             fill_size = making
             fill_price = (taking / making) if making > 0 else price
-        status = "filled" if fill_size > 0 else "open"
+        if fill_size > 0:
+            status = "filled"
+        elif req.time_in_force == "ioc":
+            # An IOC/FAK order never rests — a zero-fill ack means the venue
+            # KILLED it. Mapping it to "open" would persist a phantom live order
+            # that blocks re-entry/exit on this question_idx (SHR-48 in-flight
+            # guard) and inflates the inventory cap until the next reconcile.
+            status = "cancelled"
+        else:
+            status = "open"  # GTC limit resting on the book
         return OrderAck(
             cloid=req.cloid, venue_oid=oid,
             status=status, fill_price=fill_price, fill_size=fill_size,

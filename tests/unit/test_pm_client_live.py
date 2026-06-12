@@ -501,3 +501,41 @@ def test_live_user_fills_filters_by_since_ts_ns():
     # since_ts_ns=1500s in ns → only "new" survives.
     fills = c.user_fills(since_ts_ns=1500 * 1_000_000_000)
     assert [f.fill_id for f in fills] == ["new"]
+
+
+def test_zero_fill_ioc_is_cancelled_not_open():
+    """An IOC/FAK order that matches nothing is KILLED by the venue, never
+    resting. Mapping its zero-fill ack to status='open' creates a phantom live
+    order that blocks re-entry/exit on that question_idx (SHR-48 in-flight
+    guard) and inflates the inventory cap until the next reconcile pass."""
+    fake = _FakeClob(place_resp={
+        "success": True, "orderID": "0xfake",
+        "makingAmount": "0", "takingAmount": "0",
+    })
+    c = _client()
+    c._sdk = fake
+    ack = c.place(PlaceRequest(
+        cloid="hla-v31_pm-1", symbol="tok", side="buy", size=100, price=0.92,
+        reduce_only=False, time_in_force="ioc",
+    ))
+    assert ack.fill_size == 0.0
+    assert ack.status == "cancelled", (
+        "a zero-fill IOC/FAK is killed, not resting — must not be 'open'"
+    )
+
+
+def test_zero_fill_gtc_limit_stays_open():
+    """A GTC limit that doesn't immediately fill legitimately RESTS on the book,
+    so its zero-fill ack must remain status='open' (the conditional fix must not
+    relabel resting limits)."""
+    fake = _FakeClob(place_resp={
+        "success": True, "orderID": "0xfake",
+        "makingAmount": "0", "takingAmount": "0",
+    })
+    c = _client()
+    c._sdk = fake
+    ack = c.place(PlaceRequest(
+        cloid="hla-v31_pm-2", symbol="tok", side="buy", size=100, price=0.50,
+        reduce_only=False, time_in_force="gtc",
+    ))
+    assert ack.status == "open"
