@@ -687,7 +687,10 @@ strategies:
       fee_model: pm_binary
       fee_rate: 0.07
     global:
-      max_total_inventory_usd: 100
+      # 2026-06-12: raised 100→250 — at max_position=$50 × max_concurrent=5 the
+      # $100 cap bound effective concurrency to 2 and vetoed (max_total_inventory)
+      # once two ETH-multistrike legs filled; $250 lets all 5 concurrent slots fill.
+      max_total_inventory_usd: 250
       max_concurrent_positions: 5
       daily_loss_cap_usd: 100
       max_strike_distance_pct: 50
