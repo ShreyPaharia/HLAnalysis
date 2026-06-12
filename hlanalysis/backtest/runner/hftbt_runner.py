@@ -1562,8 +1562,15 @@ def run_one_question(
             qv = build_question_view(q, now_ns=now_ns, strike=strike, settled=False)
         else:
             qv = data_source.question_view(q, now_ns=now_ns, settled=False)
-        recent_returns, recent_hl = state.recent_returns_and_hl(
+        _rets_arr, _hl_arr = state.recent_returns_and_hl(
             now_ns=now_ns, lookback_seconds=cfg.vol_lookback_seconds
+        )
+        # Match the live engine's tuple contract (scanner.py:428-430): convert
+        # numpy arrays to tuples so sim and live pass the identical container
+        # type to strategy.evaluate.
+        recent_returns: tuple[float, ...] = tuple(_rets_arr.tolist())
+        recent_hl_bars: tuple[tuple[float, float], ...] = tuple(
+            (float(h), float(lo)) for h, lo in _hl_arr
         )
         ref_close = state.latest_btc_close() or qv.strike
 
@@ -1575,7 +1582,7 @@ def run_one_question(
             recent_volume_usd=state.recent_volume_usd(q.leg_symbols, now_ns=now_ns),
             position=st.pos,
             now_ns=now_ns,
-            recent_hl_bars=recent_hl,
+            recent_hl_bars=recent_hl_bars,
         )
         st.result.n_decisions += 1
 

@@ -42,6 +42,7 @@ from ..core.events import (
 )
 from ._synthetic_l2 import L2Snapshot, trade_to_l2
 from hlanalysis.adapters.polymarket_normalize import parse_bucket_event as _shared_parse_bucket_event
+from hlanalysis.marketdata.ohlc import resample_ohlc
 
 _GAMMA_BASE = "https://gamma-api.polymarket.com"
 _CLOB_DATA_BASE = "https://data-api.polymarket.com"
@@ -91,6 +92,59 @@ _HALF_SPREAD_DEFAULT = 0.005
 _DEPTH_DEFAULT = 10_000.0
 _P_CLIP_LO = 1e-6
 _P_CLIP_HI = 1.0 - 1e-6
+
+
+# ---- OHLC bucketing helper --------------------------------------------------
+
+
+def _bucket_to_ref_events(
+    samples: list[tuple[int, float, float, float, float]],
+    *,
+    symbol: str,
+    bucket_ns: int,
+) -> list[ReferenceEvent]:
+    """Bucket ``(ts_ns, high, low, close, open_val)`` samples into ``bucket_ns``-wide
+    OHLC bars and return a list of ``ReferenceEvent`` objects.
+
+    The H/L/C/ts computation is delegated to the canonical ``resample_ohlc``
+    function (single source of truth).  The ``open`` field — the *first* price
+    seen in each bucket, used by the runner for strike derivation — is tracked
+    in a parallel first-price accumulator so it is preserved without altering
+    the resampling contract.
+
+    ``samples`` must be a list (not a one-shot iterator) because we iterate it
+    twice: once to collect per-bucket opens, once inside ``resample_ohlc``.
+    """
+    if not samples:
+        return []
+
+    # Collect the open (first-seen price) for each bucket in one pass.
+    bucket_opens: dict[int, float] = {}
+    for ts, _high, _low, _close, open_val in samples:
+        b = ts // bucket_ns
+        if b not in bucket_opens:
+            bucket_opens[b] = open_val
+
+    # resample_ohlc consumes (ts, high, low, close) and yields (last_ts, h, l, c).
+    ohlc_bars = list(resample_ohlc(
+        ((ts, high, low, close) for ts, high, low, close, _open in samples),
+        bucket_ns=bucket_ns,
+    ))
+
+    # Pair each bar with its bucket open.  Bars are emitted in bucket order so
+    # the i-th bar corresponds to the i-th distinct bucket key.
+    bucket_keys = list(dict.fromkeys(ts // bucket_ns for ts, *_ in samples))
+    return [
+        ReferenceEvent(
+            ts_ns=last_ts,
+            symbol=symbol,
+            high=h,
+            low=l,
+            close=c,
+            open=bucket_opens[bucket_keys[i]],
+        )
+        for i, (last_ts, h, l, c) in enumerate(ohlc_bars)
+    ]
 
 
 # ---- HTTP helpers (also used by fetch_and_cache) ----------------------------
@@ -1235,41 +1289,26 @@ class PolymarketDataSource:
         Returns [] when the 1s cache is empty/uncovered (gates degrade gracefully).
         """
         resample_ns = self._reference_resample_ns
-        out: list[ReferenceEvent] = []
-        cur_bucket: int | None = None
-        o = h = l = c = 0.0
-        last_ts = 0
+        # Build (ts, high, low, close, open_val) samples from filtered klines,
+        # then delegate bucketing to _bucket_to_ref_events (uses canonical
+        # resample_ohlc under the hood).
+        samples: list[tuple[int, float, float, float, float]] = []
         for k in self._load_all_klines_1s():
             ts = int(k["ts_ns"])
             if ts < start_ns or ts >= end_ns:
                 continue
-            kh, kl, kc, ko = float(k["high"]), float(k["low"]), float(k["close"]), float(k["open"])
-            bucket = ts // resample_ns
-            if cur_bucket is None:
-                cur_bucket = bucket
-                o, h, l, c = ko, kh, kl, kc
-                last_ts = ts
-            elif bucket != cur_bucket:
-                out.append(ReferenceEvent(
-                    ts_ns=last_ts, symbol=self._reference_symbol,
-                    high=h, low=l, close=c, open=o,
-                ))
-                cur_bucket = bucket
-                o, h, l, c = ko, kh, kl, kc
-                last_ts = ts
-            else:
-                if kh > h:
-                    h = kh
-                if kl < l:
-                    l = kl
-                c = kc
-                last_ts = ts
-        if cur_bucket is not None:
-            out.append(ReferenceEvent(
-                ts_ns=last_ts, symbol=self._reference_symbol,
-                high=h, low=l, close=c, open=o,
+            samples.append((
+                ts,
+                float(k["high"]),
+                float(k["low"]),
+                float(k["close"]),
+                float(k["open"]),
             ))
-        return out
+        return _bucket_to_ref_events(
+            samples,
+            symbol=self._reference_symbol,
+            bucket_ns=resample_ns,
+        )
 
     def _load_binance_bbo_reference(
         self, start_ns: int, end_ns: int,
@@ -1343,37 +1382,18 @@ class PolymarketDataSource:
             con.close()
         if not rows:
             return []
-        # Bucket to OHLC. Same algorithm as HL HIP-4's `_resample_reference`.
+        # Bucket to OHLC via canonical _bucket_to_ref_events (uses resample_ohlc).
+        # Each BBO tick is scalar (high=low=close=mid); open = first mid in bucket.
         resample_ns = self._reference_resample_ns
-        out: list[ReferenceEvent] = []
-        cur_bucket: int | None = None
-        h = l = c = o = 0.0
-        last_ts = 0
+        samples: list[tuple[int, float, float, float, float]] = []
         for ts, bid, ask in rows:
             mid = (float(bid) + float(ask)) / 2.0
-            bucket = int(ts) // resample_ns
-            if cur_bucket is None:
-                cur_bucket = bucket
-                h = l = c = o = mid
-                last_ts = int(ts)
-            elif bucket != cur_bucket:
-                out.append(ReferenceEvent(
-                    ts_ns=last_ts, symbol=self._reference_symbol,
-                    high=h, low=l, close=c, open=o,
-                ))
-                cur_bucket = bucket
-                h = l = c = o = mid
-                last_ts = int(ts)
-            else:
-                if mid > h: h = mid
-                if mid < l: l = mid
-                c = mid
-                last_ts = int(ts)
-        out.append(ReferenceEvent(
-            ts_ns=last_ts, symbol=self._reference_symbol,
-            high=h, low=l, close=c, open=o,
-        ))
-        return out
+            samples.append((int(ts), mid, mid, mid, mid))
+        return _bucket_to_ref_events(
+            samples,
+            symbol=self._reference_symbol,
+            bucket_ns=resample_ns,
+        )
 
     def _load_recorded_book(
         self, token_id: str, start_ns: int, end_ns: int,

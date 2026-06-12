@@ -95,3 +95,191 @@ def test_klines_1s_changes_bundle_config_sig(tmp_path: Path) -> None:
 def test_invalid_reference_source_still_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="reference_source"):
         PolymarketDataSource(cache_root=tmp_path, reference_source="nonsense")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Fix-1: _load_klines_1s_reference routes through resample_ohlc — bit-identical
+# ---------------------------------------------------------------------------
+
+def _old_load_klines_1s_reference_inline(
+    klines_rows: list[dict],
+    *,
+    start_ns: int,
+    end_ns: int,
+    resample_ns: int,
+    symbol: str,
+) -> list[tuple]:
+    """Reference copy of the OLD inline bucketing logic (pre-refactor).
+
+    Kept here to prove the new ``_bucket_to_ref_events``-based path produces
+    bit-identical output.  Do NOT change this function — it is the baseline.
+    """
+    from hlanalysis.backtest.core.events import ReferenceEvent
+    out: list[ReferenceEvent] = []
+    cur_bucket = None
+    o = h = l = c = 0.0
+    last_ts = 0
+    for k in klines_rows:
+        ts = int(k["ts_ns"])
+        if ts < start_ns or ts >= end_ns:
+            continue
+        kh, kl, kc, ko = float(k["high"]), float(k["low"]), float(k["close"]), float(k["open"])
+        bucket = ts // resample_ns
+        if cur_bucket is None:
+            cur_bucket = bucket
+            o, h, l, c = ko, kh, kl, kc
+            last_ts = ts
+        elif bucket != cur_bucket:
+            out.append(ReferenceEvent(ts_ns=last_ts, symbol=symbol,
+                                      high=h, low=l, close=c, open=o))
+            cur_bucket = bucket
+            o, h, l, c = ko, kh, kl, kc
+            last_ts = ts
+        else:
+            if kh > h: h = kh
+            if kl < l: l = kl
+            c = kc
+            last_ts = ts
+    if cur_bucket is not None:
+        out.append(ReferenceEvent(ts_ns=last_ts, symbol=symbol,
+                                  high=h, low=l, close=c, open=o))
+    return [(r.ts_ns, r.high, r.low, r.close, r.open) for r in out]
+
+
+def _old_load_binance_bbo_reference_inline(
+    bbo_rows: list[tuple],
+    *,
+    resample_ns: int,
+    symbol: str,
+) -> list[tuple]:
+    """Reference copy of the OLD inline bucketing logic for the BBO path.
+
+    ``bbo_rows`` is a list of ``(ts, bid_px, ask_px)`` as returned by duckdb.
+    Kept here as baseline; do NOT change.
+    """
+    from hlanalysis.backtest.core.events import ReferenceEvent
+    out: list[ReferenceEvent] = []
+    cur_bucket = None
+    h = l = c = o = 0.0
+    last_ts = 0
+    for ts, bid, ask in bbo_rows:
+        mid = (float(bid) + float(ask)) / 2.0
+        bucket = int(ts) // resample_ns
+        if cur_bucket is None:
+            cur_bucket = bucket
+            h = l = c = o = mid
+            last_ts = int(ts)
+        elif bucket != cur_bucket:
+            out.append(ReferenceEvent(ts_ns=last_ts, symbol=symbol,
+                                      high=h, low=l, close=c, open=o))
+            cur_bucket = bucket
+            h = l = c = o = mid
+            last_ts = int(ts)
+        else:
+            if mid > h: h = mid
+            if mid < l: l = mid
+            c = mid
+            last_ts = int(ts)
+    out.append(ReferenceEvent(ts_ns=last_ts, symbol=symbol,
+                               high=h, low=l, close=c, open=o))
+    return [(r.ts_ns, r.high, r.low, r.close, r.open) for r in out]
+
+
+def test_klines_1s_resample_ohlc_path_bit_identical_to_old_inline(tmp_path: Path) -> None:
+    """``_load_klines_1s_reference`` routed through ``resample_ohlc`` must produce
+    bit-identical (ts_ns, high, low, close, open) tuples vs the old inline loop.
+
+    Uses a representative input: multiple buckets, irregular spacing, distinct
+    per-kline OHLC (not just scalar prices) so the high/low merge logic is
+    exercised.
+    """
+    base = 100 * _S
+    klines_data = [
+        _kline(base + 0 * _S, 100.0, 110.0,  99.0, 101.0),
+        _kline(base + 1 * _S, 101.0, 112.0,  98.0, 105.0),
+        _kline(base + 2 * _S, 105.0, 108.0, 100.0, 106.0),
+        _kline(base + 3 * _S, 106.0, 109.0, 101.0, 107.0),
+        _kline(base + 4 * _S, 107.0, 111.0, 103.0, 108.0),
+        # bucket boundary at base+5s (5s buckets)
+        _kline(base + 5 * _S, 108.0, 115.0, 107.0, 113.0),
+        _kline(base + 6 * _S, 113.0, 116.0, 109.0, 114.0),
+        _kline(base + 7 * _S, 114.0, 117.0, 111.0, 115.0),
+        _kline(base + 8 * _S, 115.0, 118.0, 112.0, 116.0),
+        _kline(base + 9 * _S, 116.0, 119.0, 113.0, 117.0),
+        # partial third bucket
+        _kline(base + 10 * _S, 117.0, 120.0, 114.0, 118.0),
+        _kline(base + 11 * _S, 118.0, 121.0, 115.0, 119.0),
+    ]
+    _write_1s_klines(tmp_path, klines_data)
+
+    resample_ns = 5 * _S
+    start_ns = base
+    end_ns = base + 12 * _S
+
+    # New path: routed through resample_ohlc via _bucket_to_ref_events.
+    ds = PolymarketDataSource(
+        cache_root=tmp_path,
+        reference_source="klines_1s",
+        reference_resample_seconds=5,
+    )
+    new_refs = ds._load_klines_1s_reference(start_ns, end_ns)
+    new_tuples = [(r.ts_ns, r.high, r.low, r.close, r.open) for r in new_refs]
+
+    # Old path: inline copy above.
+    old_tuples = _old_load_klines_1s_reference_inline(
+        klines_data, start_ns=start_ns, end_ns=end_ns,
+        resample_ns=resample_ns, symbol="BTC",
+    )
+
+    assert len(new_tuples) == len(old_tuples), (
+        f"bar count differs: new={len(new_tuples)} old={len(old_tuples)}"
+    )
+    for i, (new, old) in enumerate(zip(new_tuples, old_tuples)):
+        assert new == old, (
+            f"bar {i} differs: new={new} old={old} — resample_ohlc path is NOT bit-identical"
+        )
+
+
+def test_bbo_resample_ohlc_path_bit_identical_to_old_inline() -> None:
+    """``_bucket_to_ref_events`` on scalar BBO ticks (high=low=close=open=mid)
+    must be bit-identical to the old BBO inline loop.
+
+    This covers the ``_load_binance_bbo_reference`` refactor: each BBO tick
+    contributes a scalar mid price, and the bucketer tracks high=max(mid),
+    low=min(mid), close=last(mid), open=first(mid).
+    """
+    from hlanalysis.backtest.data.polymarket import _bucket_to_ref_events
+
+    _NS = 1_000_000_000
+    bbo_rows = [
+        (0 * _NS, 99.9, 100.1),   # mid=100.0   bucket 0
+        (1 * _NS, 101.9, 102.1),  # mid=102.0   bucket 0
+        (2 * _NS,  97.9,  98.1),  # mid= 98.0   bucket 0  ← new low
+        (3 * _NS, 103.9, 104.1),  # mid=104.0   bucket 0  ← new high
+        (4 * _NS,  99.9, 100.1),  # mid=100.0   bucket 0  close=100.0
+        (5 * _NS, 105.9, 106.1),  # mid=106.0   bucket 1
+        (7 * _NS, 103.9, 104.1),  # mid=104.0   bucket 1
+        (9 * _NS, 107.9, 108.1),  # mid=108.0   bucket 1  close=108.0
+    ]
+    resample_ns = 5 * _NS
+    symbol = "BTC"
+
+    # Old inline path (reference baseline).
+    old_tuples = _old_load_binance_bbo_reference_inline(
+        bbo_rows, resample_ns=resample_ns, symbol=symbol
+    )
+
+    # New path: build samples the way _load_binance_bbo_reference does.
+    samples = [(int(ts), (float(bid)+float(ask))/2.0, (float(bid)+float(ask))/2.0,
+                (float(bid)+float(ask))/2.0, (float(bid)+float(ask))/2.0)
+               for ts, bid, ask in bbo_rows]
+    new_refs = _bucket_to_ref_events(samples, symbol=symbol, bucket_ns=resample_ns)
+    new_tuples = [(r.ts_ns, r.high, r.low, r.close, r.open) for r in new_refs]
+
+    assert len(new_tuples) == len(old_tuples), (
+        f"bar count differs: new={len(new_tuples)} old={len(old_tuples)}"
+    )
+    for i, (new, old) in enumerate(zip(new_tuples, old_tuples)):
+        assert new == old, (
+            f"BBO bar {i} differs: new={new} old={old} — not bit-identical"
+        )

@@ -580,11 +580,13 @@ def cmd_tune(args: argparse.Namespace) -> int:
             f"Known grid keys: {sorted(tcfg.grids)}"
         )
 
-    # Event-array cache is opt-in (default OFF). --rebuild-cache implies it.
-    # These are genuine runtime toggles (not source-construction), so spawn
-    # workers still inherit them via the environment.
-    if getattr(args, "cache_event_arrays", False) or getattr(args, "rebuild_cache", False):
-        os.environ["HLBT_CACHE_EVENT_ARRAYS"] = "1"
+    # Event-array cache is default-ON (same as cmd_run). --cache-event-arrays
+    # is a no-op kept for back-compat; --no-cache/--fresh disables it;
+    # --rebuild-cache forces a one-time rebuild.  These are genuine runtime
+    # toggles (not source-construction), so spawn workers still inherit them
+    # via the environment.
+    if getattr(args, "no_cache", False):
+        os.environ["HLBT_NO_CACHE"] = "1"
     if getattr(args, "rebuild_cache", False):
         os.environ["HLBT_REBUILD_CACHE"] = "1"
 
