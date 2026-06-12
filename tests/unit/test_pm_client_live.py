@@ -18,6 +18,8 @@ class _FakeClob:
         cancel_resp: dict | None = None,
         open_orders: list[dict] | None = None,
         balance_allowance: dict | None = None,
+        conditional_balances: dict[str, str] | None = None,
+        conditional_raises: bool = False,
         trades: list[dict] | None = None,
     ) -> None:
         self.placed: list[dict] = []
@@ -27,6 +29,11 @@ class _FakeClob:
         self._cancel_resp = cancel_resp or {"canceled": []}
         self._open_orders = open_orders or []
         self._balance_allowance = balance_allowance or {"balance": "0"}
+        # Per-token on-chain CTF balances (base units, 6-decimal) keyed by
+        # token_id. Returned for AssetType.CONDITIONAL queries; absent tokens
+        # report a zero balance.
+        self._conditional_balances = conditional_balances or {}
+        self._conditional_raises = conditional_raises
         self._trades = trades or []
 
     def create_and_post_order(self, *, order_args, options, order_type):
@@ -91,6 +98,11 @@ class _FakeClob:
         return self._open_orders
 
     def get_balance_allowance(self, params=None):
+        token_id = getattr(params, "token_id", None)
+        if token_id:
+            if self._conditional_raises:
+                raise RuntimeError("conditional balance rpc 503")
+            return {"balance": self._conditional_balances.get(token_id, "0")}
         return self._balance_allowance
 
     def get_trades(self, params=None):
@@ -324,7 +336,12 @@ def _client_with_funder() -> PMClient:
 
 def test_live_clearinghouse_state_reports_data_api_positions():
     # The reconciler relies on this to adopt/keep PM positions as venue truth.
-    fake = _FakeClob(balance_allowance={"balance": "1000000"})  # 1 USDC
+    # Venue qty is sourced from the on-chain CTF balance (data-api `size` only
+    # discovers which tokens to check), so the chain must corroborate the size.
+    fake = _FakeClob(
+        balance_allowance={"balance": "1000000"},  # 1 USDC
+        conditional_balances={"tok-down": "51536000"},  # 51.536 shares on-chain
+    )
     c = _client_with_funder()
     c._sdk = fake
     captured = {}
@@ -344,6 +361,66 @@ def test_live_clearinghouse_state_reports_data_api_positions():
     assert "tok-zero" not in syms  # zero-size dropped
     assert syms["tok-down"].qty == 51.536
     assert syms["tok-down"].avg_entry == 0.9699
+
+
+def test_clearinghouse_drops_position_when_chain_balance_is_dust():
+    # Incident 2026-06-12 (q700064348): a 58.1279-share position was already
+    # closed-to-dust on-chain (a 2dp sell of 58.1279 leaves 0.0079 sellable),
+    # but the data-api `/positions` indexer LAGS the chain and still reports the
+    # stale pre-sell `size=58.1279`. Adopting that resurrects a phantom position
+    # the engine cannot sell → perpetual exit_safety_d → REJECT → DRIFT loop.
+    # The on-chain CONDITIONAL balance (what PM enforces at order time) is the
+    # authoritative truth: when it says dust, the position must be dropped.
+    fake = _FakeClob(
+        balance_allowance={"balance": "1000000"},
+        conditional_balances={"tok-stale": "7900"},  # 0.0079 shares on-chain
+    )
+    c = _client_with_funder()
+    c._sdk = fake
+    c._data_api_get = lambda url: [
+        {"asset": "tok-stale", "size": 58.1279, "avgPrice": 0.86, "cashPnl": -15.69},
+    ]
+    state = c.clearinghouse_state()
+    assert state.positions_known is True
+    assert state.positions == (), "dust on-chain balance must not be adopted"
+
+
+def test_clearinghouse_uses_chain_balance_over_stale_dataapi_size():
+    # When the chain reports a real (non-dust) balance that disagrees with the
+    # lagging data-api size, the on-chain balance wins (it is what PM lets us
+    # sell). Here the position was partially closed: data-api still shows 58.1279
+    # but the chain holds 30.5 shares.
+    fake = _FakeClob(
+        balance_allowance={"balance": "1000000"},
+        conditional_balances={"tok-partial": "30500000"},  # 30.5 shares
+    )
+    c = _client_with_funder()
+    c._sdk = fake
+    c._data_api_get = lambda url: [
+        {"asset": "tok-partial", "size": 58.1279, "avgPrice": 0.86},
+    ]
+    state = c.clearinghouse_state()
+    syms = {p.symbol: p for p in state.positions}
+    assert syms["tok-partial"].qty == 30.5
+    assert syms["tok-partial"].avg_entry == 0.86  # avg still from data-api
+
+
+def test_clearinghouse_falls_back_to_dataapi_size_when_chain_query_fails():
+    # A transient CONDITIONAL-balance RPC failure must not drop a real position
+    # — fall back to the data-api size (the prior behaviour) rather than
+    # vanishing a holding we may genuinely own.
+    fake = _FakeClob(
+        balance_allowance={"balance": "1000000"},
+        conditional_raises=True,
+    )
+    c = _client_with_funder()
+    c._sdk = fake
+    c._data_api_get = lambda url: [
+        {"asset": "tok-real", "size": 40.0, "avgPrice": 0.5},
+    ]
+    state = c.clearinghouse_state()
+    syms = {p.symbol: p for p in state.positions}
+    assert syms["tok-real"].qty == 40.0
 
 
 def test_live_clearinghouse_state_positions_unknown_on_data_api_failure():

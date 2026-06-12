@@ -27,9 +27,16 @@ from .exec_types import (
     UserFillRow,
     VenuePosition,
 )
+from ..marketdata.position_math import DUST_QTY_ABS_TOL
 
 
 _PM_DATA_API = "https://data-api.polymarket.com"
+
+# Sub-precision PM holdings (≤ this many shares) are un-sellable dust — the PM
+# 2dp sell-floor leaves a residual that floors to 0.00. A data-api `/positions`
+# row whose on-chain CTF balance is at/below this is genuinely closed; do not
+# surface it as venue truth (shared with the reconciler's dust floor).
+_DUST_QTY_ABS_TOL = DUST_QTY_ABS_TOL
 
 # Polymarket CLOB accepts prices in [0.01, 0.99] at tick 0.01. Outside this
 # band the venue rejects with "invalid price (X), min: 0.01 - max: 0.99". Near
@@ -449,6 +456,38 @@ class PMClient:
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL),
         )
 
+    @_PM_READ_RETRY
+    def _conditional_balance_raw(self, token_id: str):
+        from py_clob_client_v2 import AssetType, BalanceAllowanceParams
+        sdk = self._ensure_sdk()
+        return sdk.get_balance_allowance(
+            BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL, token_id=token_id,
+            ),
+        )
+
+    def _conditional_balance_shares(self, token_id: str) -> float | None:
+        """On-chain CTF balance (shares) for `token_id`, or None if the query
+        failed.
+
+        This is the SELLABLE truth Polymarket itself enforces at order time.
+        The data-api `/positions` `size` lags it and can report a stale
+        pre-close size after a position has already been sold/redeemed
+        on-chain — adopting that resurrects a position the engine cannot sell
+        (incident 2026-06-12 q700064348: data-api 58.1279 vs chain 0.0079 dust
+        → perpetual exit_safety_d → REJECT → DRIFT loop). Cross-checking each
+        data-api position against this balance makes adopt-truth == sell-truth.
+        """
+        try:
+            resp = self._conditional_balance_raw(token_id)
+        except Exception:
+            return None
+        try:
+            # CTF shares are 6-decimal; balance is a stringified integer.
+            return float(resp.get("balance") or 0.0) / 1_000_000.0
+        except (TypeError, ValueError):
+            return None
+
     def _live_clearinghouse_state(self) -> ClearinghouseState:
         try:
             resp = self._balance_allowance_raw()
@@ -509,6 +548,19 @@ class PMClient:
                 continue
             if abs(qty) < 1e-9:
                 continue
+            symbol = str(p.get("asset") or "")
+            # The data-api `size` lags the chain; cross-check the on-chain CTF
+            # balance (what PM enforces at sell time) and trust it when known.
+            # When the chain says the token is dust/flat, drop the position even
+            # if the data-api still reports a stale pre-close size — adopting it
+            # resurrects an un-sellable phantom (incident 2026-06-12). On an RPC
+            # failure fall back to the data-api size (prior behaviour) rather
+            # than vanishing a holding we may genuinely own.
+            chain_qty = self._conditional_balance_shares(symbol) if symbol else None
+            if chain_qty is not None:
+                if abs(chain_qty) <= _DUST_QTY_ABS_TOL:
+                    continue
+                qty = chain_qty
             try:
                 avg = float(p.get("avgPrice") or 0.0)
             except (TypeError, ValueError):
@@ -518,7 +570,7 @@ class PMClient:
             except (TypeError, ValueError):
                 upnl = 0.0
             out.append(VenuePosition(
-                symbol=str(p.get("asset") or ""), qty=qty,
+                symbol=symbol, qty=qty,
                 avg_entry=avg, unrealized_pnl=upnl,
             ))
         return tuple(out), True
