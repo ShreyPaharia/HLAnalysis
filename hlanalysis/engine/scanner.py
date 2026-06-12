@@ -8,6 +8,7 @@ from pathlib import Path
 from loguru import logger
 
 from .config import StrategyConfig, match_question
+from .config_builders import reference_sampling_dt_seconds
 from .market_state import MarketState
 from .risk import RiskInputs
 from .state import StateDAL
@@ -130,6 +131,21 @@ class Scanner:
         self._default_lookback_secs: int = self._lookback_secs(cfg)
         # Per-class lookback (seconds) for classes in _cadence_by_class.
         self._lookback_secs_by_class: dict[str, int] = self._class_lookback_secs(cfg)
+        # R9: the slot's own default vol_sampling_dt_seconds (seconds). Passed
+        # EXPLICITLY to build_decision_inputs in the default (no per-class
+        # override) path instead of dt=None. Using None is correct only when
+        # the slot is the sole registrant of its symbol — it resolves to
+        # cadences[0], which is the first-registered cadence. When two sibling
+        # slots share a symbol with DIFFERENT default dts, cadences[0] belongs
+        # to whichever slot registered first, so the second slot's dt=None read
+        # would alias the wrong (symbol, dt) buffer. Passing the explicit dt
+        # fixes this while staying bit-identical for single-slot setups.
+        # Use the canonical single-source-of-truth derivation: theta carries
+        # vol_sampling_dt_seconds in the `theta:` block; late_resolution carries
+        # it on its allowlist/defaults (AllowlistEntry.vol_sampling_dt_seconds).
+        # A bare `else 60` would wrongly force late_resolution slots (e.g. v1 at
+        # dt=5) to read a dt=60 buffer that was never registered/fed.
+        self._default_dt_seconds: int = reference_sampling_dt_seconds(cfg)
 
     @staticmethod
     def _bars_for(secs: int, dt: int) -> int:
@@ -377,17 +393,21 @@ class Scanner:
             # and summeries/engine_bbo_sigma_source_2026_05_31.md.
             cadence = self._cadence_by_class.get(q.klass)
             if cadence is None:
-                # Default path — byte-identical to pre-refactor (dt-less read,
-                # resolves to the symbol's first registered cadence).
-                # Pass now_ns + lookback_seconds so live MarketState uses the
-                # TIME-bounded window, matching the backtest's slice_window rule
-                # after a feed gap (SHR-66).
+                # Default path: pass the slot's own dt explicitly (R9).
+                # Previously used dt=None, which resolves to cadences[0] —
+                # the first-registered cadence on the symbol. That is correct
+                # only when this slot is the sole registrant of its symbol.
+                # When two sibling slots share a symbol with different default
+                # dts, dt=None aliases the wrong buffer. Passing the slot's own
+                # dt explicitly is bit-identical for single-slot setups (the
+                # MarketState resolves explicit dt=N to the same buffer that
+                # cadences[0]=N resolves to when there is only one registrant).
                 _rets_arr, _hl_arr = build_decision_inputs(
                     self.ms._core,
                     ref_symbol=self.ref_symbol,
                     now_ns=now_ns,
                     lookback_seconds=self._default_lookback_secs,
-                    dt=None,
+                    dt=self._default_dt_seconds,
                 )
             else:
                 dt_s, _ret_n = cadence

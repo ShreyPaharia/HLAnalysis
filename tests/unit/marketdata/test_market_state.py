@@ -461,3 +461,55 @@ def test_parity_with_backtest_marketstate_bar_path() -> None:
         bb.bid_px, bb.ask_px, bb.bid_sz, bb.ask_sz
     )
     assert cb.last_l2_ts_ns == bb.last_l2_ts_ns
+
+
+# --------------------------------------------------------------------------
+# R9: independent buffers for two cadences on the same symbol
+# --------------------------------------------------------------------------
+
+def test_multi_cadence_independent_buffers() -> None:
+    """R9 capability: two cadences registered on the same symbol maintain
+    independent OHLC buffers from the same tick stream.
+
+    A read at dt=5 returns bars bucketed every 5s; a read at dt=60 returns bars
+    bucketed every 60s. Neither read cross-contaminates the other series.
+    """
+    ms = MarketState()
+    # Register two cadences on the same symbol (engine R9 use-case: two sibling
+    # slots with different default vol_sampling_dt_seconds on BTC).
+    ms.set_reference_cadence("BTC", sampling_dt_seconds=5)
+    ms.set_reference_cadence("BTC", sampling_dt_seconds=60)
+
+    # Feed ticks at t=0,5,10,...,120 seconds (25 ticks, one per 5s).
+    # At dt=5: each tick opens a new bucket → 25 bars, 24 returns.
+    # At dt=60: ticks in [0,60) form one bucket (close=60s tick), ticks in [60,120)
+    #   form a second bucket → 2 completed buckets + in-progress, ≥1 return.
+    for i in range(25):
+        ms.apply_reference_tick("BTC", ts_ns=i * 5 * S, price=100.0 + i)
+
+    now = 124 * S
+    lookback = 600  # covers all bars
+
+    rets5 = ms.recent_returns("BTC", now_ns=now, lookback_seconds=lookback, dt=5)
+    rets60 = ms.recent_returns("BTC", now_ns=now, lookback_seconds=lookback, dt=60)
+
+    # dt=5 series must have more returns than dt=60 (finer bucketing → more bars).
+    assert rets5.size > rets60.size, (
+        f"Expected more dt=5 returns ({rets5.size}) than dt=60 ({rets60.size})"
+    )
+    # dt=5 series must NOT be empty.
+    assert rets5.size > 0, "dt=5 series produced no returns"
+    # dt=60 series must NOT be empty (multiple 60s buckets have elapsed).
+    assert rets60.size > 0, "dt=60 series produced no returns"
+
+    # No cross-contamination: reading dt=5 twice is idempotent, reading dt=60
+    # doesn't change the dt=5 buffer.
+    rets5_again = ms.recent_returns("BTC", now_ns=now, lookback_seconds=lookback, dt=5)
+    np.testing.assert_array_equal(rets5, rets5_again)
+
+    # HL bars are also independent.
+    hl5 = ms.recent_hl_bars("BTC", now_ns=now, lookback_seconds=lookback, dt=5)
+    hl60 = ms.recent_hl_bars("BTC", now_ns=now, lookback_seconds=lookback, dt=60)
+    assert hl5.shape[0] > hl60.shape[0], (
+        f"Expected more dt=5 HL bars ({hl5.shape[0]}) than dt=60 ({hl60.shape[0]})"
+    )

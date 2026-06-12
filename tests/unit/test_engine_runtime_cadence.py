@@ -288,3 +288,36 @@ def test_per_class_override_registers_extra_cadence(tmp_path) -> None:
     # assert via mark_bucket_ns_for(sym, dt=2) — that returns dt*1e9 for any
     # explicit dt regardless of registration, so it would pass vacuously.
     assert rt.market_state._cadences_by_symbol["BTC"] == [5 * _NS, 2 * _NS]
+
+
+# ---- R9: two sibling slots with independent default cadences on one symbol ---
+
+
+def test_two_sibling_slots_independent_default_cadences(tmp_path) -> None:
+    """R9 capability: two sibling slots sharing BTC with different default dts
+    (e.g. v31 at dt=5 and a hypothetical v31_slow at dt=60) can coexist and
+    each registers its own cadence on the shared symbol.
+
+    The runtime registers BOTH cadences, and the first-registered is the
+    symbol's default for dt-less reads. This test pins that both are present
+    so each slot's scanner can address its own buffer by explicit dt rather
+    than relying on cadences[0].
+    """
+    rt = _runtime(
+        [
+            _theta_cfg(alias="v31", reference_symbol="BTC", dt=5),
+            _theta_cfg(alias="v31_slow", reference_symbol="BTC", dt=60),
+        ],
+        tmp_path,
+    )
+    rt._register_reference_cadences(rt.slots)
+    # Both cadences registered.
+    registered = rt.market_state._cadences_by_symbol["BTC"]
+    assert 5 * _NS in registered, f"dt=5 cadence not found in {registered}"
+    assert 60 * _NS in registered, f"dt=60 cadence not found in {registered}"
+    # The slot registered first (v31, dt=5) is cadences[0] — the default for
+    # dt-less reads. The second slot (dt=60) must read via explicit dt=60 to
+    # avoid aliasing the dt=5 buffer.
+    assert registered[0] == 5 * _NS, (
+        f"v31 (dt=5) was registered first; expected cadences[0]=5s got {registered[0] // _NS}s"
+    )

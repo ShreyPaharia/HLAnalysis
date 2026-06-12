@@ -315,7 +315,139 @@ def test_scan_wiring_bucket_uses_dt2_binary_uses_default(
                 f"priceBucket build_decision_inputs must use dt=2, got dt={dt_arg}"
             )
         elif klass == "priceBinary":
-            assert dt_arg is None, (
-                f"priceBinary build_decision_inputs must use dt=None (default), "
-                f"got dt={dt_arg}"
+            # R9: the default path now passes the slot's explicit dt (5) rather
+            # than dt=None, so reads always land on the correct cadence buffer
+            # even when sibling slots have registered a different dt first.
+            assert dt_arg == 5, (
+                f"priceBinary build_decision_inputs must use dt=5 (slot's explicit dt), "
+                f"got dt={dt_arg!r}"
             )
+
+
+# --- R9: scanner passes explicit dt for default path to avoid cadences[0] aliasing ---
+
+
+def test_scanner_default_path_passes_explicit_dt_not_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R9 capability: when a slot has a fixed vol_sampling_dt_seconds (say 5),
+    the scanner's default path (no per-class override) must call
+    build_decision_inputs with dt=5 explicitly, NOT dt=None.
+
+    This ensures that if a sibling slot registers a different default cadence on
+    the same symbol first (making cadences[0] != this slot's dt), the scanner
+    still reads its own cadence buffer — not the first-registered one.
+
+    Concretely: we have two slots on BTC — slot A at dt=60 (registered first,
+    so cadences[0]=60) and slot B at dt=5. Slot B's scanner must call
+    build_decision_inputs(..., dt=5), NOT dt=None (which would resolve to
+    cadences[0]=60 and read the wrong buffer).
+    """
+    import hlanalysis.engine.scanner as _scanner_mod
+    from hlanalysis.marketdata.decision_kernel import build_decision_inputs as _real_bdi
+
+    now = 1_700_000_000_000_000_000
+    # Slot B has dt=5 (via theta block).
+    cfg = _cfg()  # default uses ThetaParams(vol_sampling_dt_seconds=5)
+
+    ms = _RecordingMarketState()
+    # Register dt=60 FIRST (simulating slot A having registered before slot B),
+    # then dt=5 for slot B. This makes cadences[0]=60 for BTC.
+    ms.set_reference_cadence("BTC", sampling_dt_seconds=60, lookback_seconds=3600)
+    ms.set_reference_cadence("BTC", sampling_dt_seconds=5, lookback_seconds=3600)
+    # Confirm the ordering: cadences[0] is dt=60, NOT dt=5.
+    assert ms._cadences_by_symbol["BTC"][0] == 60 * 1_000_000_000, (
+        "test precondition: dt=60 must be first so cadences[0] != slot B's dt=5"
+    )
+    _seed_two_class_market(now, ms)
+
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+
+    from hlanalysis.strategy.late_resolution import (
+        LateResolutionConfig, LateResolutionStrategy,
+    )
+    rcfg = LateResolutionConfig(
+        tte_min_seconds=0, tte_max_seconds=86400,
+        price_extreme_threshold=0.0, distance_from_strike_usd_min=0.0,
+        vol_max=100.0, max_position_usd=500.0, stop_loss_pct=None,
+        max_strike_distance_pct=100.0, min_recent_volume_usd=0.0,
+        stale_data_halt_seconds=30,
+    )
+    strat = LateResolutionStrategy(rcfg)
+    scanner = Scanner(
+        strategy=strat, cfg=cfg, market_state=ms, dal=dal,
+        kill_switch_path=tmp_path / "halt", last_reconcile_ns=now,
+    )
+
+    # Record dt args on build_decision_inputs calls.
+    bdi_calls: list[int | None] = []
+
+    def _recording_bdi(core, *, ref_symbol, now_ns, lookback_seconds, dt=None):
+        bdi_calls.append(dt)
+        return _real_bdi(core, ref_symbol=ref_symbol, now_ns=now_ns,
+                         lookback_seconds=lookback_seconds, dt=dt)
+
+    monkeypatch.setattr(_scanner_mod, "build_decision_inputs", _recording_bdi)
+
+    scanner.scan(now_ns=now)
+
+    assert bdi_calls, "scanner.scan() made no build_decision_inputs calls — check market seeding"
+    # Every default-path call (no per-class override in this cfg) must use
+    # the slot's own dt=5 explicitly, never dt=None — because dt=None would
+    # resolve to cadences[0]=60 and silently read the wrong buffer.
+    for i, dt_arg in enumerate(bdi_calls):
+        assert dt_arg == 5, (
+            f"R9: scanner default path call #{i} used dt={dt_arg!r} instead of dt=5 "
+            f"(cadences[0]=60 would be returned by dt=None, aliasing the wrong buffer)"
+        )
+
+
+def test_late_resolution_scanner_derives_default_dt_from_allowlist(
+    tmp_path: Path,
+) -> None:
+    """Regression (R9 review): a late_resolution slot has ``theta=None`` and
+    carries ``vol_sampling_dt_seconds`` on its allowlist defaults. The scanner's
+    default cadence MUST come from the canonical ``reference_sampling_dt_seconds``
+    (→ defaults.vol_sampling_dt_seconds), NOT a bare ``else 60``. A ``60`` here
+    would make the LIVE engine read a dt=60 OHLC buffer never registered/fed for
+    a dt=5 late_resolution slot (v1 / v1_pm) → wrong σ. No backtest catches this
+    (the sim path doesn't use the scanner), so this unit assertion is the guard.
+    """
+    from hlanalysis.strategy.late_resolution import (
+        LateResolutionConfig, LateResolutionStrategy,
+    )
+
+    defaults = AllowlistEntry(
+        match={}, max_position_usd=500, stop_loss_pct=None, tte_min_seconds=0,
+        tte_max_seconds=43200, price_extreme_threshold=0.0,
+        distance_from_strike_usd_min=0, vol_max=100,
+        vol_sampling_dt_seconds=5,            # late_res carries dt here, theta=None
+    )
+    cfg = StrategyConfig(
+        name="late_resolution", account_alias="v1", paper_mode=False,
+        strategy_type="late_resolution",
+        allowlist=[_entry("priceBinary")], blocklist_question_idxs=[],
+        defaults=defaults, theta=None, **{"global": _global()},
+    )
+    assert cfg.theta is None, "test precondition: late_resolution has no theta block"
+
+    ms = _RecordingMarketState()
+    ms.set_reference_cadence("BTC", sampling_dt_seconds=5, lookback_seconds=3600)
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    rcfg = LateResolutionConfig(
+        tte_min_seconds=0, tte_max_seconds=86400,
+        price_extreme_threshold=0.0, distance_from_strike_usd_min=0.0,
+        vol_max=100.0, max_position_usd=500.0, stop_loss_pct=None,
+        max_strike_distance_pct=100.0, min_recent_volume_usd=0.0,
+        stale_data_halt_seconds=30,
+    )
+    scanner = Scanner(
+        strategy=LateResolutionStrategy(rcfg), cfg=cfg, market_state=ms, dal=dal,
+        kill_switch_path=tmp_path / "halt", last_reconcile_ns=0,
+    )
+    assert scanner._default_dt_seconds == 5, (
+        f"late_resolution scanner must derive dt=5 from allowlist defaults, got "
+        f"{scanner._default_dt_seconds} (a bare `else 60` would read an unregistered buffer)"
+    )
