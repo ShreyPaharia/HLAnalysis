@@ -416,11 +416,12 @@
     </div>
   </div>
 
-  <div class="callout warn"><b>Could be merged now (verified against the code) — 2 real seams + 1 minor:</b>
+  <div class="callout warn"><b>Merge candidates — resolved (planned for zero perf impact).</b> A focused pass took these on; the perf-neutrality constraint filtered them down to what's actually worth doing:
     <ul class="tight" style="margin-top:8px">
-      <li><b>Event taxonomy (R4)</b> — <code>hlanalysis/events.py</code> (NormalizedEvent) and <code>backtest/core/events.py</code> (MarketEvent, 4 classes) are still two vocabularies bridged on load. Unify so the sim consumes <code>events.py</code> directly. <i>Highest-value remaining merge.</i></li>
-      <li><b>σ-read numpy/tuple seam (R1 leftover)</b> — <code>decision_kernel.build_decision_inputs</code> is shared, but the engine converts to <code>tuple</code> and the sim keeps <code>ndarray</code> (values identical). Make the kernel return one canonical type → the σ-read becomes fully merged. <i>Small, safe.</i></li>
-      <li><b>Backtest-only strategy params</b> — <code>model_edge</code> / <code>binary_statarb</code> / <code>delta_hedged</code> still use the pre-R6 config pattern (no pydantic params base). Apply the R6 pattern when one of them goes live. <i>Low value — they're sim-only today.</i></li>
+      <li><b>✅ Fee curve — DONE</b> (<code>e4c38cf</code>): one shared <code>pm_binary_fee(rate,p,qty)</code> replaces the duplicated <code>rate·p·(1−p)</code> in <code>strategy/fee.py</code> + <code>hftbt_runner</code>. Byte-identical on both fee paths (qty-inclusive to preserve exact FP order). Free win.</li>
+      <li><b>✅ Event taxonomy (R4) — DONE as minimal hardening</b> (<code>106de0f</code>): investigation found the "duplication" is 5 column-name strings with <i>zero</i> actual drift, and a full type-merge would add build-path overhead for no gain. Shipped instead: shared <code>_parquet_schema.py</code> column constants + 25 round-trip contract tests that catch a recorder↔sim column rename at <i>test</i> time. Additive-only → npz byte-identical, perf-neutral.</li>
+      <li><b>❌ σ-read numpy/tuple — DROPPED</b>: net-negative. The sim is already <code>ndarray</code> (no boxing to remove); the engine's <code>tuple</code> is negligible at 1 Hz <i>and</i> is the correct type for the durable trade journal (<code>recent_returns or ()</code> raises on an ndarray). Forcing one type = risk for zero perf gain.</li>
+      <li><b>❌ Backtest-only strategy params — DROPPED</b>: verified there's nothing to merge — model_edge / binary_statarb / delta_hedged each have a single Config dataclass with no parallel pydantic model. Already single-source.</li>
     </ul>
     What <b>cannot</b> merge: step 4 (BookState assembly) — live L2 book vs hftbacktest depth are genuinely different data sources (R1's finding). That split is inherent, which is exactly why R3 v2's decision-parity gate (step 10) is the thing that guarantees equivalence.</div>
 </div></section>
