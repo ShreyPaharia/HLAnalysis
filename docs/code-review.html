@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HLAnalysis · Code-Quality Review</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#11151f; --panel2:#161b27; --ink:#e6e9f0; --muted:#9aa4b8;
+    --line:#222a3a; --shared:#7c5cff; --shared-soft:#1c1733; --live:#19c37d; --live-soft:#0f2a20;
+    --sim:#4aa3ff; --sim-soft:#0e2236; --rec:#f5a623; --rec-soft:#2c2310; --danger:#ff5d5d; --danger-soft:#2c1416;
+    --mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:radial-gradient(1200px 700px at 80% -10%,#161a2b 0,var(--bg) 55%);color:var(--ink);font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased}
+  a{color:var(--sim);text-decoration:none}
+  code,.mono{font-family:var(--mono)}
+  code{background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:.86em;color:#cdd6e8}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 24px}
+
+  header{padding:64px 0 28px;border-bottom:1px solid var(--line)}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--shared);margin:0 0 14px}
+  h1{font-size:46px;line-height:1.05;margin:0 0 16px;letter-spacing:-.02em}
+  h1 .dim{color:var(--muted);font-weight:400}
+  .lede{font-size:18px;color:var(--muted);max-width:820px;margin:0}
+  .lede strong{color:var(--ink);font-weight:600}
+  .meta{margin-top:22px;display:flex;gap:10px;flex-wrap:wrap}
+  .tag{font-family:var(--mono);font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--panel)}
+
+  nav.toc{position:sticky;top:0;z-index:20;background:rgba(11,14,20,.85);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+  nav.toc .wrap{display:flex;gap:6px;flex-wrap:wrap;padding:11px 24px}
+  nav.toc a{font-family:var(--mono);font-size:12.5px;color:var(--muted);padding:5px 11px;border-radius:7px}
+  nav.toc a:hover{color:var(--ink);background:var(--panel2)}
+
+  section{padding:54px 0;border-bottom:1px solid var(--line)}
+  h2{font-size:13px;font-family:var(--mono);letter-spacing:.18em;text-transform:uppercase;color:var(--muted);margin:0 0 6px}
+  h2 .n{color:var(--shared)}
+  .h2sub{font-size:27px;margin:0 0 8px;letter-spacing:-.01em}
+  .say{color:var(--muted);max-width:860px;margin:0 0 28px}
+
+  .grid{display:grid;gap:16px}
+  .cols-2{grid-template-columns:1fr 1fr}
+  .cols-3{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:900px){.cols-2,.cols-3{grid-template-columns:1fr!important}}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px}
+  .card h3{margin:0 0 8px;font-size:16px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+  .card p{margin:6px 0 0;color:var(--muted);font-size:14.5px}
+  .card ul{margin:10px 0 0;padding-left:18px;color:var(--muted);font-size:14px}
+  .card li{margin:5px 0}
+
+  .verdict{background:linear-gradient(180deg,var(--shared-soft),#13101f);border:1px solid #3a2e6b;border-radius:16px;padding:26px 28px;font-size:19px;line-height:1.5}
+  .verdict strong{color:#cdb8ff}
+
+  /* severity badges */
+  .sev{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;font-weight:600;padding:3px 8px;border-radius:6px;text-transform:uppercase;white-space:nowrap}
+  .s-high{background:var(--danger-soft);color:#ff8c8c;border:1px solid #5c2020}
+  .s-med{background:var(--rec-soft);color:#f5c067;border:1px solid #5c4a1f}
+  .s-low{background:var(--sim-soft);color:#7fc0ff;border:1px solid #1d4a73}
+  .s-good{background:var(--live-soft);color:#5fe0a8;border:1px solid #1d5c43}
+
+  /* issue table */
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  thead th{text-align:left;font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);padding:0 14px 10px;border-bottom:1px solid var(--line)}
+  tbody td{padding:14px;border-bottom:1px solid var(--line);vertical-align:top;color:var(--ink)}
+  tbody tr:hover{background:var(--panel)}
+  td.c-sev{width:74px}
+  td.c-issue{color:var(--ink)}
+  td.c-issue .d{color:var(--muted);font-size:13px;margin-top:3px;display:block}
+  td.c-ev{font-family:var(--mono);font-size:12px;color:var(--sim);width:230px;white-space:normal}
+
+  /* subsystem strip */
+  .sub{border-radius:14px;border:1px solid var(--line);padding:18px 20px;background:var(--panel)}
+  .sub .top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px}
+  .sub .nm{font-size:16px;font-weight:600}
+  .sub .loc{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+  .sub .grade{font-family:var(--mono);font-size:11px;padding:3px 9px;border-radius:999px}
+  .sub p{margin:8px 0 0;color:var(--muted);font-size:14px}
+  .sub .ev{font-family:var(--mono);font-size:11.5px;color:#7fc0ff;margin-top:8px}
+
+  /* phases */
+  .phase{border-left:3px solid var(--line);padding:2px 0 2px 20px;margin:0 0 22px;position:relative}
+  .phase.p1{border-color:var(--danger)} .phase.p2{border-color:var(--rec)} .phase.p3{border-color:var(--sim)}
+  .phase h3{margin:0 0 4px;font-size:18px}
+  .phase .when{font-family:var(--mono);font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+  .phase ul{margin:0;padding-left:18px;color:var(--muted);font-size:14.5px}
+  .phase li{margin:6px 0}
+  .phase li code{color:#cdd6e8}
+
+  .pill{font-family:var(--mono);font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--muted);background:var(--panel2)}
+  footer{padding:40px 0 70px;color:var(--muted);font-size:13px}
+  .note{font-size:12.5px;color:var(--muted);margin-top:14px;font-style:italic}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <p class="kicker">HLAnalysis · Code-Quality Review</p>
+    <h1>Well-written code,<br><span class="dim">an ungated toolchain.</span></h1>
+    <p class="lede">An experienced-eyes review of the ~32k-LOC trading stack for readability, maintainability, architecture, and best practices. The architecture is genuinely good and the shared sim/live spine is real — but the system trades real money with <strong>no linter, no type-checker, and no CI</strong>, and a handful of god-modules have accreted past comfort. The highest-leverage work is mechanical hardening, not redesign.</p>
+    <div class="meta">
+      <span class="tag">~32k LOC package</span>
+      <span class="tag">1,774 tests · 0 xfail</span>
+      <span class="tag">5 subsystem deep-dives</span>
+      <span class="tag">findings verified against code</span>
+    </div>
+  </div>
+</header>
+
+<nav class="toc"><div class="wrap">
+  <a href="#verdict">Verdict</a>
+  <a href="#strong">What's strong</a>
+  <a href="#issues">Top issues</a>
+  <a href="#subsystems">Subsystems</a>
+  <a href="#plan">Action plan</a>
+</div></nav>
+
+<!-- 01 VERDICT -->
+<section id="verdict"><div class="wrap">
+  <h2><span class="n">01</span> &nbsp;The headline</h2>
+  <p class="h2sub">The code is in better shape than the toolchain around it</p>
+  <p class="say">This is a mature, battle-scarred stack with real architecture — a shared strategy "spine," clean risk separation, and operational scar-tissue documented at every defensive gate. The architecture doc is accurate, not aspirational: the shared-spine and parity claims hold up against the actual code.</p>
+  <div class="verdict">
+    The fundamentals are disciplined — no <code>import *</code>, no bare <code>except:</code>, one TODO in 32k LOC, 1,774 tests with <strong>zero xfail</strong>. What's missing is an automated quality floor: there is no <strong>ruff / mypy / black</strong> config and no <strong>CI</strong> anywhere, so 700+ lint findings and several real <code>float | None</code> issues in live strategy code sit unnoticed. Fix that, harden a short list of latent OOM / config / async risks, then decompose five oversized modules — in that order.
+  </div>
+</div></section>
+
+<!-- 02 STRONG -->
+<section id="strong"><div class="wrap">
+  <h2><span class="n">02</span> &nbsp;What's genuinely strong</h2>
+  <p class="h2sub">Credit where due — these are done right</p>
+  <div class="grid cols-2">
+    <div class="card">
+      <h3><span class="sev s-good">Solid</span> Real sim/live parity</h3>
+      <p><code>marketdata/</code> (MarketState, OHLC, position_math), <code>strategy/</code>, and <code>risk/caps.py</code> are single-sourced and imported by both the engine and the backtester, with byte-identity parity tests. The "one brain, two bodies" claim holds at the data &amp; accounting layer.</p>
+    </div>
+    <div class="card">
+      <h3><span class="sev s-good">Solid</span> <code>risk/caps.py</code></h3>
+      <p>Textbook single-source: three pure predicates, no IO, documented comparison operators, tested, three verified importers. Zero findings — exactly what the architecture claims.</p>
+    </div>
+    <div class="card">
+      <h3><span class="sev s-good">Solid</span> Operational maturity</h3>
+      <p>Nearly every gate, tolerance constant, and loop guard cites the incident that motivated it. The event-array cache (versioned invalidation, concurrent-write safety, OOM-bounded memos) and the spawn-worker <code>SourceConfig</code> plumbing are mature and well-tested.</p>
+    </div>
+    <div class="card">
+      <h3><span class="sev s-good">Solid</span> Disciplined fundamentals</h3>
+      <p>No <code>import *</code>, no bare <code>except:</code>, 1 TODO in the whole package, careful secrets handling (SSM SecureString + placeholder rejection), clean packaging and CLI entry points, and a large test suite with no rotting suppressions.</p>
+    </div>
+  </div>
+</div></section>
+
+<!-- 03 ISSUES -->
+<section id="issues"><div class="wrap">
+  <h2><span class="n">03</span> &nbsp;Top cross-cutting issues</h2>
+  <p class="h2sub">Priority order — severity then leverage</p>
+  <p class="say">Every row was verified against the actual source. <span class="sev s-high">High</span> = fix before scaling capital · <span class="sev s-med">Med</span> = real debt, schedule it · <span class="sev s-low">Low</span> = cleanup.</p>
+  <table>
+    <thead><tr><th>Sev</th><th>Issue</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="c-sev"><span class="sev s-high">High</span></td>
+        <td class="c-issue">No static-analysis gate at all
+          <span class="d">No ruff/mypy/black config, no <code>py.typed</code>. Ruff with a normal ruleset flags ~734 issues; mypy flags real <code>float|None</code> arithmetic in live strategy code.</span></td>
+        <td class="c-ev">pyproject.toml — 0 <code>[tool.*]</code> sections <em>(verified)</em></td>
+      </tr>
+      <tr>
+        <td class="c-sev"><span class="sev s-high">High</span></td>
+        <td class="c-issue">No CI/CD
+          <span class="d">No <code>.github/workflows</code>, no pre-commit, no <code>make test</code>/<code>lint</code>. 1,774 tests pass locally but nothing runs them before a <code>git pull</code>-and-restart deploy.</span></td>
+        <td class="c-ev">repo root <em>(verified absent)</em></td>
+      </tr>
+      <tr>
+        <td class="c-sev"><span class="sev s-high">High</span></td>
+        <td class="c-issue">God modules
+          <span class="d">5 files tangle 4–5 concerns each. <code>EngineRuntime</code> and the sim's <code>_RunState</code> (40+ fields) are de-facto god objects.</span></td>
+        <td class="c-ev">runtime.py 1419 · hftbt_runner.py 1755 · polymarket.py 1631 · theta_harvester.py 1176 · cli.py 1117</td>
+      </tr>
+      <tr>
+        <td class="c-sev"><span class="sev s-high">High</span></td>
+        <td class="c-issue">Unbounded growth (OOM class)
+          <span class="d"><code>MarketState._books</code> is never evicted (only <code>_questions</code> is); several per-question dicts in Scanner/Router aren't pruned on eviction. Same failure class as the historical OOM on the 1 GB box.</span></td>
+        <td class="c-ev">market_state.py:105 · scanner.py:101+ · router.py:114+</td>
+      </tr>
+      <tr>
+        <td class="c-sev"><span class="sev s-med">Med</span></td>
+        <td class="c-issue"><code>OrderAck.status</code> Literal omits <code>"cancelled"</code>
+          <span class="d">A confirmed type-contract violation — <code>pm_client</code> constructs exactly that status. Any exhaustive <code>match</code> silently misses cancelled IOC orders.</span></td>
+        <td class="c-ev">exec_types.py:27 vs pm_client.py:383 <em>(verified)</em></td>
+      </tr>
+      <tr>
+        <td class="c-sev"><span class="sev s-med">Med</span></td>
+        <td class="c-issue">Risk-critical config has no validation
+          <span class="d"><code>GlobalRiskConfig</code> lacks <code>Field(ge=,le=)</code> bounds and <code>extra='forbid'</code> — money caps and thresholds load any value silently; typo'd risk knobs are dropped. Inconsistent with the SHR-65 discipline applied elsewhere.</span></td>
+        <td class="c-ev">engine/config.py:79</td>
+      </tr>
+      <tr>
+        <td class="c-sev"><span class="sev s-med">Med</span></td>
+        <td class="c-issue">Two unbridged event taxonomies
+          <span class="d"><code>backtest/core/events.py</code> (dataclasses) vs <code>hlanalysis/events.py</code> (msgspec) with colliding type names. A recorder schema change won't propagate to the sim.</span></td>
+        <td class="c-ev">MarketEvent vs NormalizedEvent</td>
+      </tr>
+      <tr>
+        <td class="c-sev"><span class="sev s-med">Med</span></td>
+        <td class="c-issue">Blocking <code>requests</code> in async paths
+          <span class="d"><code>requests.get(timeout=N)</code> is per-read, not wall-clock; a hung handshake pins a threadpool worker and (on HL) delays every reconnect.</span></td>
+        <td class="c-ev">binance.py:317 · hyperliquid.py:360 · pm_client.py:54</td>
+      </tr>
+      <tr>
+        <td class="c-sev"><span class="sev s-med">Med</span></td>
+        <td class="c-issue">Recorder drops oldest data silently
+          <span class="d">FIFO eviction under write-failure loses the <em>start</em> of an outage window (the interesting part), logged but not alerted. Non-atomic <code>pq.write_table</code> can also leave truncated parquet.</span></td>
+        <td class="c-ev">recorder/writer.py:96–138, 95</td>
+      </tr>
+      <tr>
+        <td class="c-sev"><span class="sev s-med">Med</span></td>
+        <td class="c-issue">3-way param-default duplication in theta
+          <span class="d">Defaults hand-copied across the pydantic model, the dataclass, and the builder <code>.get()</code> — the exact shape of the SHR-65 bug, moved into the builder; only a partial parity test guards it.</span></td>
+        <td class="c-ev">theta_harvester.py:155–212 / 215–372 / 1076–1129</td>
+      </tr>
+      <tr>
+        <td class="c-sev"><span class="sev s-low">Low</span></td>
+        <td class="c-issue">Latent guards &amp; hot-path waste
+          <span class="d"><code>cost/filled</code> with no zero-guard; bbo-mid with no one-sided-quote guard; redundant <code>tuple(recent_returns)</code> re-wraps every scan tick; Scanner reaches into <code>MarketState._core</code> (private).</span></td>
+        <td class="c-ev">risk.py:246 · market_state.py:256 · scanner.py:406/470/486</td>
+      </tr>
+      <tr>
+        <td class="c-sev"><span class="sev s-low">Low</span></td>
+        <td class="c-issue">Hygiene drift
+          <span class="d">Mixed logging stacks (loguru ×22, stdlib logging ×11); duplicate/conflicting dev-dep groups; <code>scikit-learn</code> a hard core dep used nowhere in the package; <code>scripts/</code>+<code>tools/</code> closer to a junk drawer than the README's "clean split".</span></td>
+        <td class="c-ev">pyproject.toml · scripts/ · tools/</td>
+      </tr>
+    </tbody>
+  </table>
+</div></section>
+
+<!-- 04 SUBSYSTEMS -->
+<section id="subsystems"><div class="wrap">
+  <h2><span class="n">04</span> &nbsp;Subsystem breakdown</h2>
+  <p class="h2sub">Where each part stands</p>
+  <div class="grid cols-2">
+
+    <div class="sub">
+      <div class="top"><span class="nm">engine/</span><span class="loc">9.5k LOC · 31 files</span></div>
+      <span class="grade" style="background:var(--rec-soft);color:#f5c067">structurally heavy, logically sound</span>
+      <p>Functionally mature; problems are structural not logical. <code>EngineRuntime</code> should shed a <code>SlotBuilder</code>, a <code>VenueIO</code> helper, and per-loop classes; <code>Reconciler.run</code> (274-line method) and <code>Router._book_fill</code> (135 lines, 3 branches) should be split. <code>CachedStateDAL</code> thread-safety rests on a comment not a lock.</p>
+      <div class="ev">runtime.py · state.py:667 · risk.py:246 · scanner.py</div>
+    </div>
+
+    <div class="sub">
+      <div class="top"><span class="nm">backtest/</span><span class="loc">11k LOC · 36 files</span></div>
+      <span class="grade" style="background:var(--live-soft);color:#5fe0a8">disciplined; a few loose threads</span>
+      <p>Unusually disciplined for research code; the numpy/numba assembler and cache are excellent. Decompose <code>hftbt_runner.py</code> into latency/fills/routing. Real seam: <code>polymarket.py</code> re-implements the shared OHLC bucketer inline <em>twice</em> instead of calling <code>resample_ohlc</code>. Sim passes raw <code>ndarray</code> where the contract uses tuples.</p>
+      <div class="ev">hftbt_runner.py:1564 · polymarket.py:1239/1349 · cli.py:583 (stale comment)</div>
+    </div>
+
+    <div class="sub">
+      <div class="top"><span class="nm">strategy/ + marketdata/ + parity/</span><span class="loc">~6.6k LOC</span></div>
+      <span class="grade" style="background:var(--rec-soft);color:#f5c067">healthy kernel, accreting policy</span>
+      <p>The kernel (position_math, ohlc, vol, parity) is genuinely healthy and honest about where it deliberately didn't unify. The frayed part is policy: <code>theta_harvester.py</code> is a 1,176-line god-strategy carrying ~13 flag-gated experiments (most off-by-default, several documented inert/rejected) that were never archived — the "v3.x variants" are config shims over one growing <code>_evaluate_entry</code>.</p>
+      <div class="ev">theta_harvester.py:523–863 · 3× param-default copy · missing stale-ask guard :609</div>
+    </div>
+
+    <div class="sub">
+      <div class="top"><span class="nm">adapters/ + recorder/ + risk/ + alerts/</span><span class="loc">~3.3k LOC</span></div>
+      <span class="grade" style="background:var(--live-soft);color:#5fe0a8">robust enough for the desk</span>
+      <p>WS resilience is genuinely DRY (one <code>BaseWsAdapter</code>); the PM book-ordering bugs are fixed and triple-guarded. Main debt: 908-LOC <code>hyperliquid.py</code> with duplicated wildcard paths and repeated <code>10*outcome+side</code> coin-encoding magic; pervasive swallowing of JSON-decode failures with no counter — zero observability when a venue changes its wire format.</p>
+      <div class="ev">hyperliquid.py:252/302 · _ws_base.py:131 · writer.py:95</div>
+    </div>
+
+    <div class="sub" style="grid-column:1/-1">
+      <div class="top"><span class="nm">cross-cutting hygiene</span><span class="loc">pyproject · tests · scripts · docs</span></div>
+      <span class="grade" style="background:var(--danger-soft);color:#ff8c8c">the toolchain gap</span>
+      <p>The glaring gap is the complete absence of an automated quality floor — no linter, formatter, type-checker, or CI — which is exactly why hundreds of lint findings and real <code>float|None</code> issues in live strategy code go unnoticed. Smaller items: mixed logging stacks, duplicate dev-dependency groups, a heavy ML dep in the always-installed core set, and a <code>scripts/</code>+<code>tools/</code> junk-drawer that belies the README's clean-split claim. Test suite itself is healthy (1,774 tests, 0 xfail, 6 skips).</p>
+      <div class="ev">no <code>[tool.ruff]</code>/<code>[tool.mypy]</code> · no <code>.github/workflows</code> · no <code>py.typed</code></div>
+    </div>
+
+  </div>
+</div></section>
+
+<!-- 05 PLAN -->
+<section id="plan"><div class="wrap">
+  <h2><span class="n">05</span> &nbsp;Recommended action plan</h2>
+  <p class="h2sub">Three independently-shippable phases — none require a redesign</p>
+
+  <div class="phase p1">
+    <h3>Phase 1 — Quality floor</h3>
+    <div class="when">small · mechanical · highest leverage</div>
+    <ul>
+      <li>Add <code>[tool.ruff]</code> + <code>[tool.mypy]</code> to <code>pyproject.toml</code>; run <code>ruff format</code> once.</li>
+      <li>Wire a pre-commit hook and a minimal GitHub Actions job: <code>ruff check</code> + <code>mypy</code> + <code>pytest</code>.</li>
+      <li>Consolidate the duplicate/conflicting dev-dependency groups; move <code>scikit-learn</code>/<code>plotly</code> to extras; add <code>py.typed</code>.</li>
+      <li><em>Why first:</em> converts a well-written-but-ungated codebase into a defensible one and surfaces the <code>float|None</code> issues automatically.</li>
+    </ul>
+  </div>
+
+  <div class="phase p2">
+    <h3>Phase 2 — Latent-risk hardening</h3>
+    <div class="when">before scaling capital</div>
+    <ul>
+      <li>Evict <code>_books</code> + per-question dicts in lockstep with <code>evict_settled_questions</code>.</li>
+      <li>Add <code>extra='forbid'</code> + <code>Field</code> bounds to risk config; fix the <code>"cancelled"</code> status Literal.</li>
+      <li>Add zero/None guards at <code>risk.py:246</code> and <code>market_state.py:256</code>; lock or thread-confine <code>CachedStateDAL</code>.</li>
+      <li>Convert <code>requests</code> to <code>(connect, read)</code> timeout tuples; alert (not just log) on recorder data-drop + atomic parquet writes.</li>
+    </ul>
+  </div>
+
+  <div class="phase p3">
+    <h3>Phase 3 — Decomposition</h3>
+    <div class="when">sustained maintainability</div>
+    <ul>
+      <li>Split the five god-modules. Highest value: extract <code>theta_harvester</code>'s flag-gated experiments and collapse the 3-way param duplication to one source.</li>
+      <li>Decompose <code>EngineRuntime</code> and <code>hftbt_runner</code> along their tangled concerns.</li>
+      <li>Close remaining seams: route <code>polymarket.py</code>'s two OHLC copies through <code>resample_ohlc</code>, fold the tuple/ndarray conversion into <code>build_decision_inputs</code>, bridge or rename the two event taxonomies.</li>
+    </ul>
+  </div>
+
+  <p class="note">Methodology: architecture doc read for orientation, then five parallel deep-dives audited the actual source per subsystem. Highest-severity, falsifiable claims (CI absence, the <code>"cancelled"</code> status mismatch, no <code>[tool.*]</code> config) were independently spot-verified.</p>
+</div></section>
+
+<footer><div class="wrap">
+  HLAnalysis · Code-Quality Review &nbsp;·&nbsp; companion to <a href="architecture.html">architecture.html</a> &nbsp;·&nbsp; findings grounded in <code>file:line</code> against the working tree.
+</div></footer>
+
+</body>
+</html>
