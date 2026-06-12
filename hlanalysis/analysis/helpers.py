@@ -11,8 +11,8 @@ Notebooks should depend only on this module + duckdb/pandas/matplotlib.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import duckdb
 import numpy as np
@@ -111,7 +111,7 @@ def load_df(sql: str, *, params: Iterable | None = None) -> pd.DataFrame:
 
 def fmt_ts(ns: int | float) -> str:
     """ns since epoch -> 'YYYY-MM-DD HH:MM:SS' UTC string."""
-    return dt.datetime.fromtimestamp(int(ns) / 1e9, tz=dt.timezone.utc).strftime(
+    return dt.datetime.fromtimestamp(int(ns) / 1e9, tz=dt.UTC).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
 

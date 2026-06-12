@@ -25,7 +25,8 @@ been fully loaded.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable, NamedTuple
+from collections.abc import Callable
+from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
     from ..engine.config import StrategyConfig
@@ -40,7 +41,7 @@ class LiveStrategyEntry(NamedTuple):
     registry_id   — backtest registry id used by slot_config.backtest_params_from_slot
                     to look up the matching sim builder (e.g. "v1_late_resolution").
     """
-    live_builder: Callable[["StrategyConfig"], "Strategy"]
+    live_builder: Callable[[StrategyConfig], Strategy]
     registry_id: str
 
 
@@ -50,7 +51,7 @@ _LIVE_REGISTRY: dict[str, LiveStrategyEntry] = {}
 def register_live_strategy(
     strategy_type: str,
     *,
-    live_builder: Callable[["StrategyConfig"], "Strategy"],
+    live_builder: Callable[[StrategyConfig], Strategy],
     registry_id: str,
 ) -> None:
     """Register a strategy_type for live trading.
@@ -73,7 +74,7 @@ def live_strategy_types() -> list[str]:
     return sorted(_LIVE_REGISTRY)
 
 
-def build_live_strategy(strategy_type: str, cfg: "StrategyConfig") -> "Strategy":
+def build_live_strategy(strategy_type: str, cfg: StrategyConfig) -> Strategy:
     """Build a live Strategy for the given strategy_type and StrategyConfig.
 
     Raises ValueError for unknown types (mirrors the old if/elif raise).
@@ -115,7 +116,7 @@ def _reset_for_tests() -> None:
 # after all modules are fully loaded.
 # ---------------------------------------------------------------------------
 
-def _late_resolution_builder(cfg: "StrategyConfig") -> "Strategy":
+def _late_resolution_builder(cfg: StrategyConfig) -> Strategy:
     from ..engine.config_builders import (  # noqa: PLC0415
         build_late_resolution_config,
         build_late_resolution_configs_by_class,
@@ -127,7 +128,7 @@ def _late_resolution_builder(cfg: "StrategyConfig") -> "Strategy":
     )
 
 
-def _theta_harvester_builder(cfg: "StrategyConfig") -> "Strategy":
+def _theta_harvester_builder(cfg: StrategyConfig) -> Strategy:
     from ..engine.config_builders import (  # noqa: PLC0415
         build_theta_harvester_config,
         build_theta_harvester_configs_by_class,

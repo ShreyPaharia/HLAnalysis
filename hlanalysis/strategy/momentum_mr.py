@@ -22,7 +22,6 @@ import numpy as np
 
 from .vol import bipower_variation_sigma
 
-
 # Reference window for z-score variance — fixed at 240 minutes (4h) regardless
 # of indicator lookback. Long enough to be stable, short enough to track
 # regime shifts within a 24h PM market.

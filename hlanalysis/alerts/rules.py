@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import html
 import time
-from typing import Mapping, Protocol
+from collections.abc import Mapping
+from typing import Protocol
 
 
 def _e(s) -> str:
@@ -22,10 +23,25 @@ from loguru import logger
 
 from ..engine.event_bus import EventBus
 from ..engine.risk_events import (
-    BusEvent, DailyLossHalt, Entry, Exit, FeedDown, FeedRecovered, FeedStale,
-    KillSwitchActivated, MemoryHalt, NewQuestion, OrderRejected, OrderUnconfirmed,
-    PMStrikeMismatch, ReconcileDrift, RedemptionTimeout, RiskHalt, RiskVeto,
-    StaleDataHalt, StopLossTriggered,
+    BusEvent,
+    DailyLossHalt,
+    Entry,
+    Exit,
+    FeedDown,
+    FeedRecovered,
+    FeedStale,
+    KillSwitchActivated,
+    MemoryHalt,
+    NewQuestion,
+    OrderRejected,
+    OrderUnconfirmed,
+    PMStrikeMismatch,
+    ReconcileDrift,
+    RedemptionTimeout,
+    RiskHalt,
+    RiskVeto,
+    StaleDataHalt,
+    StopLossTriggered,
 )
 
 

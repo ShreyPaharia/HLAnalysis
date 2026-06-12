@@ -10,6 +10,8 @@ from pydantic import BaseModel, ConfigDict
 
 from ._numba.vol import (
     ewma_std as _nb_ewma_std,
+)
+from ._numba.vol import (
     parkinson_sigma_window as _nb_parkinson_sigma_window,
 )
 from .base import Strategy

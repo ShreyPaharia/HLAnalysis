@@ -5,8 +5,6 @@ Run: python -m hlanalysis.tools.list_outcomes
 
 from __future__ import annotations
 
-import json
-
 import requests
 
 URL = "https://api.hyperliquid.xyz/info"
@@ -30,9 +28,9 @@ def main() -> None:
             print(f"#   {k}: {v}")
         for side_idx, side in enumerate(o.get("sideSpecs", [])):
             coin = f"#{10 * outcome_idx + side_idx}"
-            print(f"  - venue: hyperliquid")
-            print(f"    product_type: prediction_binary")
-            print(f"    mechanism: clob")
+            print("  - venue: hyperliquid")
+            print("    product_type: prediction_binary")
+            print("    mechanism: clob")
             print(f'    symbol: "{coin}"  # {side.get("name")}')
             print("    channels: [trades, l2Book, bbo, activeAssetCtx]")
         print()

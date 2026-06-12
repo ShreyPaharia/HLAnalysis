@@ -20,18 +20,20 @@ from __future__ import annotations
 import heapq
 import json
 import re
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Iterator, Literal
+from typing import Literal
 
 import pyarrow.parquet as pq
 import requests
 from loguru import logger
 
+from hlanalysis.adapters.polymarket_normalize import parse_bucket_event as _shared_parse_bucket_event
+from hlanalysis.marketdata.ohlc import resample_ohlc
 from hlanalysis.strategy.types import QuestionView
 
-from .binance_klines import fetch_klines
 from ..core.data_source import QuestionDescriptor
 from ..core.events import (
     BookSnapshot,
@@ -40,9 +42,8 @@ from ..core.events import (
     SettlementEvent,
     TradeEvent,
 )
-from ._synthetic_l2 import L2Snapshot, trade_to_l2
-from hlanalysis.adapters.polymarket_normalize import parse_bucket_event as _shared_parse_bucket_event
-from hlanalysis.marketdata.ohlc import resample_ohlc
+from ._synthetic_l2 import L2Snapshot, LiquidityProfile, trade_to_l2
+from .binance_klines import fetch_klines
 
 _GAMMA_BASE = "https://gamma-api.polymarket.com"
 _CLOB_DATA_BASE = "https://data-api.polymarket.com"
@@ -159,7 +160,7 @@ def _http_get(url: str, params: dict | None = None) -> dict | list:
 def _parse_iso_ns(s: str) -> int:
     dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return int(dt.timestamp() * 1e9)
 
 
@@ -254,7 +255,7 @@ def _parse_strike_ref_ts_ns(description: str) -> int | None:
         return None
     year = 2000 + int(yr2)
     dt = datetime(year, _MONTHS[mon], int(day), int(hh), int(mm), tzinfo=et)
-    return int(dt.astimezone(timezone.utc).timestamp() * 1e9)
+    return int(dt.astimezone(UTC).timestamp() * 1e9)
 
 
 def _parse_binary_event(ev: dict) -> dict | None:
@@ -461,9 +462,10 @@ class PolymarketDataSource:
         # Optional per-bucket liquidity calibration for the synthetic book builder.
         # When set, trade_to_l2() uses the profile's half_spread/depth per price
         # bucket instead of the flat _StreamCfg constants.
-        self._liquidity_profile: "LiquidityProfile | None" = None
+        self._liquidity_profile: LiquidityProfile | None = None
         if liquidity_profile_path:
             import json as _json
+
             from ._synthetic_l2 import LiquidityProfile as _LiquidityProfile
             with open(liquidity_profile_path) as _f:
                 _d = _json.load(_f)
@@ -574,6 +576,7 @@ class PolymarketDataSource:
         entry = manifest.get(q.question_id)
         if entry is None:
             import numpy as np
+
             from ._fastpath_core import FastPathBundle, LegArrays, event_dtype
             empty = np.zeros(0, dtype=event_dtype)
             return FastPathBundle(
@@ -587,7 +590,7 @@ class PolymarketDataSource:
         # All source reads (trades, klines/BBO reference, book parquet,
         # settlement) are deferred into ``_build`` so a cache HIT skips ALL of
         # them — only the cheap source-file stat + npz load runs.
-        def _build() -> "FastPathBundle":
+        def _build() -> FastPathBundle:
             if self._book_source == "synthetic":
                 # Synthetic: assemble arrays from the SAME legacy event stream
                 # the runner consumes. Partitions exactly as the runner does and
@@ -1042,7 +1045,7 @@ class PolymarketDataSource:
         *,
         q: QuestionDescriptor,
         leg_pairs: tuple[tuple[str, str], ...],
-        trades_by_pair: dict[tuple[str, str], list["_RawTrade"]],
+        trades_by_pair: dict[tuple[str, str], list[_RawTrade]],
         klines: list[dict],
         per_leg_outcomes: dict[str, Literal["yes", "no", "unknown"]],
     ) -> Iterator[MarketEvent]:
@@ -1163,7 +1166,7 @@ class PolymarketDataSource:
         self._manifest_path().write_text(json.dumps(manifest, indent=2))
         self._manifest_cache = manifest
 
-    def _read_trades(self, condition_id: str) -> list["_RawTrade"]:
+    def _read_trades(self, condition_id: str) -> list[_RawTrade]:
         path = self._cache_root / "pm_trades" / f"{condition_id}.parquet"
         if not path.exists():
             return []
@@ -1342,8 +1345,8 @@ class PolymarketDataSource:
             return []
         # Hive partitions are `date=YYYY-MM-DD`. Cover the question window
         # with one-day padding on each side to catch tick-boundary spills.
-        start_d = datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).date()
-        end_d = datetime.fromtimestamp(end_ns / 1e9, tz=timezone.utc).date()
+        start_d = datetime.fromtimestamp(start_ns / 1e9, tz=UTC).date()
+        end_d = datetime.fromtimestamp(end_ns / 1e9, tz=UTC).date()
         date_list: list[str] = []
         d = start_d
         from datetime import timedelta
@@ -1515,7 +1518,7 @@ class PolymarketDataSource:
             manifest[cond_id] = {
                 "kind": "binary",
                 "n_rows": len(trades),
-                "last_pull_ts_ns": int(datetime.now(timezone.utc).timestamp() * 1e9),
+                "last_pull_ts_ns": int(datetime.now(UTC).timestamp() * 1e9),
                 "market": mkt,
             }
             # Persist after each market so a crash mid-fetch leaves a usable
@@ -1544,7 +1547,7 @@ class PolymarketDataSource:
             manifest[slug] = {
                 "kind": "bucket",
                 "n_rows": total_rows,
-                "last_pull_ts_ns": int(datetime.now(timezone.utc).timestamp() * 1e9),
+                "last_pull_ts_ns": int(datetime.now(UTC).timestamp() * 1e9),
                 "bucket": parsed,
             }
             self._write_manifest(manifest)
@@ -1644,7 +1647,7 @@ def _ts_ns_in_iso_window(ts_ns: int, start_iso: str, end_iso: str) -> bool:
     """Inclusive lower, exclusive upper, compared on the date-prefix of the
     ISO representation of `ts_ns`. Mirrors `_event_in_window` for cache rows.
     """
-    iso_date = datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc).strftime("%Y-%m-%d")
+    iso_date = datetime.fromtimestamp(ts_ns / 1e9, tz=UTC).strftime("%Y-%m-%d")
     return start_iso <= iso_date < end_iso
 
 

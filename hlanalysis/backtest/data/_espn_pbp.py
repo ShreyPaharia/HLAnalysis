@@ -13,14 +13,13 @@ flag (period >= 5).
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
-from loguru import logger
 
 _ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
 _HTTP_TIMEOUT = 30
@@ -52,7 +51,7 @@ def _ts_ns(iso: str) -> int | None:
     try:
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return int(dt.timestamp() * 1e9)
     except ValueError:
         return None

@@ -15,10 +15,14 @@ from collections.abc import Callable
 
 import requests
 from tenacity import (
-    retry, retry_if_exception, stop_after_attempt, stop_after_delay,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    stop_after_delay,
     wait_exponential,
 )
 
+from ..marketdata.position_math import DUST_QTY_ABS_TOL
 from .exec_types import (
     ClearinghouseState,
     OpenOrderRow,
@@ -27,8 +31,6 @@ from .exec_types import (
     UserFillRow,
     VenuePosition,
 )
-from ..marketdata.position_math import DUST_QTY_ABS_TOL
-
 
 _PM_DATA_API = "https://data-api.polymarket.com"
 
@@ -162,7 +164,7 @@ class PMClient:
         # as conditional-token balances, surfaced by the public data-api. The
         # reconciler needs these as venue truth (adopt/keep/vanish PM positions).
         # Injectable so tests don't hit the network.
-        self._data_api_get: "Callable[[str], list[dict]]" = _real_data_api_get
+        self._data_api_get: Callable[[str], list[dict]] = _real_data_api_get
 
     def place(self, req: PlaceRequest) -> OrderAck:
         if self.paper_mode:

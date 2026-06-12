@@ -46,8 +46,6 @@ import logging
 from dataclasses import dataclass, field
 
 import numpy as np
-from numba import njit
-
 from hftbacktest.types import (
     BUY_EVENT,
     DEPTH_EVENT,
@@ -57,6 +55,7 @@ from hftbacktest.types import (
     TRADE_EVENT,
     event_dtype,
 )
+from numba import njit
 
 from hlanalysis.marketdata.ohlc import resample_ohlc
 
@@ -317,7 +316,7 @@ def build_leg_event_array_from_columns(
 
 
 def snap_best_from_columns(
-    book_cols: "dict[str, np.ndarray] | None",
+    book_cols: dict[str, np.ndarray] | None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Extract per-snapshot best-ask and best-bid from flat book columns.
 

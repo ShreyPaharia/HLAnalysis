@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from typing import Literal, NoReturn
+from typing import NoReturn
 
-from loguru import logger
 from tenacity import (
-    retry, retry_if_exception_type, stop_after_attempt, stop_after_delay,
-    wait_exponential, wait_random,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    stop_after_delay,
+    wait_exponential,
+    wait_random,
 )
 
 from .exec_types import (
@@ -152,9 +154,9 @@ class HLClient:
         self._info = None
         if not paper_mode:
             # Lazy SDK import so paper-only test runs don't need credentials.
+            import eth_account  # type: ignore[import-not-found]
             from hyperliquid.exchange import Exchange  # type: ignore[import-not-found]
             from hyperliquid.info import Info  # type: ignore[import-not-found]
-            import eth_account  # type: ignore[import-not-found]
             try:
                 wallet = eth_account.Account.from_key(api_secret_key)
                 self._exchange = Exchange(wallet, base_url=base_url, account_address=account_address)

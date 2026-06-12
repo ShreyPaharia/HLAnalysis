@@ -138,7 +138,7 @@ def fetch_window_for_market(
         List of kline dicts (same shape as :func:`fetch_klines_1m`).
     """
     end_ts_s = market_end_ts_ns // 1_000_000_000
-    date_iso = datetime.datetime.fromtimestamp(end_ts_s, tz=datetime.timezone.utc).strftime(
+    date_iso = datetime.datetime.fromtimestamp(end_ts_s, tz=datetime.UTC).strftime(
         "%Y-%m-%d"
     )
     symbol = active_cl_contract(date_iso)

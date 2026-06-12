@@ -38,7 +38,7 @@ def event_columns(ev: BusEvent) -> dict[str, Any]:
 
 
 async def events_persist_loop(
-    sub: "asyncio.Queue[BusEvent]",
+    sub: asyncio.Queue[BusEvent],
     dals: list[StateDAL],
     *,
     max_age_ns: int,

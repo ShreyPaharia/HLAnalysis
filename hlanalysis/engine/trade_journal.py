@@ -28,8 +28,8 @@ from dataclasses import asdict, dataclass
 
 from loguru import logger
 
-from .state import StateDAL, TradeJournalRow
 from ..strategy.types import BookState, Diagnostic
+from .state import StateDAL, TradeJournalRow
 
 # Diagnostic field names a strategy uses to surface the σ it computed, in
 # preference order. theta_harvester / late_resolution tag entry diagnostics with

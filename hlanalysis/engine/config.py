@@ -11,8 +11,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..strategy.late_resolution import LateResolutionParams
-from ..strategy.theta_harvester import ThetaHarvesterParams
 from ..strategy.live_registry import live_strategy_types
+from ..strategy.theta_harvester import ThetaHarvesterParams
 
 _ENV_RE = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
@@ -354,7 +354,7 @@ class DeployConfig(BaseModel):
 
 # Back-compat property: monitoring code reads `.hl_accounts` directly.
 # Kept as a read-only view; remove after the call sites are migrated.
-def _hl_accounts(self: "DeployConfig") -> dict[str, HyperliquidAccount]:
+def _hl_accounts(self: DeployConfig) -> dict[str, HyperliquidAccount]:
     return {a: c for a, c in self.accounts.items() if isinstance(c, HyperliquidAccount)}
 DeployConfig.hl_accounts = property(_hl_accounts)  # type: ignore[assignment]
 

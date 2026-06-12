@@ -108,15 +108,15 @@ class SourceConfig:
     # derives "raw" as the default.
     hl_ref_ticks: str = "bars"
 
-    def with_reference_resample(self, seconds: int) -> "SourceConfig":
+    def with_reference_resample(self, seconds: int) -> SourceConfig:
         """Return a copy with ``reference_resample_seconds`` replaced (per-cell)."""
         return replace(self, reference_resample_seconds=int(seconds))
 
-    def with_reference_warmup(self, seconds: int) -> "SourceConfig":
+    def with_reference_warmup(self, seconds: int) -> SourceConfig:
         """Return a copy with ``reference_warmup_seconds`` replaced."""
         return replace(self, reference_warmup_seconds=int(seconds))
 
-    def build(self) -> "DataSource":
+    def build(self) -> DataSource:
         """Construct the concrete ``DataSource``. Called in the parent and in
         every worker — the single construction path for the backtest."""
         if self.kind == "synthetic":

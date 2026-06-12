@@ -11,7 +11,12 @@ from scipy.stats import norm  # type: ignore[import-untyped]
 from .base import Strategy
 from .intents import make_entry_intent, make_exit_intent, round_size
 from .types import (
-    Action, BookState, Decision, Diagnostic, Position, QuestionView,
+    Action,
+    BookState,
+    Decision,
+    Diagnostic,
+    Position,
+    QuestionView,
 )
 from .vol import ANNUAL_SECONDS, annualized_sigma
 

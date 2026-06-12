@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from .exec_types import ClearinghouseState
+
 # Reuse the live engine reconcile's qty-drift tolerances so the report never
 # flags a position diff the engine itself tolerates. PM data-api settled sizes
 # carry ~8e-3-share rounding noise vs our booked size; with a tighter tolerance
@@ -83,7 +84,7 @@ class SlotRecon:
     # SHR-77: per-market-class (priceBinary/priceBucket/unknown) split of the
     # outcome PnL + fills. Populated for HL slots only (PM is binary by
     # construction); None for PM and for slots whose venue read failed.
-    klass_breakdown: dict[str, "KlassStat"] | None = None
+    klass_breakdown: dict[str, KlassStat] | None = None
     drift: list[Drift] = field(default_factory=list)
 
     # --- Trailing-24h windowed fields ---
@@ -96,7 +97,7 @@ class SlotRecon:
     # fills_count_window: number of outcome fills within the trailing window.
     fills_count_window: int | None = None
     # klass_breakdown_window: per-class split for the trailing window (HL only).
-    klass_breakdown_window: dict[str, "KlassStat"] | None = None
+    klass_breakdown_window: dict[str, KlassStat] | None = None
 
     @property
     def total_true_pnl(self) -> float:
@@ -288,7 +289,7 @@ def format_report(recon: list[SlotRecon]) -> str:
     return "\n".join(lines).rstrip()
 
 
-def _klass_cell(st: "KlassStat | None", breakdown_known: bool) -> tuple[str, str]:
+def _klass_cell(st: KlassStat | None, breakdown_known: bool) -> tuple[str, str]:
     """Render one (pnl, fills) cell for a per-class daily-summary column.
 
     Three states:

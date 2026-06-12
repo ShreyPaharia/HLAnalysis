@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 from loguru import logger
@@ -16,7 +15,12 @@ from .intents import make_entry_intent, make_exit_intent, round_size
 from .regions import winning_region as _winning_region
 from .topup import run_topup
 from .types import (
-    Action, BookState, Decision, Diagnostic, Position, QuestionView,
+    Action,
+    BookState,
+    Decision,
+    Diagnostic,
+    Position,
+    QuestionView,
 )
 from .vol import ANNUAL_SECONDS, annualized_sigma, bipower_variation_sigma
 
@@ -34,12 +38,12 @@ def _phi(d: float) -> float:
 def _p_leg_win_prob_and_phi(
     *,
     reference_price: float,
-    lo: Optional[float],
-    hi: Optional[float],
+    lo: float | None,
+    hi: float | None,
     sigma: float,
     mu_eff: float,
     tau_yr: float,
-) -> Optional[tuple[float, float]]:
+) -> tuple[float, float] | None:
     """P(lo < S_T ≤ hi) under GBM (Itô-corrected) AND φ(d) at the nearest
     leg boundary in d-space.
 
@@ -82,12 +86,12 @@ def _p_leg_win_prob_and_phi(
 def _safety_d_for_region(
     *,
     reference_price: float,
-    lo: Optional[float],
-    hi: Optional[float],
+    lo: float | None,
+    hi: float | None,
     sigma: float,
     mu_eff: float,
     tau_yr: float,
-) -> Optional[float]:
+) -> float | None:
     """Signed σ-normalized distance from ``reference_price`` to the NEAREST
     adverse boundary of the leg's winning region. Positive when BTC is safely
     inside the winning region; negative once already on the losing side.
@@ -118,12 +122,12 @@ def _safety_d_for_region(
 def _p_leg_win_prob(
     *,
     reference_price: float,
-    lo: Optional[float],
-    hi: Optional[float],
+    lo: float | None,
+    hi: float | None,
     sigma: float,
     mu_eff: float,
     tau_yr: float,
-) -> Optional[float]:
+) -> float | None:
     """Back-compat thin wrapper around ``_p_leg_win_prob_and_phi`` for callers
     that only need the probability (tests, binary diagnostic edge_yes/edge_no).
     """
@@ -182,10 +186,10 @@ class ThetaHarvesterParams(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     # === optional: entry edge filters ===
-    edge_max: Optional[float] = None
-    min_distance_pct: Optional[float] = None
+    edge_max: float | None = None
+    min_distance_pct: float | None = None
     min_bid_notional_usd: float = 0.0
-    gamma_lambda: Optional[float] = None
+    gamma_lambda: float | None = None
     # === optional: position topup ===
     topup_enabled: bool = True
     topup_threshold_pct: float = 0.2
@@ -193,7 +197,7 @@ class ThetaHarvesterParams(BaseModel):
     # === optional: exit extras / vol estimator / jump gate ===
     exit_safety_d: float = 0.0
     vol_estimator: str = "sample_std"
-    lm_threshold: Optional[float] = None
+    lm_threshold: float | None = None
     exit_take_profit_mode: bool = False
     exit_fee: float = 0.0007
     # === optional: fee model ===
@@ -245,9 +249,9 @@ class ThetaHarvesterConfig:
     tte_min_seconds: int
     tte_max_seconds: int
     # === required: exit triggers ===
-    stop_loss_pct: Optional[float]
+    stop_loss_pct: float | None
     exit_edge_threshold: float          # exit when edge_held_side < this (typically <= 0)
-    take_profit_price: Optional[float]  # exit when held_bid >= entry_px + this
+    take_profit_price: float | None  # exit when held_bid >= entry_px + this
     time_stop_seconds: int              # exit when tau_s < this; 0 disables
     # === optional: entry edge filters ===
     # v3.1 entry upper-edge filter. Trade-level analysis of v3 PM-corpus run
@@ -257,7 +261,7 @@ class ThetaHarvesterConfig:
     # usually knows something the realized-vol model doesn't (event risk).
     # Filtering edge >= 0.20 lifted PnL +37% and cut max DD -84% on PM.
     # None disables the filter (preserves v3 baseline behavior).
-    edge_max: Optional[float] = None
+    edge_max: float | None = None
     # Near-strike hover veto. When set, entries with
     # |reference_price − question.strike| / reference_price below this
     # fraction are vetoed. Only meaningful on priceBinary (the strike concept
@@ -265,7 +269,7 @@ class ThetaHarvesterConfig:
     # -$7.68/entry across 57 entries (~2.7% of all v3.1 entries); the
     # 0.20–0.50% band immediately above is the *best* band (+$16.10/entry).
     # The sharp discontinuity concentrates v3.1's losses. None disables.
-    min_distance_pct: Optional[float] = None
+    min_distance_pct: float | None = None
     # Bid-notional sanity gate. When > 0, entries where the chosen leg's
     # bid_px × bid_sz is below this USD floor are vetoed. Catches single-
     # share spoof bids that pass numeric thresholds with no real interest.
@@ -282,7 +286,7 @@ class ThetaHarvesterConfig:
     # symmetrically at entry (require more edge near strike) and exit (cut
     # held position sooner when path variance is high).
     # None disables (legacy behavior).
-    gamma_lambda: Optional[float] = None
+    gamma_lambda: float | None = None
     # === optional: position topup ===
     # Strategy-side position topup. When a held position's notional (qty × ask)
     # is below max_position_usd by at least topup_threshold_pct, the strategy
@@ -317,7 +321,7 @@ class ThetaHarvesterConfig:
     # jump relative to the jump-robust BV vol. k≈4 is the standard threshold
     # in the literature. None disables. This is a TRULY τ-free entry trigger:
     # the gate compares a single recent return to recent BV, no τ involved.
-    lm_threshold: Optional[float] = None
+    lm_threshold: float | None = None
     # 2026-05-22: take-profit-style exit edge. When True, the held-position
     # exit gate flips from "is the alpha gone?" (held_p - bid - fee < 0) to
     # "is the bid offering above-fair premium net of fees?" (bid - held_p

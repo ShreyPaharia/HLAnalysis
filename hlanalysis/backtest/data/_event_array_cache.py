@@ -17,16 +17,20 @@ import logging
 import os
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import diskcache
 import numpy as np
 from diskcache.core import MODE_BINARY, UNKNOWN
 
-from ._fastpath_core import BUILD_VERSION as _BUILD_VERSION
-from ._fastpath_core import FastPathBundle, LegArrays, event_dtype
 from ..core.events import ReferenceEvent, SettlementEvent, TradeEvent
+
+# Bound as a module global so it's read reflectively via `_self._BUILD_VERSION`
+# (cache key + version-shard pruning) and stays monkeypatchable in tests. ruff
+# can't see the reflective use, so do not let F401 strip this import.
+from ._fastpath_core import BUILD_VERSION as _BUILD_VERSION  # noqa: F401
+from ._fastpath_core import FastPathBundle, LegArrays, event_dtype
 
 log = logging.getLogger(__name__)
 
@@ -271,7 +275,7 @@ class _NpzDisk(diskcache.Disk):
 # Per-(root, BUILD_VERSION) open Cache objects, reused across calls — each holds
 # a SQLite connection; reuse is diskcache's recommended pattern and avoids
 # re-opening on every question.
-_CACHES: "dict[tuple[str, int], diskcache.Cache]" = {}
+_CACHES: dict[tuple[str, int], diskcache.Cache] = {}
 _MISS = object()
 
 
@@ -381,10 +385,10 @@ def _cache_max_bytes() -> int:
 # module-global memo → ~TB aggregate at N=12 → OOM. So the memo is bounded
 # primarily by retained BYTES (worker-aware), with the count cap kept only as a
 # secondary backstop. See ``_inproc_max_bytes`` for the worker-aware budget.
-_INPROC_MEMO: "OrderedDict[tuple[str, str], FastPathBundle]" = OrderedDict()
+_INPROC_MEMO: OrderedDict[tuple[str, str], FastPathBundle] = OrderedDict()
 # Parallel size index (bytes per memo key) so eviction is O(1) per pop without
 # re-walking arrays; kept in lockstep with _INPROC_MEMO on every insert/evict.
-_INPROC_SIZES: "OrderedDict[tuple[str, str], int]" = OrderedDict()
+_INPROC_SIZES: OrderedDict[tuple[str, str], int] = OrderedDict()
 
 
 def _inproc_enabled() -> bool:
@@ -440,7 +444,7 @@ def _inproc_clear() -> None:
     _INPROC_SIZES.clear()
 
 
-def _inproc_store(key: "tuple[str, str]", bundle: FastPathBundle) -> None:
+def _inproc_store(key: tuple[str, str], bundle: FastPathBundle) -> None:
     """Insert ``bundle`` under ``key`` (most-recent) and LRU-evict until under
     BOTH the byte budget (primary) and the count cap (secondary). The
     just-inserted key is never evicted, so a bundle larger than the whole budget
@@ -462,7 +466,7 @@ def _inproc_store(key: "tuple[str, str]", bundle: FastPathBundle) -> None:
 
 def inproc_lookup(
     question_id: str, config_sig: str = "", *, force_rebuild: bool = False
-) -> "FastPathBundle | None":
+) -> FastPathBundle | None:
     """Peek the process memo for (question_id, config_sig) without touching disk.
 
     Returns the memoized bundle if the memo is enabled and populated, else None.

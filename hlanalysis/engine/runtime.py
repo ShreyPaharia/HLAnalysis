@@ -4,11 +4,10 @@ import asyncio
 import resource
 import signal
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable
 
 import aiohttp
 import msgspec
@@ -18,8 +17,13 @@ from ..adapters.base import VenueAdapter
 from ..adapters.binance_klines import binance_1m_close_at
 from ..config import Subscription
 from ..events import (
-    NormalizedEvent, ProductType,
-    BboEvent, BookSnapshotEvent, BookDeltaEvent, MarkEvent, TradeEvent,
+    BboEvent,
+    BookDeltaEvent,
+    BookSnapshotEvent,
+    MarkEvent,
+    NormalizedEvent,
+    ProductType,
+    TradeEvent,
 )
 
 # Event classes that move a price/book and should wake the scan + stop-loss
@@ -29,37 +33,18 @@ from ..events import (
 _PRICE_EVENT_TYPES = (
     BboEvent, BookSnapshotEvent, BookDeltaEvent, MarkEvent, TradeEvent,
 )
+from ..alerts.rules import AlertRules
+from ..alerts.telegram import TelegramClient
+from ..marketdata.position_math import DUST_QTY_ABS_TOL
+from ..strategy.base import Strategy
 from .config import (
     AccountConfig,
     DeployConfig,
-    HLConfig,
     HyperliquidAccount,
     PolymarketAccount,
     StrategyConfig,
     match_question,
 )
-from .event_bus import EventBus
-from .exec_client import ExecutionClient
-from .exec_types import ClearinghouseState, OpenOrderRow, UserFillRow
-from .market_state import MarketState
-from .reconcile import Reconciler
-from .restart_drift import RestartDriftGate
-from .risk import RiskGate
-from .risk_events import (
-    DailyLossHalt, EngineHeartbeat, Exit, FeedDown, FeedRecovered, FeedStale,
-    KillSwitchActivated, MemoryHalt, NewQuestion,
-    StaleDataHalt, StopLossTriggered,
-)
-from .router import Router
-from .scanner import Scanner
-from .trade_journal import HaltSnapshot, TradeJournal
-from .state import (
-    FILL_SOURCE_ROUTER, FILL_SOURCE_VENUE, CachedStateDAL, StateDAL,
-)
-from ..alerts.rules import AlertRules
-from ..alerts.telegram import TelegramClient
-from ..marketdata.position_math import DUST_QTY_ABS_TOL
-from ..strategy.base import Strategy
 
 # Config-building, watchdog, strike-capture, and event-sink helpers were split
 # out of this module (see each module's docstring). They are re-exported here so
@@ -77,15 +62,43 @@ from .config_builders import (  # noqa: F401  (re-exported for back-compat)
     reference_sampling_dt_seconds,
     reference_vol_lookback_seconds,
 )
+from .event_bus import EventBus
+from .events_sink import events_persist_loop
+from .exec_client import ExecutionClient
+from .exec_types import ClearinghouseState, OpenOrderRow, UserFillRow
+from .market_state import MarketState
+from .pm_strike import maybe_capture_pm_strike, pm_strike_capture_loop
 from .pm_watchdogs import (  # noqa: F401  (re-exported for back-compat)
     PM_REDEMPTION_TIMEOUT_S,
     PM_UNCONFIRMED_THRESHOLD_S,
     _pm_check_redemption_timeouts,
     _pm_check_unconfirmed_orders,
 )
-from .pm_strike import maybe_capture_pm_strike, pm_strike_capture_loop
-from .events_sink import events_persist_loop
-
+from .reconcile import Reconciler
+from .restart_drift import RestartDriftGate
+from .risk import RiskGate
+from .risk_events import (
+    DailyLossHalt,
+    EngineHeartbeat,
+    Exit,
+    FeedDown,
+    FeedRecovered,
+    FeedStale,
+    KillSwitchActivated,
+    MemoryHalt,
+    NewQuestion,
+    StaleDataHalt,
+    StopLossTriggered,
+)
+from .router import Router
+from .scanner import Scanner
+from .state import (
+    FILL_SOURCE_ROUTER,
+    FILL_SOURCE_VENUE,
+    CachedStateDAL,
+    StateDAL,
+)
+from .trade_journal import HaltSnapshot, TradeJournal
 
 # Map of Binance SPOT symbols → internal remapped symbols used in MarketState.
 # PM strategy slots reference these via `reference_symbol: <SYMBOL>_SPOT` in
@@ -161,7 +174,7 @@ class AccountSlot:
     sibling slots is the engine's MarketState + WS feed.
     """
     cfg: StrategyConfig
-    account_cfg: "HyperliquidAccount | PolymarketAccount"
+    account_cfg: HyperliquidAccount | PolymarketAccount
     # Venue discriminator, set once at build time from account_cfg.venue
     # ("hyperliquid" | "polymarket"). The single source of truth for "is this a
     # PM slot?" — read via the `is_pm` predicate, never via ad-hoc isinstance /
@@ -936,7 +949,8 @@ class EngineRuntime:
                 # settled here suppresses the stale-halt and also stops the
                 # strategy from re-entering on the now-closed market.
                 from ..strategy.render import (
-                    outcome_description, question_description,
+                    outcome_description,
+                    question_description,
                     settlement_pnl_usd,
                 )
                 is_pm = slot.is_pm
@@ -1309,7 +1323,8 @@ class EngineRuntime:
                 pass
             try:
                 import os
-                pages = int(open("/proc/self/statm").read().split()[1])
+                with open("/proc/self/statm") as _statm:
+                    pages = int(_statm.read().split()[1])
                 return pages * os.sysconf("SC_PAGE_SIZE") // 1024
             except (OSError, ValueError, IndexError):
                 pass
@@ -1399,7 +1414,7 @@ class EngineRuntime:
     async def _sleep_or_stop(self, seconds: float) -> None:
         try:
             await asyncio.wait_for(self.stop_event.wait(), timeout=seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return
 
     def _make_telegram(self, http: aiohttp.ClientSession) -> TelegramClient:

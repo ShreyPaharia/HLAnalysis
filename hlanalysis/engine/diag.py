@@ -25,9 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sqlite3
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -193,7 +191,6 @@ def _build_slot_snapshot(
             total_realized = dal.realized_pnl_since(0)
             settlement = dal.settlement_pnl_since(0)
             fills_realized = total_realized - settlement
-            true_pnl = fills_realized + settlement  # == total_realized
 
             for p in positions:
                 open_positions.append({

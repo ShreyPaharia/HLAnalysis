@@ -61,7 +61,7 @@ class DecisionInputConfig:
     reference_ticks: str         # "raw" (live) | "bars" (legacy override)
 
 
-def from_engine(cfg: "StrategyConfig") -> DecisionInputConfig:
+def from_engine(cfg: StrategyConfig) -> DecisionInputConfig:
     """Build a ``DecisionInputConfig`` from a live-engine ``StrategyConfig``.
 
     Returns EXACTLY the values the engine uses today — this is the canonical

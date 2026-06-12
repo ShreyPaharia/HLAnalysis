@@ -7,16 +7,20 @@ from pathlib import Path
 
 from loguru import logger
 
+from ..marketdata.decision_kernel import build_decision_inputs
+from ..strategy.base import Strategy
+from ..strategy.types import (
+    Action,
+    BookState,
+    Decision,
+    Position,
+    QuestionView,
+)
 from .config import StrategyConfig, match_question
 from .config_builders import reference_sampling_dt_seconds
 from .market_state import MarketState
 from .risk import RiskInputs
 from .state import StateDAL
-from ..marketdata.decision_kernel import build_decision_inputs
-from ..strategy.base import Strategy
-from ..strategy.types import (
-    Action, BookState, Decision, Position, QuestionView,
-)
 
 
 def _binary_favorite_sym(
@@ -508,7 +512,7 @@ class Scanner:
     def _maybe_log_gate_transition(
         self, *, question: QuestionView, decision: Decision,
         books: dict[str, BookState], now_ns: int,
-        position: "Position | None" = None,
+        position: Position | None = None,
     ) -> None:
         """Append a JSONL line when the (action, primary_diag) tuple changes
         for this question_idx vs the last scan tick.

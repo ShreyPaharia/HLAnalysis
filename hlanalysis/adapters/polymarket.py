@@ -32,17 +32,15 @@ import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
-from .._fastjson import decode as _json_decode
-
 import websockets
 
+from .._fastjson import decode as _json_decode
 from ..config import Subscription
 from ..events import Mechanism, NormalizedEvent, ProductType
 from ._ws_base import BaseWsAdapter
 from .polymarket_gamma import GammaClient
 from .polymarket_normalize import (
     PmBook,
-    parse_book_message,
     parse_gamma_event_to_bucket_question_meta,
     parse_gamma_market_to_question_meta,
     parse_gamma_market_to_settlement,

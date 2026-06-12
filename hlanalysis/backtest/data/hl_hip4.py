@@ -17,10 +17,10 @@ import re
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 import duckdb
 
@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 # computes it once per question, not P times. Outcomes are tiny strings, so the
 # dict is unbounded (bounded by #questions per worker). Keyed on data_root too
 # so two sources over different corpora in one process can't collide.
-_PROC_OUTCOME_MEMO: "dict[tuple[str, str], Literal['yes', 'no', 'unknown']]" = {}
+_PROC_OUTCOME_MEMO: dict[tuple[str, str], Literal['yes', 'no', 'unknown']] = {}
 
 
 def _proc_outcome_clear() -> None:
@@ -133,7 +133,7 @@ def _parse_description(desc: str) -> dict[str, str]:
 
 def _expiry_ns(expiry_str: str) -> int:
     """`20260511-0600` -> ns since epoch (UTC)."""
-    dt = datetime.strptime(expiry_str, "%Y%m%d-%H%M").replace(tzinfo=timezone.utc)
+    dt = datetime.strptime(expiry_str, "%Y%m%d-%H%M").replace(tzinfo=UTC)
     return int(dt.timestamp() * 1e9)
 
 
@@ -160,7 +160,7 @@ def _read_parquet_arg(globs: list[str]) -> str:
 
 
 def _fetch_with_retry(
-    con: "duckdb.DuckDBPyConnection", sql: str, *, attempts: int = 3
+    con: duckdb.DuckDBPyConnection, sql: str, *, attempts: int = 3
 ) -> list[tuple]:
     """Run ``con.sql(sql).fetchall()`` with a small bounded retry.
 
@@ -185,8 +185,8 @@ def _date_partitions_in_range(start_ns: int, end_ns: int) -> list[str]:
     """Return ``['YYYY-MM-DD', ...]`` covering the UTC days between start_ns and end_ns
     (inclusive of both edges, +1 day padding on the end side to catch tick-boundary spills).
     """
-    start = datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).date()
-    end = datetime.fromtimestamp(end_ns / 1e9, tz=timezone.utc).date()
+    start = datetime.fromtimestamp(start_ns / 1e9, tz=UTC).date()
+    end = datetime.fromtimestamp(end_ns / 1e9, tz=UTC).date()
     out: list[str] = []
     d = start
     while d <= end + timedelta(days=1):
@@ -508,7 +508,7 @@ class HLHip4DataSource:
 
     def _book_iter(
         self,
-        con: "duckdb.DuckDBPyConnection",
+        con: duckdb.DuckDBPyConnection,
         leg: str,
         start_ns: int,
         end_ns: int,
@@ -537,7 +537,7 @@ class HLHip4DataSource:
 
     def _trade_iter(
         self,
-        con: "duckdb.DuckDBPyConnection",
+        con: duckdb.DuckDBPyConnection,
         leg: str,
         start_ns: int,
         end_ns: int,
@@ -568,7 +568,7 @@ class HLHip4DataSource:
 
     def _reference_iter(
         self,
-        con: "duckdb.DuckDBPyConnection",
+        con: duckdb.DuckDBPyConnection,
         start_ns: int,
         end_ns: int,
         date_list: list[str],
@@ -633,7 +633,7 @@ class HLHip4DataSource:
 
     def _reference_rows(
         self,
-        con: "duckdb.DuckDBPyConnection",
+        con: duckdb.DuckDBPyConnection,
         evt: str,
         start_ns: int,
         end_ns: int,
@@ -665,7 +665,7 @@ class HLHip4DataSource:
 
     def _settlement_iter(
         self,
-        con: "duckdb.DuckDBPyConnection",
+        con: duckdb.DuckDBPyConnection,
         q: QuestionDescriptor,
         start_ns: int,
         end_ns: int,
@@ -912,7 +912,7 @@ class HLHip4DataSource:
 
     # -------------------------------- helpers -----------------------------
 
-    def _load_meta(self, q: QuestionDescriptor) -> "_QuestionMeta":
+    def _load_meta(self, q: QuestionDescriptor) -> _QuestionMeta:
         if q.question_id in self._meta_cache:
             return self._meta_cache[q.question_id]
         # question_meta carries question-level kv; market_meta carries per-leg kv we
@@ -943,7 +943,7 @@ class HLHip4DataSource:
         self._meta_cache[q.question_id] = meta
         return meta
 
-    def _last_btc_ref_at_or_before(self, ts_ns: int, con: "duckdb.DuckDBPyConnection | None" = None) -> float | None:
+    def _last_btc_ref_at_or_before(self, ts_ns: int, con: duckdb.DuckDBPyConnection | None = None) -> float | None:
         date_list = _date_partitions_in_range(ts_ns - int(2 * 86400 * 1e9), ts_ns)
         owned = con is None
         if owned:
@@ -956,7 +956,7 @@ class HLHip4DataSource:
 
     def _last_btc_ref_impl(
         self,
-        con: "duckdb.DuckDBPyConnection",
+        con: duckdb.DuckDBPyConnection,
         ts_ns: int,
         date_list: list[str],
     ) -> float | None:

@@ -33,7 +33,12 @@ from .fee import fee_per_share
 from .intents import make_entry_intent, make_exit_intent, round_size
 from .theta_harvester import ThetaHarvesterConfig
 from .types import (
-    Action, BookState, Decision, Diagnostic, Position, QuestionView,
+    Action,
+    BookState,
+    Decision,
+    Diagnostic,
+    Position,
+    QuestionView,
 )
 
 

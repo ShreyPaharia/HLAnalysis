@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 import math
-import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from loguru import logger
 
+from ..marketdata.position_math import DUST_QTY_ABS_TOL, STOP_DISABLED_SENTINEL
 from .exec_types import ClearinghouseState, OpenOrderRow, UserFillRow
 from .hl_client import _extract_cloid_hex32
 from .risk_events import ReconcileDrift
 from .state import FILL_SOURCE_ROUTER, Fill, OpenOrder, Position, StateDAL
-from ..marketdata.position_math import DUST_QTY_ABS_TOL, STOP_DISABLED_SENTINEL
-
 
 CLOID_PREFIX = "hla-"
 

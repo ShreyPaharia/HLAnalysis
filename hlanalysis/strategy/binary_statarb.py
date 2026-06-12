@@ -3,12 +3,16 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Optional
 
 from .base import Strategy
 from .intents import make_entry_intent, make_exit_intent, round_size
 from .types import (
-    Action, BookState, Decision, Diagnostic, Position, QuestionView,
+    Action,
+    BookState,
+    Decision,
+    Diagnostic,
+    Position,
+    QuestionView,
 )
 
 
@@ -22,7 +26,7 @@ class BinaryStatArbConfig:
     mid_lo: float
     mid_hi: float
     max_position_usd: float
-    stop_loss_pct: Optional[float]
+    stop_loss_pct: float | None
     time_stop_seconds: int
     fee_taker: float
     half_spread_assumption: float

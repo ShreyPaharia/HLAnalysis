@@ -72,7 +72,7 @@ if TYPE_CHECKING:
 
 
 def build_decision_inputs(
-    core: "MarketState",
+    core: MarketState,
     *,
     ref_symbol: str,
     now_ns: int,

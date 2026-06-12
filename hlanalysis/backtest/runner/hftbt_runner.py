@@ -47,10 +47,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-from loguru import logger
-
 import hftbacktest as hb
+import numpy as np
 from hftbacktest import order as hb_order
 from hftbacktest.types import (
     BUY_EVENT,
@@ -60,6 +58,7 @@ from hftbacktest.types import (
     SELL_EVENT,
     event_dtype,
 )
+from loguru import logger
 
 from hlanalysis.marketdata.position_math import (
     STOP_DISABLED_SENTINEL,
@@ -73,6 +72,9 @@ from hlanalysis.strategy.fee import pm_binary_fee
 from hlanalysis.strategy.types import Action, BookState, Position
 
 from ..core.data_source import DataSource, QuestionDescriptor
+from ..core.events import BookSnapshot, ReferenceEvent, SettlementEvent, TradeEvent
+from ..core.question import build_question_view
+from ..data._fastpath_core import build_leg_event_array_from_snapshots
 from ..halt_replay import (
     EntryGateInputs,
     HaltWindow,
@@ -80,9 +82,6 @@ from ..halt_replay import (
     daily_window_start_ns,
     entry_veto,
 )
-from ..core.events import BookSnapshot, ReferenceEvent, SettlementEvent, TradeEvent
-from ..core.question import build_question_view
-from ..data._fastpath_core import build_leg_event_array_from_snapshots
 from .market_state import MarketState
 from .result import (
     DiagnosticRow,
@@ -93,7 +92,6 @@ from .result import (
     write_diagnostics,
     write_fills,
 )
-
 
 # ---------------------------------------------------------------------------
 # Order-latency models (SHR-89)
@@ -214,7 +212,7 @@ class RunConfig:
     # knob above (back-compat). Set to a ``LatencyModel`` (e.g. ``SampledLatency``
     # fed the SHR-83 journal δ distribution) to fill on ``book(decision_ts + δ)``
     # with δ varying per order.
-    latency_model: "LatencyModel | None" = None
+    latency_model: LatencyModel | None = None
     # Hedge leg config (used by v5_delta_hedged; ignored by all other strategies)
     hedge_enabled: bool = False
     hedge_symbol: str = ""
@@ -270,9 +268,9 @@ class RunConfig:
     # given timestamp — matching the live engine's single per-slot ledger. Also
     # passed to run_one_question for the daily-loss cap and existing SHR-85 gates.
     # None (default) disables cross-question state (back-compat).
-    sim_risk_caps: "SimRiskCaps | None" = None
+    sim_risk_caps: SimRiskCaps | None = None
 
-    def effective_latency_model(self) -> "LatencyModel":
+    def effective_latency_model(self) -> LatencyModel:
         """The latency model to wire into assets: the explicit ``latency_model``
         if set, else ``ConstantLatency(order_latency_ms)`` (Spec 1 default)."""
         return self.latency_model or ConstantLatency(self.order_latency_ms)
@@ -491,9 +489,9 @@ def _is_fleeting_ask(
     fill_price: float,
     now_ns: int,
     latency_ns: int,
-    snap_best_ask_per_leg: "dict[str, np.ndarray]",
-    book_ts_per_leg: "dict[str, np.ndarray]",
-    book_idx: "dict[str, int]",
+    snap_best_ask_per_leg: dict[str, np.ndarray],
+    book_ts_per_leg: dict[str, np.ndarray],
+    book_idx: dict[str, int],
     persistence_ns: int = 0,
 ) -> bool:
     """SHR-94 + SHR-89b: was the ask at ``fill_price`` a fleeting level?
@@ -569,9 +567,9 @@ def _is_fleeting_bid(
     fill_price: float,
     now_ns: int,
     latency_ns: int,
-    snap_best_bid_per_leg: "dict[str, np.ndarray]",
-    book_ts_per_leg: "dict[str, np.ndarray]",
-    book_idx: "dict[str, int]",
+    snap_best_bid_per_leg: dict[str, np.ndarray],
+    book_ts_per_leg: dict[str, np.ndarray],
+    book_idx: dict[str, int],
     persistence_ns: int = 0,
 ) -> bool:
     """SHR-94 + SHR-89b: was the bid at ``fill_price`` a fleeting level?
@@ -659,11 +657,11 @@ class _RunState:
     # Per-tick view, refreshed each scan before routing.
     books: dict[str, BookState] = field(default_factory=dict)
     now_ns: int = 0
-    current_diag: "DiagnosticRow | None" = None
+    current_diag: DiagnosticRow | None = None
     # SHR-85 — sim state/halt replay + daily-loss-cap + inventory caps. The gate
     # suppresses ENTRIES (exits stay exempt) the way the live RiskGate does. All
     # default to "no caps / no windows" so existing callers are unaffected.
-    sim_risk_caps: "SimRiskCaps | None" = None
+    sim_risk_caps: SimRiskCaps | None = None
     halt_windows: tuple[HaltWindow, ...] = ()
     # Realized PnL accumulated per daily-window start (running) and its low-water
     # floor (so a window that crossed the daily-loss cap stays latched-halted even
@@ -674,15 +672,15 @@ class _RunState:
     # Populated from LegArrays.snap_best_ask/bid (parallel to book_ts_per_leg).
     # Empty dict (default) disables the check — synthetic / PM sources that
     # don't supply snap_best arrays fall back to the pre-SHR-94 behaviour.
-    snap_best_ask_per_leg: "dict[str, np.ndarray]" = field(default_factory=dict)
-    snap_best_bid_per_leg: "dict[str, np.ndarray]" = field(default_factory=dict)
+    snap_best_ask_per_leg: dict[str, np.ndarray] = field(default_factory=dict)
+    snap_best_bid_per_leg: dict[str, np.ndarray] = field(default_factory=dict)
     # book_ts_per_leg: per-leg snapshot timestamps, parallel to snap_best arrays.
     # Injected from run_one_question; used by _is_fleeting_ask/bid.
-    book_ts_per_leg: "dict[str, np.ndarray]" = field(default_factory=dict)
+    book_ts_per_leg: dict[str, np.ndarray] = field(default_factory=dict)
     # Per-leg snapshot cursor (shared with stale-book gate in the scan loop).
     # Injected via the runner's book_idx dict — the _RunState doesn't own it
     # directly; it's passed to _is_fleeting_level via the routing helpers.
-    _book_idx: "dict[str, int] | None" = None
+    _book_idx: dict[str, int] | None = None
     # SHR-91: cross-question inventory visible to the entry gate.
     # Populated by run_questions_parallel from the SharedInventoryLedger
     # (positions held in OTHER questions that were live at now_ns). Defaults to
@@ -691,7 +689,7 @@ class _RunState:
     extra_n_held: int = 0
     # SHR-91: timestamp when the current position opened (None = no position).
     # Used to record position_windows when a position closes.
-    _pos_open_ts_ns: "int | None" = None
+    _pos_open_ts_ns: int | None = None
 
     def next_oid(self) -> int:
         oid = self._next_oid_counter

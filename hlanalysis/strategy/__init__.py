@@ -1,3 +1,15 @@
+# Side-effect imports: each module's tail calls `@register(...)`, so simply
+# importing them populates the backtest strategy registry. `hl-bt` and the
+# tuning pipeline rely on this so they can resolve strategy ids without
+# bespoke imports.
+from . import (
+    binary_statarb,  # noqa: F401
+    delta_hedged,  # noqa: F401
+    late_resolution,  # noqa: F401
+    model_edge,  # noqa: F401
+    nba_wp,  # noqa: F401
+    theta_harvester,  # noqa: F401
+)
 from .base import Strategy
 from .types import (
     Action,
@@ -7,17 +19,6 @@ from .types import (
     OrderIntent,
     Position,
 )
-
-# Side-effect imports: each module's tail calls `@register(...)`, so simply
-# importing them populates the backtest strategy registry. `hl-bt` and the
-# tuning pipeline rely on this so they can resolve strategy ids without
-# bespoke imports.
-from . import late_resolution  # noqa: F401
-from . import model_edge  # noqa: F401
-from . import theta_harvester  # noqa: F401
-from . import binary_statarb  # noqa: F401
-from . import delta_hedged  # noqa: F401
-from . import nba_wp  # noqa: F401
 
 __all__ = [
     "Action",

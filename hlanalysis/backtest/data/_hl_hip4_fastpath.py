@@ -25,25 +25,21 @@ legacy builder.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any, Literal
 
 import duckdb
 import numpy as np
 
+from ..core.data_source import QuestionDescriptor
+from ..core.events import ReferenceEvent, SettlementEvent, TradeEvent
 from ._fastpath_core import (
-    BUILD_VERSION,
     FastPathBundle,
     LegArrays,
     _diff_clears,  # noqa: F401  (kept importable for tests)
     _resample_reference_rows,
     build_leg_event_array_from_columns,
     snap_best_from_columns,
-    event_dtype,
 )
-
-from ..core.data_source import QuestionDescriptor
-from ..core.events import ReferenceEvent, SettlementEvent, TradeEvent
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +53,7 @@ _DEFAULT_REFERENCE_RESAMPLE_NS = 60 * 1_000_000_000
 
 
 def _read_book_columns(
-    con: "duckdb.DuckDBPyConnection",
+    con: duckdb.DuckDBPyConnection,
     glob: str,
     date_list: list[str],
     start_ns: int,
@@ -90,7 +86,7 @@ def _read_book_columns(
 
 
 def _read_trade_columns(
-    con: "duckdb.DuckDBPyConnection",
+    con: duckdb.DuckDBPyConnection,
     glob: str,
     date_list: list[str],
     start_ns: int,
@@ -117,7 +113,7 @@ def _read_trade_columns(
 
 
 def _read_settlement_columns(
-    con: "duckdb.DuckDBPyConnection",
+    con: duckdb.DuckDBPyConnection,
     glob: str,
     date_list: list[str],
     start_ns: int,
@@ -149,7 +145,7 @@ def _read_settlement_columns(
 
 def build_fast_path_bundle(
     *,
-    con: "duckdb.DuckDBPyConnection",
+    con: duckdb.DuckDBPyConnection,
     q: QuestionDescriptor,
     date_list: list[str],
     book_glob_for: Any,

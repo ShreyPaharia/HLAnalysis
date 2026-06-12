@@ -17,10 +17,11 @@ from __future__ import annotations
 import heapq
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Iterable, Iterator, Literal
+from typing import Literal
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -139,7 +140,7 @@ def _question_idx(question_id: str) -> int:
 
 
 def _ts_ns_in_iso_window(ts_ns: int, start_iso: str, end_iso: str) -> bool:
-    iso_date = datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc).strftime("%Y-%m-%d")
+    iso_date = datetime.fromtimestamp(ts_ns / 1e9, tz=UTC).strftime("%Y-%m-%d")
     return start_iso <= iso_date < end_iso
 
 
@@ -366,10 +367,9 @@ from ._espn_pbp import (
     fetch_scoreboard,
     fetch_summary,
     pbp_to_rows,
-    write_pbp_parquet,
-    read_pbp_parquet,
     total_regulation_seconds_remaining,
     wp_features,
+    write_pbp_parquet,
 )
 
 _GAMMA_BASE = "https://gamma-api.polymarket.com"
@@ -525,7 +525,7 @@ def _write_pm_trades_parquet(path: Path, raw_trades: list[dict]) -> None:
 def _parse_iso_ns_local(iso: str) -> int:
     dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return int(dt.timestamp() * 1e9)
 
 
@@ -546,7 +546,7 @@ def _parse_outcomes(market: dict) -> tuple[str, str] | None:
 
 
 def _fetch_and_cache(
-    self: "PolymarketNBADataSource",
+    self: PolymarketNBADataSource,
     *,
     start: str,
     end: str,
@@ -703,7 +703,7 @@ def _fetch_and_cache(
     return self.discover(start=start, end=end)
 
 
-def _write_manifest(self: "PolymarketNBADataSource", manifest: dict) -> None:
+def _write_manifest(self: PolymarketNBADataSource, manifest: dict) -> None:
     self._cache_root.mkdir(parents=True, exist_ok=True)
     (self._cache_root / "manifest.json").write_text(json.dumps(manifest, indent=2))
     self._manifest_cache = manifest

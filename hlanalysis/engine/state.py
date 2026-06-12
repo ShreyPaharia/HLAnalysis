@@ -10,8 +10,8 @@ from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import delete, func
-from sqlmodel import Field, Session as _Session, SQLModel, create_engine, select
-
+from sqlmodel import Field, SQLModel, create_engine, select
+from sqlmodel import Session as _Session
 
 # Fill provenance (SHR-74). See Fill.source / 0004_fill_source.
 FILL_SOURCE_ROUTER = "router"

@@ -9,13 +9,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from hlanalysis.strategy.types import Decision
-
 
 # ---------------------------------------------------------------------------
 # Fill (per simulated order match)
@@ -173,17 +171,17 @@ class DiagnosticRow:
     question_idx: int
     action: str
     reason: str
-    p_model: Optional[float]
-    edge_yes: Optional[float]
-    edge_no: Optional[float]
-    sigma: Optional[float]
-    tau_yr: Optional[float]
-    ln_sk: Optional[float]
-    ref_price: Optional[float]
-    yes_bid: Optional[float]
-    yes_ask: Optional[float]
-    no_bid: Optional[float]
-    no_ask: Optional[float]
+    p_model: float | None
+    edge_yes: float | None
+    edge_no: float | None
+    sigma: float | None
+    tau_yr: float | None
+    ln_sk: float | None
+    ref_price: float | None
+    yes_bid: float | None
+    yes_ask: float | None
+    no_bid: float | None
+    no_ask: float | None
 
 
 @dataclass(slots=True)
@@ -197,18 +195,18 @@ class FillRow:
     question_id: str
     question_idx: int
     symbol: str
-    entry_p_model: Optional[float]
-    entry_edge_chosen_side: Optional[float]
-    entry_sigma: Optional[float]
-    entry_tau_yr: Optional[float]
+    entry_p_model: float | None
+    entry_edge_chosen_side: float | None
+    entry_sigma: float | None
+    entry_tau_yr: float | None
     realized_pnl_at_settle: float
-    resolved_outcome: Optional[str] = None
+    resolved_outcome: str | None = None
     is_hedge: bool = False
 
 
-def _parse_edge_fields(decision: Decision) -> dict[str, Optional[float]]:
+def _parse_edge_fields(decision: Decision) -> dict[str, float | None]:
     """Extract edge fields from a Decision's diagnostics (v2 model-edge format)."""
-    result: dict[str, Optional[float]] = {k: None for k in _EDGE_FLOAT_FIELDS}
+    result: dict[str, float | None] = {k: None for k in _EDGE_FLOAT_FIELDS}
     for diag in decision.diagnostics:
         if diag.message == "edge":
             for key, val_str in diag.fields:
@@ -227,11 +225,11 @@ def build_diagnostic_row(
     question_id: str,
     question_idx: int,
     decision: Decision,
-    ref_price: Optional[float],
-    yes_bid: Optional[float],
-    yes_ask: Optional[float],
-    no_bid: Optional[float],
-    no_ask: Optional[float],
+    ref_price: float | None,
+    yes_bid: float | None,
+    yes_ask: float | None,
+    no_bid: float | None,
+    no_ask: float | None,
 ) -> DiagnosticRow:
     edge = _parse_edge_fields(decision)
     reason = decision.diagnostics[0].message if decision.diagnostics else ""

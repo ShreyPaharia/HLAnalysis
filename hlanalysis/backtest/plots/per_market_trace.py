@@ -9,14 +9,13 @@ parquet is missing.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import pyarrow.parquet as pq
 
 from ._common import save_fig
 
 
-def _load_parquet_as_dict(path: Path) -> Optional[dict[str, list]]:
+def _load_parquet_as_dict(path: Path) -> dict[str, list] | None:
     if not path.exists():
         return None
     try:
@@ -31,7 +30,7 @@ def _load_parquet_as_dict(path: Path) -> Optional[dict[str, list]]:
 def _ns_to_dt_str(ts_ns: int) -> str:
     import datetime
     ts_us = ts_ns // 1_000
-    dt = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc) + datetime.timedelta(microseconds=ts_us)
+    dt = datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC) + datetime.timedelta(microseconds=ts_us)
     return dt.isoformat()
 
 
@@ -39,7 +38,7 @@ def plot_market_trace(
     question_id: str,
     run_dir: Path,
     out_path: Path,
-) -> Optional[Path]:
+) -> Path | None:
     diag_path = run_dir / "diagnostics" / f"{question_id}.parquet"
     diag = _load_parquet_as_dict(diag_path)
     if diag is None:
@@ -85,8 +84,8 @@ def plot_market_trace(
     buy_prices: list[float] = []
     sell_times: list[str] = []
     sell_prices: list[float] = []
-    settle_time: Optional[str] = None
-    settle_outcome: Optional[str] = None
+    settle_time: str | None = None
+    settle_outcome: str | None = None
 
     for i, cloid in enumerate(fill_cloid_col):
         ts = fill_ts_col[i] if i < len(fill_ts_col) else None

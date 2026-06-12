@@ -21,10 +21,11 @@ import itertools
 import json
 import multiprocessing as mp
 import os
+from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 import yaml
 
@@ -35,7 +36,6 @@ from .runner.hftbt_runner import RunConfig, run_one_question
 from .runner.parallel import parent_package_root, worker_path_init
 from .runner.result import RunSummary, summarise_run
 from .runner.walkforward import walk_forward_splits
-
 
 # ---------------------------------------------------------------------------
 # YAML grid config

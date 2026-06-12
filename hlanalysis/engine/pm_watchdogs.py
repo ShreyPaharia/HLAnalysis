@@ -32,7 +32,7 @@ PM_REDEMPTION_TIMEOUT_S: float = 6 * 3600.0
 
 
 def _pm_check_unconfirmed_orders(
-    slot: "AccountSlot", now_ns: int, *,
+    slot: AccountSlot, now_ns: int, *,
     threshold_s: float = PM_UNCONFIRMED_THRESHOLD_S,
 ) -> list[OrderUnconfirmed]:
     """Pure detector: scan slot.dal.live_orders() and return one
@@ -66,7 +66,7 @@ def _pm_check_unconfirmed_orders(
 
 
 def _pm_check_redemption_timeouts(
-    slot: "AccountSlot", now_ns: int, *,
+    slot: AccountSlot, now_ns: int, *,
     threshold_s: float = PM_REDEMPTION_TIMEOUT_S,
 ) -> list[RedemptionTimeout]:
     """Pure detector: walk slot.pm.settlements and return one

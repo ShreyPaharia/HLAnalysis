@@ -16,7 +16,6 @@ Per-venue exchange_ts caveats (from docs/reports/00-overview.md §4):
 """
 from __future__ import annotations
 
-import math
 from typing import Literal
 
 import duckdb

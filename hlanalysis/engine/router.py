@@ -4,12 +4,14 @@ import asyncio
 import json
 import os
 import re
-import time
 from dataclasses import replace as _dc_replace
 from pathlib import Path
 
 from loguru import logger
 
+from ..marketdata.position_math import PositionState, apply_fill, settle, stop_price
+from ..strategy.render import outcome_description, question_description
+from ..strategy.types import Action, Decision, OrderIntent, QuestionView
 from .config import StrategyConfig, match_question
 from .event_bus import EventBus
 from .exec_client import ExecutionClient
@@ -18,10 +20,6 @@ from .risk import RiskGate, RiskInputs
 from .risk_events import Entry, Exit, OrderRejected, ReconcileDrift, RiskVeto
 from .state import Fill, OpenOrder, Position, StateDAL
 from .trade_journal import HaltSnapshot, TradeJournal
-from ..marketdata.position_math import PositionState, apply_fill, settle, stop_price
-from ..strategy.render import outcome_description, question_description
-from ..strategy.types import Action, Decision, OrderIntent, QuestionView
-
 
 # Parses Polymarket's CTF *balance* shortfall rejection (SHR-109). The CLOB
 # rejects a reduce-only sell we can't cover with:
@@ -73,7 +71,7 @@ class Router:
         reject_breaker_threshold: int = 5,
         reject_breaker_reset_seconds: float = 300.0,
         reduce_close_atol: float = 1e-9,
-        journal: "TradeJournal | None" = None,
+        journal: TradeJournal | None = None,
     ) -> None:
         self.dal = dal
         # Durable trade journal (SHR-83). Optional + best-effort: when present,

@@ -109,11 +109,21 @@ class ReplayRunner:
         Yields decisions in arrival order.
         """
         import duckdb  # local import to keep strategy/ unaffected
+
         from ..events import (
-            BboEvent, BookSnapshotEvent, BookDeltaEvent, FundingEvent,
-            HealthEvent, LiquidationEvent, MarketMetaEvent, MarkEvent,
-            OpenInterestEvent, OracleEvent, QuestionMetaEvent,
-            SettlementEvent, TradeEvent,
+            BboEvent,
+            BookDeltaEvent,
+            BookSnapshotEvent,
+            FundingEvent,
+            HealthEvent,
+            LiquidationEvent,
+            MarketMetaEvent,
+            MarkEvent,
+            OpenInterestEvent,
+            OracleEvent,
+            QuestionMetaEvent,
+            SettlementEvent,
+            TradeEvent,
         )
 
         TYPE_MAP: dict[str, type[Any]] = {
@@ -148,9 +158,9 @@ def _cli() -> None:
     import argparse
     from pathlib import Path
 
+    from ..strategy.late_resolution import LateResolutionStrategy
     from .config import load_strategy_config, match_question  # noqa: F401
     from .runtime import build_late_resolution_config
-    from ..strategy.late_resolution import LateResolutionStrategy
 
     p = argparse.ArgumentParser()
     p.add_argument("--parquet", required=True, help="parquet glob")

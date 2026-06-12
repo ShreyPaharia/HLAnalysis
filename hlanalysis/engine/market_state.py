@@ -42,11 +42,12 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
+from datetime import UTC
 
 from ..events import (
     BboEvent,
-    BookSnapshotEvent,
     BookDeltaEvent,
+    BookSnapshotEvent,
     MarkEvent,
     NormalizedEvent,
     QuestionMetaEvent,
@@ -490,9 +491,9 @@ class MarketState:
     @staticmethod
     def _parse_expiry_ns(expiry: str) -> int:
         # YYYYMMDD-HHMM -> ns since epoch (UTC). Returns 0 if unparseable.
-        from datetime import datetime, timezone
+        from datetime import datetime
         try:
-            dt = datetime.strptime(expiry, "%Y%m%d-%H%M").replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(expiry, "%Y%m%d-%H%M").replace(tzinfo=UTC)
             return int(dt.timestamp() * 1_000_000_000)
         except ValueError:
             return 0

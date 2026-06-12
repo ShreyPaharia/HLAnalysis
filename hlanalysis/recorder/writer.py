@@ -4,7 +4,7 @@ import logging
 import os
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 
 
 def _hour_bucket(ts_ns: int) -> tuple[str, str]:
-    dt = datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc)
+    dt = datetime.fromtimestamp(ts_ns / 1e9, tz=UTC)
     return dt.strftime("%Y-%m-%d"), dt.strftime("%H")
 
 

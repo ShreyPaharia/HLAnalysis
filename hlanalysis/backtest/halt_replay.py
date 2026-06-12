@@ -27,11 +27,16 @@ from dataclasses import dataclass
 
 from hlanalysis.risk.caps import (
     concurrent_cap_exceeded as _concurrent_cap_exceeded,
+)
+from hlanalysis.risk.caps import (
     daily_loss_exceeded as _daily_loss_exceeded,
+)
+from hlanalysis.risk.caps import (
     daily_window_start_ns as _shared_daily_window_start_ns,
+)
+from hlanalysis.risk.caps import (
     inventory_cap_exceeded as _inventory_cap_exceeded,
 )
-
 
 # ---------------------------------------------------------------------------
 # Halt windows

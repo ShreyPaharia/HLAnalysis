@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -201,11 +201,6 @@ class MemoryHalt(_Base):
 
 
 BusEvent = Annotated[
-    Union[
-        RiskVeto, RiskHalt, StopLossTriggered, DailyLossHalt, StaleDataHalt,
-        KillSwitchActivated, ReconcileDrift, Entry, Exit, NewQuestion,
-        OrderRejected, OrderUnconfirmed, RedemptionTimeout, PMStrikeMismatch,
-        EngineHeartbeat, FeedStale, FeedDown, FeedRecovered, MemoryHalt,
-    ],
+    RiskVeto | RiskHalt | StopLossTriggered | DailyLossHalt | StaleDataHalt | KillSwitchActivated | ReconcileDrift | Entry | Exit | NewQuestion | OrderRejected | OrderUnconfirmed | RedemptionTimeout | PMStrikeMismatch | EngineHeartbeat | FeedStale | FeedDown | FeedRecovered | MemoryHalt,
     Field(discriminator="kind"),
 ]

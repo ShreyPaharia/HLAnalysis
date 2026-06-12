@@ -28,7 +28,6 @@ from hlanalysis.marketdata.position_math import (
 )
 from hlanalysis.strategy.types import Position
 
-
 # ---------------------------------------------------------------------------
 # Change-point timeline
 # ---------------------------------------------------------------------------
@@ -136,7 +135,7 @@ def build_position_timeline(
 
 
 def build_timelines_from_fills_parquet(
-    parquet_path: "str | Any",
+    parquet_path: str | Any,
     *,
     stop_loss_pct: float | None = None,
 ) -> dict[int, PositionTimeline]:

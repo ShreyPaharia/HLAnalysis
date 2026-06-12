@@ -16,7 +16,13 @@ from scipy.stats import norm  # type: ignore[import-untyped]
 from .base import Strategy
 from .theta_harvester import ThetaHarvesterConfig, ThetaHarvesterStrategy
 from .types import (
-    Action, BookState, Decision, Diagnostic, OrderIntent, Position, QuestionView,
+    Action,
+    BookState,
+    Decision,
+    Diagnostic,
+    OrderIntent,
+    Position,
+    QuestionView,
 )
 from .vol import ANNUAL_SECONDS
 

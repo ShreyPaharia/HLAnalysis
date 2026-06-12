@@ -6,7 +6,7 @@ the engine's router to populate alert messages and by sim/report.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ..marketdata.position_math import PositionState, open_mtm
 from .regions import kv_get as _kv
@@ -16,7 +16,7 @@ from .types import QuestionView
 def _expiry_str(qv: QuestionView) -> str:
     if not qv.expiry_ns:
         return ""
-    dt = datetime.fromtimestamp(qv.expiry_ns / 1e9, tz=timezone.utc)
+    dt = datetime.fromtimestamp(qv.expiry_ns / 1e9, tz=UTC)
     return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 

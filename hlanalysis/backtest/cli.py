@@ -14,12 +14,11 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import os
 import sys
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Sequence
 
 from loguru import logger
 
@@ -28,14 +27,14 @@ from loguru import logger
 # populates the registry before any `build()` call.
 import hlanalysis.strategy  # noqa: F401
 
+from ..marketdata.decision_input import DecisionInputConfig, from_backtest_params
 from .core.data_source import QuestionDescriptor
 from .core.registry import ids as registry_ids
 from .core.source_config import PM_FLAVORS, SourceConfig
 from .report import write_single_run_report, write_tuning_report
-from .runner.hftbt_runner import RunConfig, run_one_question
+from .runner.hftbt_runner import RunConfig
 from .runner.parallel import run_questions_parallel
 from .runner.result import summarise_run
-from ..marketdata.decision_input import DecisionInputConfig, from_backtest_params
 
 # Cache/data-root location defaults. These are user-facing "where is my data"
 # knobs (documented on --cache-root): the parent resolves them once and bakes
@@ -166,7 +165,7 @@ def _resolve_reference_warmup_seconds(
     return _derive_reference_warmup_seconds(params, data_source=data_source)
 
 
-def assert_hl_cadence_match(source_config: "SourceConfig", params: dict) -> None:
+def assert_hl_cadence_match(source_config: SourceConfig, params: dict) -> None:
     """Raise ``ValueError`` if an hl_hip4 source's resample period disagrees with
     the strategy's ``vol_sampling_dt_seconds``.
 
@@ -420,7 +419,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     # This keeps the strategy factory clean (it only sees binary knobs).
     params, hedge_cfg = _extract_hedge_config(params)
 
-    hedge_source = _build_hedge_source(args.hedge_data_path, hedge_cfg)
+    # Built for its validation side effect (raises on a bad hedge path); the
+    # actual source is rebuilt from the picklable SourceConfig below.
+    _hedge_source = _build_hedge_source(args.hedge_data_path, hedge_cfg)
 
     # ONE source-construction path: the SourceConfig is used to build the
     # in-process source here AND shipped (picklable) to subprocess workers, so

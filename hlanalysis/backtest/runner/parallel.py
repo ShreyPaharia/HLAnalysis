@@ -10,15 +10,14 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import sys
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
 
-from .hftbt_runner import RunConfig, run_one_question
 from ..core.data_source import QuestionDescriptor
 from ..core.source_config import SourceConfig
-
+from .hftbt_runner import RunConfig, run_one_question
 
 # ---------------------------------------------------------------------------
 # SHR-91: Shared cross-market inventory ledger
@@ -129,6 +128,7 @@ def build_strategy_for_run(strategy_id: str, params: dict):
     """
     # Importing strategy triggers auto-registration of all real strategies.
     import hlanalysis.strategy  # noqa: F401
+
     from ..core.registry import build, ids
 
     if strategy_id in ids():

@@ -14,7 +14,7 @@ Comparison operators (all match the live engine):
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 
 def inventory_cap_exceeded(
@@ -90,7 +90,7 @@ def daily_window_start_ns(now_ns: int, *, hour: int) -> int:
     Otherwise rolls back to yesterday's HH:00.  This gives a stable daily
     window boundary so the same fill never appears in two consecutive windows.
     """
-    dt = datetime.fromtimestamp(now_ns / 1e9, tz=timezone.utc)
+    dt = datetime.fromtimestamp(now_ns / 1e9, tz=UTC)
     boundary = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
     if dt < boundary:
         boundary = boundary - timedelta(days=1)

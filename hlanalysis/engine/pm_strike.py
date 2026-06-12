@@ -21,7 +21,7 @@ if TYPE_CHECKING:  # avoid a runtime import cycle (EngineRuntime lives in runtim
 
 
 async def maybe_capture_pm_strike(
-    rt: "EngineRuntime", qv, slots: list["AccountSlot"],
+    rt: EngineRuntime, qv, slots: list[AccountSlot],
     fields: dict[str, str], *, now_ns: int,
 ) -> None:
     """Capture a PM up/down strike from the Binance SPOT 1m candle close.
@@ -100,7 +100,7 @@ async def maybe_capture_pm_strike(
 
 
 async def pm_strike_capture_loop(
-    rt: "EngineRuntime", slots: list["AccountSlot"],
+    rt: EngineRuntime, slots: list[AccountSlot],
 ) -> None:
     """Retry PM up/down strike capture each second. First-sight capture in
     _ingest_loop fires at discovery, but PM lists markets ~24h before open,

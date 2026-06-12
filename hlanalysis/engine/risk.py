@@ -4,13 +4,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import StrategyConfig, match_question
 from ..risk.caps import (
     concurrent_cap_exceeded,
     daily_loss_exceeded,
     inventory_cap_exceeded,
 )
 from ..strategy.types import BookState, OrderIntent, Position, QuestionView
+from .config import StrategyConfig, match_question
 
 
 @dataclass(frozen=True, slots=True)

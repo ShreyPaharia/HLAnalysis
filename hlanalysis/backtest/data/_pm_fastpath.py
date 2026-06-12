@@ -41,8 +41,9 @@ def read_pm_book_columns(
     Returns ``None`` when there is no parquet coverage matching the glob or
     no rows fall in the requested window.
     """
-    import duckdb
     from glob import glob as _glob
+
+    import duckdb
 
     if not _glob(book_glob, recursive=True):
         return None

@@ -133,7 +133,7 @@ class BaseWsAdapter(VenueAdapter):
         while True:
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=self.stale_timeout_s)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 await queue.put(
                     self._health(
                         f"feed_stale{suffix}",

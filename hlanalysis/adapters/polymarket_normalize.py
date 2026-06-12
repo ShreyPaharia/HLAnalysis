@@ -8,13 +8,11 @@ and are carried through verbatim as `symbol`.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
-
-from .._fastjson import decode as _json_decode
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
+from .._fastjson import decode as _json_decode
 from ..events import (
     BookSnapshotEvent,
     Mechanism,
@@ -221,7 +219,7 @@ def _parse_strike_ref_ts_ns(description: str) -> int | None:
     if mon_key not in _MONTHS:
         return None
     dt = datetime(2000 + int(yr2), _MONTHS[mon_key], int(day), int(hh), int(mm), tzinfo=et)
-    return int(dt.astimezone(timezone.utc).timestamp() * 1e9)
+    return int(dt.astimezone(UTC).timestamp() * 1e9)
 
 
 def _question_idx_from_condition(condition_id: str) -> int:
@@ -249,7 +247,7 @@ def _parse_token_ids(market: dict) -> tuple[str, str] | None:
 def _parse_iso_ns(s: str) -> int:
     dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return int(dt.timestamp() * 1e9)
 
 
@@ -264,9 +262,9 @@ def _iso_to_hl_expiry(s: str) -> str:
     except ValueError:
         return ""
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     else:
-        dt = dt.astimezone(timezone.utc)
+        dt = dt.astimezone(UTC)
     return dt.strftime("%Y%m%d-%H%M")
 
 

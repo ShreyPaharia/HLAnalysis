@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import pyarrow.parquet as pq
 
@@ -24,12 +24,12 @@ if TYPE_CHECKING:
 
 
 def _ts_ns_to_date_utc(ts_ns: int) -> str:
-    dt = datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc)
+    dt = datetime.fromtimestamp(ts_ns / 1e9, tz=UTC)
     return dt.strftime("%Y-%m-%d")
 
 
 def _ts_ns_to_utc(ts_ns: int) -> str:
-    dt = datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc)
+    dt = datetime.fromtimestamp(ts_ns / 1e9, tz=UTC)
     return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
@@ -50,7 +50,7 @@ def _load_fills_for_question(fills_dir: Path, question_id: str) -> dict[str, lis
 def _compute_market_row(
     q: QuestionDescriptor,
     realized_pnl_usd: float,
-    fills_dir: Optional[Path],
+    fills_dir: Path | None,
     outcome: str,
 ) -> dict:
     if fills_dir is None:
@@ -75,8 +75,8 @@ def _compute_market_row(
     cloids = raw["cloid"]
     ts_ns_list = raw["ts_ns"]
     trade_indices = [i for i, c in enumerate(cloids) if c != "settle"]
-    first_entry_ts: Optional[int] = None
-    last_exit_ts: Optional[int] = None
+    first_entry_ts: int | None = None
+    last_exit_ts: int | None = None
     if trade_indices:
         trade_ts = [ts_ns_list[i] for i in trade_indices]
         first_entry_ts = min(trade_ts)
@@ -126,10 +126,10 @@ def write_single_run_report(
     descriptors: list[QuestionDescriptor],
     per_question_pnl: list[float],
     outcomes: list[str],
-    fills_dir: Optional[Path] = None,
+    fills_dir: Path | None = None,
     fee_taker: float = 0.0,
     slippage_bps: float = 0.0,
-    slot_strategy_cfg: Optional["StrategyConfig"] = None,
+    slot_strategy_cfg: StrategyConfig | None = None,
 ) -> Path:
     """Write report.md for a single backtest run.
 

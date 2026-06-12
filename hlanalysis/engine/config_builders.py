@@ -13,9 +13,15 @@ from __future__ import annotations
 
 from dataclasses import (
     fields as dataclass_fields_of,
+)
+from dataclasses import (
     replace as dataclass_replace,
 )
 
+from ..strategy.base import Strategy
+from ..strategy.late_resolution import LateResolutionConfig
+from ..strategy.live_registry import build_live_strategy
+from ..strategy.theta_harvester import ThetaHarvesterConfig
 from .config import (
     AccountConfig,
     HyperliquidAccount,
@@ -24,11 +30,6 @@ from .config import (
 )
 from .exec_client import ExecutionClient
 from .hl_client import HLClient
-from ..strategy.base import Strategy
-from ..strategy.late_resolution import LateResolutionConfig
-from ..strategy.theta_harvester import ThetaHarvesterConfig
-from ..strategy.live_registry import build_live_strategy
-
 
 # LateResolutionConfig fields sourced from the strategy GLOBAL block, not the
 # allowlist entry. Everything else on the dataclass that also exists on

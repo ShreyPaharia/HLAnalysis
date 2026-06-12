@@ -8,7 +8,6 @@ from pydantic import BaseModel, ConfigDict
 
 from .events import Mechanism, ProductType
 
-
 # Standard channel vocabulary. Each adapter translates these to native streams.
 # Adapters may silently drop channels that don't apply (e.g. funding for spot).
 STANDARD_CHANNELS = frozenset(
