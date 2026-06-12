@@ -51,7 +51,11 @@ def _clamp_pm_price(p: float) -> float:
 
 
 def _real_data_api_get(url: str) -> list[dict]:
-    r = requests.get(url, timeout=15)
+    # (connect_timeout, read_timeout): a scalar timeout alone can hang on a
+    # stalled TLS handshake or dribbling response even though the read timer
+    # hasn't started yet.  Read bound (7s) stays inside the _PM_READ_RETRY
+    # stop_after_delay(8s) window so one attempt can't exhaust the whole budget.
+    r = requests.get(url, timeout=(5, 7))
     r.raise_for_status()
     data = r.json()
     return data if isinstance(data, list) else []

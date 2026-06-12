@@ -8,6 +8,7 @@ from __future__ import annotations
 import requests
 
 from hlanalysis.engine.exec_types import PlaceRequest
+from hlanalysis.engine.pm_client import _real_data_api_get
 from hlanalysis.engine.pm_client import PMClient
 
 
@@ -110,3 +111,43 @@ def test_live_write_does_not_retry_business_error():
     ack = c.place(_buy_req())
     assert fake.calls == 1
     assert ack.status == "rejected"
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: _real_data_api_get must pass a (connect, read) tuple timeout, not a
+# scalar, so a stalled TLS handshake can't hang indefinitely.
+# ---------------------------------------------------------------------------
+
+def test_data_api_get_passes_tuple_timeout(monkeypatch):
+    """_real_data_api_get must call requests.get with a (connect, read) tuple.
+
+    A scalar timeout does not bound the TLS-handshake phase; only a tuple
+    gives a separate connect deadline. We capture the kwargs passed to
+    requests.get and assert the timeout value is a 2-tuple of numbers.
+    """
+    captured: dict = {}
+
+    class _FakeResponse:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return []
+
+    def fake_get(url, **kwargs):
+        captured.update(kwargs)
+        return _FakeResponse()
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    result = _real_data_api_get("https://data-api.polymarket.com/positions?user=0x0")
+    assert result == []
+
+    timeout = captured.get("timeout")
+    assert isinstance(timeout, tuple), f"expected tuple timeout, got {timeout!r}"
+    assert len(timeout) == 2, f"expected 2-tuple, got {timeout!r}"
+    connect_t, read_t = timeout
+    assert isinstance(connect_t, (int, float)) and connect_t > 0
+    assert isinstance(read_t, (int, float)) and read_t > 0
+    # Read bound must stay inside the _PM_READ_RETRY stop_after_delay(8s) window
+    # so one attempt can't exhaust the whole retry budget.
+    assert read_t < 8.0, f"read_t={read_t} would exhaust the 8s retry budget"

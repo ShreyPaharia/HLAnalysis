@@ -22,11 +22,14 @@ everything through :meth:`_run_ws`.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 
 import websockets
+
+log = logging.getLogger(__name__)
 
 from .._fastjson import decode as _json_decode
 from ..events import HealthEvent, Mechanism, NormalizedEvent, ProductType
@@ -49,6 +52,16 @@ class BaseWsAdapter(VenueAdapter):
     # window is unambiguously a dead/half-open stream — not a quiet market. Also
     # acts as the first-data deadline ("subscribed but silent").
     stale_timeout_s: float = 30.0
+
+    # Decode-failure visibility. A sustained run of bad frames means the venue
+    # changed its wire format. We don't log every frame (could be high-rate) but
+    # emit one warning per `_decode_warn_every` failures once past the initial
+    # threshold, and keep an instance counter so ops can see it in metrics.
+    _decode_fail_warn_threshold: int = 5
+    _decode_fail_warn_every: int = 100
+
+    def __init__(self) -> None:
+        self.decode_failures: int = 0
 
     # Reconnect circuit-breaker: if this many reconnects happen within the
     # window, sleep a long cooldown instead of thrashing. Tripped during the
@@ -131,6 +144,17 @@ class BaseWsAdapter(VenueAdapter):
             try:
                 msg = _json_decode(raw)
             except (ValueError, TypeError):
+                self.decode_failures += 1
+                n = self.decode_failures
+                if n == self._decode_fail_warn_threshold or (
+                    n > self._decode_fail_warn_threshold
+                    and (n - self._decode_fail_warn_threshold)
+                    % self._decode_fail_warn_every == 0
+                ):
+                    log.warning(
+                        "%s: %d JSON decode failures so far — venue wire format may have changed",
+                        self.venue, n,
+                    )
                 continue
             for ev in handle(msg, recv_ns):
                 await queue.put(ev)

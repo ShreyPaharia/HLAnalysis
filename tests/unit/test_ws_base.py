@@ -8,8 +8,10 @@ per-venue adapter tests assert the venues actually route through it.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
+import requests
 
 from hlanalysis.adapters._ws_base import BaseWsAdapter
 from hlanalysis.events import HealthEvent, ProductType
@@ -177,3 +179,116 @@ async def test_circuit_breaker_trips_after_threshold():
 
     kinds = [e.kind for e in await _drain(q)]
     assert any(k == "circuit-breaker" for k in kinds), kinds
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: JSON decode failures must increment decode_failures counter and emit
+# a throttled log.warning once past the threshold — not silently swallow every
+# bad frame, which would hide a venue wire-format change.
+# ---------------------------------------------------------------------------
+
+class _MalformedFramesWS:
+    """Delivers N malformed (non-JSON) frames then goes silent forever."""
+
+    def __init__(self, n: int) -> None:
+        self._n = n
+        self._sent = 0
+
+    async def recv(self) -> str:
+        if self._sent < self._n:
+            self._sent += 1
+            return "not-valid-json{{{"
+        await asyncio.sleep(3600)
+
+
+@pytest.mark.asyncio
+async def test_decode_failure_counter_increments(caplog):
+    """Each malformed frame increments decode_failures on the adapter."""
+    a = _Tiny()
+    a.stale_timeout_s = 0.01  # short so the test exits quickly after frames
+    q: asyncio.Queue = asyncio.Queue()
+
+    n_bad = 3
+    await asyncio.wait_for(
+        a._recv_until_stale(_MalformedFramesWS(n_bad), lambda m, t: [], "x", q),
+        timeout=2.0,
+    )
+    assert a.decode_failures == n_bad, (
+        f"expected decode_failures={n_bad}, got {a.decode_failures}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_decode_failure_warning_emitted_at_threshold(caplog):
+    """A warning is emitted once decode_failures reaches _decode_fail_warn_threshold.
+
+    We set the threshold to 2 and feed 3 bad frames; the third frame should
+    NOT produce an extra warning (only at-threshold fires, not at-threshold+1).
+    The warning after exactly threshold frames proves the venue wire-format
+    change becomes visible without flooding every frame.
+    """
+    a = _Tiny()
+    a.stale_timeout_s = 0.01
+    a._decode_fail_warn_threshold = 2
+    a._decode_fail_warn_every = 1000  # suppress the periodic re-fire for this test
+    q: asyncio.Queue = asyncio.Queue()
+
+    with caplog.at_level(logging.WARNING, logger="hlanalysis.adapters.tiny"):
+        await asyncio.wait_for(
+            a._recv_until_stale(_MalformedFramesWS(3), lambda m, t: [], "x", q),
+            timeout=2.0,
+        )
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING
+                and "decode" in r.message.lower()]
+    assert warnings, "no decode-failure warning logged at threshold"
+    # Only one warning should fire for the threshold crossing (not one per frame).
+    assert len(warnings) == 1, (
+        f"expected exactly 1 threshold-crossing warning, got {len(warnings)}: "
+        + str([r.message for r in warnings])
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: hyperliquid._fetch_outcome_meta must pass a (connect, read) tuple.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_hyperliquid_fetch_outcome_meta_passes_tuple_timeout(monkeypatch):
+    """HyperliquidAdapter._fetch_outcome_meta must use a (connect, read) tuple.
+
+    We monkeypatch requests.post (used inside asyncio.to_thread) to capture
+    the kwargs. A scalar timeout alone can't bound the TLS handshake phase.
+    """
+    from hlanalysis.adapters.hyperliquid import HyperliquidAdapter
+
+    captured: list[dict] = []
+
+    def fake_post(url, **kwargs):
+        captured.append(kwargs)
+
+        class _R:
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return {"outcomes": [], "questions": []}
+
+        return _R()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+
+    adapter = HyperliquidAdapter()
+    result = await adapter._fetch_outcome_meta()
+    assert result is not None, "expected a dict back from mocked _fetch_outcome_meta"
+
+    assert captured, "requests.post was never called"
+    timeout = captured[0].get("timeout")
+    assert isinstance(timeout, tuple), f"expected tuple timeout, got {timeout!r}"
+    assert len(timeout) == 2
+    connect_t, read_t = timeout
+    assert connect_t > 0 and read_t > 0

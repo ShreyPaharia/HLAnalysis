@@ -314,9 +314,14 @@ class BinanceAdapter(BaseWsAdapter):
                         requests.get,
                         PERP_REST_PREMIUM_INDEX,
                         params={"symbol": sub.symbol.upper()},
-                        timeout=4,
+                        timeout=(5, 10),
                     )
                     if r.status_code != 200:
+                        log.warning(
+                            "binance premiumIndex non-200: status=%d symbol=%s; backing off",
+                            r.status_code, sub.symbol.upper(),
+                        )
+                        await asyncio.sleep(min(PERP_MARK_POLL_INTERVAL_S * 2, 30.0))
                         continue
                     p = r.json()
                 except Exception as e:

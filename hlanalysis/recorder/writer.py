@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -90,11 +91,18 @@ class ParquetWriter:
         partition.mkdir(parents=True, exist_ok=True)
         self._flush_seq += 1
         path = partition / f"{int(time.time() * 1000)}-{self._flush_seq:06d}.parquet"
+        tmp_path = path.with_suffix(".parquet.tmp")
         try:
             table = pa.Table.from_pylist(rows)
-            pq.write_table(table, path, compression="zstd")
+            pq.write_table(table, tmp_path, compression="zstd")
+            os.replace(tmp_path, path)
         except Exception:
             log.exception("failed to write %s (%d rows)", path, len(rows))
+            # Clean up any partially written temp file so globs don't see it.
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             # Re-buffer so we don't lose the events; subsequent flush may succeed.
             self._buffers[key].extend(rows)
             self._enforce_global_cap()
@@ -131,8 +139,10 @@ class ParquetWriter:
                 del self._buffers[key]
         self.dropped_rows += dropped_this_call
         if dropped_this_call:
-            log.warning(
-                "recorder buffer cap hit; dropped=%d this_call, dropped_rows=%d total",
+            log.error(
+                "RECORDER DATA LOSS: buffer cap hit; dropped=%d this_call,"
+                " dropped_rows_total=%d — persistent write failure or runaway buffer;"
+                " market-data records are being discarded",
                 dropped_this_call,
                 self.dropped_rows,
             )

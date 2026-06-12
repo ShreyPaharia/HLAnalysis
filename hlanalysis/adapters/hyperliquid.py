@@ -357,7 +357,7 @@ class HyperliquidAdapter(BaseWsAdapter):
         network error so callers keep their prior state. Each poll cycle awaits
         these sequentially (no concurrent fan-out at the HL info endpoint)."""
         def _post() -> dict:
-            r = requests.post(HL_INFO_URL, json={"type": "outcomeMeta"}, timeout=5)
+            r = requests.post(HL_INFO_URL, json={"type": "outcomeMeta"}, timeout=(5, 10))
             r.raise_for_status()
             return r.json()
 
