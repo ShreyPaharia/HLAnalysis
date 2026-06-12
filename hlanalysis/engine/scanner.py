@@ -11,6 +11,7 @@ from .config import StrategyConfig, match_question
 from .market_state import MarketState
 from .risk import RiskInputs
 from .state import StateDAL
+from ..marketdata.decision_kernel import build_decision_inputs
 from ..strategy.base import Strategy
 from ..strategy.types import (
     Action, BookState, Decision, Position, QuestionView,
@@ -381,25 +382,33 @@ class Scanner:
                 # Pass now_ns + lookback_seconds so live MarketState uses the
                 # TIME-bounded window, matching the backtest's slice_window rule
                 # after a feed gap (SHR-66).
-                recent_returns = self.ms.recent_returns(
-                    self.ref_symbol, n=self._recent_returns_n,
-                    now_ns=now_ns, lookback_seconds=self._default_lookback_secs,
-                )
-                recent_hl_bars = self.ms.recent_hl_bars(
-                    self.ref_symbol, n=self._recent_returns_n,
-                    now_ns=now_ns, lookback_seconds=self._default_lookback_secs,
+                _rets_arr, _hl_arr = build_decision_inputs(
+                    self.ms._core,
+                    ref_symbol=self.ref_symbol,
+                    now_ns=now_ns,
+                    lookback_seconds=self._default_lookback_secs,
+                    dt=None,
                 )
             else:
-                dt_s, ret_n = cadence
+                dt_s, _ret_n = cadence
                 lookback_s = self._lookback_secs_by_class.get(q.klass, self._default_lookback_secs)
-                recent_returns = self.ms.recent_returns(
-                    self.ref_symbol, n=ret_n, dt=dt_s,
-                    now_ns=now_ns, lookback_seconds=lookback_s,
+                _rets_arr, _hl_arr = build_decision_inputs(
+                    self.ms._core,
+                    ref_symbol=self.ref_symbol,
+                    now_ns=now_ns,
+                    lookback_seconds=lookback_s,
+                    dt=dt_s,
                 )
-                recent_hl_bars = self.ms.recent_hl_bars(
-                    self.ref_symbol, n=ret_n, dt=dt_s,
-                    now_ns=now_ns, lookback_seconds=lookback_s,
-                )
+            # Engine contract: convert numpy arrays to tuples (Strategy.evaluate
+            # signature declares tuple[float,...] / tuple[tuple[float,float],...]).
+            # The engine's MarketState.recent_returns / recent_hl_bars previously
+            # performed this conversion internally; we replicate it here so the
+            # call to strategy.evaluate is byte-identical. The backtest historically
+            # passed numpy arrays (duck-typed silence); new code follows the contract.
+            recent_returns: tuple[float, ...] = tuple(_rets_arr.tolist())
+            recent_hl_bars: tuple[tuple[float, float], ...] = tuple(
+                (float(h), float(lo)) for h, lo in _hl_arr
+            )
             decision = self.strategy.evaluate(
                 question=q,
                 books=books,

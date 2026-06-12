@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from hlanalysis.marketdata.decision_kernel import build_decision_inputs
 from hlanalysis.marketdata.market_state import MarketState as _CoreMarketState
 from hlanalysis.strategy.types import BookState
 
@@ -129,20 +130,31 @@ class MarketState:
         return self._core.last_mark(_REFERENCE_KEY)
 
     def recent_returns(self, *, now_ns: int, lookback_seconds: int) -> np.ndarray:
-        return self._core.recent_returns(
-            _REFERENCE_KEY, now_ns=now_ns, lookback_seconds=lookback_seconds
+        rets, _ = build_decision_inputs(
+            self._core,
+            ref_symbol=_REFERENCE_KEY,
+            now_ns=now_ns,
+            lookback_seconds=lookback_seconds,
         )
+        return rets
 
     def recent_hl_bars(self, *, now_ns: int, lookback_seconds: int) -> np.ndarray:
-        return self._core.recent_hl_bars(
-            _REFERENCE_KEY, now_ns=now_ns, lookback_seconds=lookback_seconds
+        _, hl = build_decision_inputs(
+            self._core,
+            ref_symbol=_REFERENCE_KEY,
+            now_ns=now_ns,
+            lookback_seconds=lookback_seconds,
         )
+        return hl
 
     def recent_returns_and_hl(
         self, *, now_ns: int, lookback_seconds: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        return self._core.recent_returns_and_hl(
-            _REFERENCE_KEY, now_ns=now_ns, lookback_seconds=lookback_seconds
+        return build_decision_inputs(
+            self._core,
+            ref_symbol=_REFERENCE_KEY,
+            now_ns=now_ns,
+            lookback_seconds=lookback_seconds,
         )
 
 

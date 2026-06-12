@@ -136,33 +136,21 @@ def test_cadence_by_class_base_lookback_not_inflated() -> None:
 
 
 class _RecordingMarketState(MarketState):
-    """Thin proxy that records every (n, dt) pair passed to recent_returns,
-    keyed by call order. Used to assert that priceBucket evaluations pass
-    dt=2 while priceBinary evaluations pass dt=None."""
+    """Engine MarketState sub-type kept for market-seeding; the scanner now
+    calls ``build_decision_inputs(self.ms._core, ...)`` directly (R1), so
+    interception is done at the ``build_decision_inputs`` level in the test
+    rather than overriding the wrapper's ``recent_returns`` / ``recent_hl_bars``
+    methods.  The lists below are populated by the monkeypatch in
+    ``test_scan_wiring_bucket_uses_dt2_binary_uses_default``."""
 
     def __init__(self) -> None:
         super().__init__()
-        # list of (n, dt) in call order — one entry per scan()-level evaluation
+        # list of (dt,) in call order — one entry per scan()-level evaluation
+        # populated by the monkeypatch in the test function below (not by
+        # overriding recent_returns, which is no longer called by the scanner
+        # since R1 routes through build_decision_inputs directly).
         self.recent_returns_calls: list[tuple[int, int | None]] = []
         self.recent_hl_bars_calls: list[tuple[int, int | None]] = []
-
-    def recent_returns(
-        self, symbol: str, n: int, dt: int | None = None, *,
-        now_ns: int | None = None, lookback_seconds: int | None = None,
-    ):
-        self.recent_returns_calls.append((n, dt))
-        return super().recent_returns(
-            symbol, n, dt, now_ns=now_ns, lookback_seconds=lookback_seconds,
-        )
-
-    def recent_hl_bars(
-        self, symbol: str, n: int, dt: int | None = None, *,
-        now_ns: int | None = None, lookback_seconds: int | None = None,
-    ):
-        self.recent_hl_bars_calls.append((n, dt))
-        return super().recent_hl_bars(
-            symbol, n, dt, now_ns=now_ns, lookback_seconds=lookback_seconds,
-        )
 
 
 class _ClassRecordingStrategy(LateResolutionStrategy):
@@ -242,18 +230,25 @@ def _seed_two_class_market(now_ns: int, ms: MarketState) -> None:
         ))
 
 
-def test_scan_wiring_bucket_uses_dt2_binary_uses_default(tmp_path: Path) -> None:
+def test_scan_wiring_bucket_uses_dt2_binary_uses_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """scan() must route per-class cadence overrides to the correct dt arg on
-    recent_returns / recent_hl_bars reads.
+    build_decision_inputs calls (R1: scanner now calls build_decision_inputs
+    directly instead of ms.recent_returns / ms.recent_hl_bars).
 
     - priceBucket has vol_sampling_dt_seconds=2 in its theta_override → scan()
-      must call ms.recent_returns(..., dt=2).
-    - priceBinary has no dt override → scan() must call ms.recent_returns(...)
-      WITHOUT a dt kwarg (dt=None in _RecordingMarketState, i.e. dt-less read).
+      must call build_decision_inputs(..., dt=2).
+    - priceBinary has no dt override → scan() must call build_decision_inputs(...)
+      with dt=None (the dt-less / default-cadence read).
 
-    Approach: real scan() path, _RecordingMarketState intercepts calls, and
-    _ClassRecordingStrategy links klass → which returns tuple was received.
+    Approach: monkeypatch hlanalysis.engine.scanner.build_decision_inputs to
+    record (dt,) per call; _ClassRecordingStrategy links klass → which inputs
+    were received by evaluate().
     """
+    import hlanalysis.engine.scanner as _scanner_mod
+    from hlanalysis.marketdata.decision_kernel import build_decision_inputs as _real_bdi
+
     now = 1_700_000_000_000_000_000
     cfg = _cfg(theta_overrides={"priceBucket": {"vol_sampling_dt_seconds": 2}})
 
@@ -283,6 +278,19 @@ def test_scan_wiring_bucket_uses_dt2_binary_uses_default(tmp_path: Path) -> None
     assert scanner._cadence_by_class == {"priceBucket": (2, scanner._cadence_by_class["priceBucket"][1])}
     assert "priceBinary" not in scanner._cadence_by_class
 
+    # Monkeypatch build_decision_inputs in the scanner module so we can record
+    # the (dt,) argument the scanner passes without touching the real logic.
+    # R1: the scanner now calls build_decision_inputs(self.ms._core, ..., dt=...)
+    # directly instead of ms.recent_returns / ms.recent_hl_bars.
+    bdi_calls: list[int | None] = []
+
+    def _recording_bdi(core, *, ref_symbol, now_ns, lookback_seconds, dt=None):
+        bdi_calls.append(dt)
+        return _real_bdi(core, ref_symbol=ref_symbol, now_ns=now_ns,
+                         lookback_seconds=lookback_seconds, dt=dt)
+
+    monkeypatch.setattr(_scanner_mod, "build_decision_inputs", _recording_bdi)
+
     scanner.scan(now_ns=now)
 
     # We must have seen at least one evaluate() call per question class to
@@ -295,22 +303,19 @@ def test_scan_wiring_bucket_uses_dt2_binary_uses_default(tmp_path: Path) -> None
         "priceBucket question was never evaluated — check market seeding"
     )
 
-    # The ms.recent_returns calls are recorded in order; correlate by class.
-    # _RecordingMarketState records one entry per scan()-level evaluation.
-    # Build a map: klass → set of dt values seen in recent_returns calls for
-    # that class by correlating recent_returns_calls order with strat.calls order.
-    assert len(ms.recent_returns_calls) == len(strat.calls), (
-        f"expected one recent_returns call per evaluate call, "
-        f"got {len(ms.recent_returns_calls)} vs {len(strat.calls)}"
+    # build_decision_inputs is called once per evaluated question.
+    # Correlate bdi_calls order with strat.calls order to verify per-class dt.
+    assert len(bdi_calls) == len(strat.calls), (
+        f"expected one build_decision_inputs call per evaluate call, "
+        f"got {len(bdi_calls)} vs {len(strat.calls)}"
     )
-    for (klass, _rets, _hl), (n_arg, dt_arg) in zip(
-        strat.calls, ms.recent_returns_calls
-    ):
+    for (klass, _rets, _hl), dt_arg in zip(strat.calls, bdi_calls):
         if klass == "priceBucket":
             assert dt_arg == 2, (
-                f"priceBucket recent_returns must use dt=2, got dt={dt_arg}"
+                f"priceBucket build_decision_inputs must use dt=2, got dt={dt_arg}"
             )
         elif klass == "priceBinary":
             assert dt_arg is None, (
-                f"priceBinary recent_returns must use dt=None (default), got dt={dt_arg}"
+                f"priceBinary build_decision_inputs must use dt=None (default), "
+                f"got dt={dt_arg}"
             )
