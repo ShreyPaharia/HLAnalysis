@@ -366,6 +366,9 @@ strategies:
         exit_safety_d: 1.0             # C3: restored mid-hold exit (was 0.0; inert but defensive)
         vol_lookback_seconds: 2700     # mechanical tilt (vs binary 900)
         vol_sampling_dt_seconds: 2     # per-class mechanical tilt; binary + v1 stay dt=5
+        exit_spread_hold: 0.04         # SHR-102: hold favorite to settle when held half-spread > 0.04
+                                       # (kills doom-loop churn). 35-day backtest: +$330, 0 regressions,
+                                       # inert on 30/35 days. See docs/research/2026-06-12-hl-bucket-retune-exit-spread-hold.md
 
   # --- v3.1 Polymarket ---
   # PM ablation knobs: post-2026-05-23 walk-forward (see Appendix C of

@@ -51,3 +51,17 @@ still works). Leave `entry_spread_gate` off (inert here).
 - The retuned sim now diverges from live in the *good* direction on 06-07 (sim +13 vs live −133)
   because live actually doom-looped — i.e. this gate is what stops live from losing there.
 - Sweep driver: `tools/_bucket_retune_sweep.py`.
+
+## Full-history validation (all 35 recorded settlement days, 2026-05-07..06-10)
+Ran baseline vs exit_spread_hold=0.04 on EVERY recorded bucket day (`tools/_bucket_retune_fullsweep.py`,
+main-worktree corpus). **Result: zero regressions.**
+
+- Total sim PnL: **+591.84 → +921.76 (+$329.92)**; total fills 1041 → 941.
+- **Inert on 30/35 days** (bit-identical — gate only fires on wide books).
+- Helps on 5 wide-book days: 06-07 (−185.39→+13.44), 06-02 (−50.14→+35.88),
+  06-09 (−8.86→+34.86), 05-28 (−89.44→−88.09), 05-24 (less churn, same PnL).
+- **Leaves profitable liquid-day churn alone** (05-29 197 fills/+59, 05-19 164/+11 unchanged) —
+  it distinguishes good theta churn from doom-loop spread-crossing. No day is hurt.
+
+**Verdict: promote `exit_spread_hold: 0.04` to the live priceBucket config.** Strictly non-negative
+across 35 days, conditional (no overfit), and it removes the only real bucket money-loser.
