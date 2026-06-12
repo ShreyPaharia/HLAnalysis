@@ -24,7 +24,6 @@ Top-level:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sqlite3
@@ -294,31 +293,18 @@ def _build_slot_snapshot(
 def _build_config_fingerprint(alias: str, strategy_cfg: Any) -> dict[str, Any]:
     """Build a stable config fingerprint for a strategy slot.
 
-    Hash covers the full defaults + allowlist + global risk config so any
-    parameter change produces a different hash. Key params are inlined for
-    quick config-vs-runtime skew detection (e.g. exit_safety_d=0.0 when
+    Hash comes from the shared ``strategy_config_sig`` function so that the
+    engine-diag hash equals the backtest ``slot config_sig`` for the same slot
+    config — the whole point of R5.  Key params are inlined alongside the hash
+    for quick config-vs-runtime skew detection (e.g. exit_safety_d=0.0 when
     YAML says 1.0 — SHR-65).
     """
+    # Import here to avoid a top-level circular import (diag.py is imported
+    # early; config.py imports nothing from diag.py so the lazy import is safe).
+    from hlanalysis.engine.config import strategy_config_sig
+
     defaults = strategy_cfg.defaults
-
-    # Build a stable serialisable dict of the effective params
-    params: dict[str, Any] = {
-        "strategy_type": strategy_cfg.strategy_type,
-        "paper_mode": strategy_cfg.paper_mode,
-        "reference_symbol": strategy_cfg.reference_symbol,
-        "reference_sigma_source": strategy_cfg.reference_sigma_source,
-        "defaults": defaults.model_dump(),
-        "allowlist_count": len(strategy_cfg.allowlist),
-        # Include the serialised allowlist for full hash coverage
-        "allowlist": [e.model_dump() for e in strategy_cfg.allowlist],
-        "global_risk": strategy_cfg.global_.model_dump(),
-    }
-    if strategy_cfg.theta is not None:
-        params["theta"] = strategy_cfg.theta.model_dump()
-
-    # Stable JSON (sorted keys) → SHA-256 → first 16 hex chars
-    stable_json = json.dumps(params, sort_keys=True, default=str)
-    digest = hashlib.sha256(stable_json.encode()).hexdigest()[:16]
+    digest = strategy_config_sig(strategy_cfg)
 
     # Inline the key params most likely to cause config-vs-runtime skew
     inline: dict[str, Any] = {

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 from pathlib import Path
@@ -303,6 +305,38 @@ class StrategiesConfig(BaseModel):
     account)."""
     model_config = ConfigDict(frozen=True)
     strategies: list[StrategyConfig]
+
+
+def strategy_config_sig(strategy_cfg: StrategyConfig) -> str:
+    """Return a stable 16-hex SHA-256 fingerprint of a StrategyConfig's effective params.
+
+    Covers the full resolved params: strategy_type, paper_mode, reference_symbol,
+    reference_sigma_source, defaults (all fields), allowlist (all entries),
+    allowlist_count, global_ (all fields), and theta (all fields, when present).
+
+    Stable across Python sessions: uses sorted-keys JSON with str default.
+
+    **Location rationale:** placed here in ``hlanalysis/engine/config.py`` (where
+    ``StrategyConfig`` is defined) so both sides — the engine's diag.py and the
+    backtest's report.py — can import it from the single authoritative source
+    without creating an import cycle.  The backtest already imports StrategyConfig
+    from this module via slot_config.py, so adding the sig function here is the
+    least-surprise location and avoids a new intermediary module.
+    """
+    params: dict[str, Any] = {
+        "strategy_type": strategy_cfg.strategy_type,
+        "paper_mode": strategy_cfg.paper_mode,
+        "reference_symbol": strategy_cfg.reference_symbol,
+        "reference_sigma_source": strategy_cfg.reference_sigma_source,
+        "defaults": strategy_cfg.defaults.model_dump(),
+        "allowlist_count": len(strategy_cfg.allowlist),
+        "allowlist": [e.model_dump() for e in strategy_cfg.allowlist],
+        "global_risk": strategy_cfg.global_.model_dump(),
+    }
+    if strategy_cfg.theta is not None:
+        params["theta"] = strategy_cfg.theta.model_dump()
+    stable_json = json.dumps(params, sort_keys=True, default=str)
+    return hashlib.sha256(stable_json.encode()).hexdigest()[:16]
 
 
 class _AccountBase(BaseModel):

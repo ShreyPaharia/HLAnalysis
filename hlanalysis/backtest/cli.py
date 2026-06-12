@@ -393,6 +393,10 @@ def _load_run_params(args: argparse.Namespace) -> dict:
             slot_cfg, klass=getattr(args, "slot_class", None)
         )
         args.strategy = strategy_id
+        # Stash the StrategyConfig on args so cmd_run can stamp the shared
+        # config sig (strategy_config_sig) in the report without a second YAML
+        # load. Non-slot runs leave this unset; cmd_run checks with getattr.
+        args._slot_strategy_cfg = slot_cfg
         return params
     if not getattr(args, "config", None) or not getattr(args, "strategy", None):
         raise SystemExit("provide --slot, or both --strategy and --config")
@@ -512,6 +516,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         fills_dir=fills_dir,
         fee_taker=args.fee_taker,
         slippage_bps=args.slippage_bps,
+        # R5: stamp the shared slot config_sig when running from a live slot so
+        # the backtest report hash equals make engine-diag's hash for the same
+        # slot (enables "is this sim comparable to the live slot?" verification).
+        slot_strategy_cfg=getattr(args, "_slot_strategy_cfg", None),
     )
     # Concatenate per-question parquets into a single top-level
     # diagnostics.parquet / fills.parquet for downstream tooling.

@@ -12,12 +12,15 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import pyarrow.parquet as pq
 
 from .core.data_source import QuestionDescriptor
 from .runner.result import RunSummary
+
+if TYPE_CHECKING:
+    from hlanalysis.engine.config import StrategyConfig
 
 
 def _ts_ns_to_date_utc(ts_ns: int) -> str:
@@ -126,7 +129,20 @@ def write_single_run_report(
     fills_dir: Optional[Path] = None,
     fee_taker: float = 0.0,
     slippage_bps: float = 0.0,
+    slot_strategy_cfg: Optional["StrategyConfig"] = None,
 ) -> Path:
+    """Write report.md for a single backtest run.
+
+    When ``slot_strategy_cfg`` is provided (a ``--slot`` run), the report
+    additionally stamps a ``slot config_sig`` line whose hex value equals
+    ``strategy_config_sig(slot_strategy_cfg)`` — the same hash that
+    ``make engine-diag`` produces for the same live slot.  This lets an operator
+    confirm "this sim result was generated from the same config as the live slot"
+    by comparing the two hex values.
+
+    For non-slot runs (``--strategy``/``--config``), ``slot_strategy_cfg`` is
+    ``None`` and the line is omitted.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg_hash = _config_hash(config_summary)
     if descriptors:
@@ -135,6 +151,13 @@ def write_single_run_report(
         data_range = f"{_ts_ns_to_date_utc(min_ts)} UTC → {_ts_ns_to_date_utc(max_ts)} UTC"
     else:
         data_range = "n/a"
+
+    # Compute the shared slot config sig when running from a live slot.
+    slot_sig_line = ""
+    if slot_strategy_cfg is not None:
+        from hlanalysis.engine.config import strategy_config_sig
+        slot_sig = strategy_config_sig(slot_strategy_cfg)
+        slot_sig_line = f"- **slot config_sig:** `{slot_sig}`\n"
 
     rows = [
         _compute_market_row(d, pnl, fills_dir, outcome)
@@ -150,7 +173,9 @@ def write_single_run_report(
         f"- **questions:** {len(descriptors)}\n"
         f"- **fee_taker:** {fee_taker}\n"
         f"- **slippage_bps:** {slippage_bps}\n"
-        f"- **config SHA-256:** `{cfg_hash}`\n\n"
+        f"- **config SHA-256:** `{cfg_hash}`\n"
+        + slot_sig_line
+        + "\n"
         "## Summary\n\n"
         f"- questions: {summary.n_markets}\n"
         f"- trades: {summary.n_trades}\n"
