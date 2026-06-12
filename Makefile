@@ -1,4 +1,4 @@
-.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy deploy-recorder deploy-engine engine-local install-engine-on-ec2 push-engine-secrets ssh-ec2 status engine-status logs engine-logs engine-diag reconcile-report engine-events query data-summary pull-data daily-report help
+.PHONY: cdk-bootstrap cdk-deploy cdk-diff cdk-destroy deploy deploy-recorder deploy-engine engine-local install-engine-on-ec2 push-engine-secrets ssh-ec2 status engine-status logs engine-logs engine-diag reconcile-report engine-events query data-summary pull-data daily-report parity-gate help
 
 # Stack name
 STACK_NAME=HLRecorderStack
@@ -317,6 +317,15 @@ pull-data:
 #   make daily-report ARGS="--day 2026-06-10 --slots v1,v31"
 daily-report:
 	@uv run python tools/daily_report.py --pull $(ARGS)
+
+# CI parity gate — enforces engine↔sim decision-level equivalence on the
+# committed hl_hip4 fixture. No network, no venue, hermetic and deterministic.
+# Run before merging any change that touches the engine evaluation path or
+# the backtest sim path. Measured baseline (2026-06-12):
+#   decision_match_rate = 2.7%  (structural: engine has no pos tracking)
+#   sigma median_rel    = 0.00  (exact match at comparable scan points)
+parity-gate:
+	uv run pytest -q tests/unit/parity/test_ci_decision_parity_gate.py
 
 # Help
 help:
