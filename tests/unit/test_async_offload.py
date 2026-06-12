@@ -75,8 +75,10 @@ class RecordingExecClient:
         self.fills_thread = threading.get_ident()
         return []
 
-    def realized_pnl_since(self, since_ts_ns: int) -> float:
+    def realized_pnl_since(self, since_ts_ns: int, *,
+                           outcome_only: bool = False) -> float:
         self.pnl_thread = threading.get_ident()
+        self.pnl_outcome_only = outcome_only
         return 0.0
 
 
@@ -215,6 +217,23 @@ async def test_realized_pnl_today_runs_off_event_loop_thread(tmp_path):
     assert client.pnl_thread != loop_thread, (
         "exec_client.realized_pnl_since() ran on the event-loop thread — must "
         "be offloaded via asyncio.to_thread()."
+    )
+
+
+@pytest.mark.asyncio
+async def test_daily_loss_gate_reads_outcome_only_pnl(tmp_path):
+    """The daily-loss gate must source realized PnL with outcome_only=True so the
+    operator's NON-strategy manual trading on the same HL account (perps, ordinary
+    spot — e.g. a −$394 HYPE day) cannot false-halt (or mask losses in) the
+    strategy. The strategy only trades HIP-4 binary outcome markets (coin "#N")."""
+    rt, slot = _build_runtime_with_recording(tmp_path)
+    client = slot.exec_client
+
+    await rt._realized_pnl_today(slot, now_ns=10_000_000_000_000_000)
+
+    assert client.pnl_outcome_only is True, (
+        "daily-loss gate summed ALL coins (incl. manual perp/spot), not just the "
+        "strategy's '#' outcome markets"
     )
 
 

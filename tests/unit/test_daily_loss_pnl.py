@@ -29,7 +29,7 @@ async def test_daily_pnl_hl_uses_venue_only(tmp_path):
     # NOT add the persisted settlement again (no double-count, no mis-sign).
     rt, slot = _build_runtime_with_recording(tmp_path)
     assert slot.is_pm is False  # default builder is an HL slot
-    slot.exec_client.realized_pnl_since = lambda ns: -10.0  # venue (incl. settle)
+    slot.exec_client.realized_pnl_since = lambda ns, **_kw: -10.0  # venue (incl. settle)
     slot.dal.record_settlement(question_idx=1, symbol="@30",
                                realized_pnl=-50.0, ts_ns=_NOW)
 
@@ -43,7 +43,7 @@ async def test_daily_pnl_pm_adds_persisted_settlement(tmp_path):
     # PM: redeem is not a fill, so the persisted settlement must be added.
     rt, slot = _build_runtime_with_recording(tmp_path)
     slot.venue = "polymarket"  # flip the single venue predicate → PM path
-    slot.exec_client.realized_pnl_since = lambda ns: -10.0  # venue fills only
+    slot.exec_client.realized_pnl_since = lambda ns, **_kw: -10.0  # venue fills only
     slot.dal.record_settlement(question_idx=1, symbol="@30",
                                realized_pnl=-50.0, ts_ns=_NOW)
 
@@ -57,7 +57,7 @@ async def test_venue_failure_uses_settlement_inclusive_dal_then_halts(tmp_path):
     rt, slot = _build_runtime_with_recording(tmp_path)
     rt.daily_loss_venue_fail_halt = 2
 
-    def _boom(ns):
+    def _boom(ns, **_kw):
         raise RuntimeError("HL down")
 
     slot.exec_client.realized_pnl_since = _boom
@@ -81,7 +81,7 @@ async def test_venue_success_resets_failure_streak(tmp_path):
     rt.daily_loss_venue_fail_halt = 2
     calls = {"n": 0}
 
-    def _flaky(ns):
+    def _flaky(ns, **_kw):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("blip")

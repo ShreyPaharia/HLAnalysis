@@ -486,8 +486,12 @@ class EngineRuntime:
             # Daily-loss cap reads from HL (venue truth) rather than the local
             # DB. The DB's realized_pnl is structurally near-zero — fills aren't
             # persisted on the happy path and closed positions are deleted —
-            # so without this the cap would never fire.
-            pnl_provider=exec_client.realized_pnl_since,
+            # so without this the cap would never fire. outcome_only=True so the
+            # operator's NON-strategy manual perp/spot trades on the same account
+            # can't false-halt (or mask losses in) the strategy (no-op for PM).
+            pnl_provider=lambda ts: exec_client.realized_pnl_since(
+                ts, outcome_only=True,
+            ),
             gate_log_path=gate_log_path,
         )
         return AccountSlot(
@@ -830,6 +834,7 @@ class EngineRuntime:
         try:
             venue_pnl = await asyncio.to_thread(
                 slot.exec_client.realized_pnl_since, window_start_ns,
+                outcome_only=True,
             )
             self._venue_pnl_failures[slot.alias] = 0
             if slot.is_pm:

@@ -47,7 +47,7 @@ async def test_daily_loss_breach_latches_halt_and_writes_flag(tmp_path):
     # Pretend cap is $200 and today we lost $250.
     slot.cfg.global_.__class__.__dict__  # just reference to confirm attribute
     # daily_loss_cap_usd = 200 (from _build_runtime_with_recording)
-    slot.exec_client.realized_pnl_since = lambda _ns: -250.0
+    slot.exec_client.realized_pnl_since = lambda _ns, **_kw: -250.0
 
     # Collect published events
     sub = rt.bus.subscribe()
@@ -79,7 +79,7 @@ async def test_daily_loss_latch_does_not_auto_clear(tmp_path):
     """The latch must NOT auto-clear on the next cycle. Only operator
     removal of the flag file should resume the slot."""
     rt, slot = _build_runtime_with_recording(tmp_path)
-    slot.exec_client.realized_pnl_since = lambda _ns: -9999.0
+    slot.exec_client.realized_pnl_since = lambda _ns, **_kw: -9999.0
 
     # First cycle — breach
     pnl = await rt._realized_pnl_today(slot, now_ns=_NOW)
@@ -92,7 +92,7 @@ async def test_daily_loss_latch_does_not_auto_clear(tmp_path):
     assert slot.kill_switch_path.exists()
 
     # Second cycle — PnL "recovers" (shouldn't matter — latch is permanent)
-    slot.exec_client.realized_pnl_since = lambda _ns: 0.0
+    slot.exec_client.realized_pnl_since = lambda _ns, **_kw: 0.0
     pnl2 = await rt._realized_pnl_today(slot, now_ns=_NOW + 1)
     assert pnl2 == pytest.approx(0.0)
 
@@ -362,7 +362,7 @@ async def test_continuous_checks_loop_latches_and_writes_flag(tmp_path):
     the cap; verify slot.halted + flag file after one iteration."""
     rt, slot = _build_runtime_with_recording(tmp_path)
     # cap = 200; breaching loss
-    slot.exec_client.realized_pnl_since = lambda _ns: -300.0
+    slot.exec_client.realized_pnl_since = lambda _ns, **_kw: -300.0
 
     # Stop the loop after one full iteration
     rt.stop_event = asyncio.Event()
