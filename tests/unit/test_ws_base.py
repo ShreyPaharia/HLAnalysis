@@ -249,6 +249,49 @@ async def test_decode_failure_warning_emitted_at_threshold(caplog):
     )
 
 
+@pytest.mark.asyncio
+async def test_real_polymarket_adapter_counts_decode_failures():
+    """Regression: the REAL PolymarketAdapter overrides __init__; a malformed
+    frame must not crash with AttributeError on a missing decode_failures.
+
+    The _Tiny stub used above inherits the base init, so it never exercised the
+    super()-skipping subclass. PolymarketAdapter does — the first bad live frame
+    would have raised AttributeError and killed the PM stream. decode_failures is
+    now a class-attribute default + PM calls super().__init__()."""
+    from hlanalysis.adapters.polymarket import PolymarketAdapter
+
+    a = PolymarketAdapter(ws_factory=lambda url: None, gamma_client=object())
+    assert a.decode_failures == 0  # attribute exists pre-increment
+    a.stale_timeout_s = 0.01  # return promptly once the stream goes silent
+
+    n_bad = 3
+    await asyncio.wait_for(
+        a._recv_until_stale(_MalformedFramesWS(n_bad), lambda m, t: [], "x",
+                            asyncio.Queue()),
+        timeout=2.0,
+    )
+    assert a.decode_failures == n_bad
+
+
+@pytest.mark.parametrize("adapter_path", [
+    "hlanalysis.adapters.polymarket:PolymarketAdapter",
+    "hlanalysis.adapters.binance:BinanceAdapter",
+    "hlanalysis.adapters.hyperliquid:HyperliquidAdapter",
+])
+def test_all_adapters_initialize_decode_failures(adapter_path):
+    """Every concrete adapter must expose decode_failures == 0 on a fresh
+    instance, regardless of whether it overrides __init__."""
+    import importlib
+    mod_name, cls_name = adapter_path.split(":")
+    cls = getattr(importlib.import_module(mod_name), cls_name)
+    # default-constructible with stubs; only the attribute presence matters
+    try:
+        inst = cls()
+    except TypeError:
+        inst = cls(ws_factory=lambda url: None, gamma_client=object())
+    assert inst.decode_failures == 0
+
+
 # ---------------------------------------------------------------------------
 # Fix 1: hyperliquid._fetch_outcome_meta must pass a (connect, read) tuple.
 # ---------------------------------------------------------------------------

@@ -59,9 +59,11 @@ class BaseWsAdapter(VenueAdapter):
     # threshold, and keep an instance counter so ops can see it in metrics.
     _decode_fail_warn_threshold: int = 5
     _decode_fail_warn_every: int = 100
-
-    def __init__(self) -> None:
-        self.decode_failures: int = 0
+    # Class-attribute default so the counter exists even for subclasses that
+    # override __init__ without calling super() (e.g. PolymarketAdapter). On an
+    # int, `self.decode_failures += 1` rebinds a per-instance attribute, so there
+    # is no cross-instance sharing — each adapter counts its own bad frames.
+    decode_failures: int = 0
 
     # Reconnect circuit-breaker: if this many reconnects happen within the
     # window, sleep a long cooldown instead of thrashing. Tripped during the

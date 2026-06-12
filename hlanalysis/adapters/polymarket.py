@@ -66,6 +66,7 @@ class PolymarketAdapter(BaseWsAdapter):
         ws_factory: Callable[[str], Any] | None = None,
         gamma_client: GammaClient | None = None,
     ) -> None:
+        super().__init__()
         self._ws_factory = ws_factory or (
             lambda url: websockets.connect(url, ping_interval=30)
         )
