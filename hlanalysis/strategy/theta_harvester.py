@@ -7,6 +7,7 @@ from typing import Optional
 
 import numpy as np
 from loguru import logger
+from pydantic import BaseModel, ConfigDict
 from scipy.stats import norm  # type: ignore[import-untyped]
 
 from .base import Strategy
@@ -149,6 +150,66 @@ def _jr_trust_weight(recent_returns: tuple[float, ...], lookback_min: int) -> fl
     bpv = (np.pi / 2.0) * float(np.sum(abs_r[1:] * abs_r[:-1]))
     jr = max(0.0, min(1.0, (rv - bpv) / rv))
     return 1.0 - jr
+
+
+class ThetaHarvesterParams(BaseModel):
+    """Pydantic model declaring every *optional* theta_harvester knob with its
+    canonical default.  This is the SINGLE SOURCE OF TRUTH for those defaults:
+
+    * ``ThetaParams`` (engine/config.py) inherits from this model — adding
+      a knob here automatically makes it settable in the live YAML ``theta:``
+      block with no separate declaration on ``ThetaParams``.
+    * ``ThetaHarvesterConfig`` (the frozen dataclass below) carries the same
+      field with the same default for the runtime strategy — enforced by
+      ``tests/unit/test_theta_config_parity.py``.
+
+    Adding one new optional knob therefore requires exactly two edits:
+      1. Add the field here (with its canonical default).
+      2. Add the same field to ThetaHarvesterConfig below.
+    ThetaParams automatically inherits step 1; the parity test enforces step 2.
+
+    Fields NOT declared here (they stay on ThetaParams directly):
+    * Required-in-dataclass but defaulted-in-YAML fields: vol_lookback_seconds,
+      vol_sampling_dt_seconds, vol_clip_min, vol_clip_max, edge_buffer,
+      fee_taker, half_spread_assumption, drift_lookback_seconds, drift_blend,
+      favorite_threshold, exit_edge_threshold, take_profit_price,
+      time_stop_seconds. These have no dataclass default — ThetaParams must
+      always supply them; they live on ThetaParams only, not here.
+    * Allowlist-sourced fields: max_position_usd, tte_min_seconds,
+      tte_max_seconds, stop_loss_pct. The live builder reads these from the
+      strategy's ``defaults:`` block, not the ``theta:`` block.
+    """
+    model_config = ConfigDict(frozen=True)
+
+    # === optional: entry edge filters ===
+    edge_max: Optional[float] = None
+    min_distance_pct: Optional[float] = None
+    min_bid_notional_usd: float = 0.0
+    gamma_lambda: Optional[float] = None
+    # === optional: position topup ===
+    topup_enabled: bool = True
+    topup_threshold_pct: float = 0.2
+    topup_min_notional_usd: float = 11.0
+    # === optional: exit extras / vol estimator / jump gate ===
+    exit_safety_d: float = 0.0
+    vol_estimator: str = "sample_std"
+    lm_threshold: Optional[float] = None
+    exit_take_profit_mode: bool = False
+    exit_fee: float = 0.0007
+    # === optional: fee model ===
+    fee_model: str = "flat"
+    fee_rate: float = 0.0
+    # === optional: momentum / mean-reversion ===
+    momentum_mr_enabled: bool = False
+    momentum_mr_indicator: str = "z_ret"
+    momentum_mr_lookback_min: int = 15
+    momentum_mr_mode: str = "gate"
+    momentum_mr_tau_gate: float = 1.0
+    momentum_mr_alpha_tilt: float = 0.5
+    momentum_mr_jr_trust_weight: bool = False
+    # === SHR-102: bucket doom-loop fix (flag-gated, OFF BY DEFAULT) ===
+    entry_spread_gate: bool = False
+    exit_spread_hold: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

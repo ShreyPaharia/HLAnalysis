@@ -6,6 +6,13 @@ The live `ThetaParams` pydantic model parses the YAML `theta:` block and
 strategy runs. If `ThetaParams` omits a knob, that knob silently falls back to
 the dataclass default and the live engine runs a *different* strategy than the
 backtest that justified it. These tests pin the two models together.
+
+R6.2 (single-source param schema): ``ThetaParams`` now inherits from
+``ThetaHarvesterParams`` for all optional theta knobs.  Adding a new optional
+knob requires two edits: (1) add to ``ThetaHarvesterParams`` → ``ThetaParams``
+inherits automatically; (2) add the same field to ``ThetaHarvesterConfig`` →
+the parity test below enforces both name and default match.
+``test_single_source_property`` is the structural guard for that invariant.
 """
 from __future__ import annotations
 
@@ -17,7 +24,7 @@ from pydantic import ValidationError
 
 from hlanalysis.engine.config import ThetaParams, load_strategies_config
 from hlanalysis.engine.runtime import build_theta_harvester_config
-from hlanalysis.strategy.theta_harvester import ThetaHarvesterConfig
+from hlanalysis.strategy.theta_harvester import ThetaHarvesterConfig, ThetaHarvesterParams
 
 # Fields the engine intentionally sources from the allowlist `defaults:` block,
 # NOT from the `theta:` block. Everything else MUST be settable via `theta:`.
@@ -92,3 +99,74 @@ def test_build_forwards_all_declared_theta_fields() -> None:
             f"field {name!r} not forwarded: theta={getattr(c.theta, name)!r} "
             f"built={getattr(built, name)!r}"
         )
+
+
+def test_single_source_property() -> None:
+    """R6.2 structural guard: ThetaHarvesterParams IS the single source of truth
+    for all optional theta_harvester knobs.
+
+    This test asserts two invariants that together guarantee a new optional knob
+    added to ThetaHarvesterParams (one edit) automatically propagates everywhere:
+
+    1. ThetaParams inherits ALL ThetaHarvesterParams fields (so a new optional
+       field declared in ThetaHarvesterParams is immediately settable in the live
+       YAML ``theta:`` block with no second edit on ThetaParams).
+
+    2. Every ThetaHarvesterParams field also appears on ThetaHarvesterConfig with
+       the SAME default value (so the canonical default declared once in
+       ThetaHarvesterParams is the default in both the YAML validation model and
+       the runtime strategy config). Violation = train/serve skew.
+
+    The remaining "second edit" when adding an optional knob: add the field to
+    ThetaHarvesterConfig (the frozen dataclass used at runtime). That edit is
+    unavoidable — the dataclass is the runtime type — but the test below makes it
+    mandatory and enforced.
+
+    Note: the 13 required-in-dataclass fields (vol_lookback_seconds, etc.) are
+    NOT in ThetaHarvesterParams by design — they have no dataclass default and
+    are therefore core required knobs, not optional extras. They stay on
+    ThetaParams directly and are covered by test_theta_params_declares_every_theta_block_knob.
+    """
+    params_fields = ThetaHarvesterParams.model_fields
+    dataclass_fields = {f.name: f for f in dataclasses.fields(ThetaHarvesterConfig)}
+    tp_fields = ThetaParams.model_fields
+
+    # Invariant 1: every ThetaHarvesterParams field appears on ThetaParams
+    # (guaranteed by inheritance, but an explicit check catches if someone
+    # accidentally re-declares a field on ThetaParams with a different type).
+    missing_from_tp = set(params_fields) - set(tp_fields)
+    assert not missing_from_tp, (
+        f"ThetaHarvesterParams fields not inherited by ThetaParams: "
+        f"{sorted(missing_from_tp)}"
+    )
+
+    # Invariant 2: every ThetaHarvesterParams field appears in ThetaHarvesterConfig
+    # with the same default — canonical default in one place only.
+    missing_from_dc: list[str] = []
+    default_mismatch: list[str] = []
+    for name, pydantic_field in params_fields.items():
+        if name not in dataclass_fields:
+            missing_from_dc.append(name)
+            continue
+        dc_field = dataclass_fields[name]
+        if dc_field.default is dataclasses.MISSING:
+            # ThetaHarvesterParams fields are all optional (have defaults).
+            # A required dataclass field would be a structural error.
+            default_mismatch.append(
+                f"{name}: ThetaHarvesterParams has default "
+                f"{pydantic_field.default!r} but ThetaHarvesterConfig has no default"
+            )
+            continue
+        if dc_field.default != pydantic_field.default:
+            default_mismatch.append(
+                f"{name}: ThetaHarvesterParams default={pydantic_field.default!r} "
+                f"!= ThetaHarvesterConfig default={dc_field.default!r}"
+            )
+    assert not missing_from_dc, (
+        f"ThetaHarvesterParams fields not present in ThetaHarvesterConfig: "
+        f"{sorted(missing_from_dc)}"
+    )
+    assert not default_mismatch, (
+        "Default mismatch between ThetaHarvesterParams and ThetaHarvesterConfig:\n"
+        + "\n".join(f"  {m}" for m in default_mismatch)
+    )

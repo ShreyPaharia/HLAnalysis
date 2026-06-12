@@ -11,6 +11,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..strategy.late_resolution import LateResolutionParams
+from ..strategy.theta_harvester import ThetaHarvesterParams
 
 _ENV_RE = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
@@ -117,18 +118,36 @@ class GlobalRiskConfig(BaseModel):
     stop_loss_loop_enabled: bool = False
 
 
-class ThetaParams(BaseModel):
+class ThetaParams(ThetaHarvesterParams):
     """v3.1 theta_harvester knobs. Only consumed when strategy_type='theta_harvester'.
 
-    Complete mirror of every ThetaHarvesterConfig field EXCEPT the handful the
-    engine sources from the allowlist `defaults:` block (max_position_usd,
-    tte_min_seconds, tte_max_seconds, stop_loss_pct). A field missing here would
-    be silently unsettable from YAML and fall back to the dataclass default —
-    train/serve skew (SHR-65). `tests/unit/test_theta_config_parity.py` pins the
-    two models together; `extra='forbid'` makes a typo'd knob fail loudly at
-    load instead of being dropped.
+    Inherits all optional theta_harvester knobs from ThetaHarvesterParams —
+    the single source of truth for those defaults. Adding a new optional theta
+    knob to ThetaHarvesterParams automatically makes it settable in the live
+    YAML ``theta:`` block with no edit to this class.
+
+    Declares the 13 non-optional-but-defaulted-in-YAML fields directly here:
+    these fields are required in ThetaHarvesterConfig (no dataclass default) but
+    always populated from YAML with a sensible default. They do NOT belong in
+    ThetaHarvesterParams because they are required knobs, not optional extras.
+
+    The four allowlist-sourced fields (max_position_usd, tte_min_seconds,
+    tte_max_seconds, stop_loss_pct) are excluded from both; the live builder
+    reads them from the ``defaults:`` block.
+
+    `extra='forbid'` makes a typo'd knob fail loudly at load instead of being
+    dropped (SHR-65). `tests/unit/test_theta_config_parity.py` guards the
+    mirror; `test_single_source_property` guards the inheritance structure.
     """
+    # extra='forbid' stays on ThetaParams (not on ThetaHarvesterParams) so the
+    # base model itself stays permissive — ThetaHarvesterParams is also used as a
+    # mixin base for theta_overrides entries, which share the same extra='forbid'
+    # via ThetaParams. The base's frozen=True is sufficient for its own use.
     model_config = ConfigDict(frozen=True, extra="forbid")
+    # === required-in-dataclass fields (no ThetaHarvesterConfig default) ===
+    # These always have a value in the YAML `theta:` block; defaults here are
+    # the canonical live baseline values. Not in ThetaHarvesterParams because
+    # they are required core knobs, not optional feature gates.
     vol_lookback_seconds: int = 3600
     vol_sampling_dt_seconds: int = 60
     vol_clip_min: float = 0.05
@@ -142,51 +161,6 @@ class ThetaParams(BaseModel):
     exit_edge_threshold: float = 0.0
     take_profit_price: float | None = None
     time_stop_seconds: int = 0
-    edge_max: float | None = None
-    # See ThetaHarvesterConfig.min_distance_pct — None disables.
-    min_distance_pct: float | None = None
-    # See ThetaHarvesterConfig.min_bid_notional_usd — 0 disables.
-    min_bid_notional_usd: float = 0.0
-    # See ThetaHarvesterConfig.gamma_lambda — None disables.
-    gamma_lambda: float | None = None
-    # See ThetaHarvesterConfig.topup_* — strategy-side topup of partial-fill
-    # positions. Defaults match AllowlistEntry; tune via the YAML `theta:` block
-    # when v3.1 needs different topup behavior than v1.
-    topup_enabled: bool = True
-    topup_threshold_pct: float = 0.2
-    topup_min_notional_usd: float = 11.0
-    # See ThetaHarvesterConfig.exit_take_profit_mode / exit_fee.
-    exit_take_profit_mode: bool = False
-    exit_fee: float = 0.0007
-    # Fee model selector. Plumbed into ThetaHarvesterConfig in Phase 7; the
-    # strategy ignores these fields today, but they MUST round-trip cleanly
-    # through YAML now so the v31_pm slot config is stable across phases.
-    #   "flat"      → existing behaviour: fee = fee_taker (per-leg fixed bps)
-    #   "pm_binary" → Polymarket curve: fee = C · fee_rate · p · (1−p)
-    # Default "flat" / 0.0 preserves HL v31 bit-identically.
-    fee_model: Literal["flat", "pm_binary"] = "flat"
-    fee_rate: float = 0.0
-    # See ThetaHarvesterConfig.exit_safety_d — σ-normalized mid-hold distance
-    # exit. 0.0 disables. config/strategy.yaml ships 1.0 on the live slots;
-    # before SHR-65 this field was undeclared here and silently ran at 0.0.
-    exit_safety_d: float = 0.0
-    # See ThetaHarvesterConfig.vol_estimator — "sample_std" (v3.1 baseline) |
-    # "bipower" (jump-robust BV σ).
-    vol_estimator: str = "sample_std"
-    # See ThetaHarvesterConfig.lm_threshold — Lee-Mykland jump gate. None disables.
-    lm_threshold: float | None = None
-    # See ThetaHarvesterConfig.momentum_mr_* — v3.5/v3.6 momentum/MR gate or tilt.
-    momentum_mr_enabled: bool = False
-    momentum_mr_indicator: str = "z_ret"
-    momentum_mr_lookback_min: int = 15
-    momentum_mr_mode: str = "gate"
-    momentum_mr_tau_gate: float = 1.0
-    momentum_mr_alpha_tilt: float = 0.5
-    momentum_mr_jr_trust_weight: bool = False
-    # SHR-102: bucket doom-loop fix (flag-gated, off by default).
-    # See ThetaHarvesterConfig.entry_spread_gate / exit_spread_hold for semantics.
-    entry_spread_gate: bool = False
-    exit_spread_hold: float = 0.0
 
 
 class StrategyConfig(BaseModel):
