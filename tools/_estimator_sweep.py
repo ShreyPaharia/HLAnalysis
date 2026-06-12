@@ -21,10 +21,14 @@ from pathlib import Path
 ROOT = Path(os.environ["HLBT_HL_DATA_ROOT"])
 OUTROOT = Path("data")
 BBO = ROOT / "venue=hyperliquid/product_type=prediction_binary/mechanism=clob/event=bbo"
-BASE = json.loads(Path("/tmp/v31_binary_base.json").read_text())
+# KIND=binary|bucket; BASE_JSON points at the dumped slot params for that cell.
+KIND = os.environ.get("EST_KIND", "binary")
+BASE = json.loads(Path(os.environ.get(
+    "EST_BASE_JSON", "/tmp/v31_binary_base.json")).read_text())
 assert BASE.get("vol_estimator", "sample_std") == "sample_std", BASE.get("vol_estimator")
 BIPOWER = {**BASE, "vol_estimator": "bipower"}
 CONCURRENCY = 6
+_TAG = KIND[:3]
 
 
 def settlement_days() -> list[str]:
@@ -37,13 +41,13 @@ def settlement_days() -> list[str]:
 
 def run_cell(day: str, name: str, cfg: dict) -> tuple[str, str, int, float, float]:
     end = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
-    cf = f"/tmp/est_{name}.json"
+    cf = f"/tmp/est_{_TAG}_{name}.json"
     Path(cf).write_text(json.dumps(cfg))
-    out = OUTROOT / "sim/runs" / f"est_{name}_{day}"
+    out = OUTROOT / "sim/runs" / f"est_{_TAG}_{name}_{day}"
     env = {**os.environ, "HLBT_HL_DATA_ROOT": str(ROOT), "LOGURU_LEVEL": "ERROR"}
     subprocess.run(
         ["hl-bt", "run", "--strategy", "v3_theta_harvester", "--config", cf,
-         "--kind", "binary", "--data-source", "hl_hip4", "--ref-source", "hl_perp",
+         "--kind", KIND, "--data-source", "hl_hip4", "--ref-source", "hl_perp",
          "--ref-event", "mark", "--reference-ticks", "raw", "--scan-mode", "event",
          "--fee-taker", "0.0", "--slippage-bps", "0", "--no-cache",
          "--start", day, "--end", end, "--out-dir", str(out)],
