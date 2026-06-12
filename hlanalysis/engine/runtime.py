@@ -10,33 +10,31 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import aiohttp
-import msgspec
 from loguru import logger
 
 from ..adapters.base import VenueAdapter
 from ..adapters.binance_klines import binance_1m_close_at
+from ..alerts.rules import AlertRules
+from ..alerts.telegram import TelegramClient
 from ..config import Subscription
 from ..events import (
     BboEvent,
     BookDeltaEvent,
     BookSnapshotEvent,
     MarkEvent,
-    NormalizedEvent,
-    ProductType,
     TradeEvent,
 )
-
-# Event classes that move a price/book and should wake the scan + stop-loss
-# loops (P1). QuestionMetaEvent / SettlementEvent do not move prices, so they
-# don't trigger an immediate re-scan (the idle max-interval floor still covers
-# their time-based effects).
-_PRICE_EVENT_TYPES = (
-    BboEvent, BookSnapshotEvent, BookDeltaEvent, MarkEvent, TradeEvent,
-)
-from ..alerts.rules import AlertRules
-from ..alerts.telegram import TelegramClient
-from ..marketdata.position_math import DUST_QTY_ABS_TOL
 from ..strategy.base import Strategy
+from ._runtime_helpers import (  # noqa: F401  (re-exported for back-compat)
+    _SPOT_REF_SYMBOLS,
+    _is_transient_venue_error,
+    _remap_reference_symbol,
+    _stub_question,
+)
+from ._slot_builder import build_slot as _build_slot_fn
+from ._slot_builder import register_reference_cadences as _register_reference_cadences_fn
+from ._venue_io import realized_pnl_today as _realized_pnl_today_fn
+from ._venue_io import venue_snapshot as _venue_snapshot_fn
 from .config import (
     AccountConfig,
     DeployConfig,
@@ -95,48 +93,28 @@ from .scanner import Scanner
 from .state import (
     FILL_SOURCE_ROUTER,
     FILL_SOURCE_VENUE,
-    CachedStateDAL,
     StateDAL,
 )
 from .trade_journal import HaltSnapshot, TradeJournal
+
+# Event classes that move a price/book and should wake the scan + stop-loss
+# loops (P1). QuestionMetaEvent / SettlementEvent do not move prices, so they
+# don't trigger an immediate re-scan (the idle max-interval floor still covers
+# their time-based effects).
+_PRICE_EVENT_TYPES = (
+    BboEvent, BookSnapshotEvent, BookDeltaEvent, MarkEvent, TradeEvent,
+)
 
 # Map of Binance SPOT symbols → internal remapped symbols used in MarketState.
 # PM strategy slots reference these via `reference_symbol: <SYMBOL>_SPOT` in
 # config/strategy.yaml — those YAML strings MUST match these values exactly, or
 # the slot reads an empty book.
-_SPOT_REF_SYMBOLS = {"BTCUSDT": "BTCUSDT_SPOT", "ETHUSDT": "ETHUSDT_SPOT"}
+# _SPOT_REF_SYMBOLS is single-sourced in _runtime_helpers (imported above) so
+# the remap map can't drift between the two modules.
 # Back-compat alias: callers (pm_strike.py, tests) that reference the BTC
 # constant by name keep working without changes.
 _SPOT_REF_SYMBOL = _SPOT_REF_SYMBOLS["BTCUSDT"]
 
-
-def _is_transient_venue_error(exc: BaseException) -> bool:
-    """True for expected, self-recovering venue read failures the client's
-    read-retry already exhausted — HL 429 rate limits, connection blips, 5xx.
-
-    The reconcile loop uses this to log such failures concisely and retry next
-    cycle, rather than emitting a full ``reconcile crashed`` traceback for
-    routine venue flakiness (e.g. HL 429 bursts when two slots poll /info from
-    one IP). Genuine, non-transient errors still surface with a full traceback.
-
-    Covers both venues: HL's RateLimitError plus the PM client's own
-    transient classifier (requests/builtin conn+timeout, HTTP 5xx and 429)."""
-    from .hl_client import RateLimitError
-    from .pm_client import _pm_is_transient
-    if isinstance(exc, (RateLimitError, ConnectionError, TimeoutError)):
-        return True
-    return _pm_is_transient(exc)
-
-
-def _remap_reference_symbol(ev: NormalizedEvent) -> NormalizedEvent:
-    """Rename Binance SPOT bbo events to ``<symbol>_SPOT`` so PM slots'
-    ``reference_symbol`` resolves to the spot feed (not any perp entry).
-    No-op for every other event."""
-    if ev.venue == "binance" and ev.product_type == ProductType.SPOT:
-        mapped = _SPOT_REF_SYMBOLS.get(ev.symbol)
-        if mapped is not None:
-            return msgspec.structs.replace(ev, symbol=mapped)
-    return ev
 
 
 @dataclass
@@ -416,104 +394,21 @@ class EngineRuntime:
         ``from_engine`` (the shared decision-input resolver). The output is
         identical to the previous inline reads — this is a pure refactor,
         bit-identical behaviour is guaranteed by the SHR-87 and SHR-97 gates.
-        """
-        from ..marketdata.decision_input import from_engine
 
-        for slot in slots:
-            sym = slot.cfg.reference_symbol
-            dic = from_engine(slot.cfg)
-            self.market_state.set_reference_cadence(
-                sym,
-                sampling_dt_seconds=dic.sampling_dt_seconds,
-                lookback_seconds=dic.vol_lookback_seconds,
-            )
-            for dt_s, _n in Scanner.cadence_by_class(slot.cfg).values():
-                self.market_state.set_reference_cadence(
-                    sym,
-                    sampling_dt_seconds=dt_s,
-                    lookback_seconds=dic.vol_lookback_seconds,
-                )
-            # Couple the σ/OHLC source (mark | bbo) per reference symbol. Unlike
-            # the cadence (which now accepts multiple per symbol), the source is
-            # fail-fast: slots sharing a symbol must agree on one σ source.
-            # Default "mark" preserves HL behaviour bit-identically.
-            self.market_state.set_reference_source(
-                sym, dic.reference_source,
-            )
+        Thin delegator — logic lives in ``_slot_builder.register_reference_cadences``.
+        """
+        _register_reference_cadences_fn(slots, market_state=self.market_state)
 
     # ---------- slot construction ----------
 
     def _build_slot(self, s_cfg: StrategyConfig) -> AccountSlot:
-        alias = s_cfg.account_alias
-        if alias not in self.deploy_cfg.accounts:
-            raise ValueError(
-                f"strategy '{s_cfg.name}' references account_alias={alias!r} but "
-                f"deploy.accounts has only {list(self.deploy_cfg.accounts)}",
-            )
-        acct = self.deploy_cfg.accounts[alias]
-        state_db_path = Path(self.deploy_cfg.state_db_path_for(alias))
-        kill_switch_path = Path(self.deploy_cfg.kill_switch_path_for(alias))
-        cloid_prefix = f"hla-{alias}-"
-
-        # Cached DAL: positions/orders are read every loop wake (esp. under the
-        # event-driven scan, P1); serve those from memory, write through to the
-        # DB. run_migrations FIRST so the lazy cache load sees existing tables.
-        dal = CachedStateDAL(state_db_path)
-        dal.run_migrations()
-
-        if self.exec_client_factory is not None:
-            exec_client = self.exec_client_factory(alias, acct, s_cfg.paper_mode)
-        else:
-            exec_client = build_exec_client(alias, acct, s_cfg.paper_mode)
-
-        risk = RiskGate(s_cfg)
-        # Durable trade journal (SHR-83): persists into the slot's state.db, shared
-        # by the Router (decision/send/reject/fill) and Reconciler (late fills).
-        journal = TradeJournal(dal)
-        # PM market sells floor the share amount to 2dp, stranding sub-0.01 dust
-        # that wedges the position open (2026-06-06 v31_pm). PM slots treat a
-        # reduce landing within that dust of flat as a full close (and suppress
-        # un-sellable dust sells). HL fills the exact size, so it stays ~exact.
-        reduce_close_atol = (
-            DUST_QTY_ABS_TOL if acct.venue == "polymarket" else 1e-9
-        )
-        router = Router(
-            dal=dal, gate=risk, bus=self.bus, exec_client=exec_client,
-            strategy_cfg=s_cfg, strategy_id=s_cfg.name,
-            cloid_prefix=cloid_prefix,
-            reduce_close_atol=reduce_close_atol,
-            journal=journal,
-        )
-        strategy = _build_strategy_for_slot(s_cfg)
-        # Gate-decision log sibling of state.db. Operators tail this during
-        # forward-testing to see which gates are firing without combing
-        # through journal heartbeats. State-change-debounced, so file size
-        # stays small (one line per question per transition).
-        gate_log_path = state_db_path.parent / "gate_decisions.jsonl"
-        scanner = Scanner(
-            strategy=strategy, cfg=s_cfg,
-            market_state=self.market_state, dal=dal,
-            kill_switch_path=kill_switch_path,
-            reference_symbol=s_cfg.reference_symbol,
-            last_reconcile_ns=0,
-            # Daily-loss cap reads from HL (venue truth) rather than the local
-            # DB. The DB's realized_pnl is structurally near-zero — fills aren't
-            # persisted on the happy path and closed positions are deleted —
-            # so without this the cap would never fire. outcome_only=True so the
-            # operator's NON-strategy manual perp/spot trades on the same account
-            # can't false-halt (or mask losses in) the strategy (no-op for PM).
-            pnl_provider=lambda ts: exec_client.realized_pnl_since(
-                ts, outcome_only=True,
-            ),
-            gate_log_path=gate_log_path,
-        )
-        return AccountSlot(
-            cfg=s_cfg, account_cfg=acct, venue=acct.venue,
-            state_db_path=state_db_path, kill_switch_path=kill_switch_path,
-            cloid_prefix=cloid_prefix,
-            dal=dal, exec_client=exec_client, risk=risk, router=router,
-            strategy=strategy, scanner=scanner, journal=journal,
-            pm=PmSlotState() if acct.venue == "polymarket" else None,
+        """Thin delegator — logic lives in ``_slot_builder.build_slot``."""
+        return _build_slot_fn(  # type: ignore[return-value]
+            s_cfg,
+            deploy_cfg=self.deploy_cfg,
+            exec_client_factory=self.exec_client_factory,
+            bus=self.bus,
+            market_state=self.market_state,
         )
 
     # ---------- task bodies ----------
@@ -817,63 +712,17 @@ class EngineRuntime:
     async def _venue_snapshot(
         self, slot: AccountSlot,
     ) -> tuple[list[OpenOrderRow], ClearinghouseState, list[UserFillRow]]:
-        """Fetch venue open-orders, clearinghouse state, and the full fills list
-        off the event loop. Fills are fetched once and reused as the reconcile
-        `fills_lookup` for every cloid — the live lambda ignores its cloid arg
-        and returns all fills anyway, so this is behaviour-preserving."""
-        open_orders = await asyncio.to_thread(slot.exec_client.open_orders)
-        state = await asyncio.to_thread(slot.exec_client.clearinghouse_state)
-        fills = await asyncio.to_thread(slot.exec_client.user_fills)
-        return open_orders, state, fills
+        """Thin delegator — logic lives in ``_venue_io.venue_snapshot``."""
+        return await _venue_snapshot_fn(slot)
 
     async def _realized_pnl_today(self, slot: AccountSlot, *, now_ns: int) -> float:
-        """Realized PnL since the slot's daily window start, for both the Scanner
-        daily-loss read and the continuous-checks cap.
-
-        Venue-truth, no double-count: HL exposes HIP-4 / bucket settlement as a
-        *fill* (`dir="Settlement"`, `closedPnl` populated), so `realized_pnl_since`
-        ALREADY includes the settlement payout — adding the separately-persisted
-        settlement PnL on top double-counts it (and historically mis-signed it
-        for multi-leg buckets: a winning leg booked as a total loss tripped a
-        spurious DAILY LOSS HALT). PM settles via on-chain redeem, which is NOT a
-        CLOB fill, so PM's venue read misses it and the persisted settlement must
-        be added back. On a venue-read failure we fall back to the DAL value (now
-        also settlement-inclusive, no longer structurally zero) and count the
-        failure; after `daily_loss_venue_fail_halt` consecutive failures we latch
-        the slot halted (fail-safe) rather than keep trading venue-blind."""
-        window_start_ns = Scanner._daily_window_start_ns(
-            now_ns, hour=slot.cfg.global_.daily_window_start_hour_utc,
+        """Thin delegator — logic lives in ``_venue_io.realized_pnl_today``."""
+        return await _realized_pnl_today_fn(
+            slot,
+            now_ns=now_ns,
+            venue_pnl_failures=self._venue_pnl_failures,
+            daily_loss_venue_fail_halt=self.daily_loss_venue_fail_halt,
         )
-        try:
-            venue_pnl = await asyncio.to_thread(
-                slot.exec_client.realized_pnl_since, window_start_ns,
-                outcome_only=True,
-            )
-            self._venue_pnl_failures[slot.alias] = 0
-            if slot.is_pm:
-                settlement_pnl = await asyncio.to_thread(
-                    slot.dal.settlement_pnl_since, window_start_ns,
-                )
-                return venue_pnl + settlement_pnl
-            return venue_pnl  # HL: settlement already in venue fills' closedPnl
-        except Exception:
-            n = self._venue_pnl_failures.get(slot.alias, 0) + 1
-            self._venue_pnl_failures[slot.alias] = n
-            logger.warning(
-                "realized_pnl_since failed alias={} (consecutive={}); using "
-                "settlement-inclusive DAL", slot.alias, n,
-            )
-            if n >= self.daily_loss_venue_fail_halt:
-                logger.error(
-                    "venue PnL unreadable for {} consecutive checks; halting "
-                    "slot {} (fail-safe — cap can't be trusted venue-blind)",
-                    n, slot.alias,
-                )
-                slot.halted = True
-            # DAL realized_pnl_since already includes settlement PnL (SHR-53).
-            return await asyncio.to_thread(
-                slot.dal.realized_pnl_since, window_start_ns,
-            )
 
     async def _reconcile_loop(self, slot: AccountSlot) -> None:
         interval = slot.cfg.global_.reconcile_interval_seconds
@@ -1437,9 +1286,3 @@ class EngineRuntime:
         return _t.time_ns()
 
 
-def _stub_question(p):
-    from ..strategy.types import QuestionView
-    return QuestionView(
-        question_idx=p.question_idx, yes_symbol=p.symbol, no_symbol="",
-        strike=0.0, expiry_ns=0, underlying="", klass="", period="",
-    )
