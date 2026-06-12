@@ -236,6 +236,12 @@ class Scanner:
         (Binance spot 1m close) happens off the scan path."""
         if q.venue != "polymarket" or q.question_idx in self._pm_strike_seen:
             return q
+        # Only PM up/down (priceBinary) markets have an async-captured strike.
+        # priceBucket prices each leg off `priceThresholds` and never resolves a
+        # single strike, so mark it seen to skip the per-tick get_pm_strike read.
+        if q.klass != "priceBinary":
+            self._pm_strike_seen.add(q.question_idx)
+            return q
         if q.strike == q.strike:  # already stamped in-memory
             self._pm_strike_seen.add(q.question_idx)
             return q
@@ -322,12 +328,22 @@ class Scanner:
             # already persisted by that path (pure sync, no IO). May re-stamp
             # the shared QuestionView, so re-read q before using it.
             q = self._resolve_pm_strike(q)
-            # No strike → cannot price the market. PM up/down strikes are
-            # captured asynchronously (runtime spot 1m-close); until captured the
-            # strike is NaN. Skip rather than evaluate — a NaN strike makes
-            # safety_d NaN, which the strategy maps to None and would otherwise
-            # silently bypass the safety_d gate. "No strike → no trade."
-            if q.venue == "polymarket" and q.strike != q.strike:  # NaN check
+            # No strike → cannot price the market. PM up/down (priceBinary)
+            # strikes are captured asynchronously (runtime spot 1m-close); until
+            # captured the strike is NaN. Skip rather than evaluate — a NaN
+            # strike makes safety_d NaN, which the strategy maps to None and
+            # would otherwise silently bypass the safety_d gate. "No strike →
+            # no trade." This applies ONLY to priceBinary: PM multi-strike
+            # priceBucket questions have NO single strike (q.strike is ALWAYS
+            # NaN — every leg is priced off `priceThresholds` via
+            # winning_region, not question.strike), so a blanket NaN skip would
+            # silently swallow every bucket leg and the bucket-only slot would
+            # emit zero decisions (v31_pm_eth_ms incident 2026-06-12).
+            if (
+                q.venue == "polymarket"
+                and q.klass == "priceBinary"
+                and q.strike != q.strike  # NaN check
+            ):
                 continue
             # Multi-outcome support: feed every leg of the question to the
             # strategy so it can decide across all sides (priceBucket has 6 legs;

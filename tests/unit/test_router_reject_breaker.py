@@ -146,6 +146,34 @@ class _RejectingExec:
         return 0.0
 
 
+class _BalanceShortfallExec(_RejectingExec):
+    """Rejects every order with PM's CTF *balance* shortfall (SHR-109): the
+    venue says we hold none of the shares the reduce-only exit is selling."""
+
+    def place(self, req: PlaceRequest) -> OrderAck:
+        self.placed.append(req)
+        return OrderAck(
+            cloid=req.cloid, venue_oid="", status="rejected",
+            error=("PolyApiException[status_code=400, 'not enough balance / "
+                   "allowance: the balance is not enough -> balance: 7900, "
+                   "order amount: 58120000']"),
+        )
+
+
+class _AllowanceShortfallExec(_RejectingExec):
+    """Rejects with an ALLOWANCE shortfall — we DO hold the shares but the
+    on-chain CTF approval is missing. Must NOT be detracked."""
+
+    def place(self, req: PlaceRequest) -> OrderAck:
+        self.placed.append(req)
+        return OrderAck(
+            cloid=req.cloid, venue_oid="", status="rejected",
+            error=("PolyApiException[status_code=400, 'not enough balance / "
+                   "allowance: the allowance is not enough -> allowance: 0, "
+                   "order amount: 58120000']"),
+        )
+
+
 class _ScriptedExec(_RejectingExec):
     """Returns a scripted sequence of statuses (one per call), then rejects.
 
@@ -292,4 +320,203 @@ async def test_breaker_scoped_per_question_side_does_not_gag_other_questions(tmp
     assert len(client.placed) == placed_after_q42 + 1, (
         "Exit on q=99 was wrongly suppressed by q=42's tripped breaker. "
         "Breaker scoping (router.py _consecutive_rejects keyed by (qidx, side)) is broken."
+    )
+
+
+# ---------------------------------------------------------------------------
+# SHR-109: time-based auto-reset + un-sellable orphan quarantine.
+# ---------------------------------------------------------------------------
+
+_RESET_S = 300.0
+_SEC_NS = 1_000_000_000
+
+
+def _drain(q) -> list:
+    out = []
+    while not q.empty():
+        out.append(q.get_nowait())
+    return out
+
+
+@pytest.mark.asyncio
+async def test_breaker_auto_resets_after_window(tmp_path):
+    """A tripped breaker on a leg that can never fill must NOT wedge forever:
+    once the reset window elapses since the last reject, exactly ONE re-probe is
+    allowed through, then it re-arms (auto-recovery without a fill).
+    """
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    _held(dal, 42, "@30", 100.0)  # large qty so reduce_only clamp stays inert
+
+    client = _RejectingExec()  # generic reject (not a balance shortfall)
+    cfg = _strategy_cfg()
+    router = Router(
+        dal=dal, gate=RiskGate(cfg), bus=EventBus(),
+        exec_client=client, strategy_cfg=cfg,
+        reject_breaker_threshold=_THRESHOLD,
+        reject_breaker_reset_seconds=_RESET_S,
+    )
+
+    base = 10_000_000_000_000
+    # Trip: 3 placed, 4th suppressed (all within the window).
+    for i in range(4):
+        await router.handle(
+            Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-ar{i}"),)),
+            inputs=_approval_inputs(), now_ns=base + i,
+        )
+    assert len(client.placed) == _THRESHOLD, "breaker should suppress 4th attempt"
+
+    # After the window elapses → exactly ONE re-probe is allowed.
+    after = base + 2 + int(_RESET_S * _SEC_NS) + 1
+    await router.handle(
+        Decision(action=Action.EXIT, intents=(_exit_intent("hla-ar-probe"),)),
+        inputs=_approval_inputs(), now_ns=after,
+    )
+    assert len(client.placed) == _THRESHOLD + 1, (
+        "auto-reset must let one re-probe through once the window elapses"
+    )
+
+    # Immediately after the re-probe (within a fresh window) → suppressed again.
+    await router.handle(
+        Decision(action=Action.EXIT, intents=(_exit_intent("hla-ar-probe2"),)),
+        inputs=_approval_inputs(), now_ns=after + 5,
+    )
+    assert len(client.placed) == _THRESHOLD + 1, (
+        "a second probe within the same window must be suppressed (≤1 per window)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reset_seconds_zero_keeps_permanent_until_fill(tmp_path):
+    """reject_breaker_reset_seconds=0 disables auto-reset (legacy behaviour):
+    once tripped, no amount of elapsed time lets an order through."""
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    _held(dal, 42, "@30", 100.0)
+
+    client = _RejectingExec()
+    cfg = _strategy_cfg()
+    router = Router(
+        dal=dal, gate=RiskGate(cfg), bus=EventBus(),
+        exec_client=client, strategy_cfg=cfg,
+        reject_breaker_threshold=_THRESHOLD,
+        reject_breaker_reset_seconds=0.0,
+    )
+    base = 10_000_000_000_000
+    for i in range(_THRESHOLD):
+        await router.handle(
+            Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-z{i}"),)),
+            inputs=_approval_inputs(), now_ns=base + i,
+        )
+    # An hour later, still suppressed.
+    await router.handle(
+        Decision(action=Action.EXIT, intents=(_exit_intent("hla-z-late"),)),
+        inputs=_approval_inputs(), now_ns=base + 3600 * _SEC_NS,
+    )
+    assert len(client.placed) == _THRESHOLD
+
+
+@pytest.mark.asyncio
+async def test_unsellable_orphan_quarantined_on_balance_shortfall(tmp_path):
+    """SHR-109: when the venue authoritatively reports the CTF balance is short
+    for a reduce-only exit, the breaker trip must DETRACK the stale position so
+    the flood stops and the slot can resume — not retry it forever.
+    """
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    _held(dal, 700064348, "437614505505316", 58.1279)
+
+    bus = EventBus()
+    drift_q = bus.subscribe()
+    client = _BalanceShortfallExec()
+    cfg = _strategy_cfg()
+    router = Router(
+        dal=dal, gate=RiskGate(cfg), bus=bus,
+        exec_client=client, strategy_cfg=cfg,
+        reject_breaker_threshold=_THRESHOLD,
+    )
+
+    inputs = replace(
+        _approval_inputs(),
+        question=replace(_q(), question_idx=700064348, yes_symbol="437614505505316"),
+    )
+    # Threshold consecutive rejects → trip → quarantine deletes the position.
+    for i in range(_THRESHOLD):
+        await router.handle(
+            Decision(action=Action.EXIT, intents=(
+                _exit_intent(f"hla-orph{i}", 700064348, "437614505505316"),)),
+            inputs=inputs, now_ns=10 + i,
+        )
+    assert dal.get_position(700064348) is None, (
+        "un-sellable orphan must be detracked once the breaker trips on a "
+        "balance shortfall"
+    )
+
+    # A drift event records the quarantine for the operator.
+    drifts = [e for e in _drain(drift_q)
+              if getattr(e, "kind", "") == "reconcile_drift"]
+    assert any(
+        e.detail.get("resolution") == "quarantined_unsellable_orphan"
+        for e in drifts
+    ), "expected a quarantined_unsellable_orphan drift event"
+
+    # Further exits no longer hit the venue (position gone → reduce_only suppressed).
+    placed_before = len(client.placed)
+    await router.handle(
+        Decision(action=Action.EXIT, intents=(
+            _exit_intent("hla-orph-after", 700064348, "437614505505316"),)),
+        inputs=inputs, now_ns=999,
+    )
+    assert len(client.placed) == placed_before, (
+        "after quarantine the strategy must stop re-sending the dead exit"
+    )
+
+
+@pytest.mark.asyncio
+async def test_allowance_shortfall_does_not_detrack(tmp_path):
+    """An ALLOWANCE shortfall means we DO hold the shares but lack the on-chain
+    CTF approval — detracking would abandon a real position. The breaker still
+    trips (flood control) but the position MUST survive."""
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    _held(dal, 42, "@30", 58.13)
+
+    client = _AllowanceShortfallExec()
+    cfg = _strategy_cfg()
+    router = Router(
+        dal=dal, gate=RiskGate(cfg), bus=EventBus(),
+        exec_client=client, strategy_cfg=cfg,
+        reject_breaker_threshold=_THRESHOLD,
+    )
+    for i in range(_THRESHOLD + 2):
+        await router.handle(
+            Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-al{i}"),)),
+            inputs=_approval_inputs(), now_ns=10 + i,
+        )
+    assert dal.get_position(42) is not None, (
+        "allowance shortfall must NOT detrack — we still hold the shares"
+    )
+    # Breaker still bounds the flood at threshold.
+    assert len(client.placed) == _THRESHOLD
+
+
+def test_pm_balance_shortfall_parser():
+    """Unit-pin the error classifier: balance shortfall matches, allowance
+    shortfall and unrelated errors do not."""
+    from hlanalysis.engine.router import _pm_balance_shortfall
+
+    assert _pm_balance_shortfall(
+        "not enough balance / allowance: the balance is not enough -> "
+        "balance: 7900, order amount: 58120000"
+    )
+    assert not _pm_balance_shortfall(
+        "not enough balance / allowance: the allowance is not enough -> "
+        "allowance: 0, order amount: 58120000"
+    )
+    assert not _pm_balance_shortfall("insufficient margin")
+    assert not _pm_balance_shortfall(None)
+    assert not _pm_balance_shortfall("")
+    # Balance present but sufficient (defensive: balance >= order amount).
+    assert not _pm_balance_shortfall(
+        "the balance is not enough -> balance: 99999999, order amount: 100"
     )

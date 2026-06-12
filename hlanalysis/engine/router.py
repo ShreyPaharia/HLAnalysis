@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import replace as _dc_replace
 from pathlib import Path
@@ -14,12 +15,42 @@ from .event_bus import EventBus
 from .exec_client import ExecutionClient
 from .exec_types import PlaceRequest
 from .risk import RiskGate, RiskInputs
-from .risk_events import Entry, Exit, OrderRejected, RiskVeto
+from .risk_events import Entry, Exit, OrderRejected, ReconcileDrift, RiskVeto
 from .state import Fill, OpenOrder, Position, StateDAL
 from .trade_journal import HaltSnapshot, TradeJournal
 from ..marketdata.position_math import PositionState, apply_fill, settle, stop_price
 from ..strategy.render import outcome_description, question_description
 from ..strategy.types import Action, Decision, OrderIntent, QuestionView
+
+
+# Parses Polymarket's CTF *balance* shortfall rejection (SHR-109). The CLOB
+# rejects a reduce-only sell we can't cover with:
+#   "not enough balance / allowance: the balance is not enough ->
+#    balance: 7900, order amount: 58120000"
+# where both numbers are USDC/CTF 1e6 base units. We deliberately require the
+# literal "balance is not enough" branch and balance < order_amount, so an
+# ALLOWANCE shortfall ("the allowance is not enough") does NOT match — there we
+# still HOLD the shares and must not detrack, only fix the on-chain CTF approval.
+_PM_BALANCE_SHORTFALL_RE = re.compile(
+    r"balance is not enough.*?balance:\s*(\d+).*?order amount:\s*(\d+)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _pm_balance_shortfall(error: str | None) -> bool:
+    """True iff a PM CLOB rejection authoritatively reports the on-chain CTF
+    *balance* (not the allowance) is short of the order amount — i.e. the venue
+    says we no longer hold the shares a reduce-only exit is trying to close."""
+    if not error:
+        return False
+    m = _PM_BALANCE_SHORTFALL_RE.search(error)
+    if not m:
+        return False
+    try:
+        balance, order_amount = int(m.group(1)), int(m.group(2))
+    except (TypeError, ValueError):
+        return False
+    return balance < order_amount
 
 
 class Router:
@@ -40,6 +71,7 @@ class Router:
         strategy_id: str = "late_resolution",
         cloid_prefix: str = "hla-",
         reject_breaker_threshold: int = 5,
+        reject_breaker_reset_seconds: float = 300.0,
         reduce_close_atol: float = 1e-9,
         journal: "TradeJournal | None" = None,
     ) -> None:
@@ -90,6 +122,18 @@ class Router:
         # the question (a fill proves the leg is tradeable again).
         self._reject_breaker_threshold = reject_breaker_threshold
         self._consecutive_rejects: dict[tuple[int, str], int] = {}
+        # Time-based auto-reset (SHR-109). A fill is the ONLY other reset, so a
+        # leg whose exit can never fill — e.g. a stale orphan the venue no longer
+        # holds — would otherwise stay tripped FOREVER, wedged with no recovery.
+        # After this many seconds since the last reject for a tripped key we let
+        # exactly ONE order through as a re-probe (the count is not cleared, so a
+        # fresh reject re-arms the full window → at most one order per window,
+        # vs. the pre-fix ~1,200/h flood; a fill clears it via _book_fill). 0
+        # disables the auto-reset (legacy permanent-until-fill behaviour).
+        self._reject_breaker_reset_seconds = reject_breaker_reset_seconds
+        # Wall-clock (ns) of the most recent reject per (qidx, side), driving the
+        # auto-reset window above.
+        self._last_reject_ts: dict[tuple[int, str], int] = {}
 
     def _cooldown_path(self) -> Path:
         return Path(self.dal.db_path).parent / "exit_cooldowns.json"
@@ -309,8 +353,26 @@ class Router:
         # call. A fill on the question resets the count (see _book_fill).
         breaker_key = (intent.question_idx, intent.side)
         if self._consecutive_rejects.get(breaker_key, 0) >= self._reject_breaker_threshold:
-            self._journal_reject(intent.cloid, "reject_breaker_suppressed")
-            return
+            # Tripped. Allow a single re-probe once the auto-reset window has
+            # elapsed since the last reject, so a wedged-but-now-tradeable leg
+            # can recover without a fill (and a permanently-dead one floods at
+            # most one order per window instead of every tick). The count is
+            # NOT cleared here: if the re-probe rejects, _last_reject_ts advances
+            # and the next probe waits another full window; a fill clears it.
+            last = self._last_reject_ts.get(breaker_key, 0)
+            elapsed_s = (now_ns - last) / 1e9 if last else float("inf")
+            if (
+                self._reject_breaker_reset_seconds > 0
+                and elapsed_s >= self._reject_breaker_reset_seconds
+            ):
+                logger.info(
+                    "reject breaker re-probe qidx={} side={} after {:.0f}s idle "
+                    "(tripped, window elapsed)",
+                    intent.question_idx, intent.side, elapsed_s,
+                )
+            else:
+                self._journal_reject(intent.cloid, "reject_breaker_suppressed")
+                return
         # 1. Persist pending row before the network call (spec §5.5 idempotency).
         self.dal.upsert_order(OpenOrder(
             cloid=intent.cloid, venue_oid=None, question_idx=intent.question_idx,
@@ -342,14 +404,29 @@ class Router:
             self._journal_reject(intent.cloid, ack.error or "rejected")
             n = self._consecutive_rejects.get(breaker_key, 0) + 1
             self._consecutive_rejects[breaker_key] = n
+            self._last_reject_ts[breaker_key] = now_ns
             if n == self._reject_breaker_threshold:
                 logger.warning(
                     "reject circuit-breaker TRIPPED qidx={} side={} after {} "
                     "consecutive rejects; suppressing further placements until a "
-                    "fill clears it (last err: {})",
+                    "fill clears it or the {:.0f}s auto-reset re-probes (last err: {})",
                     intent.question_idx, intent.side, n,
-                    ack.error or "<no_error_field>",
+                    self._reject_breaker_reset_seconds, ack.error or "<no_error_field>",
                 )
+            # SHR-109: an un-sellable stale orphan. Once we have enough evidence
+            # (breaker tripped) AND the venue authoritatively reports the CTF
+            # balance is short for THIS reduce-only exit, the shares are gone —
+            # retrying can never fill, so detrack the local position to stop the
+            # perpetual flood and let the slot resume trading. Scoped to a
+            # balance (not allowance) shortfall so we never abandon a position we
+            # actually hold; _pm_balance_shortfall only matches PM's error, so HL
+            # is unaffected.
+            if (
+                n >= self._reject_breaker_threshold
+                and intent.reduce_only
+                and _pm_balance_shortfall(ack.error)
+            ):
+                await self._quarantine_unsellable_position(intent, now_ns=now_ns)
             logger.warning(
                 "order rejected cloid={} symbol={} side={} size={} price={} err={}",
                 intent.cloid, intent.symbol, intent.side, intent.size,
@@ -393,6 +470,48 @@ class Router:
             # SHR-83: record the venue fill (ts + px/sz) for latency calibration.
             self._journal_fill(intent.cloid, now_ns, ack.fill_price, ack.fill_size)
 
+    async def _quarantine_unsellable_position(
+        self, intent: OrderIntent, *, now_ns: int,
+    ) -> None:
+        """Detrack a stale local position the venue says we no longer hold
+        (SHR-109). The CLOB rejects its reduce-only exit with a CTF *balance*
+        shortfall, so the shares are gone (most likely a sell/redeem fill the
+        engine missed). Retrying floods forever, so delete the row: the strategy
+        stops re-emitting the exit, the breaker state clears, and the slot can
+        trade again. We stamp the post-exit cooldown to avoid an instant
+        re-entry, and emit a position_mismatch DRIFT so the detrack is auditable.
+        No realized PnL is booked here — the closing trade (if any) was never
+        ours to observe; the loud alert is the operator's signal to reconcile.
+        """
+        pos = self.dal.get_position(intent.question_idx)
+        if pos is None:
+            return
+        self.dal.delete_position(intent.question_idx)
+        self._last_exit_ts[intent.question_idx] = now_ns
+        self._save_cooldowns()
+        self._consecutive_rejects = {
+            k: v for k, v in self._consecutive_rejects.items()
+            if k[0] != intent.question_idx
+        }
+        self._last_reject_ts = {
+            k: v for k, v in self._last_reject_ts.items()
+            if k[0] != intent.question_idx
+        }
+        logger.warning(
+            "quarantined un-sellable position qidx={} symbol={} qty={:g} "
+            "avg_entry={:g}: venue reports insufficient CTF balance for the "
+            "reduce-only exit (stale orphan). Detracked to stop the reject flood.",
+            intent.question_idx, pos.symbol, pos.qty, pos.avg_entry,
+        )
+        await self.bus.publish(ReconcileDrift(
+            ts_ns=now_ns, account_alias=self.account_alias,
+            case="position_mismatch", question_idx=intent.question_idx,
+            detail={
+                "resolution": "quarantined_unsellable_orphan",
+                "symbol": pos.symbol, "db_qty": f"{pos.qty}",
+            },
+        ))
+
     def _stop_loss_price_for(
         self, fill_price: float, question_idx: int,
         question_fields: dict[str, str] | None,
@@ -423,6 +542,10 @@ class Router:
         # reject-breaker state for it (both sides) so a fresh position can exit.
         self._consecutive_rejects = {
             k: v for k, v in self._consecutive_rejects.items()
+            if k[0] != intent.question_idx
+        }
+        self._last_reject_ts = {
+            k: v for k, v in self._last_reject_ts.items()
             if k[0] != intent.question_idx
         }
         q_desc = question_description(question) if question else ""
