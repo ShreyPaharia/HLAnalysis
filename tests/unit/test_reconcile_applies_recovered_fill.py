@@ -16,7 +16,7 @@ from hlanalysis.engine.hl_client import (
     ClearinghouseState, UserFillRow, VenuePosition,
 )
 from hlanalysis.engine.reconcile import Reconciler
-from hlanalysis.engine.state import OpenOrder, StateDAL
+from hlanalysis.engine.state import OpenOrder, Position, StateDAL
 
 
 @pytest.fixture
@@ -156,6 +156,50 @@ def test_recovered_fill_no_position_if_symbol_absent_from_venue_state(dal):
     ).run(venue_open=[], venue_state=venue_state, now_ns=3)
 
     assert dal.get_position(qidx) is None
+
+
+# ---------------------------------------------------------------------------
+# Preservation: a recovered lost-ACK fill on a question that ALREADY has a
+# local Position (accumulated realized_pnl from a prior partial reduce + a real
+# stop_loss_price) must NOT erase that state. The adopt-on-mismatch path lower
+# in run() preserves both; the local-ghost fill-discovery path must match it.
+# ---------------------------------------------------------------------------
+
+def test_recovered_fill_preserves_existing_realized_pnl_and_stop(dal):
+    """Position #46 was partially reduced (booking +12.50 realized) and carries a
+    real stop at 0.50. A *second* order's ACK is lost and discovered via
+    user_fills. Reconcile must adopt the venue qty/avg but PRESERVE the prior
+    realized_pnl and stop_loss_price — not reset them to 0.0 / DISABLED."""
+    cloid = "hla-v31-ffff"
+    qidx = 46
+    # Pre-existing tracked position with accumulated realized PnL and a real stop.
+    dal.upsert_position(Position(
+        question_idx=qidx, symbol="@34", qty=100.0, avg_entry=0.60,
+        realized_pnl=12.50, last_update_ts_ns=1, stop_loss_price=0.50,
+    ))
+    dal.upsert_order(_pending_order(cloid, qidx=qidx, symbol="@34"))
+
+    fills = [_fill(cloid, symbol="@34", size=50.0, price=0.62)]
+    # Venue truth: the lost-ACK add grew the position to 150 @ 0.6067.
+    venue_state = _venue_state_with_position(symbol="@34", qty=150.0,
+                                             avg_entry=0.6067)
+
+    Reconciler(
+        dal,
+        fills_lookup=lambda c: fills if c == cloid else [],
+        symbol_to_question={},
+        apply_position_changes=True,
+    ).run(venue_open=[], venue_state=venue_state, now_ns=3)
+
+    pos = dal.get_position(qidx)
+    assert pos is not None
+    assert pos.qty == 150.0, "venue qty is authoritative"
+    assert pos.realized_pnl == 12.50, (
+        "prior partial-reduce realized PnL must survive fill-discovery"
+    )
+    assert pos.stop_loss_price == 0.50, (
+        "stop-loss must not be reset to DISABLED on a still-protected position"
+    )
 
 
 # ---------------------------------------------------------------------------

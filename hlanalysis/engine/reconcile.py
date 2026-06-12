@@ -203,14 +203,24 @@ class Reconciler:
                         None,
                     )
                     if vp is not None and abs(vp.qty) > 1e-9:
+                        # Adopt the venue's authoritative qty/avg, but PRESERVE
+                        # any prior local realized_pnl (accumulated by earlier
+                        # partial reduces) and stop_loss_price — a fresh upsert
+                        # would erase both, under-reporting PnL on the eventual
+                        # close and stripping stop protection from a still-open
+                        # position. Mirrors the adopt-on-mismatch path below.
+                        existing = self.dal.get_position(db_o.question_idx)
                         self.dal.upsert_position(Position(
                             question_idx=db_o.question_idx,
                             symbol=db_o.symbol,
                             qty=vp.qty,
                             avg_entry=vp.avg_entry,
-                            realized_pnl=0.0,
+                            realized_pnl=existing.realized_pnl if existing else 0.0,
                             last_update_ts_ns=now_ns,
-                            stop_loss_price=STOP_DISABLED_SENTINEL,
+                            stop_loss_price=(
+                                existing.stop_loss_price if existing
+                                else STOP_DISABLED_SENTINEL
+                            ),
                         ))
                 drift.append(ReconcileDrift(
                     ts_ns=now_ns, account_alias=self.account_alias, case="state_mismatch", cloid=cloid,
