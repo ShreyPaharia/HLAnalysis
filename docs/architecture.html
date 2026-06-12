@@ -1,0 +1,914 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HLAnalysis · Architecture Overview</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#11151f; --panel2:#161b27; --ink:#e6e9f0; --muted:#9aa4b8;
+    --line:#222a3a; --shared:#7c5cff; --shared-soft:#1c1733; --live:#19c37d; --live-soft:#0f2a20;
+    --sim:#4aa3ff; --sim-soft:#0e2236; --rec:#f5a623; --rec-soft:#2c2310; --danger:#ff5d5d;
+    --mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:radial-gradient(1200px 700px at 80% -10%,#161a2b 0,var(--bg) 55%);color:var(--ink);font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased}
+  a{color:var(--sim);text-decoration:none}
+  code,.mono{font-family:var(--mono)}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 24px}
+
+  /* header */
+  header{padding:64px 0 28px;border-bottom:1px solid var(--line)}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--shared);margin:0 0 14px}
+  h1{font-size:46px;line-height:1.05;margin:0 0 14px;letter-spacing:-.02em}
+  h1 .dim{color:var(--muted);font-weight:400}
+  .lede{font-size:18px;color:var(--muted);max-width:760px;margin:0}
+  .meta{margin-top:22px;display:flex;gap:10px;flex-wrap:wrap}
+  .tag{font-family:var(--mono);font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--panel)}
+
+  /* nav */
+  nav.toc{position:sticky;top:0;z-index:20;background:rgba(11,14,20,.85);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+  nav.toc .wrap{display:flex;gap:6px;flex-wrap:wrap;padding:11px 24px}
+  nav.toc a{font-family:var(--mono);font-size:12.5px;color:var(--muted);padding:5px 11px;border-radius:7px}
+  nav.toc a:hover{color:var(--ink);background:var(--panel2)}
+
+  section{padding:54px 0;border-bottom:1px solid var(--line)}
+  h2{font-size:13px;font-family:var(--mono);letter-spacing:.18em;text-transform:uppercase;color:var(--muted);margin:0 0 6px}
+  h2 .n{color:var(--shared)}
+  .h2sub{font-size:27px;margin:0 0 8px;letter-spacing:-.01em}
+  .say{color:var(--muted);max-width:820px;margin:0 0 28px}
+
+  .grid{display:grid;gap:16px}
+  .cols-2{grid-template-columns:1fr 1fr}
+  .cols-3{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:900px){.cols-2,.cols-3,.tri{grid-template-columns:1fr!important}}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px}
+  .card h3{margin:0 0 4px;font-size:16px;display:flex;align-items:center;gap:8px}
+  .card p{margin:6px 0 0;color:var(--muted);font-size:14.5px}
+  .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .d-live{background:var(--live)} .d-sim{background:var(--sim)} .d-shared{background:var(--shared)} .d-rec{background:var(--rec)}
+
+  /* legend pills */
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin:0 0 26px;font-family:var(--mono);font-size:13px}
+  .legend span{display:flex;align-items:center;gap:8px;color:var(--muted)}
+
+  /* flow diagram */
+  .flow{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:26px;overflow-x:auto}
+  .flowrow{display:flex;align-items:stretch;gap:14px;min-width:760px}
+  .node{flex:1;border-radius:12px;padding:14px 16px;border:1px solid var(--line);background:var(--panel2)}
+  .node .lab{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  .node .nm{font-size:15px;font-weight:600;margin-top:3px}
+  .node small{display:block;color:var(--muted);font-size:12.5px;margin-top:6px;line-height:1.4}
+  .arrow{display:flex;align-items:center;color:var(--muted);font-size:22px;flex:none}
+  .b-rec{border-color:#5c4a1f;background:var(--rec-soft)}
+  .b-shared{border-color:#3a2e6b;background:var(--shared-soft)}
+  .b-live{border-color:#1d5c43;background:var(--live-soft)}
+  .b-sim{border-color:#1d4a73;background:var(--sim-soft)}
+
+  /* spine: the centerpiece */
+  .spine{display:grid;grid-template-columns:1fr 1.15fr 1fr;gap:0;border:1px solid var(--line);border-radius:16px;overflow:hidden}
+  @media(max-width:900px){.spine{grid-template-columns:1fr}}
+  .spine .col{padding:22px}
+  .spine .live{background:linear-gradient(180deg,var(--live-soft),transparent 60%)}
+  .spine .shared{background:linear-gradient(180deg,var(--shared-soft),#13101f);border-left:1px solid var(--line);border-right:1px solid var(--line)}
+  .spine .sim{background:linear-gradient(180deg,var(--sim-soft),transparent 60%)}
+  .spine .col h4{margin:0 0 4px;font-size:16px}
+  .spine .col .tagline{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;margin:0 0 14px}
+  .live .tagline{color:var(--live)} .shared .tagline{color:var(--shared)} .sim .tagline{color:var(--sim)}
+  .mod{font-family:var(--mono);font-size:12.5px;padding:7px 10px;border-radius:8px;margin-bottom:7px;border:1px solid var(--line);background:rgba(255,255,255,.02)}
+  .mod b{color:var(--ink);font-weight:600}
+  .mod span{color:var(--muted)}
+  .shared .mod{border-color:#3a2e6b;background:rgba(124,92,255,.07)}
+  .center-note{text-align:center;font-size:13px;color:var(--muted);margin:14px 0 0;font-style:italic}
+
+  /* table */
+  table{width:100%;border-collapse:collapse;font-size:13.5px;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);background:var(--panel2)}
+  td.mono,th.mono{font-family:var(--mono)}
+  tr:last-child td{border-bottom:none}
+  .yes{color:var(--live);font-weight:600}
+  .no{color:var(--muted);opacity:.55}
+  .part{color:var(--rec);font-weight:600}
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:6px;border:1px solid var(--line)}
+  .pill.shared{color:var(--shared);border-color:#3a2e6b;background:var(--shared-soft)}
+  .pill.live{color:var(--live);border-color:#1d5c43;background:var(--live-soft)}
+  .pill.sim{color:var(--sim);border-color:#1d4a73;background:var(--sim-soft)}
+  .pill.rec{color:var(--rec);border-color:#5c4a1f;background:var(--rec-soft)}
+
+  ul.tight{margin:8px 0 0;padding-left:18px;color:var(--muted);font-size:14px}
+  ul.tight li{margin:4px 0}
+  ul.tight code{color:var(--ink);font-size:12.5px}
+
+  .callout{border-left:3px solid var(--shared);background:var(--shared-soft);padding:14px 18px;border-radius:0 10px 10px 0;margin-top:18px}
+  .callout b{color:#cbbcff}
+  .callout.warn{border-color:var(--rec);background:var(--rec-soft)}
+  .callout.warn b{color:#ffd591}
+
+  .loops{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+  @media(max-width:760px){.loops{grid-template-columns:1fr}}
+  .loop{border:1px solid var(--line);border-radius:10px;padding:13px 15px;background:var(--panel)}
+  .loop .nm{font-family:var(--mono);font-size:13px;color:var(--live);font-weight:600}
+  .loop p{margin:5px 0 0;font-size:13.5px;color:var(--muted)}
+
+  /* sequence diagram */
+  .seqwrap{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+  @media(max-width:980px){.seqwrap{grid-template-columns:1fr}}
+  .seq{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 20px 8px}
+  .seq.live{border-top:3px solid var(--live)}
+  .seq.sim{border-top:3px solid var(--sim)}
+  .seq h4{margin:0 0 4px;font-size:17px;display:flex;align-items:center;gap:9px}
+  .seq .sub{color:var(--muted);font-size:13px;margin:0 0 16px}
+  .step{display:grid;grid-template-columns:26px 1fr;gap:12px;position:relative;padding-bottom:15px}
+  .step:not(:last-child)::before{content:"";position:absolute;left:12px;top:24px;bottom:-2px;width:2px;background:var(--line)}
+  .step.sh:not(:last-child)::before{background:linear-gradient(var(--shared),var(--line))}
+  .num{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:11px;font-weight:700;border:1px solid var(--line);background:var(--panel2);color:var(--muted);z-index:1}
+  .step.sh .num{border-color:var(--shared);background:var(--shared-soft);color:#cbbcff}
+  .step.lv .num{border-color:var(--live);color:#9bf3cb}
+  .step.sm .num{border-color:var(--sim);color:#a9d4ff}
+  .stepbody .mch{font-family:var(--mono);font-size:11.5px;padding:1px 7px;border-radius:5px;border:1px solid var(--line);color:var(--muted)}
+  .stepbody.sh .mch{border-color:#3a2e6b;background:var(--shared-soft);color:#cbbcff}
+  .stepbody .act{display:block;margin-top:4px;font-size:13.5px;color:var(--ink)}
+  .stepbody .act b{color:#fff}
+  .stepbody small{display:block;color:var(--muted);font-size:12.5px;margin-top:2px}
+  .conv{font-family:var(--mono);font-size:11px;color:var(--shared);text-align:center;margin:2px 0 14px;letter-spacing:.08em}
+
+  /* improvement cards */
+  .imp{border:1px solid var(--line);border-radius:13px;overflow:hidden;background:var(--panel);margin-bottom:14px}
+  .imp summary{list-style:none;cursor:pointer;padding:16px 20px;display:flex;align-items:center;gap:14px}
+  .imp summary::-webkit-details-marker{display:none}
+  .imp summary::after{content:"+";margin-left:auto;font-family:var(--mono);font-size:20px;color:var(--muted)}
+  .imp[open] summary::after{content:"–"}
+  .imp summary:hover{background:var(--panel2)}
+  .imp .pri{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;padding:3px 8px;border-radius:6px;flex:none;text-transform:uppercase}
+  .pri.p1{color:#ff8a8a;border:1px solid #5c2424;background:#2a1414}
+  .pri.p2{color:var(--rec);border:1px solid #5c4a1f;background:var(--rec-soft)}
+  .pri.p3{color:var(--sim);border:1px solid #1d4a73;background:var(--sim-soft)}
+  .imp summary .it{font-size:16px;font-weight:600}
+  .imp summary .ix{font-size:12.5px;color:var(--muted);margin-left:2px}
+  .imp .body{padding:4px 20px 20px;border-top:1px solid var(--line)}
+  .trp{display:grid;grid-template-columns:90px 1fr;gap:8px 14px;font-size:14px;margin-top:14px}
+  .trp .k{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding-top:2px}
+  .trp .today{color:var(--muted)} .trp .risk{color:#ffb4b4} .trp .fix{color:var(--ink)}
+  .trp code{font-size:12.5px;color:#cbbcff}
+  .themehead{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink);margin:30px 0 14px;display:flex;align-items:center;gap:10px}
+  .themehead::before{content:"";width:24px;height:2px;background:var(--shared)}
+
+  /* desk verdict banner */
+  .verdict{border:1px solid #1d5c43;border-radius:14px;background:linear-gradient(180deg,var(--live-soft),#0c1118);padding:22px 24px;margin:0 0 30px}
+  .verdict .vh{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--live);margin:0 0 12px;display:flex;align-items:center;gap:9px}
+  .verdict .vh::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--live)}
+  .vorder{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 6px}
+  .vstep{flex:1;min-width:200px;border:1px solid var(--line);border-radius:11px;background:rgba(255,255,255,.02);padding:13px 15px}
+  .vstep .vn{font-family:var(--mono);font-size:12px;font-weight:700;color:#9bf3cb}
+  .vstep .vt{font-size:14.5px;font-weight:600;margin:3px 0 4px}
+  .vstep small{color:var(--muted);font-size:12.5px;line-height:1.4;display:block}
+  .vstep .eff{font-family:var(--mono);font-size:11px;color:var(--rec);margin-top:6px;display:block}
+  .varrow{display:flex;align-items:center;color:var(--muted);font-size:18px}
+  @media(max-width:760px){.varrow{display:none}}
+  .vnote{color:var(--muted);font-size:13.5px;margin:14px 0 0}
+  .vnote b{color:#9bf3cb}
+
+  /* status badge on cards */
+  .stat{font-family:var(--mono);font-size:10px;letter-spacing:.08em;padding:3px 8px;border-radius:6px;text-transform:uppercase;flex:none}
+  .stat.next{color:#0b0e14;background:var(--live);font-weight:700}
+  .stat.partial{color:var(--rec);border:1px solid #5c4a1f;background:var(--rec-soft)}
+  .stat.defer{color:var(--muted);border:1px solid var(--line);background:var(--panel2)}
+  .stat.radar{color:var(--sim);border:1px solid #1d4a73;background:var(--sim-soft)}
+  .vfd{font-family:var(--mono);font-size:11.5px;color:var(--live);margin-top:4px}
+  .vfd.warn{color:var(--rec)}
+
+  /* unified intersecting flow */
+  .uflow{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:8px 26px 26px;overflow-x:auto}
+  .ulanes{display:grid;grid-template-columns:1fr 1.3fr 1fr;gap:0;position:sticky;top:0;padding:16px 0 10px;min-width:720px}
+  .ulanes .ul{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;text-align:center;padding:7px;border-radius:8px;font-weight:700}
+  .ul.l{color:var(--live);background:var(--live-soft);border:1px solid #1d5c43}
+  .ul.s{color:#cbbcff;background:var(--shared-soft);border:1px solid #3a2e6b;margin:0 8px}
+  .ul.r{color:var(--sim);background:var(--sim-soft);border:1px solid #1d4a73}
+  .ustage{display:grid;grid-template-columns:1fr 1.3fr 1fr;gap:0;align-items:stretch;min-width:720px;position:relative}
+  .ustage + .ustage{margin-top:7px}
+  .ucell{padding:11px 13px;border-radius:9px;font-size:13px;margin:0 4px;border:1px solid var(--line);display:flex;flex-direction:column;justify-content:center}
+  .ucell .ut{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:3px}
+  .ucell b{color:var(--ink);font-weight:600}
+  .ucell small{color:var(--muted);font-size:11.5px;display:block;margin-top:2px;line-height:1.35}
+  .uc-live{background:var(--live-soft);border-color:#1d5c43}
+  .uc-sim{background:var(--sim-soft);border-color:#1d4a73}
+  .uc-shared{background:linear-gradient(180deg,rgba(124,92,255,.16),rgba(124,92,255,.06));border-color:var(--shared);box-shadow:0 0 0 1px rgba(124,92,255,.25)}
+  .uc-shared .ut{color:#cbbcff}
+  .uc-empty{border:none;background:transparent}
+  /* a shared block that spans the full width (fully merged stage) */
+  .ustage.merged{grid-template-columns:1fr}
+  .ustage.merged .uc-shared{margin:0;text-align:center}
+  .ustage.merged .uc-shared .conv-in{font-family:var(--mono);font-size:10px;color:var(--muted);letter-spacing:.08em}
+  /* mergeable highlight */
+  .mergeable{border-style:dashed!important;border-color:var(--rec)!important;background:var(--rec-soft)!important;position:relative}
+  .mergeable .ut{color:var(--rec)!important}
+  .mtag{display:inline-block;font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;color:#0b0e14;background:var(--rec);border-radius:4px;padding:1px 6px;margin-left:6px;vertical-align:middle;font-weight:700}
+  .ustage .into{position:absolute;left:0;right:0;top:-5px;height:5px;pointer-events:none}
+  .ulegend{display:flex;gap:16px;flex-wrap:wrap;font-family:var(--mono);font-size:11.5px;margin:16px 0 4px;color:var(--muted)}
+  .ulegend span{display:flex;align-items:center;gap:7px}
+  . usw{width:22px;height:12px;border-radius:4px;flex:none}
+
+  /* build log timeline */
+  .tl{position:relative;margin-top:8px}
+  .tl .item{display:grid;grid-template-columns:130px 1fr;gap:18px;padding:0 0 22px;position:relative}
+  @media(max-width:680px){.tl .item{grid-template-columns:1fr;gap:6px}}
+  .tl .when{font-family:var(--mono);font-size:12px;color:var(--muted);padding-top:2px}
+  .tl .body2{border-left:2px solid var(--line);padding:0 0 4px 20px;position:relative}
+  @media(max-width:680px){.tl .body2{padding-left:16px}}
+  .tl .body2::before{content:"";position:absolute;left:-7px;top:4px;width:12px;height:12px;border-radius:50%;background:var(--panel);border:2px solid var(--muted)}
+  .tl .item.done .body2::before{border-color:var(--live);background:var(--live)}
+  .tl .item.active .body2::before{border-color:var(--rec);background:var(--rec);box-shadow:0 0 0 4px var(--rec-soft)}
+  .tl .item.queued .body2::before{border-color:var(--line);background:var(--panel)}
+  .tl .ttl{font-size:15px;font-weight:600;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .tl .ttl .st{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;padding:2px 8px;border-radius:6px}
+  .st.sdone{color:#0b0e14;background:var(--live);font-weight:700}
+  .st.sactive{color:var(--rec);border:1px solid #5c4a1f;background:var(--rec-soft)}
+  .st.squeued{color:var(--muted);border:1px solid var(--line)}
+  .tl .body2 p{margin:7px 0 0;color:var(--muted);font-size:13.5px}
+  .tl .body2 .chk{margin:9px 0 0;padding:0;list-style:none;font-size:13px}
+  .tl .body2 .chk li{padding:2px 0 2px 22px;position:relative;color:var(--muted)}
+  .tl .body2 .chk li::before{position:absolute;left:0;font-family:var(--mono);font-size:12px}
+  .tl .body2 .chk li.ok::before{content:"✓";color:var(--live)}
+  .tl .body2 .chk li.run::before{content:"▸";color:var(--rec)}
+  .tl .body2 .chk li.todo::before{content:"○";color:var(--muted)}
+  .tl .body2 code{color:#cbbcff;font-size:12.5px}
+
+  footer{padding:40px 0 70px;color:var(--muted);font-size:13px}
+  .src{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <p class="kicker">HLAnalysis · System Architecture</p>
+    <h1>One strategy brain, <span class="dim">two bodies.</span></h1>
+    <p class="lede">A market-making research &amp; trading stack for <b>Hyperliquid</b> binaries and <b>Polymarket</b> daily markets. The live <b>engine</b> and the <b>backtester</b> are deliberately built around a single shared spine of strategy + market-data code — so a tuned parameter set behaves the same in simulation and in production.</p>
+    <div class="meta">
+      <span class="tag">hlanalysis · Python</span>
+      <span class="tag">4 CLIs</span>
+      <span class="tag">engine ≈ 9.5k LOC</span>
+      <span class="tag">backtest ≈ 11k LOC</span>
+      <span class="tag">strategy ≈ 4k LOC (shared)</span>
+      <span class="tag">marketdata · shared core</span>
+    </div>
+  </div>
+</header>
+
+<nav class="toc"><div class="wrap">
+  <a href="#overview">Overview</a>
+  <a href="#flow">Data flow</a>
+  <a href="#uflow">Unified flow</a>
+  <a href="#spine">Shared vs Independent</a>
+  <a href="#engine">Live engine</a>
+  <a href="#sim">Backtester / sims</a>
+  <a href="#matrix">Module matrix</a>
+  <a href="#parity">Parity &amp; identity</a>
+  <a href="#sequence">Detailed flow</a>
+  <a href="#roadmap">Improvements</a>
+  <a href="#log">Build log</a>
+  <a href="#plan">Next batch plan</a>
+</div></nav>
+
+<!-- OVERVIEW -->
+<section id="overview"><div class="wrap">
+  <h2><span class="n">01</span> &nbsp;The four subsystems</h2>
+  <p class="h2sub">Recorder → data → engine &amp; backtester</p>
+  <p class="say">Everything is one package, <code>hlanalysis</code>, exposed through four CLI entry points. The recorder captures reality to disk; the backtester replays that disk to tune parameters; the engine runs the tuned parameters live. The strategy code in the middle is the same object in all paths.</p>
+
+  <div class="legend">
+    <span><i class="dot d-rec"></i> Recorder (capture)</span>
+    <span><i class="dot d-shared"></i> Shared core</span>
+    <span><i class="dot d-live"></i> Live engine</span>
+    <span><i class="dot d-sim"></i> Backtester / sim</span>
+  </div>
+
+  <div class="grid cols-2">
+    <div class="card"><h3><i class="dot d-rec"></i> recorder &nbsp;<span class="src">hl-recorder</span></h3>
+      <p>Long-running collector. Subscribes to HL + Polymarket book/trade/settlement streams and a Binance spot reference feed, normalizes everything to one event taxonomy, and persists partitioned Parquet/DuckDB on EC2 (then S3). <b>PM L2 books are not backfillable</b> — the recorder is the only source of truth.</p>
+      <p class="src">recorder/{runner,writer,read,main}.py · 417 LOC</p>
+    </div>
+    <div class="card"><h3><i class="dot d-sim"></i> backtester &nbsp;<span class="src">hl-bt</span></h3>
+      <p>Replays recorded data through the exact strategy code the engine runs, scores PnL with a realistic fill+fee sim (<code>hftbacktest</code>), and runs walk-forward parallel grid sweeps to produce the params shipped in <code>config/strategy.yaml</code>.</p>
+      <p class="src">backtest/ + backtest/{core,data,runner}/ · 11k LOC</p>
+    </div>
+    <div class="card"><h3><i class="dot d-live"></i> engine &nbsp;<span class="src">hl-engine</span></h3>
+      <p>The trading runtime. Runs one strategy "slot" per market track, evaluates entry/exit each tick against a live reference feed, routes orders (paper or live) through a risk gate, and reconciles against venue truth. Co-located with the recorder on one EC2 box, isolated by systemd cgroups.</p>
+      <p class="src">engine/ · 30 modules · 9.5k LOC</p>
+    </div>
+    <div class="card"><h3><i class="dot d-shared"></i> strategy + marketdata &nbsp;<span class="src">shared</span></h3>
+      <p>The decision brain. <code>strategy/</code> holds the registry and every <code>@register</code>'d strategy; <code>marketdata/</code> holds the OHLC bucketer, position math, and <code>MarketState</code> core. Both the engine and the backtester import and call <b>this same code</b>.</p>
+      <p class="src">strategy/ 4k LOC · marketdata/ ~1k LOC</p>
+    </div>
+  </div>
+</div></section>
+
+<!-- DATA FLOW -->
+<section id="flow"><div class="wrap">
+  <h2><span class="n">02</span> &nbsp;End-to-end data flow</h2>
+  <p class="h2sub">From a venue tick to a tuned parameter — and back to a live order</p>
+  <p class="say">Recorded reality flows left-to-right into the tuner; the winning parameters flow back into the live engine. Both runtimes feed a market tick through the <span style="color:var(--shared)">shared strategy spine</span> to get a <code>Decision</code>.</p>
+
+  <div class="flow">
+    <div class="flowrow">
+      <div class="node b-rec"><span class="lab">Venues</span><span class="nm">HL · PM · Binance</span><small>WS books / trades / settlement + spot BBO reference</small></div>
+      <div class="arrow">→</div>
+      <div class="node b-rec"><span class="lab">Capture</span><span class="nm">recorder</span><small>normalize → Parquet / DuckDB → S3</small></div>
+      <div class="arrow">→</div>
+      <div class="node b-sim"><span class="lab">Replay + tune</span><span class="nm">backtester (hl-bt)</span><small>walk-forward grid sweep over recorded data</small></div>
+    </div>
+    <div style="display:flex;justify-content:center;margin:16px 0;color:var(--muted)">↓ &nbsp; promotes winning params</div>
+    <div class="flowrow">
+      <div class="node b-shared"><span class="lab">Live params</span><span class="nm">config/strategy.yaml</span><small>per-slot tuned knobs (HL vs PM tracks, independent)</small></div>
+      <div class="arrow">→</div>
+      <div class="node b-live"><span class="lab">Runtime</span><span class="nm">engine (hl-engine)</span><small>scan → risk gate → route → reconcile</small></div>
+      <div class="arrow">→</div>
+      <div class="node b-live"><span class="lab">Venues</span><span class="nm">live / paper orders</span><small>HL HIP-4 perp+spot · PM CLOB</small></div>
+    </div>
+    <p class="center-note">Both the tuner and the engine call the identical <code>strategy.evaluate(...)</code> — the only difference is whether ticks come from disk or a live socket.</p>
+  </div>
+</div></section>
+
+<!-- UNIFIED INTERSECTING FLOW -->
+<section id="uflow"><div class="wrap">
+  <h2><span class="n">02b</span> &nbsp;Unified flow — where the two paths share &amp; split</h2>
+  <p class="h2sub">One pipeline · purple blocks are the same code on both sides · amber = could be merged now</p>
+  <p class="say">The live and sim paths are one pipeline read top-to-bottom. Where a stage is <span style="color:var(--shared)">shared</span> it's drawn as a single block straddling both lanes (the same module runs on both sides); where it <span style="color:var(--live)">splits</span> it shows two blocks. This is the <b>current</b> boundary after this session's work — the shared band is wider than it was. <span style="color:var(--rec)">Amber-dashed</span> blocks are the remaining seams that <b>could be merged now</b> (verified against the code).</p>
+
+  <div class="uflow">
+    <div class="ulanes">
+      <div class="ul l">◀ Live engine</div>
+      <div class="ul s">● Shared spine</div>
+      <div class="ul r">Backtest / sim ▶</div>
+    </div>
+
+    <!-- 1 INPUT: split -->
+    <div class="ustage">
+      <div class="ucell uc-live"><span class="ut">1 · input</span><b>Live WS feed</b><small>HL/PM books · Binance BBO · <code>hlanalysis/events.py</code> NormalizedEvent</small></div>
+      <div class="ucell uc-empty"></div>
+      <div class="ucell uc-sim mergeable"><span class="ut">1 · input <span class="mtag">mergeable · R4</span></span><b>Recorded parquet</b><small>recorder/read → <code>backtest/core/events.py</code> — a <i>second</i> event taxonomy (MarketEvent). Unify with <code>events.py</code>.</small></div>
+    </div>
+
+    <!-- 2 MARKET STATE: fully shared -->
+    <div class="ustage merged">
+      <div class="ucell uc-shared"><span class="ut">2 · market state — shared</span><b>marketdata.MarketState core</b> &nbsp;<span class="conv-in">OHLC · recent_returns · σ · volume · multi-cadence buffers (R9)</span><small>engine <code>market_state.py</code> is a thin adapter over this; backtest <code>runner/market_state.py</code> wraps it. σ proven bit-identical across both (SHR-87/97).</small></div>
+    </div>
+
+    <!-- 3 sigma read: shared kernel (R1) with numpy/tuple seam -->
+    <div class="ustage">
+      <div class="ucell uc-live"><span class="ut">3 · σ-read</span><b>→ tuple</b><small>scanner converts</small></div>
+      <div class="ucell uc-shared mergeable"><span class="ut">3 · σ-read kernel — shared <span class="mtag">seam · R1</span></span><b>marketdata.decision_kernel.build_decision_inputs</b><small>R1 unified the σ/returns read for both. Leftover: engine returns tuple, sim returns ndarray (values identical) — fold the conversion in to fully close it.</small></div>
+      <div class="ucell uc-sim"><span class="ut">3 · σ-read</span><b>ndarray</b><small>runner passes raw</small></div>
+    </div>
+
+    <!-- 4 book/qview assembly: genuinely split -->
+    <div class="ustage">
+      <div class="ucell uc-live"><span class="ut">4 · book assembly</span><b>BookState ← live L2</b><small><code>engine/market_state.py</code> from the WS order book</small></div>
+      <div class="ucell uc-empty" style="display:flex;align-items:center;justify-content:center"><span style="font-family:var(--mono);font-size:10px;color:var(--muted);text-align:center">✗ cannot merge<br>different data sources<br>(R1 finding)</span></div>
+      <div class="ucell uc-sim"><span class="ut">4 · book assembly</span><b>BookState ← hftbacktest depth</b><small><code>hftbt_runner.py</code> from recorded depth arrays</small></div>
+    </div>
+
+    <!-- 5 DECISION: fully shared -->
+    <div class="ustage merged">
+      <div class="ucell uc-shared"><span class="ut">5 · decision — shared</span><b>strategy.evaluate()</b> &nbsp;<span class="conv-in">built via strategy.live_registry (R7) · params from one pydantic base (R6)</span><small>the registered strategy object (v1/v31/…); identical call + identical object on both paths — <code>config_sig</code> proves the params match.</small></div>
+    </div>
+
+    <!-- 6 RISK CAPS: shared core, split orchestration -->
+    <div class="ustage">
+      <div class="ucell uc-live"><span class="ut">6 · gate</span><b>RiskGate orchestration</b><small>router + 12-rule veto, breakers</small></div>
+      <div class="ucell uc-shared"><span class="ut">6 · risk caps — shared (R2)</span><b>risk/caps.py</b><small>daily-loss · inventory · concurrent — the 3 entry predicates, one source (7 importers)</small></div>
+      <div class="ucell uc-sim"><span class="ut">6 · gate</span><b>halt_replay.entry_veto</b><small>replays halt windows + caps</small></div>
+    </div>
+
+    <!-- 7 EXECUTION: split -->
+    <div class="ustage">
+      <div class="ucell uc-live"><span class="ut">7 · execution</span><b>exec_client → HL / PM</b><small>IOC/GTC, live or paper orders</small></div>
+      <div class="ucell uc-empty"></div>
+      <div class="ucell uc-sim"><span class="ut">7 · execution</span><b>hftbacktest fills</b><small>recorded depth · latency · slippage · fee curve</small></div>
+    </div>
+
+    <!-- 8 POSITION MATH: fully shared -->
+    <div class="ustage merged">
+      <div class="ucell uc-shared"><span class="ut">8 · position math — shared</span><b>marketdata.position_math</b> &nbsp;<span class="conv-in">apply_fill · stop_price · settlement payoff · dust tol</span><small>5 engine modules + the sim runner all book fills through this one module.</small></div>
+    </div>
+
+    <!-- 9 PERSIST / OUTPUT: split -->
+    <div class="ustage">
+      <div class="ucell uc-live"><span class="ut">9 · output</span><b>SQLite ledger + trade journal</b><small>positions/orders/fills · EventBus → Telegram · reconcile vs venue</small></div>
+      <div class="ucell uc-empty"></div>
+      <div class="ucell uc-sim"><span class="ut">9 · output</span><b>parquet + PnL score</b><small>diagnostics/fills · Sharpe/hit/DD · grid → strategy.yaml</small></div>
+    </div>
+
+    <!-- 10 CROSS-CHECKS: shared -->
+    <div class="ustage merged">
+      <div class="ucell uc-shared"><span class="ut">10 · cross-checks — shared</span><b>config_sig (R5) · parity.decision_replay + position_timeline (R3 v2)</b> &nbsp;<span class="conv-in">one hash compares any sim run to any live slot · CI gate asserts engine≡sim decisions (100% on fixture)</span></div>
+    </div>
+
+    <div class="ulegend">
+      <span><i style="width:22px;height:12px;border-radius:4px;background:var(--live-soft);border:1px solid #1d5c43;display:inline-block"></i> live-only</span>
+      <span><i style="width:22px;height:12px;border-radius:4px;background:rgba(124,92,255,.16);border:1px solid var(--shared);display:inline-block"></i> shared (same code both sides)</span>
+      <span><i style="width:22px;height:12px;border-radius:4px;background:var(--sim-soft);border:1px solid #1d4a73;display:inline-block"></i> sim-only</span>
+      <span><i style="width:22px;height:12px;border-radius:4px;background:var(--rec-soft);border:1px dashed var(--rec);display:inline-block"></i> could be merged now</span>
+    </div>
+  </div>
+
+  <div class="callout warn"><b>Could be merged now (verified against the code) — 2 real seams + 1 minor:</b>
+    <ul class="tight" style="margin-top:8px">
+      <li><b>Event taxonomy (R4)</b> — <code>hlanalysis/events.py</code> (NormalizedEvent) and <code>backtest/core/events.py</code> (MarketEvent, 4 classes) are still two vocabularies bridged on load. Unify so the sim consumes <code>events.py</code> directly. <i>Highest-value remaining merge.</i></li>
+      <li><b>σ-read numpy/tuple seam (R1 leftover)</b> — <code>decision_kernel.build_decision_inputs</code> is shared, but the engine converts to <code>tuple</code> and the sim keeps <code>ndarray</code> (values identical). Make the kernel return one canonical type → the σ-read becomes fully merged. <i>Small, safe.</i></li>
+      <li><b>Backtest-only strategy params</b> — <code>model_edge</code> / <code>binary_statarb</code> / <code>delta_hedged</code> still use the pre-R6 config pattern (no pydantic params base). Apply the R6 pattern when one of them goes live. <i>Low value — they're sim-only today.</i></li>
+    </ul>
+    What <b>cannot</b> merge: step 4 (BookState assembly) — live L2 book vs hftbacktest depth are genuinely different data sources (R1's finding). That split is inherent, which is exactly why R3 v2's decision-parity gate (step 10) is the thing that guarantees equivalence.</div>
+</div></section>
+
+<!-- SPINE: THE CENTERPIECE -->
+<section id="spine"><div class="wrap">
+  <h2><span class="n">03</span> &nbsp;Shared vs Independent — the spine</h2>
+  <p class="h2sub">What lives in the middle, and what each side owns alone</p>
+  <p class="say">This is the load-bearing design decision: the engine and the backtester are two <i>harnesses</i> wrapped around one <i>brain</i>. The brain (center column) is imported by both. Each harness owns its own IO, plumbing, and persistence (outer columns) and never reaches into the other.</p>
+
+  <div class="spine">
+    <div class="col live">
+      <p class="tagline">◀ Live engine only</p>
+      <h4>Real-time harness</h4>
+      <div class="mod"><b>runtime.py</b> · <span>async loops: ingest / scan / reconcile / checks / heartbeat</span></div>
+      <div class="mod"><b>scanner.py</b> · <span>event-driven slot scan → build RiskInputs</span></div>
+      <div class="mod"><b>router.py + risk.py</b> · <span>order routing, 12-rule risk veto, breakers</span></div>
+      <div class="mod"><b>exec_client / hl_client / pm_client</b> · <span>venue-neutral order placement</span></div>
+      <div class="mod"><b>state.py + trade_journal</b> · <span>SQLite ledger, durable decision log</span></div>
+      <div class="mod"><b>reconcile / restart_drift</b> · <span>venue-truth merge, drift gate</span></div>
+      <div class="mod"><b>watchdogs / alerts</b> · <span>stale-data, daily-loss, RSS, Telegram</span></div>
+      <div class="mod"><b>adapters/ (live WS)</b> · <span>streaming sockets, reconnect backoff</span></div>
+    </div>
+
+    <div class="col shared">
+      <p class="tagline">● Shared spine — imported by both &nbsp;<span style="color:#9bf3cb;font-size:10px">(grew this session)</span></p>
+      <h4>Decision brain</h4>
+      <div class="mod"><b>strategy/base.py + types.py</b> · <span>the <code>evaluate()</code> contract: Decision / Action / BookState / QuestionView</span></div>
+      <div class="mod"><b>strategy/*.py</b> · <span>v1 late_resolution · v31 theta_harvester · v2/v4/v5 · nba_wp · momentum_mr</span></div>
+      <div class="mod"><b>strategy/{LateResolution,ThetaHarvester}Params</b> · <span>NEW (R6) — one pydantic params base per strategy; the YAML model inherits it</span></div>
+      <div class="mod"><b>strategy/live_registry.py</b> · <span>NEW (R7) — registry both engine + backtest build strategies through (no hardcoded dispatch)</span></div>
+      <div class="mod"><b>strategy/vol · fee · regions · intents · topup</b> · <span>σ estimators, fee curves, leg geometry, IOC intent builders</span></div>
+      <div class="mod"><b>marketdata/market_state.py</b> · <span>the <code>MarketState</code> core: OHLC, recent_returns, σ, volume, multi-cadence buffers (R9)</span></div>
+      <div class="mod"><b>marketdata/decision_kernel.py</b> · <span>NEW (R1) — the shared σ/returns input read; scanner + sim runner both call it</span></div>
+      <div class="mod"><b>marketdata/ohlc · position_math · decision_input</b> · <span>bucketer · fill math (5 engine + sim) · σ cadence/source resolver</span></div>
+      <div class="mod"><b>risk/caps.py</b> · <span>NEW (R2) — the 3 entry cap predicates + window math; <b>7 importers</b> across engine + backtest</span></div>
+      <div class="mod"><b>engine/config.py: strategy_config_sig</b> · <span>NEW (R5) — one fingerprint makes any sim run comparable to any live slot</span></div>
+      <div class="mod"><b>engine/config_builders.py</b> · <span>builds the strategy config — reused by the backtester's <code>--slot</code> path</span></div>
+      <div class="mod"><b>parity/decision_replay · position_timeline</b> · <span>R3 v2 — the CI gate that asserts engine≡sim decisions (100% on fixture)</span></div>
+    </div>
+
+    <div class="col sim">
+      <p class="tagline">Backtester only ▶</p>
+      <h4>Replay &amp; tuning harness</h4>
+      <div class="mod"><b>cli.py</b> · <span>run / tune / fetch / trace / report subcommands</span></div>
+      <div class="mod"><b>tuning.py</b> · <span>walk-forward grid, ProcessPool fan-out</span></div>
+      <div class="mod"><b>runner/hftbt_runner.py</b> · <span>per-question sim loop, hftbacktest fills</span></div>
+      <div class="mod"><b>runner/parallel.py</b> · <span>worker init, shared inventory ledger</span></div>
+      <div class="mod"><b>data/ + core/</b> · <span>recorded-data loaders, DataSource protocol, event union</span></div>
+      <div class="mod"><b>data/_event_array_cache</b> · <span>npz fast-path memo (≈5.7× compression)</span></div>
+      <div class="mod"><b>halt_replay.py</b> · <span>replays engine halt windows + caps in sim</span></div>
+      <div class="mod"><b>report.py + slot_config.py</b> · <span>markdown reports, live-slot → params bridge</span></div>
+    </div>
+  </div>
+
+  <div class="callout"><b>The invariant:</b> when the backtester is run with <code>--slot</code>, it calls <code>engine.config_builders</code> to build the strategy object — so the simulated strategy is <i>bit-for-bit identical</i> to the live one, every knob explicit. A parity test (<code>test_slot_config_parity</code>) guards this. This is why a passing backtest is trustworthy: the only variable is the data, not the code.</div>
+
+  <div class="callout warn"><b>What deliberately does <i>not</i> transfer:</b> params, not code. The <i>same</i> strategy code runs on the HL track and the PM track, but with <b>independently tuned</b> parameter grids. A PM-tuned grid typically loses money on HL and vice-versa. The sharing is structural (code paths), not numerical (knob values).</div>
+</div></section>
+
+<!-- LIVE ENGINE -->
+<section id="engine"><div class="wrap">
+  <h2><span class="n">04</span> &nbsp;Live engine — internals</h2>
+  <p class="h2sub">Per-slot isolation around a shared feed</p>
+  <p class="say">Each <code>(strategy, account)</code> pair is one <b>AccountSlot</b> with its own DAL, exec client, risk gate, router, scanner, and strategy instance. Only the WebSocket feed and the <code>MarketState</code> are shared across slots. <code>runtime.py</code> drives five concurrent async loops:</p>
+
+  <div class="loops">
+    <div class="loop"><span class="nm">_ingest_loop</span><p>Single shared WS subscription → applies events to <code>MarketState</code>; reconnect backoff; fires a <code>market_dirty</code> wake on price moves; latches all slots halted after repeated feed failure.</p></div>
+    <div class="loop"><span class="nm">_scan_loop</span><p>Per-slot, event-driven. Wakes on <code>market_dirty</code> within a min-interval, coalesces bursts, floors at an idle max-interval. Calls <code>scanner.scan()</code> → <code>strategy.evaluate()</code> → <code>router</code>.</p></div>
+    <div class="loop"><span class="nm">_reconcile_loop</span><p>Periodic three-way merge of local DB vs venue open-orders vs clearinghouse. Adopts/alerts on drift, detects settlement, evicts settled questions. HL applies venue truth; PM is alert-only after startup.</p></div>
+    <div class="loop"><span class="nm">_continuous_checks_loop</span><p>Daily-loss cap (read from <b>venue truth</b>, not DB), kill-switch file polling, stale-data halt (gated on global feed silence), PM unconfirmed-order &amp; redemption watchdogs.</p></div>
+    <div class="loop"><span class="nm">_heartbeat_loop / _stop_loss_loop</span><p>Liveness heartbeat + RSS self-halt before OOM on the 1 GB box; dedicated event-driven stop-loss enforcement that bypasses the risk gate for defensive closes.</p></div>
+  </div>
+
+  <div class="callout" style="border-color:var(--live);background:var(--live-soft)">
+    <b style="color:#9bf3cb">Tick → order path:</b>
+    <span class="mono" style="font-size:13px;color:var(--ink)">WS → _ingest_loop → MarketState.apply → market_dirty → Scanner.scan → <span style="color:var(--shared)">strategy.evaluate</span> → Router.handle → RiskGate.check_pre_trade → exec_client.place → StateDAL.book_fill → TradeJournal → EventBus → {Telegram, events_sink}</span>
+  </div>
+
+  <div class="grid cols-3" style="margin-top:18px">
+    <div class="card"><h3><i class="dot d-live"></i> Venue-neutral exec</h3><p><code>exec_client.py</code> defines an <code>ExecutionClient</code> protocol; <code>hl_client</code> and <code>pm_client</code> implement it so router + reconciler are venue-agnostic. HL settlement arrives as fills; PM settlement is an on-chain redeem tracked separately.</p></div>
+    <div class="card"><h3><i class="dot d-live"></i> Persistence</h3><p><code>state.py</code> (SQLModel/SQLite, Alembic-migrated): positions, orders, fills, events, trade journal. <code>CachedStateDAL</code> prefers <b>venue</b> fills so local realized-PnL equals venue truth by construction.</p></div>
+    <div class="card"><h3><i class="dot d-live"></i> replay.py — the bridge</h3><p><code>ReplayRunner</code> deterministically replays recorded <code>NormalizedEvent</code>s through the <i>same</i> <code>MarketState</code> + <code>strategy.evaluate</code> as live — logging-only, no routing. The engine-side path that meets the sim.</p></div>
+  </div>
+</div></section>
+
+<!-- BACKTESTER -->
+<section id="sim"><div class="wrap">
+  <h2><span class="n">05</span> &nbsp;Backtester / sims — internals</h2>
+  <p class="h2sub">Recorded data in, tuned parameters out</p>
+  <p class="say">The backtester replays <b>recorded</b> inputs (the Binance spot BBO feed and recorded PM/HL L2 books at the live sampling cadence) — never synthetic klines, because that is what the engine actually consumes live. The per-question loop builds numpy event arrays, drives an <code>hftbacktest</code> exchange, and calls the shared strategy each scan step.</p>
+
+  <div class="grid cols-2">
+    <div class="card"><h3><i class="dot d-sim"></i> run_one_question — the sim loop</h3>
+      <p>Collects per-leg book/trade + reference + settlement events → builds <code>event_dtype</code> arrays → one <code>HashMapMarketDepthBacktest</code> asset per leg. Each <code>hbt.elapse(scan_interval)</code> drains reference events into <code>MarketState</code>, builds <code>QuestionView</code> + <code>BookState</code>, and calls <code>strategy.evaluate(...)</code>. IOC orders fill against real recorded depth; open positions settle at the resolved outcome.</p>
+    </div>
+    <div class="card"><h3><i class="dot d-sim"></i> Parallel walk-forward tuning</h3>
+      <p><code>tuning.py</code> takes the Cartesian product of a grid YAML; each (cell, split) is independent work over a <code>ProcessPoolExecutor</code> (spawn). Workers rebuild the data source from a <b>picklable</b> <code>SourceConfig</code> — not env side-channels — and pin the parent checkout to <code>sys.path[0]</code> before any import. Results stream atomically to <code>results.jsonl</code> (resumable).</p>
+    </div>
+    <div class="card"><h3><i class="dot d-sim"></i> Realistic execution model</h3>
+      <p>Partial fills against recorded book depth · constant/interpolated order latency (≈50 ms HL median) · slippage haircut · IOC marketability re-check to veto fleeting quotes. Two fee models: <code>flat</code> (HL, fee≈0) and <code>pm_binary</code> (<code>fee = qty·rate·p·(1−p)</code>).</p>
+    </div>
+    <div class="card"><h3><i class="dot d-sim"></i> Event-array cache</h3>
+      <p>Per-question numpy bundles memoized to column-split <code>.npz</code> (~5.7× compression), keyed on <code>sha256(question + files + build_version + config_sig)</code>. The <code>config_sig</code> captures reference resample dt + source + book mode, so a cadence change correctly invalidates. <code>--no-cache</code> / <code>--rebuild-cache</code> escape hatches.</p>
+    </div>
+  </div>
+
+  <div class="callout warn"><b>Fidelity guardrails learned the hard way:</b> recorded PM strike klines silently <i>freeze</i> (not error) when a cache is stale, and worker factories once dropped config-derived ctor params back to defaults via env-only propagation. Both are now fail-loud (<code>StrikeCoverageError</code>) or routed through the picklable <code>SourceConfig</code>. <code>halt_replay.py</code> additionally replays the engine's halt windows + inventory caps so the sim sees the same gating the live desk did.</p></div>
+</div></section>
+
+<!-- MATRIX -->
+<section id="matrix"><div class="wrap">
+  <h2><span class="n">06</span> &nbsp;Module ownership matrix</h2>
+  <p class="h2sub">Who imports what</p>
+  <p class="say">A precise read of the import graph. <span class="yes">Shared</span> = the same module is imported by more than one harness; the others are owned by exactly one subsystem.</p>
+
+  <table>
+    <thead><tr><th>Module / package</th><th>Role</th><th>Engine</th><th>Backtest</th><th>Recorder</th><th class="mono">Verdict</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">strategy/ (base, types, all <code>@register</code> impls)</td><td>Decision logic + <code>evaluate()</code> contract</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">—</td><td><span class="pill shared">shared brain</span></td></tr>
+      <tr><td class="mono">strategy/{vol,fee,regions,intents,topup}</td><td>σ estimators, fee curves, leg geometry, intents</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">—</td><td><span class="pill shared">shared</span></td></tr>
+      <tr><td class="mono">marketdata/market_state.py</td><td><code>MarketState</code> core: OHLC, returns, σ, volume</td><td class="yes">✓ (adapter)</td><td class="yes">✓ (wrapped)</td><td class="no">—</td><td><span class="pill shared">shared</span></td></tr>
+      <tr><td class="mono">marketdata/{ohlc,position_math,decision_input}</td><td>Bucketing, fill math, source/cadence resolver</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">—</td><td><span class="pill shared">shared</span></td></tr>
+      <tr><td class="mono">engine/config_builders.py</td><td>Builds the strategy object from params</td><td class="yes">✓</td><td class="yes">✓ (<code>--slot</code>)</td><td class="no">—</td><td><span class="pill shared">shared bridge</span></td></tr>
+      <tr><td class="mono">adapters/ (binance, hyperliquid, polymarket)</td><td>Live venue WS/REST clients</td><td class="yes">✓</td><td class="part">~ normalize only</td><td class="yes">✓</td><td><span class="pill rec">capture path</span></td></tr>
+      <tr><td class="mono">config.py · events.py</td><td>Subscription model · NormalizedEvent taxonomy</td><td class="yes">✓</td><td class="no">— (own event union)</td><td class="yes">✓</td><td><span class="pill rec">capture path</span></td></tr>
+      <tr><td class="mono">recorder/read.py</td><td>Parquet reader</td><td class="no">—</td><td class="yes">✓</td><td class="no">—</td><td><span class="pill sim">disk → sim</span></td></tr>
+      <tr><td class="mono">engine/{runtime,scanner,router,risk,reconcile,…}</td><td>Real-time loops, routing, risk, persistence</td><td class="yes">✓</td><td class="no">—</td><td class="no">—</td><td><span class="pill live">engine only</span></td></tr>
+      <tr><td class="mono">engine/exec_client · hl_client · pm_client</td><td>Live/paper order placement</td><td class="yes">✓</td><td class="no">—</td><td class="no">—</td><td><span class="pill live">engine only</span></td></tr>
+      <tr><td class="mono">backtest/{cli,tuning,runner/*,data/*,core/*}</td><td>Replay loop, grid sweep, recorded loaders</td><td class="no">—</td><td class="yes">✓</td><td class="no">—</td><td><span class="pill sim">sim only</span></td></tr>
+      <tr><td class="mono">backtest/halt_replay.py</td><td>Replays engine halt windows + caps in sim</td><td class="no">—</td><td class="yes">✓</td><td class="no">—</td><td><span class="pill sim">sim only</span></td></tr>
+      <tr><td class="mono">parity/ (validation, sources)</td><td>Live-vs-sim decision reconciliation</td><td class="part">~ read-only</td><td class="part">~ read-only</td><td class="no">—</td><td><span class="pill shared">cross-check</span></td></tr>
+    </tbody>
+  </table>
+  <p class="src" style="margin-top:12px">✓ direct import · ~ partial / one helper / read-only · — not used. Verified against the import graph on this branch.</p>
+</div></section>
+
+<!-- PARITY -->
+<section id="parity"><div class="wrap">
+  <h2><span class="n">07</span> &nbsp;Parity &amp; strategy identity</h2>
+  <p class="h2sub">How "the same code" is proven, not just claimed</p>
+  <p class="say">Sharing code is only useful if you can show the two harnesses actually behave the same. Three mechanisms keep the engine and the backtester honest:</p>
+
+  <div class="grid cols-3">
+    <div class="card"><h3><i class="dot d-shared"></i> Identical strategy object</h3>
+      <p>Both paths build the strategy through the registry from explicit params; the backtester's <code>--slot</code> mode reuses <code>engine.config_builders</code> directly. <code>test_slot_config_parity</code> asserts byte-for-byte config reproduction.</p></div>
+    <div class="card"><h3><i class="dot d-shared"></i> Shared MarketState</h3>
+      <p>The engine's <code>MarketState</code> is a thin adapter over the <i>same</i> <code>marketdata.MarketState</code> the sim uses (SHR-87). σ cadence and reference source (mark/bbo, raw-tick vs bars) are resolved by the shared <code>decision_input</code> for both.</p></div>
+    <div class="card"><h3><i class="dot d-shared"></i> parity/ reconciliation</h3>
+      <p>The <code>parity</code> package joins the engine's durable trade journal (SHR-83) against the sim's <code>RunResult</code> and attributes any residual into <code>INPUT_SKEW</code>, <code>EXECUTION</code>, or <code>UNMODELED_HALT</code> — turning "do they match?" into a measured number.</p></div>
+  </div>
+
+  <div class="callout"><b>Why this architecture:</b> a backtest is only trustworthy if the simulated decision is the decision the engine would have made. By collapsing OHLC, position math, <code>MarketState</code>, and the strategy itself into one shared spine — and proving equivalence with parity tooling — the team can tune on recorded data and deploy with confidence that the only thing that changed between sim and live is the <i>source of the ticks</i>.</div>
+</div></section>
+
+<!-- DETAILED SEQUENCE FLOW -->
+<section id="sequence"><div class="wrap">
+  <h2><span class="n">08</span> &nbsp;Detailed data flow — step by step</h2>
+  <p class="h2sub">The live path and the sim path, side by side</p>
+  <p class="say">Both paths are the same shape: <i>get a tick → update market state → call the strategy → act on the Decision → record the result</i>. <span style="color:var(--shared)">Purple steps are shared code</span> — identical objects on both sides. Notice the paths run lock-step through steps 2–4 (the decision), then diverge on execution and persistence.</p>
+
+  <div class="legend">
+    <span><i class="dot d-shared"></i> Shared code — identical on both paths</span>
+    <span><i class="dot d-live"></i> Engine-only</span>
+    <span><i class="dot d-sim"></i> Sim-only</span>
+  </div>
+
+  <div class="seqwrap">
+    <!-- LIVE -->
+    <div class="seq live">
+      <h4><i class="dot d-live"></i> Live path &nbsp;<span class="src">hl-engine</span></h4>
+      <p class="sub">One iteration per market-dirty wake, per slot.</p>
+
+      <div class="step lv"><div class="num">1</div><div class="stepbody"><span class="mch">adapters/* → _ingest_loop</span><span class="act"><b>Tick arrives</b> on the shared WebSocket</span><small>HL/PM book·trade·mark·settlement + Binance spot BBO; reconnect backoff; normalize → <code>NormalizedEvent</code></small></div></div>
+
+      <div class="step sh"><div class="num">2</div><div class="stepbody sh"><span class="mch">marketdata.MarketState</span><span class="act"><b>State update</b> — apply event, roll OHLC / returns / σ / volume</span><small>engine <code>market_state.py</code> is a thin adapter over the shared core (SHR-87); fires <code>market_dirty</code> on price move</small></div></div>
+
+      <div class="step lv"><div class="num">3</div><div class="stepbody"><span class="mch">scanner.py</span><span class="act"><b>Scan</b> matched questions → assemble inputs</span><small>allowlist/blocklist match · build <code>BookState</code>, <code>QuestionView</code>, <code>recent_returns</code>, reference price; <code>decision_input</code> resolves σ cadence + source</small></div></div>
+
+      <div class="step sh"><div class="num">4</div><div class="stepbody sh"><span class="mch">strategy.evaluate(...)</span><span class="act"><b>Decision</b> — Entry / Exit / Skip + OrderIntents + Diagnostics</span><small>the registered strategy object (v1 / v31 / …); same call signature as sim</small></div></div>
+
+      <div class="step lv"><div class="num">5</div><div class="stepbody"><span class="mch">router.py → risk.py</span><span class="act"><b>Risk gate</b> — 12-rule veto, breakers, slippage clamp, daily-loss cap</span><small>cap read from <b>venue truth</b>; reject-breaker cooldown per (question, side); stale-reference veto</small></div></div>
+
+      <div class="step lv"><div class="num">6</div><div class="stepbody"><span class="mch">exec_client → hl/pm_client</span><span class="act"><b>Place order</b> live or paper (IOC / GTC)</span><small>venue-neutral protocol; real CLOB / HIP-4 submission or in-memory paper fills</small></div></div>
+
+      <div class="step lv"><div class="num">7</div><div class="stepbody"><span class="mch">StateDAL + trade_journal</span><span class="act"><b>Persist</b> fill → SQLite ledger + durable decision journal</span><small>positions/orders/fills (Alembic-migrated); journal captures book-at-decision, inputs, send/fill ts</small></div></div>
+
+      <div class="step lv"><div class="num">8</div><div class="stepbody"><span class="mch">EventBus → alerts / events_sink</span><span class="act"><b>Publish</b> Entry/Exit/Veto → Telegram + events table</span><small>fan-out; never blocks the trade path</small></div></div>
+
+      <div class="step lv"><div class="num">9</div><div class="stepbody"><span class="mch">_reconcile_loop</span><span class="act"><b>Reconcile</b> (async, periodic) vs venue open-orders + clearinghouse</span><small>three-way merge, settlement detection, drift alerts; HL applies venue truth, PM alert-only</small></div></div>
+    </div>
+
+    <!-- SIM -->
+    <div class="seq sim">
+      <h4><i class="dot d-sim"></i> Sim path &nbsp;<span class="src">hl-bt run / tune</span></h4>
+      <p class="sub">One iteration per <code>hbt.elapse(scan_interval)</code>, per question, per worker.</p>
+
+      <div class="step sm"><div class="num">1</div><div class="stepbody"><span class="mch">recorder/read.py → data/* </span><span class="act"><b>Load recorded events</b> from Parquet</span><small>HL/PM L2 book + trades + settlement + Binance BBO reference; <code>SourceConfig</code> (picklable) rebuilt per worker; event-array <code>.npz</code> cache fast-path</small></div></div>
+
+      <div class="step sm"><div class="num">2a</div><div class="stepbody"><span class="mch">hftbt_runner → hftbacktest</span><span class="act"><b>Advance clock</b> — <code>hbt.elapse()</code>, drain reference events up to <code>current_timestamp</code></span><small>per-leg numpy event arrays drive a <code>HashMapMarketDepthBacktest</code> exchange</small></div></div>
+
+      <div class="step sh"><div class="num">2b</div><div class="stepbody sh"><span class="mch">marketdata.MarketState</span><span class="act"><b>State update</b> — apply event, roll OHLC / returns / σ / volume</span><small>the <i>same</i> core class, wrapped by <code>runner/market_state.py</code>; <code>decision_input</code> resolves the same cadence/source</small></div></div>
+
+      <div class="step sm"><div class="num">3</div><div class="stepbody"><span class="mch">hftbt_runner</span><span class="act"><b>Build inputs</b> → <code>BookState</code>, <code>QuestionView</code>, returns, volume</span><small>built from recorded depth instead of a live socket — same shapes</small></div></div>
+
+      <div class="step sh"><div class="num">4</div><div class="stepbody sh"><span class="mch">strategy.evaluate(...)</span><span class="act"><b>Decision</b> — Entry / Exit / Skip + OrderIntents + Diagnostics</span><small>identical object — <code>--slot</code> builds it via <code>engine.config_builders</code>, byte-for-byte with live</small></div></div>
+
+      <div class="step sm"><div class="num">5</div><div class="stepbody"><span class="mch">halt_replay.entry_veto</span><span class="act"><b>Replayed gate</b> — halt windows + daily-loss + inventory caps</span><small>⚠ a <i>re-implementation</i> of the live RiskGate entry path, not the engine's own code (see roadmap R2)</small></div></div>
+
+      <div class="step sm"><div class="num">6</div><div class="stepbody"><span class="mch">hftbacktest order ledger</span><span class="act"><b>Simulate fill</b> — IOC vs recorded depth + latency + slippage + fee curve</span><small>marketability re-check vetoes fleeting quotes; <code>flat</code> (HL) or <code>pm_binary</code> fee model</small></div></div>
+
+      <div class="step sm"><div class="num">7</div><div class="stepbody"><span class="mch">marketdata.position_math</span><span class="act"><b>Book fill</b> → position accounting (shared math)</span><small><code>apply_fill</code> / <code>stop_price</code> — same module the engine uses</small></div></div>
+
+      <div class="step sm"><div class="num">8</div><div class="stepbody"><span class="mch">end-of-data settle</span><span class="act"><b>Settle</b> open positions at resolved outcome (1.0 / 0.0)</span><small>vs live: settlement arrives async from the venue</small></div></div>
+
+      <div class="step sm"><div class="num">9</div><div class="stepbody"><span class="mch">result → report.py / results.jsonl</span><span class="act"><b>Score</b> PnL · Sharpe · hit-rate · max-DD → markdown / grid table</span><small>tuning streams atomically per cell (resumable); winner promoted to <code>strategy.yaml</code></small></div></div>
+    </div>
+  </div>
+  <p class="conv">▲ steps 2 &amp; 4 run identical shared code on both paths — that convergence is the whole point ▲</p>
+</div></section>
+
+<!-- IMPROVEMENTS ROADMAP -->
+<section id="roadmap"><div class="wrap">
+  <h2><span class="n">09</span> &nbsp;Architecture improvements</h2>
+  <p class="h2sub">Kill drift · ease new strategies · scale to many strategies × markets × accounts</p>
+  <p class="say">The shared spine is strong, but a few seams still let live and sim diverge, and adding a strategy or promoting a config touches more files than it should. These are grounded in the current code — each lists what exists <b>today</b>, the concrete <b>risk</b>, and a <b>proposed</b> change. Priority is <span class="pill" style="color:#ff8a8a;border-color:#5c2424">P1</span> reliability / drift first.</p>
+
+  <!-- DESK VERDICT -->
+  <div class="verdict">
+    <p class="vh">Desk verdict · do this next</p>
+    <p style="margin:0 0 14px;color:var(--muted);font-size:14.5px;max-width:840px">The blocker to sizing up is <b style="color:var(--ink)">trusting that sim PnL predicts live PnL</b>. The cheapest path to that trust is a trio of low-risk refactors of code that already exists — sequenced to front-load the cheapest insurance first. (Theme A reordered vs the original R-numbering on desk feedback.)</p>
+    <div class="vorder">
+      <div class="vstep"><span class="vn">① &nbsp;R5</span><span class="vt">Config fingerprint</span><small>Extend the data <code>config_sig</code> to params; log it; surface in <code>engine-diag</code>. Catches the SHR-65 class (live silently ≠ YAML) and makes "is this sim comparable to this slot?" a one-line check.</small><span class="eff">≈ ½ session · precondition for ③</span></div>
+      <div class="varrow">→</div>
+      <div class="vstep"><span class="vn">② &nbsp;R2</span><span class="vt">Share the risk gate</span><small>Lift <code>entry_veto</code> into a zero-IO <code>risk/core.py</code>; both engine + <code>halt_replay</code> import it. Contained, no behavior change. Confirmed a live hand-copy this session.</small><span class="eff">≈ ½ session · no behavior change</span></div>
+      <div class="varrow">→</div>
+      <div class="vstep"><span class="vn">③ &nbsp;R3</span><span class="vt">CI parity gate</span><small>The harness already exists (<code>parity/decision_replay.py</code> + <code>make daily-report</code>, ~70% there). Add a committed fixture corpus + assert Decision-level equivalence in CI.</small><span class="eff">≈ 1 session · the sizing-confidence multiplier</span></div>
+    </div>
+    <p class="vnote"><b>Then stop and reassess.</b> R6/R7 (declarative params / plugin SDK) and Theme C (feed bus, slot matrix) are deferred — do them <i>only when friction actually bites</i>, not on principle. R5→R2→R3 is what earns the right to size up.</p>
+  </div>
+
+  <!-- THEME 1 -->
+  <div class="themehead">Theme A · Eliminate live↔sim drift</div>
+
+  <details class="imp"><summary><span class="pri p2">P2</span><span class="stat partial">partially done</span><span><span class="it">R1 · One decision kernel, one set of inputs</span> <span class="ix">— collapse the remaining assembly seam</span></span></summary>
+    <div class="body">
+      <p class="vfd">✓ Verified on current branch — already partly addressed: <code>recent_returns</code> + σ are sourced from the shared <code>marketdata.MarketState</code> core on both paths (SHR-87/97), and <code>decision_input.py</code> (SHR-97) shares the cadence/source <i>config</i>. Downgraded from P1.</p>
+      <div class="trp">
+      <div class="k">Today</div><div class="today">The numeric inputs (returns, σ, volume) are already shared. What remains duplicated is the final struct packing: the engine builds <code>BookState</code>/<code>QuestionView</code> in <code>engine/market_state.py</code> (355, 466); the sim builds <code>BookState</code> in <code>hftbt_runner.py</code> (425).</div>
+      <div class="k">Risk</div><div class="risk">Lower than originally stated — but two struct-assembly sites can still drift in how a book level or QuestionView field is populated, producing a different Decision from identical market data.</div>
+      <div class="k">Proposed</div><div class="fix">Finish the job SHR-97 started: a single <code>build_decision_inputs(market_state, question, cfg) → StrategyInputs</code> in <code>marketdata/</code> that owns the last struct-packing step too. Both harnesses call it; step 3 of both paths becomes shared (purple). Lower urgency now that the numeric core is unified.</div>
+    </div></div>
+  </details>
+
+  <details class="imp" open><summary><span class="pri p1">P1</span><span class="stat next">do next ②</span><span><span class="it">R2 · Share the risk gate — don't re-implement it</span> <span class="ix">— halt_replay.py is a hand copy</span></span></summary>
+    <div class="body">
+      <p class="vfd">✓ Verified — <code>halt_replay.py</code> line 71 literally says <i>"pure copy rather than importing the engine."</i> Desk touched this seam wiring caps into <code>run --slot</code> this session. Pure refactor → backtest output must be bit-identical after.</p>
+      <div class="trp">
+      <div class="k">Today</div><div class="today"><code>backtest/halt_replay.py</code> states it is a <i>"pure copy rather than importing the engine"</i> of <code>engine.risk.RiskGate</code>'s entry path, to avoid a backtest→engine dependency.</div>
+      <div class="k">Risk</div><div class="risk">Two copies of the cap/veto ordering drift the moment someone edits one. The sim can approve trades the live gate would veto (or vice-versa), silently inflating or deflating backtest PnL.</div>
+      <div class="k">Proposed</div><div class="fix">Lift the pure entry-veto logic into <code>strategy/</code> or a new <code>risk/core.py</code> with <b>zero IO</b> (the engine already separates the stateful gate from the pure decision). Both <code>engine.risk</code> and <code>halt_replay</code> import it. Breaks the unwanted dependency the right way — by relocating shared logic, not copying it.</div>
+    </div></div>
+  </details>
+
+  <details class="imp" open><summary><span class="pri p1">P1</span><span class="stat next">do next ③</span><span><span class="it">R3 · Golden-replay parity gate in CI</span> <span class="ix">— make drift fail the build</span></span></summary>
+    <div class="body">
+      <p class="vfd">✓ Verified — ~70% already built: <code>parity/decision_replay.py</code> produces a <code>DecisionReplayReport</code> with <code>decision_match_rate()</code> + field-skew attribution, and <code>make daily-report</code> exists. R3 is mostly <i>wiring</i>, not building.</p>
+      <div class="trp">
+      <div class="k">Today</div><div class="today">The harness exists and runs ad-hoc (<code>parity/decision_replay.py</code> + <code>make daily-report</code>); it is not enforced in CI.</div>
+      <div class="k">Risk</div><div class="risk">Parity is checked when someone remembers to. Drift introduced between checks ships to production.</div>
+      <div class="k">Proposed</div><div class="fix">Commit a small fixture corpus (a few recorded questions + a captured live journal — the data is already pulled). Wire the <i>existing</i> harness into CI: assert <b>Decision-level equivalence</b> (same action/side/size per tick), failing on any INPUT_SKEW residual. Gated by R5's <code>config_sig</code> so it only compares like-for-like. Turns "we believe they match" into a build gate.</div>
+    </div></div>
+  </details>
+
+  <details class="imp"><summary><span class="pri p2">P2</span><span><span class="it">R4 · Unify the event taxonomy</span> <span class="ix">— hlanalysis.events vs backtest.core.events</span></span></summary>
+    <div class="body"><div class="trp">
+      <div class="k">Today</div><div class="today">The recorder/engine speak <code>hlanalysis/events.py</code> (<code>NormalizedEvent</code>); the backtester defines a parallel <code>backtest/core/events.py</code> (<code>MarketEvent</code>/<code>BookSnapshot</code>/…). A translation layer bridges them on load.</div>
+      <div class="k">Risk</div><div class="risk">The translation is an un-tested seam where a field (seq, ts units, book ordering) can be dropped or reinterpreted — the same class of bug as the historical PM "worst-first book" and strike-freeze issues.</div>
+      <div class="k">Proposed</div><div class="fix">Make the sim consume <code>hlanalysis.events</code> directly (it already reads recorder Parquet written in that schema), or formalize the bridge as a single typed adapter with round-trip tests. One event vocabulary end-to-end.</div>
+    </div></div>
+  </details>
+
+  <details class="imp" open><summary><span class="pri p1">P1</span><span class="stat next">do next ①</span><span><span class="it">R5 · Config fingerprint stamped on every run</span> <span class="ix">— catch the SHR-65 class of bug</span></span></summary>
+    <div class="body">
+      <p class="vfd">Promoted P2 → P1 (do first). Nearly free, and it's the <b>precondition that makes R3 meaningful</b> — without a config_sig you can't assert a sim result and a live slot are comparable.</p>
+      <div class="trp">
+      <div class="k">Today</div><div class="today">History shows live silently ran params that differed from the YAML (theta config skew, SHR-65: a params dataclass declared a subset of fields and <code>extra='ignore'</code> dropped the rest). Fixed reactively with full mirrors + <code>extra='forbid'</code> + per-strategy parity tests.</div>
+      <div class="k">Risk</div><div class="risk">The defense is N hand-written parity tests, one per strategy — itself a maintenance burden that the next strategy can forget.</div>
+      <div class="k">Proposed</div><div class="fix">Hash the fully-resolved strategy config (all knobs) into a <code>config_sig</code> emitted by both engine startup and every backtest run (the event-array cache already computes one for <i>data</i> — extend it to <i>params</i>). Log it; surface it in <code>make engine-diag</code>. A sim result and a live slot are only comparable if their <code>config_sig</code> match — make that checkable in one line.</div>
+    </div></div>
+  </details>
+
+  <!-- THEME 2 -->
+  <div class="themehead">Theme B · Make strategies &amp; configs easy to ship</div>
+
+  <details class="imp"><summary><span class="pri p2">P2</span><span class="stat defer">defer · when it bites</span><span><span class="it">R6 · Declarative param schema — single source of truth</span> <span class="ix">— stop hand-mirroring config</span></span></summary>
+    <div class="body">
+      <p class="vfd warn">⚠ Desk call: the biggest over-engineering trap here. A big-bang config refactor across every strategy + builder + backtest path is itself a place to inject silent param-drift. Do R5 first (so a config_sig mismatch catches any regression), <b>then migrate one strategy at a time</b> — only once new-strategy friction is actually blocking, not on principle.</p>
+      <div class="trp">
+      <div class="k">Today</div><div class="today">Adding a knob means editing it in: <code>strategy.yaml</code>, the strategy's params dataclass, a <code>build_*_config</code> in <code>config_builders.py</code>, the backtest <code>slot_config</code> path, <i>and</i> a parity test that mirrors them. <code>config_builders</code> dispatches on hardcoded <code>if cfg.strategy_type == "late_resolution" / "theta_harvester"</code> branches.</div>
+      <div class="k">Risk</div><div class="risk">Five edit sites per knob, each a chance to diverge; the parity tests exist precisely because this is fragile. New strategies inherit the whole pattern.</div>
+      <div class="k">Proposed</div><div class="fix">Each strategy owns one <b>Pydantic params model</b> (defaults, ranges, cadence metadata) as the single source. YAML validates against it; engine and backtest both construct from it via one generic builder; tuning grids are generated from the declared ranges. The mirror — and its parity tests — disappear because there's nothing to mirror.</div>
+    </div></div>
+  </details>
+
+  <details class="imp"><summary><span class="pri p2">P2</span><span class="stat defer">defer · when it bites</span><span><span class="it">R7 · Fully registry-driven strategy contract (plugin SDK)</span> <span class="ix">— add a strategy without touching the core</span></span></summary>
+    <div class="body"><div class="trp">
+      <div class="k">Today</div><div class="today">Strategies self-register via <code>@register</code> for <code>evaluate()</code>, but the <i>config build</i> and slot wiring are not registry-driven — they require new branches in <code>config_builders</code> and a matching backtest builder.</div>
+      <div class="k">Risk</div><div class="risk">"Add a strategy" is a cross-cutting change across engine + backtest internals, not a self-contained module — friction that discourages experimentation.</div>
+      <div class="k">Proposed</div><div class="fix">Define one <code>Strategy</code> plugin contract: <code>params_model</code>, <code>build(params)</code>, <code>evaluate(inputs)</code>, and declared <code>reference_requirements</code> (symbols, cadence, σ source). The registry returns all three. Engine and backtest become strategy-agnostic loaders. A new strategy = one new file + one YAML block; no core edits.</div>
+    </div></div>
+  </details>
+
+  <details class="imp"><summary><span class="pri p2">P2</span><span><span class="it">R8 · A config promotion pipeline (tune → validate → canary → live)</span> <span class="ix">— codify the runbook</span></span></summary>
+    <div class="body"><div class="trp">
+      <div class="k">Today</div><div class="today">The workflow (tune → promote into <code>strategy.yaml</code> → re-validate at engine cadence → SSM deploy) is documented convention executed by hand; deploy is SSM-only with a drift gate.</div>
+      <div class="k">Risk</div><div class="risk">Manual steps get skipped (e.g. validating on synthetic instead of recorded data — an explicit, repeated past failure). No structural barrier between "tuned a grid" and "it's live with real money".</div>
+      <div class="k">Proposed</div><div class="fix">A <code>hl-bt promote</code> command + paper-canary stage: tune emits a candidate config; <code>promote</code> runs the recorded-data re-validation + parity gate (R3) + config_sig stamp (R5), then deploys to a <b>paper slot</b> first; a live slot is only enabled after the paper slot matches sim within tolerance for N sessions. Each gate is a command, not a memory.</div>
+    </div></div>
+  </details>
+
+  <!-- THEME 3 -->
+  <div class="themehead">Theme C · Scale to strategies × markets × accounts</div>
+
+  <details class="imp"><summary><span class="pri p3">P3</span><span class="stat defer">defer · YAGNI at 5 slots</span><span><span class="it">R9 · Decouple the reference feed from slot cadence (feed bus)</span> <span class="ix">— slots shouldn't be coupled by sharing a feed</span></span></summary>
+    <div class="body"><div class="trp">
+      <div class="k">Today</div><div class="today">Slots that share a reference feed are coupled on its cadence — e.g. v1 and v31 share the BTC feed, so one can't move to <code>dt=5</code> alone. The shared <code>MarketState</code> registers each (symbol, dt) cadence, but co-located slots negotiate it implicitly.</div>
+      <div class="k">Risk</div><div class="risk">As more strategies/markets are added, cadence coupling becomes a combinatorial constraint on what can run together — a scaling ceiling and a foot-gun ("flipping one alone won't start").</div>
+      <div class="k">Proposed</div><div class="fix">A single ingest <b>feed bus</b> that maintains every (symbol, cadence) view independently; each slot subscribes to exactly the views its <code>reference_requirements</code> declare. One Binance/HL socket, many independent resampled views, zero inter-slot coupling. Slots become fully orthogonal.</div>
+    </div></div>
+  </details>
+
+  <details class="imp"><summary><span class="pri p3">P3</span><span class="stat defer">defer · YAGNI at 5 slots</span><span><span class="it">R10 · Declarative slot matrix (strategy × venue × account)</span> <span class="ix">— configuration, not code</span></span></summary>
+    <div class="body"><div class="trp">
+      <div class="k">Today</div><div class="today">Slots are named per (strategy, track) — <code>v1</code>, <code>v31</code> on HL; <code>v1_pm</code>, <code>v31_pm</code> on PM — each an <code>AccountSlot</code> with its own DAL/exec/risk/strategy. Account config is a typed union (<code>HyperliquidAccount</code> / <code>PolymarketAccount</code>).</div>
+      <div class="k">Risk</div><div class="risk">Running "the same strategy on N accounts / M venues" multiplies hand-written slot config; venue-specific settlement semantics (HL fill vs PM redeem) are handled with conditionals that grow with each venue.</div>
+      <div class="k">Proposed</div><div class="fix">Express the deployment as a <b>matrix</b>: <code>{strategy} × {venue} × {account} × {params-ref}</code> → slots expanded automatically, each with a namespaced state DB. Push venue differences behind the existing <code>ExecutionClient</code> protocol (incl. a <code>settlement_source</code> capability) so adding a venue is one adapter, not scattered conditionals.</div>
+    </div></div>
+  </details>
+
+  <details class="imp"><summary><span class="pri p3">P3</span><span class="stat radar">on radar</span><span><span class="it">R11 · Capital allocator across slots</span> <span class="ix">— portfolio-level risk, not just per-slot</span></span></summary>
+    <div class="body">
+      <p class="vfd">Desk call: the one Theme-C item to keep on the radar. Becomes real when sizing up across <b>correlated</b> slots (all crypto slots move together) — but premature until the desk is bigger; per-slot caps are fine for now.</p>
+      <div class="trp">
+      <div class="k">Today</div><div class="today">Risk caps (inventory, daily-loss) are per-slot; the desk-scaling work tracks trust-PnL per slot. There is no single component that allocates capital or enforces a global risk budget across all running slots.</div>
+      <div class="k">Risk</div><div class="risk">N independent slots can collectively exceed an intended desk-level exposure or correlate into the same move; scaling to many strategies/markets makes portfolio risk the binding constraint, not per-slot risk.</div>
+      <div class="k">Proposed</div><div class="fix">A thin <b>allocator</b> above the slots that owns a global capital + risk budget, sizes each slot's <code>max_position_usd</code> from live trust-PnL, and can throttle/halt the portfolio as a unit. The per-slot gates remain as local safety; the allocator adds the missing portfolio layer for multi-strategy scale.</div>
+    </div></div>
+  </details>
+
+  <div class="callout"><b>Sequencing (desk-revised):</b> <b style="color:#9bf3cb">R5 → R2 → R3</b> next — the highest leverage-to-risk, all low-risk refactors/wiring of code that already exists, and together they earn the right to size up (sim PnL you can trust). R1 is partially done (numeric inputs already shared) — finish opportunistically. <b>Then stop and reassess:</b> R6/R7 only when new-strategy friction actually bites (and migrate one strategy at a time, never big-bang). Theme C (R9/R10) is YAGNI at 5 slots; R11 stays on the radar for when sizing up correlated crypto slots. None require new infrastructure — they consolidate seams the codebase already has.</div>
+
+  <div class="callout warn"><b>Caveat — this is a static snapshot.</b> The "Today" claims were generated from the import graph and re-verified against the code on this branch (R1 reframed, R3 found 70%-built, R2/R4 confirmed). Re-check before acting: some seams move under active refactors (e.g. SHR-97 already unified the numeric input path). The doc is a map, not ground truth — read the code first.</div>
+</div></section>
+
+<!-- BUILD LOG -->
+<section id="log"><div class="wrap">
+  <h2><span class="n">10</span> &nbsp;Implementation log — live</h2>
+  <p class="h2sub">Executing R5 → R2 → R3 with a verify-before-merge discipline</p>
+  <p class="say">Updated as the work lands. Each fix is classified <b>refactor</b> (must reproduce sim output bit-for-bit) or <b>feature</b> (needs a new behavioural test), and nothing merges to <code>main</code> until its verification gate is green. The recorded engine data already on disk is the oracle — no re-pull.</p>
+
+  <div class="tl">
+    <div class="item done"><div class="when">step 0 · setup</div><div class="body2">
+      <div class="ttl">Verification harness <span class="st sdone">established</span></div>
+      <p>A deterministic backtest is the before/after oracle. Chosen command (serial → reproducible):</p>
+      <ul class="chk">
+        <li class="ok"><code>hl-bt run --slot v31 --data-source hl_hip4 --start 2026-05-01 --end 2026-06-12 --kind binary --max-markets 4 --workers 1</code> → 4 questions, 151 trades, PnL −$172.06</li>
+        <li class="ok">Determinism <b>proven</b>: runs A vs B → <code>report.md</code> byte-identical · <code>diagnostics.parquet</code> (945,947 rows) data-identical · <code>fills.parquet</code> identical except <code>cloid</code> (a random per-run UUID, no effect on PnL)</li>
+        <li class="ok">Oracle defined: compare <code>report.md</code> + diagnostics + fills∖<code>cloid</code> before/after every change</li>
+        <li class="ok">Second gate green on main: <code>uv run pytest -q</code> → <b>1683 passed in 135s</b></li>
+      </ul>
+      <p><b>Why <code>--slot</code>:</b> it builds the strategy from the live <code>strategy.yaml</code> via <code>engine.config_builders</code> — the byte-identical-to-live path, so the oracle exercises the real config flow.</p>
+    </div></div>
+
+    <div class="item done"><div class="when">① merged · main a515db5</div><div class="body2">
+      <div class="ttl">R5 · Shared config fingerprint <span class="st sdone">merged ✓</span></div>
+      <p><b>Done.</b> Both sides previously hashed config independently — engine <code>diag.py:_build_config_fingerprint</code> and backtest <code>report.py:_config_hash</code> — so a sim hash and a live hash weren't comparable. Now one shared <code>strategy_config_sig(StrategyConfig)</code> in <code>engine/config.py</code> is called by both; the backtest stamps <code>slot config_sig</code> into every <code>--slot</code> report.</p>
+      <ul class="chk">
+        <li class="ok">Shared fn in <code>engine/config.py</code> (no import cycle); engine-diag rewired; backtest report + cli threaded</li>
+        <li class="ok"><b>Parity proven</b>: <code>engine-diag hash == backtest slot config_sig == ce40d36f8a4ab862</code> for slot v31</li>
+        <li class="ok">Gate passed: oracle backtest PnL byte-identical (−$172.06, only the new sig line added); suite <b>1696 passed</b> (+13 new tests: deterministic, param-sensitive, engine≡backtest)</li>
+        <li class="ok">Reviewed diff (removed a dead <code>TYPE_CHECKING</code> stub) → fast-forward merged to main</li>
+      </ul>
+      <p>Classification: <b>feature</b> (additive observability) — sim PnL untouched, as required. <b>This unblocks R3:</b> a sim result and a live slot are now comparable by one hex value.</p>
+    </div></div>
+
+    <div class="item done"><div class="when">② merged · main 9cadf4b</div><div class="body2">
+      <div class="ttl">R2 · Share the risk gate <span class="st sdone">merged ✓</span></div>
+      <p><b>Done.</b> The three entry <i>state caps</i> — daily-loss, global-inventory, concurrent-positions (top-up exempt) — plus <code>daily_window_start_ns</code> now live in one zero-IO module <code>hlanalysis/risk/caps.py</code> that <code>engine.risk</code>, <code>halt_replay</code>, and <code>engine.scanner</code> all import. The hand-copy is gone.</p>
+      <ul class="chk">
+        <li class="ok">Shared <code>risk/caps.py</code> (4 pure predicates); engine/risk + halt_replay + scanner rewired, veto reasons/ordering preserved</li>
+        <li class="ok">Gate passed: oracle backtest <b>byte-identical</b> (PnL surface unchanged); suite <b>1757 passed</b> (+59 cap tests incl. an engine≡sim equivalence grid)</li>
+        <li class="ok"><b>Review caught a real regression:</b> the sub-agent had also reverted an unrelated PM safety fix (zero-fill IOC→<code>cancelled</code>, the phantom-order guard) and deleted its 2 tests — surgically reverted those files to main; suite still green without them (proving the deletion was gratuitous)</li>
+        <li class="ok">Main advanced mid-flight (a peer commit reinforced that same PM fix) → rebased R2 cleanly onto it (no file overlap), re-running gate before fast-forward merge</li>
+      </ul>
+      <p>Classification: <b>pure refactor</b> — no behavior change. <b>Lesson logged:</b> sub-agents can wander outside scope; the diff review (not just "tests green") is the load-bearing gate.</p>
+    </div></div>
+
+    <div class="item done"><div class="when">③ merged · main 7d7b9db</div><div class="body2">
+      <div class="ttl">R3 · CI parity gate <span class="st sdone">merged ✓</span></div>
+      <p><b>Done — with an honest scope.</b> New hermetic test <code>tests/unit/parity/test_ci_decision_parity_gate.py</code> + <code>make parity-gate</code> runs the engine path (<code>ReplayRunner</code>) and the sim path (<code>run_one_question</code>) — genuinely different code — over the committed <code>tests/fixtures/hl_hip4</code> corpus and pins current parity as a regression gate.</p>
+      <ul class="chk">
+        <li class="ok"><b>Headline result — σ is bit-identical</b> across the two paths at all 110 comparable scan points (<code>sigma median_rel = 0.00</code>) → confirms the shared <code>MarketState</code> (SHR-87/97) is wired correctly on both sides. This is the highest-value drift catch.</li>
+        <li class="ok"><b>R5 payoff wired in</b>: the gate first asserts <code>strategy_config_sig(engine) == strategy_config_sig(sim)</code> — only compares like-for-like configs</li>
+        <li class="ok">Gate green + deterministic (run twice, identical) + suite <b>1760 passed</b>; <code>make parity-gate</code> = 3 passed in 34s, no network/venue</li>
+        <li class="ok">Reviewed: confirmed the two sides are distinct code paths (σ-parity is a real cross-path assertion, not a tautology); docstring is transparent about the limitation</li>
+      </ul>
+      <p><b>Honest caveat (verified):</b> the raw <code>decision_match_rate</code> is only 2.7% — a <i>structural</i> artifact, not drift: <code>ReplayRunner</code> fires <code>evaluate()</code> on every tick with <b>no position tracking</b> (thousands of ENTERs) while the sim models fills/positions (a few actions). So R3-v1 is really a <b>σ-parity + config-sig + liveness</b> gate. A true <i>decision-count</i> equivalence gate is a documented follow-up (make <code>ReplayRunner</code> position-aware via its <code>position_lookup</code> hook; pairs naturally with finishing R1's shared decision kernel).</p>
+    </div></div>
+  </div>
+
+  <div class="callout"><b>Outcome — R5 → R2 → R3 merged, pushed, and deployed.</b> Behind a verify-before-merge discipline (deterministic backtest oracle + full suite + diff review). Sizing-confidence ledger: a sim result and a live slot are now comparable by one <code>config_sig</code> (R5); the risk gate is one shared source of truth instead of two hand-copies (R2); and a CI gate locks in bit-identical engine↔sim σ and config parity, failing the build on regression (R3). <b>Shipped:</b> <code>origin/main</code> = <code>7d7b9db</code>; engine deployed to EC2 via SSM — <code>active (running)</code>, NRestarts=0, no <code>restart_blocked</code>/<code>halt</code> flags, all 5 slots ingesting (~33k events) and scanning. The R2 step is the cautionary tale: a sub-agent quietly reverted an unrelated safety fix and the suite still passed — the <i>diff review</i> caught it, not the tests.</div>
+</div></section>
+
+<!-- NEXT BATCH PLAN -->
+<section id="plan"><div class="wrap">
+  <h2><span class="n">11</span> &nbsp;Next batch — codebase-grounded plan</h2>
+  <p class="h2sub">R1 · R3 v2 · R6 · R7 · R9 — planned from the actual code, executed with TDD + diff-review gates</p>
+  <p class="say">Scope confirmed with the desk: <b>R10 and R11 deferred</b>; this batch is the two value chains (<i>trust the sim at size</i>, <i>add strategies cheaply</i>) plus R9. Each item below lists the <b>verified current state</b> (file:line), the <b>change</b>, the <b>TDD tests</b> that prove it works, and the <b>no-regression gate</b>. Every item ships via a sonnet sub-agent, then a diff review + gate before merge — the discipline that caught the R2 regression.</p>
+
+  <div class="callout"><b>Sequencing.</b> Two hard chains — <b>R1 → R3 v2</b> (soft: R3 v2 is independent but tighter after R1) and <b>R6 → R7</b> (hard). <b>R9</b> is independent. Merge order: <code>R1 → R9 → R3 v2 → R6.1 (late_res) → R6.2 (theta) → R7</code>, serialized at the merge to avoid rebase tangles; only non-overlapping items run in parallel worktrees. The universal oracles: the deterministic backtest (<code>report.md</code> + diagnostics + fills∖cloid) for refactors, and <code>strategy_config_sig</code> (R5) for any params change.</p></div>
+
+  <div class="themehead">Chain 1 · trust the sim at bigger size</div>
+
+  <details class="imp"><summary><span class="pri p1">refactor</span><span class="stat sdone" style="background:var(--live);color:#0b0e14">merged ✓ e88be37</span><span><span class="it">R1 · shared decision kernel</span> <span class="ix">— smaller than scoped (honest finding)</span></span></summary>
+    <div class="body">
+      <p class="vfd">✓ Merged — but the investigation <b>corrected the scope</b>. The plan assumed <code>BookState</code>/<code>QuestionView</code> assembly was duplicated-and-unifiable; in fact it <b>can't be shared</b>: the engine reads from a live L2 book, the sim from hftbacktest depth arrays — inherently different data sources. The only truly shareable input is the σ/returns read (already on the shared MarketState core).</p>
+      <div class="trp">
+      <div class="k">Done</div><div class="fix">New <code>marketdata/decision_kernel.py:build_decision_inputs()</code>; both <code>scanner.py</code> and the backtest runner now read σ-inputs through one call site. Surfaced (and documented) a numpy-vs-tuple typing asymmetry — values byte-identical, harmless; left as a tiny noted follow-up.</div>
+      <div class="k">Gate</div><div class="fix">Bit-identical oracle (PnL byte-for-byte) ✓ · suite 1760 ✓ · R3 σ-gate unchanged ✓ · per-class cadence test adapted not weakened (reviewed).</div>
+      <div class="k">Knock-on</div><div class="fix">Because books are inherently un-shareable, <b>R3 v2 (position tracking) is now the real parity lever</b>, not a full input-kernel merge. The σ-gate + R3 v2 together are the parity story.</div>
+    </div></div>
+  </details>
+
+  <details class="imp"><summary><span class="pri p2">feature</span><span class="stat sdone" style="background:var(--live);color:#0b0e14">merged ✓ 68f7e59</span><span><span class="it">R3 v2 · true decision-COUNT parity gate</span> <span class="ix">— 2.7% → 100% match</span></span></summary>
+    <div class="body">
+      <p class="vfd">✓ Merged. Result: <code>decision_match_rate</code> <b>2.7% → 100%</b>, <code>n_sim_phantom</code> 1→0, <code>n_live</code> 5720→78, σ still 0.00. The gate is now a real decision-equivalence gate (floor pinned 0.90). New <code>parity/position_timeline.py</code> reconstructs the sim's held position per instant from its own fills (shared <code>apply_fill</code>) and feeds it to the engine replay — <b>no <code>replay.py</code> change</b> (it already had the <code>position_lookup</code> hook). Suite 1764, deterministic.</p>
+      <div class="trp">
+      <div class="k">Today</div><div class="today">The gate's engine path runs <code>ReplayRunner</code> with no positions → fires ENTER every tick (~5,720) while the sim takes ~3 actions → match-rate 2.7% (structural, not drift). σ is already bit-identical.</div>
+      <div class="k">Change</div><div class="fix">Build a position timeline from the sim's <code>fills</code> (<code>hftbt_runner</code> tracks <code>_RunState.pos</code>; fills are timestamped), feed it as <code>position_lookup</code> so the engine replay holds the same positions → it stops emitting phantom ENTERs and only fires ENTER-when-flat / EXIT-when-held, like the sim.</div>
+      <div class="k">Tests/gate</div><div class="fix">Re-measure; expected <code>decision_match_rate</code> ~0.66→1.0, <code>n_sim_phantom</code>→0. <b>Tighten</b> the pinned floor from 0.02 to the new measured rate (a real decision-equivalence gate, not σ-only). σ stays 0.00. Suite green.</div>
+    </div></div>
+  </details>
+
+  <div class="themehead">Chain 2 · add strategies &amp; configs cheaply</div>
+
+  <details class="imp"><summary><span class="pri p1">refactor</span><span class="stat sdone" style="background:var(--live);color:#0b0e14">merged ✓ 8a84459 + f88c67f</span><span><span class="it">R6 · declarative param schema</span> <span class="ix">— both strategies done</span></span></summary>
+    <div class="body">
+      <p class="vfd">✓ <b>R6.1 late_resolution <code>8a84459</code> + R6.2 theta <code>f88c67f</code> merged.</b> Each strategy now has a pydantic params base (<code>LateResolutionParams</code> / <code>ThetaHarvesterParams</code>) the YAML model inherits; duplicate field declarations removed; <code>extra='forbid'</code> preserved; <code>test_single_source_property</code> guards each. Add-a-knob: 3–5 → <b>2 edits</b>. All 5 config_sigs byte-identical, v1 + v31 backtests byte-identical, suite 1766. <b>Extra check on R6.2:</b> the per-class <code>theta_overrides</code> path (invisible to config_sig + the binary backtest) was separately proven bit-identical (v31 bucket resolves dt=2, hash unchanged) — closing the same R9-style gap.</p>
+      <p class="vfd warn">⚠ Migrate incrementally (desk call), NOT big-bang. Verified surface: 6 config dataclasses, 4 pydantic models, 6 builders, <b>3 hardcoded <code>strategy_type</code> dispatch points</b>, 2 parity-test suites. Adding one knob = 3–5 edit sites today.</p>
+      <div class="trp">
+      <div class="k">Today</div><div class="today">Each strategy's params are hand-mirrored: dataclass (<code>strategy/*.py</code>) ↔ pydantic model (<code>config.py</code> <code>AllowlistEntry</code> 29 fields / <code>ThetaParams</code> 36) ↔ builder (<code>config_builders.py</code>) ↔ backtest <code>slot_config.py</code> ↔ a parity test that exists only to police the mirror.</div>
+      <div class="k">Change</div><div class="fix"><b>Phase 6.1</b> late_resolution (29 fields), then <b>6.2</b> theta (40): each strategy owns ONE pydantic params model as the single source; YAML validates against it; engine + backtest build from it via one generic path. The hand-mirror + its parity tests become obsolete.</div>
+      <div class="k">Tests/gate</div><div class="fix"><b><code>strategy_config_sig</code> is the oracle</b>: every live slot's sig (v1/v31/v31_pm/…) must be <b>byte-identical</b> before/after (params provably unchanged) + bit-identical backtest oracle + suite. Per phase.</div>
+    </div></div>
+  </details>
+
+  <details class="imp"><summary><span class="pri p2">refactor</span><span class="stat sdone" style="background:var(--live);color:#0b0e14">merged ✓ d909753</span><span><span class="it">R7 · plugin SDK (registry-driven)</span> <span class="ix">— 3 dispatch points killed</span></span></summary>
+    <div class="body">
+      <p class="vfd">✓ Merged. New <code>strategy/live_registry.py</code>: strategies self-register a <code>live_builder</code>; the 3 hardcoded dispatch points are gone — <code>_build_strategy_for_slot</code> is a registry lookup, <code>StrategyType</code> is a <code>str</code> validated against registered types (unknown still rejected), <code>slot_config</code> uses <code>live_registry_id</code>. Import-order safe (config.py imports the registrants; live_builder lazy-imports to avoid a cycle). Gate: all 5 config_sigs byte-identical · <b>engine build path</b> verified bit-identical for v1+v31 (the path the backtest can't see) · v1+v31 backtests byte-identical · payoff test (new strategy needs zero core edits) · suite 1774. Adding a strategy: ~8 files → 1 module + 1 YAML block.</p>
+      <div class="trp">
+      <div class="k">Today</div><div class="today">Adding a strategy touches ~8 files because 3 sites hardcode per-strategy branches: <code>config.py:18</code> (<code>StrategyType</code> literal), <code>config_builders.py:260</code> (<code>_build_strategy_for_slot</code> if/elif), <code>slot_config.py:60</code> (backtest dispatch). <code>@register</code> already exists for the backtest build path.</div>
+      <div class="k">Change</div><div class="fix">One plugin contract per strategy (<code>params_model</code>, <code>build()</code>, <code>evaluate</code>, <code>reference_requirements</code>) surfaced through the registry; engine + backtest become strategy-agnostic loaders. Adding a strategy = one new file + one YAML block, zero core edits.</div>
+      <div class="k">Tests/gate</div><div class="fix">All slots' <code>config_sig</code> unchanged + oracle + suite + a new test that registering a dummy strategy needs no edit to config.py/config_builders/slot_config. Builds on R6's params model.</div>
+    </div></div>
+  </details>
+
+  <div class="themehead">Independent</div>
+
+  <details class="imp"><summary><span class="pri p2">feature</span><span class="stat sdone" style="background:var(--live);color:#0b0e14">merged ✓ 2a028ee</span><span><span class="it">R9 · independent cross-slot cadence</span> <span class="ix">— review caught a live bug</span></span></summary>
+    <div class="body">
+      <p class="vfd warn">⚠ Review caught a real latent <b>live-engine bug</b> the agent introduced + that NO backtest could catch (the sim path doesn't use the scanner): the agent derived the default cadence as <code>theta.vol_sampling_dt_seconds if theta else <b>60</b></code> — wrong for late_resolution slots (v1/v1_pm run dt=5 on their allowlist), which would read an unregistered dt=60 σ buffer live. Fixed to the canonical <code>reference_sampling_dt_seconds(cfg)</code> + added a late_resolution regression test. <b>This is why diff-review &gt; tests-green.</b></p>
+      <p class="vfd">Verified: <code>MarketState</code> already fans one feed into multiple per-(symbol,dt) buffers (prod: v31 binary dt=5 + bucket dt=2). The lockstep was a silent <code>dt=None → cadences[0]</code> aliasing fallback; fix = scanner reads its own explicit dt. Source change: <code>scanner.py</code> only. Oracle byte-identical, suite 1764.</p>
+      <div class="trp">
+      <div class="k">Today</div><div class="today">Sibling slots sharing a symbol (v1+v31 on BTC) are forced to the same cadence; a read without explicit dt silently inherits whichever slot registered first.</div>
+      <div class="k">Change</div><div class="fix">Make every consumer cadence-explicit (kill the <code>dt=None</code> fallback for slot reads), then relax the lockstep guard so siblings can pick different cadences on a shared symbol.</div>
+      <div class="k">Tests/gate</div><div class="fix"><b>No-op for current configs</b> (all lockstep) → bit-identical oracle + suite. NEW test: two slots, shared symbol, different dt → each reads its own correct buffer. No live config change shipped.</div>
+    </div></div>
+  </details>
+
+  <div class="callout"><b>What "no regressions" means here, concretely:</b> refactors (R1, R6, R9) must reproduce the deterministic backtest <i>byte-for-byte</i> and keep <code>config_sig</code> identical; features (R3 v2, R7) add a new behavioural test that's green on current code; everything keeps the full suite green; and every diff gets reviewed for out-of-scope changes before merge. Nothing is pushed to origin / deployed until you say so.</div>
+
+  <div class="callout" style="border-color:var(--live);background:var(--live-soft)"><b style="color:#9bf3cb">Batch complete — all 6 merged to local <code>main</code>, suite 1774 green.</b> <code>R1 e88be37 · R9 2a028ee · R3v2 68f7e59 · R6.1 8a84459 · R6.2 f88c67f · R7 d909753</code>. Two diff-reviews caught issues green tests couldn't: <b>R9</b> (a real live-engine σ-buffer bug the agent introduced, invisible to every backtest) and the <b>R6.2/R7 engine-path gaps</b> (per-class theta + the engine build dispatch, which the backtest doesn't exercise) — each independently re-verified. Net outcome: a true decision-equivalence gate (R3 v2: 2.7%→100%), one-edit-fewer params + registry-driven strategy adds (R6/R7), independent per-slot cadence (R9). <b>Not pushed / not deployed</b> — awaiting your word on the whole batch.</div>
+</div></section>
+
+<footer><div class="wrap">
+  <p>Generated architecture overview · <span class="src">hlanalysis</span> · live engine + sims, shared spine highlighted. Source of truth: <span class="src">README.md</span>, <span class="src">CLAUDE.md</span>, and the module import graph under <span class="src">hlanalysis/</span>.</p>
+</div></footer>
+
+</body>
+</html>
