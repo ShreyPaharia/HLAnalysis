@@ -71,13 +71,33 @@ cut is a no-op; on buckets it is the whole game — and the fill model
 *understates* its live value (deterministic fills don't fully price the wide
 spread bipower avoids).
 
-**Caveat — regime-tilted PnL.** The +$95 is concentrated in the recent (June)
-regime; bipower is net *negative* in early May (05-14 −96, 05-18 −52, 05-27
-−110). So the PnL edge is regime-dependent, but the **−49% churn reduction is
-regime-independent and structurally protective** for the doom-loop.
+**The +$95 hides a winner-abandonment left tail (decisive).** Drilling into the
+loss days: on **5 of 6** bucket "WORSE" days, bipower flips the day's hit rate
+from **100% → 0%** — it ABANDONS a favorite that eventually WON, via a premature
+σ-driven exit during an intraday dip, locking in a real loss right before
+settlement (05-27 Q20 *yes*: sample_std holds to 05:16 → +$28/hit 100%; bipower
+exits 04:51 → −$82/hit 0%/maxDD $82. 05-14 Q6 *yes*: ss +$57/100% vs bp
+−$39/0%). These are REAL losses, not thinner profit, and they persist DESPITE the
+deployed `exit_spread_hold=0.04` (so the abandonment is via `exit_safety_d`/stop,
+not the spread gate). The PnL edge is also recent-regime tilted (net negative
+early May). The −49% churn cut is real, but on the bad days it co-occurs with
+abandoning the winner — "less churn" ≠ "better" uniformly.
 
-**Recommendation:** binary → keep `sample_std`; bucket → `bipower` is a genuine
-improvement (entry-side doom-loop complement, halves churn, +10% recent-regime
-PnL). It is a single per-class `theta_override` (`vol_estimator: bipower`), easily
-reverted. Operator call on whether to flip live now vs shadow-validate over a few
-settlements given the regime tilt + early-May tail days.
+## Recommendation (concrete)
+
+**Keep `sample_std` on BOTH cells. Do not flip live.**
+
+- **Binary:** bipower flat-to-worse (−$22), higher variance, one −$126 tail.
+- **Bucket:** +$95 mean is seductive but bought with a **winner-abandonment fat
+  left tail** (hit 100%→0% on ~5 days, −$82/−$39 losses). For a desk whose goal
+  is to *increase sizes*, that left tail is disqualifying — at 5× it is
+  −$410/−$195 days. Positive-mean, wrong-shaped distribution.
+- **Pursue the churn win differently.** The −49% churn is worth capturing, but
+  via the **entry-side spread gate** (real `(ask−bid)/2` vs the static
+  `half_spread_assumption=0.005`) to SKIP all-day-wide bucket books — that cuts
+  churn as a *no-entry*, not a *premature-exit*, so it never abandons a winner.
+  That is the SHR-102-family `entry_spread_gate` lever (off by default), the
+  clean next step. Swapping the vol estimator is the wrong tool.
+
+Revisit bipower only if a σ-near-settlement / hold-to-settlement guard is added
+that removes the winner-abandonment, or after the entry-gate churn fix lands.
