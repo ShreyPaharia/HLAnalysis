@@ -39,59 +39,122 @@ recorded fill price (buys fill higher, sells lower). HL fee = 0 empirically;
 ``fee_taker`` defaults to 0.0 and is logged at run start. PM / synthetic paths
 are unaffected — they still build with identical API calls (only the exchange
 model and latency changed, which was already the right trade-off for both).
+
+Sub-module layout
+-----------------
+Logic extracted from this 1755-LOC file into cohesive sub-modules:
+
+- ``_latency.py``  — pluggable order-latency models (``LatencyModel``,
+                     ``ConstantLatency``, ``SampledLatency``)
+- ``_fees.py``     — binary fee models (``_binary_fee``)
+- ``_fills.py``    — fill/slippage heuristics, IOC marketability checks,
+                     hedge math, settlement payoff helpers
+- ``_assets.py``   — hftbacktest asset-building helpers and book-state reader
+- ``_routing.py``  — ``_RunState`` dataclass + order-routing helpers
+
+All moved names are re-exported here so the public import surface is unchanged.
 """
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import hftbacktest as hb
 import numpy as np
-from hftbacktest import order as hb_order
-from hftbacktest.types import (
-    BUY_EVENT,
-    DEPTH_CLEAR_EVENT,
-    EXCH_EVENT,
-    LOCAL_EVENT,
-    SELL_EVENT,
-    event_dtype,
-)
 from loguru import logger
 
 from hlanalysis.marketdata.position_math import (
     STOP_DISABLED_SENTINEL,
-    PositionState,
-    apply_fill,
-    settlement_payoff_price,
-    stop_price,
 )
 from hlanalysis.strategy.base import Strategy
-from hlanalysis.strategy.fee import pm_binary_fee
-from hlanalysis.strategy.types import Action, BookState, Position
+from hlanalysis.strategy.types import Action, BookState, Position  # noqa: F401 (re-exported)
 
 from ..core.data_source import DataSource, QuestionDescriptor
 from ..core.events import BookSnapshot, ReferenceEvent, SettlementEvent, TradeEvent
 from ..core.question import build_question_view
 from ..data._fastpath_core import build_leg_event_array_from_snapshots
 from ..halt_replay import (
-    EntryGateInputs,
     HaltWindow,
     SimRiskCaps,
-    daily_window_start_ns,
-    entry_veto,
+)
+from ._assets import (  # noqa: F401
+    _book_state,
+    _build_asset,
+    _build_hedge_asset,
+    _initial_clear_array,
+    _latency_span,
+    _sentinel_event_array,
+)
+from ._fees import _binary_fee  # noqa: F401
+from ._fills import (  # noqa: F401
+    _classify_reject,
+    _hedge_avg_entry,
+    _hedge_mtm_fill,
+    _inter_order_blocked,
+    _is_fleeting_ask,
+    _is_fleeting_bid,
+    _settle_px_for_outcome,
+    _slipped_buy_price,
+    _slipped_sell_price,
+)
+
+# ---------------------------------------------------------------------------
+# Re-exports from sub-modules (preserve the public import surface)
+# ---------------------------------------------------------------------------
+from ._latency import (  # noqa: F401
+    _ORDER_LATENCY_DTYPE,
+    ConstantLatency,
+    LatencyModel,
+    SampledLatency,
+)
+from ._routing import (  # noqa: F401
+    _route_enter,
+    _route_exit,
+    _route_hedge,
+    _route_stop_loss,
+    _RunState,
+    _settle,
 )
 from .market_state import MarketState
 from .result import (
     DiagnosticRow,
-    Fill,
+    Fill,  # noqa: F401 (re-exported)
     FillRow,
     RunResult,
     build_diagnostic_row,
     write_diagnostics,
     write_fills,
 )
+
+# ---------------------------------------------------------------------------
+# Helpers retained in this module (used only by RunConfig / run_one_question)
+# ---------------------------------------------------------------------------
+
+# Re-exported from the shared position-math module so the runner and the live
+# router/reconcile share ONE sentinel definition (no copy to drift).
+_STOP_DISABLED_SENTINEL = STOP_DISABLED_SENTINEL
+
+
+def _strategy_stop_loss_pct(strategy: Strategy) -> float | None:
+    """Pull the legacy ``cfg.stop_loss_pct`` sim convention if present.
+
+    A value of ``None`` (or a sentinel float ≥1e8 used by v1) disables the stop.
+    """
+    raw = getattr(getattr(strategy, "cfg", None), "stop_loss_pct", None)
+    if raw is None:
+        return None
+    if float(raw) >= 1e8:
+        return None
+    return float(raw)
+
+
+def _stop_price(fill_price: float, stop_pct: float | None) -> float:
+    """Thin alias over the shared ``position_math.stop_price`` (single source of
+    truth shared with the live router)."""
+    from hlanalysis.marketdata.position_math import stop_price
+    return stop_price(fill_price, stop_pct)
+
 
 # ---------------------------------------------------------------------------
 # Order-latency models (SHR-89)
@@ -110,73 +173,9 @@ from .result import (
 # supplied sample of millisecond latencies and feeds hftbacktest's interpolated
 # order-latency model, so each order fills on ``book(decision_ts + δ)`` with δ
 # varying across the question.
-
-# Matches hftbacktest's order-latency record layout (data/utils/feed_order_latency.py).
-_ORDER_LATENCY_DTYPE = np.dtype(
-    [("req_ts", "i8"), ("exch_ts", "i8"), ("resp_ts", "i8"), ("_padding", "i8")],
-    align=True,
-)
-
-
-class LatencyModel:
-    """Pluggable order-latency model. Subclasses configure how an order's
-    round-trip latency δ is wired into the hftbacktest asset."""
-
-    def apply(self, asset: Any, *, start_ts_ns: int, end_ts_ns: int) -> Any:
-        raise NotImplementedError
-
-
-@dataclass(frozen=True, slots=True)
-class ConstantLatency(LatencyModel):
-    """Constant round-trip latency (Spec 1 behaviour). ``latency_ms`` ms entry
-    AND response latency, identical for every order."""
-
-    latency_ms: float = 50.0
-
-    def apply(self, asset: Any, *, start_ts_ns: int, end_ts_ns: int) -> Any:
-        ns = int(self.latency_ms * 1_000_000)
-        return asset.constant_order_latency(ns, ns)
-
-
-@dataclass(frozen=True, slots=True)
-class SampledLatency(LatencyModel):
-    """Draw order entry latency δ from an empirical sample of millisecond values
-    (e.g. the SHR-83 journal's measured δ distribution, or any synthetic list).
-
-    Builds an hftbacktest interpolated order-latency array spanning the question
-    on a ``step_ns`` grid, sampling one δ per grid point. The engine interpolates
-    each order's latency from the surrounding grid points, so an order submitted
-    at ``t`` reaches the exchange around ``t + δ`` and fills on the book then.
-
-    Deterministic given ``seed`` — sims must be reproducible (no process-salted
-    randomness). ``resp_ms`` is the response latency added on top of the entry
-    latency (default 0; the entry latency is what governs the fill book)."""
-
-    samples_ms: tuple[float, ...]
-    seed: int = 0
-    step_ns: int = 1_000_000_000  # 1s grid
-    resp_ms: float = 0.0
-
-    def build_latency_array(self, *, start_ts_ns: int, end_ts_ns: int) -> np.ndarray:
-        if not self.samples_ms:
-            raise ValueError("SampledLatency requires at least one δ sample")
-        span = max(0, int(end_ts_ns) - int(start_ts_ns))
-        n = max(2, span // int(self.step_ns) + 2)
-        rng = np.random.default_rng(self.seed)
-        samples = np.asarray(self.samples_ms, dtype=float)
-        draws = rng.choice(samples, size=n)
-        req_ts = int(start_ts_ns) + np.arange(n, dtype=np.int64) * int(self.step_ns)
-        entry_ns = np.rint(draws * 1_000_000).astype(np.int64)
-        resp_ns = int(self.resp_ms * 1_000_000)
-        out = np.zeros(n, dtype=_ORDER_LATENCY_DTYPE)
-        out["req_ts"] = req_ts
-        out["exch_ts"] = req_ts + entry_ns
-        out["resp_ts"] = req_ts + entry_ns + resp_ns
-        return out
-
-    def apply(self, asset: Any, *, start_ts_ns: int, end_ts_ns: int) -> Any:
-        arr = self.build_latency_array(start_ts_ns=start_ts_ns, end_ts_ns=end_ts_ns)
-        return asset.intp_order_latency(arr)
+#
+# NOTE: LatencyModel / ConstantLatency / SampledLatency are defined in
+# _latency.py and re-exported above.
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,868 +273,6 @@ class RunConfig:
         """The latency model to wire into assets: the explicit ``latency_model``
         if set, else ``ConstantLatency(order_latency_ms)`` (Spec 1 default)."""
         return self.latency_model or ConstantLatency(self.order_latency_ms)
-
-
-def _binary_fee(px: float, qty: float, cfg: RunConfig) -> float:
-    """Per-fill fee for binary tokens. Branches on cfg.fee_model.
-
-    - "flat":      px * qty * fee_taker          (legacy; HL & synthetic)
-    - "pm_binary": qty * fee_rate * p * (1-p)    (Polymarket docs formula)
-    """
-    if cfg.fee_model == "pm_binary":
-        p = max(0.0, min(1.0, px))
-        return pm_binary_fee(cfg.fee_rate, p, qty)
-    return px * qty * cfg.fee_taker
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-# Re-exported from the shared position-math module so the runner and the live
-# router/reconcile share ONE sentinel definition (no copy to drift).
-_STOP_DISABLED_SENTINEL = STOP_DISABLED_SENTINEL
-
-
-def _strategy_stop_loss_pct(strategy: Strategy) -> float | None:
-    """Pull the legacy ``cfg.stop_loss_pct`` sim convention if present.
-
-    A value of ``None`` (or a sentinel float ≥1e8 used by v1) disables the stop.
-    """
-    raw = getattr(getattr(strategy, "cfg", None), "stop_loss_pct", None)
-    if raw is None:
-        return None
-    if float(raw) >= 1e8:
-        return None
-    return float(raw)
-
-
-def _stop_price(fill_price: float, stop_pct: float | None) -> float:
-    """Thin alias over the shared ``position_math.stop_price`` (single source of
-    truth shared with the live router)."""
-    return stop_price(fill_price, stop_pct)
-
-
-def _sentinel_event_array(ts_ns: int) -> np.ndarray:
-    """Single no-op DEPTH_CLEAR event at ``ts_ns``.
-
-    Used to extend hftbacktest's data timeline to the question's end_ts_ns in
-    event-driven scan mode (SHR-95). Without at least one event at/near end_ts,
-    hbt.elapse() returns rc=1 (end-of-data) as soon as the last real event is
-    consumed — preventing the max-interval ceiling from firing over a quiet
-    window. This sentinel keeps the timeline alive without affecting book state.
-    """
-    arr = np.zeros(1, dtype=event_dtype)
-    flag = EXCH_EVENT | LOCAL_EVENT
-    arr[0]["ev"] = DEPTH_CLEAR_EVENT | flag | BUY_EVENT
-    arr[0]["exch_ts"] = ts_ns
-    arr[0]["local_ts"] = ts_ns
-    return arr
-
-
-def _initial_clear_array(start_ts_ns: int) -> np.ndarray:
-    """Two depth-clear events at the start so the engine begins with an empty book.
-
-    Without this an asset's first elapse can leave book sides in an undefined
-    initial state. Cheap (2 events) and clearer than relying on the first
-    snapshot to overwrite ghost levels.
-    """
-    arr = np.zeros(2, dtype=event_dtype)
-    flag = EXCH_EVENT | LOCAL_EVENT
-    arr[0]["ev"] = DEPTH_CLEAR_EVENT | flag | BUY_EVENT
-    arr[0]["exch_ts"] = start_ts_ns
-    arr[0]["local_ts"] = start_ts_ns
-    arr[1]["ev"] = DEPTH_CLEAR_EVENT | flag | SELL_EVENT
-    arr[1]["exch_ts"] = start_ts_ns
-    arr[1]["local_ts"] = start_ts_ns
-    return arr
-
-
-def _latency_span(
-    arr: np.ndarray, start_ts_ns: int | None, end_ts_ns: int | None
-) -> tuple[int, int]:
-    """Resolve the [start, end] ts window the latency model spans. Callers in the
-    runner pass the question's start/end; low-level tests may omit them, in which
-    case the window is derived from the event array's exch_ts range."""
-    if start_ts_ns is not None and end_ts_ns is not None:
-        return int(start_ts_ns), int(end_ts_ns)
-    ts = arr["exch_ts"]
-    derived_start = int(ts.min()) if len(ts) else 0
-    derived_end = int(ts.max()) if len(ts) else derived_start
-    return (
-        int(start_ts_ns) if start_ts_ns is not None else derived_start,
-        int(end_ts_ns) if end_ts_ns is not None else derived_end,
-    )
-
-
-def _build_asset(
-    arr: np.ndarray, cfg: RunConfig, *,
-    start_ts_ns: int | None = None, end_ts_ns: int | None = None,
-):
-    # SHR-79: partial_fill_exchange replaces no_partial_fill_exchange so IOC
-    # orders fill only real recorded book depth and walk levels naturally.
-    # SHR-89: the pluggable latency model (constant by default; a sampled δ
-    # distribution when configured) wires the order RTT into the sim.
-    start, end = _latency_span(arr, start_ts_ns, end_ts_ns)
-    asset = hb.BacktestAsset().data(arr).linear_asset(1.0)
-    asset = cfg.effective_latency_model().apply(asset, start_ts_ns=start, end_ts_ns=end)
-    return (
-        asset
-        .risk_adverse_queue_model()
-        .partial_fill_exchange()
-        .trading_value_fee_model(0.0, 0.0)
-        .tick_size(cfg.tick_size)
-        .lot_size(cfg.lot_size)
-        .last_trades_capacity(cfg.last_trades_capacity)
-    )
-
-
-def _build_hedge_asset(
-    arr: np.ndarray, cfg: RunConfig, *,
-    start_ts_ns: int | None = None, end_ts_ns: int | None = None,
-):
-    """Like _build_asset but uses hedge-specific tick/lot sizes."""
-    start, end = _latency_span(arr, start_ts_ns, end_ts_ns)
-    asset = hb.BacktestAsset().data(arr).linear_asset(1.0)
-    asset = cfg.effective_latency_model().apply(asset, start_ts_ns=start, end_ts_ns=end)
-    return (
-        asset
-        .risk_adverse_queue_model()
-        .partial_fill_exchange()
-        .trading_value_fee_model(0.0, 0.0)
-        .tick_size(cfg.hedge_tick_size)
-        .lot_size(cfg.hedge_lot_size)
-        .last_trades_capacity(cfg.last_trades_capacity)
-    )
-
-
-def _book_state(
-    hbt: Any, asset_no: int, symbol: str, *, last_l2_ts_ns: int = 0
-) -> BookState | None:
-    depth = hbt.depth(asset_no)
-    bid = float(depth.best_bid)
-    ask = float(depth.best_ask)
-    bid_sz = float(depth.best_bid_qty)
-    ask_sz = float(depth.best_ask_qty)
-    has_bid = bid > 0.0
-    has_ask = ask > 0.0
-    if not (has_bid or has_ask):
-        return None
-    return BookState(
-        symbol=symbol,
-        bid_px=bid if has_bid else None,
-        bid_sz=bid_sz if has_bid else None,
-        ask_px=ask if has_ask else None,
-        ask_sz=ask_sz if has_ask else None,
-        last_trade_ts_ns=0,
-        last_l2_ts_ns=last_l2_ts_ns,
-    )
-
-
-def _slipped_buy_price(book: BookState, limit_price: float, slippage_bps: float) -> float:
-    if book.ask_px is None:
-        return 0.0
-    slipped = book.ask_px * (1.0 + slippage_bps / 1e4)
-    px = min(slipped, limit_price) if limit_price > 0 else slipped
-    return max(0.0, min(1.0, px))
-
-
-def _slipped_sell_price(book: BookState, limit_price: float, slippage_bps: float) -> float:
-    if book.bid_px is None:
-        return 0.0
-    slipped = book.bid_px * (1.0 - slippage_bps / 1e4)
-    px = max(slipped, limit_price) if limit_price > 0 else slipped
-    return max(0.0, min(1.0, px))
-
-
-def _classify_reject(book: BookState, side: str, submit_px: float) -> bool:
-    """SHR-89: was a no-fill IOC a *reject* (limit unmarketable at fill time)?
-
-    An order is a reject when it was submitted as a crossing/marketable order
-    against the decision-time book (buy at/through the ask; sell at/through the
-    bid) yet recorded no fill — the book moved away (or the queue wasn't swept)
-    during the latency δ before the order reached the exchange. The strategy
-    then re-fires on the next scan, reproducing live's churn.
-
-    A non-fill on a *non-crossing* order (limit below the ask / above the bid),
-    or when there was no opposing liquidity to cross, is a plain no-op — not a
-    reject."""
-    if side == "buy":
-        return book.ask_px is not None and submit_px >= book.ask_px
-    return book.bid_px is not None and submit_px <= book.bid_px
-
-
-def _inter_order_blocked(
-    now_ns: int, last_order_ns: int | None, min_inter_order_ns: int
-) -> bool:
-    """SHR-79/SHR-89: would dispatching an order on this leg now violate the
-    minimum inter-order re-fire floor?
-
-    Returns ``True`` when a prior order was dispatched on this leg less than
-    ``min_inter_order_ns`` ago — the caller must suppress this submission and
-    let the strategy re-fire on a later scan (reproducing live's one-order-in-
-    flight serialization). Returns ``False`` when:
-    - the floor is disabled (``min_inter_order_ns <= 0``); or
-    - this is the first order on the leg (``last_order_ns is None``); or
-    - at least ``min_inter_order_ns`` has elapsed since the last dispatch.
-    """
-    if min_inter_order_ns <= 0 or last_order_ns is None:
-        return False
-    return (now_ns - last_order_ns) < min_inter_order_ns
-
-
-def _is_fleeting_ask(
-    sym: str,
-    fill_price: float,
-    now_ns: int,
-    latency_ns: int,
-    snap_best_ask_per_leg: dict[str, np.ndarray],
-    book_ts_per_leg: dict[str, np.ndarray],
-    book_idx: dict[str, int],
-    persistence_ns: int = 0,
-) -> bool:
-    """SHR-94 + SHR-89b: was the ask at ``fill_price`` a fleeting level?
-
-    Two complementary checks:
-
-    **SHR-94 (latency-window check):** looks at the *next* snapshot within the
-    order-latency window ``[now_ns, now_ns + latency_ns]``. If it shows the
-    ask has moved ABOVE ``fill_price``, the level is fleeting. Effective when
-    HL snapshots are more frequent than the latency (~50ms).
-
-    **SHR-89b (wall-clock persistence check, ``persistence_ns > 0``):** checks
-    the *current* snapshot's prior snapshot. If the ask at ``fill_price`` just
-    appeared (present in the current snapshot but ABSENT in the previous one),
-    the level has been live for fewer nanoseconds than ``persistence_ns`` →
-    fleeting. This catches HL's burst-sampled book where the next snapshot is
-    seconds away (making the SHR-94 window never fire).
-
-    Either check may veto the IOC independently. Returns ``False`` when:
-    - No snapshot arrays for this leg.
-    - persistence_ns=0 AND no next snapshot within the latency window.
-    """
-    snap_ask = snap_best_ask_per_leg.get(sym)
-    ts_arr = book_ts_per_leg.get(sym)
-    if snap_ask is None or ts_arr is None or len(snap_ask) == 0 or len(ts_arr) == 0:
-        return False
-    # book_idx[sym] is the first snapshot index NOT YET consumed at now_ns
-    # (the scan loop advances it past all ts <= now_ns).
-    idx = book_idx.get(sym, 0)
-
-    # SHR-89b: wall-clock persistence check on the CURRENT (most-recently-
-    # consumed) snapshot. current_idx = idx - 1 (last consumed snapshot).
-    if persistence_ns > 0:
-        current_idx = idx - 1
-        if current_idx >= 0:
-            current_ask = float(snap_ask[current_idx])
-            if not np.isnan(current_ask) and current_ask <= fill_price:
-                # The ask is marketable at the current snapshot. Check if it
-                # appeared here for the first time (no prior snapshot) or if
-                # the previous snapshot had a DIFFERENT ask.
-                if current_idx == 0:
-                    # First-ever snapshot: the level just appeared → fleeting.
-                    return True
-                prev_ask = float(snap_ask[current_idx - 1])
-                if np.isnan(prev_ask) or prev_ask > fill_price:
-                    # Previous snapshot had no marketable ask at fill_price:
-                    # the level is new. Check persistence duration.
-                    current_ts = int(ts_arr[current_idx])
-                    prev_ts = int(ts_arr[current_idx - 1])
-                    if current_ts - prev_ts < persistence_ns:
-                        return True  # level just appeared; within persistence window
-
-    # SHR-94: forward-looking latency-window check.
-    if idx >= len(ts_arr):
-        return False  # no next snapshot
-    next_ts = int(ts_arr[idx])
-    # Only a snapshot that falls STRICTLY WITHIN the latency window can reveal
-    # a fleeting level. A snapshot AFTER arrival (next_ts > now_ns + latency_ns)
-    # means the book was stable through the latency window — fill is valid.
-    arrival_ns = now_ns + latency_ns
-    if next_ts > arrival_ns:
-        return False
-    # The next snapshot is within [now_ns, arrival_ns]. Check if the ask at
-    # that snapshot is worse (higher) than fill_price — fleeting!
-    next_ask = float(snap_ask[idx])
-    if np.isnan(next_ask):
-        return False  # no ask recorded at that snapshot — can't tell; allow fill
-    return next_ask > fill_price
-
-
-def _is_fleeting_bid(
-    sym: str,
-    fill_price: float,
-    now_ns: int,
-    latency_ns: int,
-    snap_best_bid_per_leg: dict[str, np.ndarray],
-    book_ts_per_leg: dict[str, np.ndarray],
-    book_idx: dict[str, int],
-    persistence_ns: int = 0,
-) -> bool:
-    """SHR-94 + SHR-89b: was the bid at ``fill_price`` a fleeting level?
-
-    Symmetric to ``_is_fleeting_ask`` for the sell side.
-
-    **SHR-94:** next snapshot within latency window shows bid BELOW fill_price.
-    **SHR-89b:** bid just appeared in the current snapshot (not in the prior
-    one) and has been present for fewer than ``persistence_ns`` nanoseconds.
-    """
-    snap_bid = snap_best_bid_per_leg.get(sym)
-    ts_arr = book_ts_per_leg.get(sym)
-    if snap_bid is None or ts_arr is None or len(snap_bid) == 0 or len(ts_arr) == 0:
-        return False
-    idx = book_idx.get(sym, 0)
-
-    # SHR-89b: wall-clock persistence check (bid side).
-    if persistence_ns > 0:
-        current_idx = idx - 1
-        if current_idx >= 0:
-            current_bid = float(snap_bid[current_idx])
-            if not np.isnan(current_bid) and current_bid >= fill_price:
-                if current_idx == 0:
-                    return True
-                prev_bid = float(snap_bid[current_idx - 1])
-                if np.isnan(prev_bid) or prev_bid < fill_price:
-                    current_ts = int(ts_arr[current_idx])
-                    prev_ts = int(ts_arr[current_idx - 1])
-                    if current_ts - prev_ts < persistence_ns:
-                        return True
-
-    # SHR-94: forward-looking latency-window check.
-    if idx >= len(ts_arr):
-        return False
-    next_ts = int(ts_arr[idx])
-    arrival_ns = now_ns + latency_ns
-    if next_ts > arrival_ns:
-        return False
-    next_bid = float(snap_bid[idx])
-    if np.isnan(next_bid):
-        return False
-    return next_bid < fill_price
-
-
-# ---------------------------------------------------------------------------
-# Mutable run state + order-routing helpers
-# ---------------------------------------------------------------------------
-#
-# The scan loop's enter / exit / hedge / stop-loss / settlement blocks were
-# extracted into the helpers below to keep ``run_one_question`` legible. They
-# all mutate one ``_RunState``; the behaviour is identical to the prior inline
-# code — same submit order, same fill recording, same position math.
-
-
-@dataclass(slots=True)
-class _RunState:
-    """Mutable state threaded through one question's scan loop + settlement.
-
-    Carries the immutable per-run context (``hbt``, ``cfg``, ``q`` …), the
-    accumulated outputs (``result``, ``fill_ts`` …), the evolving binary/hedge
-    positions, and the per-tick view (``books``, ``now_ns``, ``current_diag``)
-    that the routing helpers read.
-    """
-
-    hbt: Any
-    cfg: RunConfig
-    q: QuestionDescriptor
-    data_source: DataSource
-    leg_to_asset: dict[str, int]
-    hedge_asset_no: int | None
-    stop_pct: float | None
-    fills_dir_active: bool
-    result: RunResult
-    pos: Position | None = None
-    hedge_positions: dict[str, Position] = field(default_factory=dict)
-    last_hedge_mid: float | None = None
-    fill_ts: dict[str, int] = field(default_factory=dict)
-    fill_question_idx: dict[str, int] = field(default_factory=dict)
-    fill_meta: dict[str, dict[str, Any]] = field(default_factory=dict)
-    # SHR-79/SHR-89: per-leg timestamp (ns) of the last order DISPATCHED to the
-    # venue (filled, rejected, or fleeting-vetoed — any round-trip consumed).
-    # Read by the inter-order re-fire floor to throttle re-submission on a leg.
-    last_order_ns: dict[str, int] = field(default_factory=dict)
-    _next_oid_counter: int = 1
-    # Per-tick view, refreshed each scan before routing.
-    books: dict[str, BookState] = field(default_factory=dict)
-    now_ns: int = 0
-    current_diag: DiagnosticRow | None = None
-    # SHR-85 — sim state/halt replay + daily-loss-cap + inventory caps. The gate
-    # suppresses ENTRIES (exits stay exempt) the way the live RiskGate does. All
-    # default to "no caps / no windows" so existing callers are unaffected.
-    sim_risk_caps: SimRiskCaps | None = None
-    halt_windows: tuple[HaltWindow, ...] = ()
-    # Realized PnL accumulated per daily-window start (running) and its low-water
-    # floor (so a window that crossed the daily-loss cap stays latched-halted even
-    # if a later win recovers it — matching the live kill-switch latch).
-    realized_running_by_window: dict[int, float] = field(default_factory=dict)
-    realized_floor_by_window: dict[int, float] = field(default_factory=dict)
-    # SHR-94: per-snapshot top-of-book arrays for IOC marketability re-check.
-    # Populated from LegArrays.snap_best_ask/bid (parallel to book_ts_per_leg).
-    # Empty dict (default) disables the check — synthetic / PM sources that
-    # don't supply snap_best arrays fall back to the pre-SHR-94 behaviour.
-    snap_best_ask_per_leg: dict[str, np.ndarray] = field(default_factory=dict)
-    snap_best_bid_per_leg: dict[str, np.ndarray] = field(default_factory=dict)
-    # book_ts_per_leg: per-leg snapshot timestamps, parallel to snap_best arrays.
-    # Injected from run_one_question; used by _is_fleeting_ask/bid.
-    book_ts_per_leg: dict[str, np.ndarray] = field(default_factory=dict)
-    # Per-leg snapshot cursor (shared with stale-book gate in the scan loop).
-    # Injected via the runner's book_idx dict — the _RunState doesn't own it
-    # directly; it's passed to _is_fleeting_level via the routing helpers.
-    _book_idx: dict[str, int] | None = None
-    # SHR-91: cross-question inventory visible to the entry gate.
-    # Populated by run_questions_parallel from the SharedInventoryLedger
-    # (positions held in OTHER questions that were live at now_ns). Defaults to
-    # zero so all existing callers are unaffected.
-    extra_held_notional: float = 0.0
-    extra_n_held: int = 0
-    # SHR-91: timestamp when the current position opened (None = no position).
-    # Used to record position_windows when a position closes.
-    _pos_open_ts_ns: int | None = None
-
-    def next_oid(self) -> int:
-        oid = self._next_oid_counter
-        self._next_oid_counter += 1
-        return oid
-
-    def record_realized(self, now_ns: int, amount: float) -> None:
-        """Accumulate realized PnL into the daily window containing ``now_ns``.
-
-        No-op unless a daily-loss cap is configured. Updates both the running
-        total and the per-window floor (the minimum running PnL seen this window)
-        which the daily-loss gate reads so the halt latches for the rest of the
-        window."""
-        caps = self.sim_risk_caps
-        if caps is None or caps.daily_loss_cap_usd is None:
-            return
-        ws = daily_window_start_ns(now_ns, hour=caps.daily_window_start_hour_utc)
-        running = self.realized_running_by_window.get(ws, 0.0) + amount
-        self.realized_running_by_window[ws] = running
-        if running < self.realized_floor_by_window.get(ws, 0.0):
-            self.realized_floor_by_window[ws] = running
-
-    def entry_blocked(
-        self, *, intent_notional: float, is_topup: bool,
-        held_notional: float, n_held: int,
-    ) -> str | None:
-        """Return a veto reason if this entry would be suppressed, else ``None``.
-
-        Mirrors the live RiskGate entry-only caps via the shared
-        ``halt_replay.entry_veto``. Exits never call this.
-
-        SHR-91: ``extra_held_notional`` and ``extra_n_held`` (cross-question
-        positions from the SharedInventoryLedger) are added to the totals so
-        the concurrent / inventory caps are evaluated against the full set of
-        positions that were live at ``now_ns`` across ALL questions, matching
-        the live engine's single per-slot ledger."""
-        caps = self.sim_risk_caps
-        if caps is None and not self.halt_windows:
-            return None
-        caps = caps or SimRiskCaps()
-        ws = daily_window_start_ns(
-            self.now_ns, hour=caps.daily_window_start_hour_utc
-        )
-        inp = EntryGateInputs(
-            now_ns=self.now_ns,
-            intent_notional=intent_notional,
-            held_inventory_usd=held_notional + self.extra_held_notional,
-            n_held_positions=n_held + self.extra_n_held,
-            is_topup=is_topup,
-            realized_pnl_window=self.realized_floor_by_window.get(ws, 0.0),
-        )
-        return entry_veto(caps, self.halt_windows, inp)
-
-    def record_fill_from_order(
-        self, oid: int, asset_no: int, symbol: str, side: str, cloid: str,
-        intent_size: float,
-    ) -> Fill | None:
-        order = self.hbt.orders(asset_no).get(oid)
-        if order is None:
-            return None
-        # Accept FILLED(3), PARTIALLY_FILLED(5), and EXPIRED(2).
-        # With partial_fill_exchange + IOC, a partially-filled order whose
-        # remainder was cancelled gets status=EXPIRED (the IOC cancellation).
-        # exec_qty > 0 confirms something actually filled; exec_qty == 0 means
-        # the order was rejected/expired with no fill (e.g. no book at all).
-        exec_qty = float(order.exec_qty)
-        if order.status not in (2, 3, 5) or exec_qty <= 0.0:
-            return None
-        exec_px = float(order.exec_price)
-        # Bound to [0, 1] for binary tokens.
-        exec_px = max(0.0, min(1.0, exec_px))
-        # Cap fill size by the strategy's intended size; apply the optional
-        # book_depth_assumption cap when set (None = unlimited).
-        if self.cfg.book_depth_assumption is not None:
-            exec_qty = min(exec_qty, intent_size, self.cfg.book_depth_assumption)
-        else:
-            exec_qty = min(exec_qty, intent_size)
-        fee = _binary_fee(exec_px, exec_qty, self.cfg)
-        return Fill(
-            cloid=cloid, symbol=symbol, side=side, price=exec_px, size=exec_qty,
-            fee=fee, partial=exec_qty < intent_size,
-        )
-
-    def record_hedge_fill_from_order(
-        self, oid: int, asset_no: int, symbol: str, side: str, cloid: str,
-        intent_size: float,
-    ) -> Fill | None:
-        """Like ``record_fill_from_order`` but for the hedge leg: no [0, 1] price
-        clamp (BTC perp is ~100k), uses ``cfg.hedge_fee_bps``, sets is_hedge."""
-        order = self.hbt.orders(asset_no).get(oid)
-        if order is None:
-            return None
-        if order.status not in (3, 5):
-            return None
-        exec_qty = float(order.exec_qty)
-        if exec_qty <= 0.0:
-            return None
-        exec_px = float(order.exec_price)
-        exec_qty = min(exec_qty, intent_size)
-        fee_rate = self.cfg.hedge_fee_bps / 1e4
-        fee = exec_px * exec_qty * fee_rate
-        return Fill(
-            cloid=cloid, symbol=symbol, side=side, price=exec_px, size=exec_qty,
-            fee=fee, partial=exec_qty < intent_size, is_hedge=True,
-        )
-
-
-def _route_stop_loss(st: _RunState) -> None:
-    """Force an exit when the held leg's bid has fallen through the stop price,
-    before evaluating the strategy's intent."""
-    pos = st.pos
-    if pos is None or st.stop_pct is None or pos.symbol not in st.books:
-        return
-    held_bid = st.books[pos.symbol].bid_px
-    if held_bid is None or held_bid > pos.stop_loss_price:
-        return
-    asset_no = st.leg_to_asset[pos.symbol]
-    # SHR-79/SHR-89: a stop-loss is a safety dispatch — it is never throttled by
-    # the inter-order floor (the stop must fire), but it does mark the leg's last
-    # dispatch so a follow-on enter/exit respects the one-order-in-flight floor.
-    st.last_order_ns[pos.symbol] = st.now_ns
-    oid = st.next_oid()
-    st.hbt.submit_sell_order(
-        asset_no, oid, held_bid, abs(pos.qty), hb_order.IOC, hb_order.LIMIT, True,
-    )
-    cloid = f"stop-{oid}"
-    stop_book = st.books[pos.symbol]
-    px = _slipped_sell_price(stop_book, held_bid, st.cfg.slippage_bps)
-    # Read the actual exec from hftbacktest; fall back to the slipped price if
-    # no fill recorded (e.g. zero-bid).
-    fill = st.record_fill_from_order(oid, asset_no, pos.symbol, "sell", cloid, abs(pos.qty))
-    if fill is None:
-        fill = Fill(
-            cloid=cloid, symbol=pos.symbol, side="sell", price=px,
-            size=abs(pos.qty), fee=_binary_fee(px, abs(pos.qty), st.cfg), partial=False,
-        )
-    st.result.fills.append(fill)
-    st.fill_ts[cloid] = st.now_ns
-    st.fill_question_idx[cloid] = st.q.question_idx
-    # SHR-85: a stop-loss is a closing reduce — realize PnL into the daily-loss
-    # window accumulator. Long-leg close realizes (sell_px - avg_entry)*size − fee.
-    st.record_realized(
-        st.now_ns, (fill.price - pos.avg_entry) * fill.size - fill.fee
-    )
-    # SHR-91: record the completed position window for the shared-inventory ledger.
-    if st._pos_open_ts_ns is not None:
-        notional = abs(pos.qty) * pos.avg_entry
-        st.result.position_windows.append((st._pos_open_ts_ns, st.now_ns, notional))
-    st._pos_open_ts_ns = None
-    st.pos = None
-
-
-def _route_hedge(st: _RunState, decision: Any) -> None:
-    """Route hedge intents (independent of binary action / pos state)."""
-    cfg = st.cfg
-    if st.hedge_asset_no is None or not cfg.hedge_symbol or not decision.intents:
-        return
-    for h_intent in decision.intents:
-        if h_intent.symbol != cfg.hedge_symbol:
-            continue
-        if cfg.hedge_symbol not in st.books:
-            continue
-        h_book = st.books[cfg.hedge_symbol]
-        if h_intent.side == "buy":
-            h_slipped = (
-                h_book.ask_px * (1.0 + cfg.hedge_slippage_bps / 1e4)
-                if h_book.ask_px is not None else 0.0
-            )
-            h_oid = st.next_oid()
-            st.hbt.submit_buy_order(
-                st.hedge_asset_no, h_oid, h_slipped, h_intent.size,
-                hb_order.IOC, hb_order.LIMIT, True,
-            )
-            h_side = "buy"
-        else:
-            h_slipped = (
-                h_book.bid_px * (1.0 - cfg.hedge_slippage_bps / 1e4)
-                if h_book.bid_px is not None else 0.0
-            )
-            h_oid = st.next_oid()
-            st.hbt.submit_sell_order(
-                st.hedge_asset_no, h_oid, h_slipped, h_intent.size,
-                hb_order.IOC, hb_order.LIMIT, True,
-            )
-            h_side = "sell"
-        h_fill = st.record_hedge_fill_from_order(
-            h_oid, st.hedge_asset_no, cfg.hedge_symbol, h_side, h_intent.cloid, h_intent.size,
-        )
-        if h_fill is None:
-            # SHR-89: marketable hedge IOC with no fill → reject (re-fires next scan).
-            if _classify_reject(h_book, h_side, h_slipped):
-                st.result.n_rejects += 1
-        if h_fill is not None:
-            st.result.fills.append(h_fill)
-            st.fill_ts[h_fill.cloid] = st.now_ns
-            st.fill_question_idx[h_fill.cloid] = st.q.question_idx
-            # Track hedge position independently. Qty-weighted cost basis across
-            # fills (SHR-55) — avg_entry was previously clobbered with the latest
-            # fill price on every top-up.
-            h_pos = st.hedge_positions.get(cfg.hedge_symbol)
-            prev_qty = h_pos.qty if h_pos is not None else 0.0
-            prev_avg = h_pos.avg_entry if h_pos is not None else 0.0
-            new_qty, new_avg = _hedge_avg_entry(
-                prev_qty, prev_avg, h_fill.side, h_fill.size, h_fill.price,
-            )
-            st.hedge_positions[cfg.hedge_symbol] = Position(
-                question_idx=st.q.question_idx, symbol=cfg.hedge_symbol, qty=new_qty,
-                avg_entry=new_avg, stop_loss_price=0.0, last_update_ts_ns=st.now_ns,
-            )
-
-
-def _route_enter(st: _RunState, decision: Any) -> None:
-    """Route an ENTER decision: open or top-up the binary position."""
-    cfg = st.cfg
-    q = st.q
-    intent = decision.intents[0]
-    # Skip hedge intents for binary position management.
-    if cfg.hedge_enabled and intent.symbol == cfg.hedge_symbol:
-        intent = next(
-            (i for i in decision.intents if i.symbol != cfg.hedge_symbol), None
-        )
-    # Topup intents target the held position's symbol; reject any other.
-    if intent is not None and st.pos is not None and intent.symbol != st.pos.symbol:
-        intent = None
-    asset_no = None
-    if intent is not None:
-        asset_no = st.leg_to_asset.get(intent.symbol)
-    if intent is None or asset_no is None or intent.symbol not in st.books:
-        return
-    book = st.books[intent.symbol]
-    # SHR-85 entry gate: suppress this ENTER if live would have been halted /
-    # capped at this instant (halt window, daily-loss cap, inventory caps).
-    # Notional uses the intent's limit price to match the live RiskGate's
-    # ``intent.size * intent.limit_price``.
-    is_topup = st.pos is not None and intent.symbol == st.pos.symbol
-    held_notional = abs(st.pos.qty) * st.pos.avg_entry if st.pos is not None else 0.0
-    n_held = 1 if st.pos is not None else 0
-    veto = st.entry_blocked(
-        intent_notional=intent.size * intent.limit_price,
-        is_topup=is_topup, held_notional=held_notional, n_held=n_held,
-    )
-    if veto is not None:
-        st.result.n_entries_suppressed += 1
-        return
-    # SHR-79/SHR-89: minimum inter-order re-fire floor. Suppress re-submission on
-    # this leg until the floor has elapsed since the last dispatch (live
-    # serializes one order per leg in flight). Throttled re-fires re-evaluate on
-    # a later scan; the floor stamp below marks this dispatch.
-    min_io_ns = int(cfg.min_inter_order_seconds * 1_000_000_000)
-    if _inter_order_blocked(st.now_ns, st.last_order_ns.get(intent.symbol), min_io_ns):
-        st.result.n_refire_throttled += 1
-        return
-    st.last_order_ns[intent.symbol] = st.now_ns
-    slipped = _slipped_buy_price(book, intent.limit_price, cfg.slippage_bps)
-    # SHR-94: pre-flight IOC marketability re-check at send+latency.
-    # If the next recorded book snapshot falls within the latency window and
-    # shows the ask above the fill price, the level is fleeting — veto the
-    # submit and count a reject (strategy re-fires next scan as with live).
-    if cfg.ioc_marketability_recheck and st._book_idx is not None:
-        latency_ns = int(cfg.order_latency_ms * 1_000_000)
-        persistence_ns = int(cfg.ioc_fleeting_persistence_seconds * 1_000_000_000)
-        if _is_fleeting_ask(
-            intent.symbol, slipped, st.now_ns, latency_ns,
-            st.snap_best_ask_per_leg, st.book_ts_per_leg, st._book_idx,
-            persistence_ns=persistence_ns,
-        ):
-            st.result.n_rejects += 1
-            return
-    # Submit IOC limit at the slipped/limit price.
-    oid = st.next_oid()
-    st.hbt.submit_buy_order(
-        asset_no, oid, slipped, intent.size, hb_order.IOC, hb_order.LIMIT, True,
-    )
-    fill = st.record_fill_from_order(oid, asset_no, intent.symbol, "buy", intent.cloid, intent.size)
-    if fill is None:
-        # SHR-89: a marketable buy that returned no fill is a reject (book moved
-        # away during latency δ). Count it; the strategy re-fires next scan.
-        if _classify_reject(book, "buy", slipped):
-            st.result.n_rejects += 1
-        return
-    st.result.fills.append(fill)
-    st.fill_ts[fill.cloid] = st.now_ns
-    st.fill_question_idx[fill.cloid] = q.question_idx
-    if st.fills_dir_active and st.current_diag is not None and st.pos is None:
-        edge_chosen = (
-            st.current_diag.edge_yes
-            if intent.symbol == (q.leg_symbols[0] if q.leg_symbols else "")
-            else st.current_diag.edge_no
-        )
-        st.fill_meta[fill.cloid] = {
-            "entry_p_model": st.current_diag.p_model,
-            "entry_edge_chosen_side": edge_chosen,
-            "entry_sigma": st.current_diag.sigma,
-            "entry_tau_yr": st.current_diag.tau_yr,
-        }
-    # Open or topup (add-on) via the shared position math — the SAME
-    # ``apply_fill`` the live router calls, so add-on weighted-average entry is
-    # bit-identical to production. The stop is (re)stamped at the resulting
-    # basis: the fill price on open, the new weighted average on a topup.
-    prev = PositionState(st.pos.qty, st.pos.avg_entry) if st.pos is not None else None
-    new_pos, _ = apply_fill(prev, "buy", fill.size, fill.price)
-    assert new_pos is not None
-    # SHR-91: stamp the position open time on the first ENTER (prev=None means
-    # no prior position; top-ups keep the existing open timestamp).
-    if prev is None:
-        st._pos_open_ts_ns = st.now_ns
-    st.pos = Position(
-        question_idx=st.pos.question_idx if st.pos is not None else q.question_idx,
-        symbol=intent.symbol, qty=new_pos.qty, avg_entry=new_pos.avg_entry,
-        stop_loss_price=_stop_price(new_pos.avg_entry, st.stop_pct),
-        last_update_ts_ns=st.now_ns,
-    )
-
-
-def _route_exit(st: _RunState, decision: Any) -> None:
-    """Route an EXIT decision: reduce / close the held binary position.
-
-    Caller guarantees ``st.pos is not None``.
-    """
-    cfg = st.cfg
-    pos = st.pos
-    intent = decision.intents[0]
-    # Skip hedge intents for binary position management.
-    if cfg.hedge_enabled and intent.symbol == cfg.hedge_symbol:
-        intent = next(
-            (i for i in decision.intents if i.symbol != cfg.hedge_symbol), None
-        )
-    if intent is None or st.leg_to_asset.get(intent.symbol) is None or intent.symbol not in st.books:
-        return
-    exit_asset_no = st.leg_to_asset[intent.symbol]
-    book = st.books[intent.symbol]
-    size = min(intent.size, abs(pos.qty))
-    # SHR-79/SHR-89: minimum inter-order re-fire floor (see _route_enter). An
-    # exit re-fire within the floor is suppressed; the position stays open and
-    # the strategy re-fires on a later scan. Throttles the wide-bucket exit churn
-    # (the #1670 doom-loop) to live's one-order-in-flight cadence.
-    min_io_ns = int(cfg.min_inter_order_seconds * 1_000_000_000)
-    if _inter_order_blocked(st.now_ns, st.last_order_ns.get(intent.symbol), min_io_ns):
-        st.result.n_refire_throttled += 1
-        return
-    st.last_order_ns[intent.symbol] = st.now_ns
-    slipped = _slipped_sell_price(book, intent.limit_price, cfg.slippage_bps)
-    # SHR-94: pre-flight IOC marketability re-check at send+latency.
-    # If the next recorded book snapshot shows the bid has retreated below the
-    # fill price within the latency window, the level is fleeting — veto.
-    if cfg.ioc_marketability_recheck and st._book_idx is not None:
-        latency_ns = int(cfg.order_latency_ms * 1_000_000)
-        persistence_ns = int(cfg.ioc_fleeting_persistence_seconds * 1_000_000_000)
-        if _is_fleeting_bid(
-            intent.symbol, slipped, st.now_ns, latency_ns,
-            st.snap_best_bid_per_leg, st.book_ts_per_leg, st._book_idx,
-            persistence_ns=persistence_ns,
-        ):
-            st.result.n_rejects += 1
-            return
-    oid = st.next_oid()
-    st.hbt.submit_sell_order(
-        exit_asset_no, oid, slipped, size, hb_order.IOC, hb_order.LIMIT, True,
-    )
-    fill = st.record_fill_from_order(oid, exit_asset_no, intent.symbol, "sell", intent.cloid, size)
-    if fill is None:
-        # SHR-89: a marketable sell that returned no fill is a reject (bid moved
-        # away during latency δ). Count it; the strategy re-fires next scan with
-        # the position still open.
-        if _classify_reject(book, "sell", slipped):
-            st.result.n_rejects += 1
-        return
-    st.result.fills.append(fill)
-    st.fill_ts[fill.cloid] = st.now_ns
-    st.fill_question_idx[fill.cloid] = st.q.question_idx
-    # Reduce via the shared position math. ``close_atol=cfg.lot_size`` reproduces
-    # the runner's close rule: when fill.size is capped below abs(pos.qty) by
-    # book_depth_assumption, keep the residual open so settlement (or a later
-    # exit) closes it — but anything below one lot is unfillable, so treat it as
-    # closed to avoid an infinite-exit loop.
-    new_pos, realized = apply_fill(
-        PositionState(pos.qty, pos.avg_entry), fill.side, fill.size, fill.price,
-        close_atol=cfg.lot_size,
-    )
-    # SHR-85: feed the realized PnL on this reduce into the daily-loss window
-    # accumulator (net of fee, matching live closedPnl semantics).
-    st.record_realized(st.now_ns, realized - fill.fee)
-    if new_pos is None:
-        # SHR-91: position fully closed — record window for shared-inventory ledger.
-        if st._pos_open_ts_ns is not None:
-            notional = abs(pos.qty) * pos.avg_entry
-            st.result.position_windows.append((st._pos_open_ts_ns, st.now_ns, notional))
-        st._pos_open_ts_ns = None
-        st.pos = None
-    else:
-        st.pos = Position(
-            question_idx=pos.question_idx, symbol=pos.symbol, qty=new_pos.qty,
-            avg_entry=new_pos.avg_entry, stop_loss_price=pos.stop_loss_price,
-            last_update_ts_ns=st.now_ns,
-        )
-
-
-def _settle(st: _RunState) -> None:
-    """End-of-data settlement: close any open binary position at its leg payoff
-    and mark any open hedge residual to the last observed hedge mid (SHR-55)."""
-    q = st.q
-    if st.pos is not None:
-        pos = st.pos
-        outcome = st.data_source.resolved_outcome(q)
-        # Prefer the data source's per-leg payoff when it provides one (HL HIP-4
-        # handles bucket markets here). Fall back to the binary-only
-        # leg_symbols[0]/[1] lookup when the source doesn't expose it.
-        leg_payoff = getattr(st.data_source, "leg_payoff", None)
-        if leg_payoff is not None:
-            settle_px = float(leg_payoff(q, pos.symbol))
-        else:
-            settle_px = _settle_px_for_outcome(pos, q, outcome)
-        settle_fill = Fill(
-            cloid="settle", symbol=pos.symbol,
-            side="sell" if pos.qty > 0 else "buy",
-            price=settle_px, size=abs(pos.qty), fee=0.0, partial=False,
-        )
-        st.result.fills.append(settle_fill)
-        st.fill_ts["settle"] = q.end_ts_ns
-        st.fill_question_idx["settle"] = pos.question_idx
-        if st.fills_dir_active:
-            st.fill_meta["settle"] = {"resolved_outcome": outcome}
-        # SHR-91: record the settled position window for the shared-inventory ledger.
-        if st._pos_open_ts_ns is not None:
-            notional = abs(pos.qty) * pos.avg_entry
-            st.result.position_windows.append((st._pos_open_ts_ns, q.end_ts_ns, notional))
-        st._pos_open_ts_ns = None
-        st.pos = None
-
-    # Mark any open hedge residual to the last observed hedge mid and book a
-    # closing fill. Without this only the OPENING hedge leg lands in
-    # result.fills, so realized PnL omits the entire hedge value.
-    for h_sym, h_pos in st.hedge_positions.items():
-        if h_pos.qty == 0.0:
-            continue
-        if st.last_hedge_mid is None:
-            logger.warning(
-                f"hedge {h_sym} qty={h_pos.qty} held to expiry but no hedge mid "
-                f"was observed; cannot mark-to-market (PnL excludes this leg)"
-            )
-            continue
-        mtm_fill = _hedge_mtm_fill(h_sym, h_pos.qty, st.last_hedge_mid)
-        st.result.fills.append(mtm_fill)
-        st.fill_ts[mtm_fill.cloid] = q.end_ts_ns
-        st.fill_question_idx[mtm_fill.cloid] = h_pos.question_idx
-    st.hedge_positions.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -1672,84 +809,6 @@ def run_one_question(
         write_fills(fill_rows, fills_dir / f"{q.question_id}.parquet")
 
     return result
-
-
-def _hedge_avg_entry(
-    prev_qty: float, prev_avg: float, fill_side: str, fill_size: float, fill_price: float,
-) -> tuple[float, float]:
-    """Return (new_qty, new_avg_entry) after applying a hedge fill (SHR-55).
-
-    Qty-weighted average when adding in the same direction, basis preserved when
-    reducing, and reset to the fill price when the position flips through zero.
-    Replaces the bug where avg_entry was overwritten with the latest fill price
-    on every top-up.
-    """
-    add = fill_size if fill_side == "buy" else -fill_size
-    new_qty = prev_qty + add
-    if prev_qty == 0.0:
-        return new_qty, fill_price
-    if (prev_qty > 0) == (add > 0):  # growing in the same direction
-        new_avg = (prev_avg * abs(prev_qty) + fill_price * fill_size) / (
-            abs(prev_qty) + fill_size
-        )
-        return new_qty, new_avg
-    if abs(add) < abs(prev_qty):  # partial reduction — basis unchanged
-        return new_qty, prev_avg
-    if new_qty == 0.0:  # fully closed
-        return 0.0, 0.0
-    return new_qty, fill_price  # flipped past zero — new basis is the fill price
-
-
-def _hedge_mtm_fill(symbol: str, qty: float, mark_px: float) -> Fill:
-    """Closing Fill that marks an open hedge residual to ``mark_px`` (the last
-    observed hedge mid) at end-of-data, mirroring binary settlement (SHR-55).
-
-    No slippage/fee — this is a mark-to-market of the residual at fair value,
-    not a modelled liquidation, so realized PnL reflects the hedge's true
-    economic value rather than only its opening leg.
-    """
-    side = "sell" if qty > 0 else "buy"
-    return Fill(
-        cloid=f"hedge_settle:{symbol}",
-        symbol=symbol,
-        side=side,
-        price=mark_px,
-        size=abs(qty),
-        fee=0.0,
-        partial=False,
-        is_hedge=True,
-    )
-
-
-def _settle_px_for_outcome(pos: Position, q: QuestionDescriptor, outcome: str) -> float:
-    """Binary-leg settlement payoff, via the shared
-    :func:`position_math.settlement_payoff_price` (SHR-88).
-
-    The held leg's index (leg[0] = YES, leg[1] = NO) is the position side; the
-    venue/recorded resolved ``outcome`` supplies the winning (settled) side
-    index — ``yes`` -> 0, ``no`` -> 1. Routing through the shared function makes
-    the sim book payoffs identically to the live engine and, critically, derives
-    the winner from the resolved outcome rather than re-deriving a YES winner.
-    An unrecognised outcome, or a position whose leg isn't one of the question's
-    legs, can never match the settled side and settles worthless (0.0) — exactly
-    as before.
-    """
-    legs = q.leg_symbols
-    yes_leg = legs[0] if legs else ""
-    no_leg = legs[1] if len(legs) > 1 else ""
-    if pos.symbol == yes_leg:
-        position_side_idx = 0
-    elif pos.symbol == no_leg:
-        position_side_idx = 1
-    else:
-        return 0.0  # held leg isn't part of this question — can't win
-    if outcome == "yes":
-        settled_side_idx = 0
-    elif outcome == "no":
-        settled_side_idx = 1
-    else:
-        return 0.0  # unresolved / unknown outcome settles worthless
-    return settlement_payoff_price(position_side_idx, settled_side_idx)
 
 
 __all__ = [
