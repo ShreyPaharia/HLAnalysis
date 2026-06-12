@@ -512,6 +512,27 @@ class Router:
             },
         ))
 
+    def prune(self, active_question_idxs: set[int]) -> None:
+        """Drop per-question cache entries for question_idxs no longer active.
+
+        Wiring choice: same as Scanner.prune — an explicit method rather than
+        hooking into MarketState's eviction, so all eviction logic stays within
+        the owned files (no edits to runtime.py required).  The caller passes the
+        current active set; Router removes stale entries from _last_exit_ts and
+        the reject-breaker dicts (keyed by (qidx, side)).  Cooldowns for active
+        questions are untouched.  Note: _last_exit_ts is also persisted to disk
+        (exit_cooldowns.json); prune() does NOT rewrite the file — entries there
+        are harmless (they only extend a cooldown for a question that no longer
+        exists) and a disk write on every eviction is wasteful.
+        """
+        stale_qidxs = {idx for idx in self._last_exit_ts if idx not in active_question_idxs}
+        for idx in stale_qidxs:
+            self._last_exit_ts.pop(idx, None)
+        stale_breaker_keys = [k for k in self._consecutive_rejects if k[0] not in active_question_idxs]
+        for k in stale_breaker_keys:
+            self._consecutive_rejects.pop(k, None)
+            self._last_reject_ts.pop(k, None)
+
     def _stop_loss_price_for(
         self, fill_price: float, question_idx: int,
         question_fields: dict[str, str] | None,

@@ -997,6 +997,12 @@ class EngineRuntime:
                     now_ns=self._now_ns(),
                     retain_after_settle_ns=6 * 3600 * 1_000_000_000,  # 6h
                 )
+                # SHR-44 cont.: prune this slot's Scanner/Router per-question
+                # caches so they don't outlive the evicted questions (same
+                # unbounded-growth/OOM class as MarketState._books above).
+                active_idxs = {q.question_idx for q in self.market_state.all_questions()}
+                slot.scanner.prune(active_idxs)
+                slot.router.prune(active_idxs)
                 slot.last_reconcile_ns = now
             except Exception as exc:
                 # An expected, self-recovering venue read failure (HL 429 burst,

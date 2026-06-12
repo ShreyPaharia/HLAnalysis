@@ -487,6 +487,24 @@ class Scanner:
                 ))
         return out
 
+    def prune(self, active_question_idxs: set[int]) -> None:
+        """Drop per-question cache entries for question_idxs no longer active.
+
+        Wiring choice: Scanner exposes an explicit ``prune(active_set)`` method
+        rather than hooking into eviction directly because ``evict_settled_questions``
+        lives on MarketState (not Scanner), and we cannot edit runtime.py.  The
+        caller (an integration harness, a test, or a future scan-loop self-prune)
+        passes the current active set obtained from ``ms.all_questions()``.  This
+        keeps Scanner's eviction logic entirely within Scanner's owned file — the
+        runtime can call ``scanner.prune({q.question_idx for q in ms.all_questions()})``
+        after each eviction round without Scanner knowing about MarketState.
+        """
+        stale = {idx for idx in self._tradeable_cache if idx not in active_question_idxs}
+        for idx in stale:
+            self._tradeable_cache.pop(idx, None)
+            self._pm_strike_seen.discard(idx)
+            self._last_logged_state.pop(idx, None)
+
     def _maybe_log_gate_transition(
         self, *, question: QuestionView, decision: Decision,
         books: dict[str, BookState], now_ns: int,

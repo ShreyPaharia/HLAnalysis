@@ -252,7 +252,16 @@ class MarketState:
                 # reference (mirrors backtest `_load_binance_bbo_reference`:
                 # mid=(bid+ask)/2, per-bucket OHLC). Mark-sourced symbols ignore
                 # the bbo for σ (book only) — legacy behaviour.
-                if self._reference_source_by_symbol.get(ev.symbol) == "bbo":
+                # Guard: skip the mid update when either side is None (one-sided
+                # BBO, common on thin markets during the opening auction or after
+                # a reconnect).  Do NOT fabricate a mid from a single side — that
+                # would bias the σ estimator and is inconsistent with how missing
+                # data is handled elsewhere (e.g. risk gate None-checks).
+                if (
+                    self._reference_source_by_symbol.get(ev.symbol) == "bbo"
+                    and ev.bid_px is not None
+                    and ev.ask_px is not None
+                ):
                     mid = (ev.bid_px + ev.ask_px) / 2.0
                     self._core.apply_reference_tick(
                         ev.symbol, ts_ns=ev.exchange_ts or ev.local_recv_ts, price=mid,
@@ -410,17 +419,48 @@ class MarketState:
         """Drop questions that are settled AND whose expiry is older than the
         retain window. Bounds _questions on the 1 GB box (SHR-44) and shrinks
         the per-tick scan set. Returns the number evicted. Invalidates the
-        symbol→question cache when anything is removed."""
+        symbol→question cache when anything is removed.
+
+        Also evicts _books entries for symbols that are exclusively referenced
+        by evicted questions. A symbol referenced by any surviving question is
+        retained so its book stays live for the questions still trading it.
+        """
         victims = [
             idx for idx, q in self._questions.items()
             if q.settled
             and q.expiry_ns
             and (now_ns - q.expiry_ns) > retain_after_settle_ns
         ]
+        if not victims:
+            return 0
+
+        # Collect all leg symbols that the to-be-evicted questions reference.
+        evicted_syms: set[str] = set()
+        for idx in victims:
+            q = self._questions[idx]
+            legs = q.leg_symbols or (
+                (q.yes_symbol, q.no_symbol) if q.yes_symbol else ()
+            )
+            evicted_syms.update(s for s in legs if s)
+
+        # Remove the evicted questions.
         for idx in victims:
             del self._questions[idx]
-        if victims:
-            self._sym_to_q_cache = None
+        self._sym_to_q_cache = None
+
+        # Retain any symbol still referenced by a surviving question so we
+        # don't evict a shared book that another question is still trading.
+        retained_syms: set[str] = set()
+        for q in self._questions.values():
+            legs = q.leg_symbols or (
+                (q.yes_symbol, q.no_symbol) if q.yes_symbol else ()
+            )
+            retained_syms.update(s for s in legs if s)
+
+        # Evict only the symbols that are exclusively owned by the victims.
+        for sym in evicted_syms - retained_syms:
+            self._books.pop(sym, None)
+
         return len(victims)
 
     def _mark_settled(self, ev: SettlementEvent) -> None:

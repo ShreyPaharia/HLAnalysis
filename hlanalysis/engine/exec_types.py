@@ -24,7 +24,7 @@ class PlaceRequest:
 class OrderAck:
     cloid: str
     venue_oid: str
-    status: Literal["pending", "open", "filled", "rejected"]
+    status: Literal["pending", "open", "filled", "rejected", "cancelled"]
     fill_price: float | None = None
     fill_size: float | None = None
     error: str | None = None

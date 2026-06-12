@@ -243,6 +243,13 @@ class RiskGate:
             if remaining <= 1e-9:
                 break
 
+        # Guard: every usable level had sz<=0 (e.g. adapter publishes a zero-
+        # size level before the real size arrives).  Treat as no fillable
+        # liquidity — mirror the empty-book path above.
+        if filled <= 0:
+            return RiskVerdict(False, "depth_walk_no_fill",
+                               {"shortfall": f"{intent.size:.4f}"})
+
         avg_px = cost / filled
         slip = (avg_px - intent.limit_price) / intent.limit_price
         if intent.side == "sell":
