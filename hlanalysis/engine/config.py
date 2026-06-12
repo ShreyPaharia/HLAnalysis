@@ -76,32 +76,36 @@ class AllowlistEntry(LateResolutionParams):
 
 
 class GlobalRiskConfig(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    max_total_inventory_usd: float
-    max_concurrent_positions: int
-    daily_loss_cap_usd: float
-    max_strike_distance_pct: float
-    min_recent_volume_usd: float
-    stale_data_halt_seconds: int
-    reconcile_interval_seconds: int
+    # extra='forbid': a typo'd key (e.g. 'daily_loss_cap_uusd') raises
+    # ValidationError at load time instead of being silently dropped — the
+    # SHR-65 pattern extended to global risk params. These are leaf config
+    # models (never used as open override mixins), so strict rejection is safe.
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    max_total_inventory_usd: float = Field(ge=0)
+    max_concurrent_positions: int = Field(ge=1)
+    daily_loss_cap_usd: float = Field(ge=0)
+    max_strike_distance_pct: float = Field(ge=0)
+    min_recent_volume_usd: float = Field(ge=0)
+    stale_data_halt_seconds: int = Field(ge=1)
+    reconcile_interval_seconds: int = Field(ge=1)
     # Maximum tolerated realized-fill slippage as a fraction of intent
     # limit_price (depth-walk gate). 0 disables; PM ships ~0.005
     # (~0.5¢ at a 0.95-favorite leg). HL slots keep this at 0 because the
     # BboEvent path doesn't populate BookState.ask_levels and the gate is a
     # no-op without ladder data.
-    max_slippage_pct: float = 0.0
+    max_slippage_pct: float = Field(default=0.0, ge=0)
     # After the depth-walk gate clamps an intent down to available at-limit
     # liquidity, reject if the resulting notional falls below this floor.
     # Prevents the engine from spamming the venue with micro-orders when only
     # 1–2 contracts are quoted at the inside ask. 0 disables. PM: ~$11 (one
     # 5-share clip of a 0.95-favorite); HL: 0 (legacy behaviour unchanged).
-    min_order_notional_usd: float = 0.0
+    min_order_notional_usd: float = Field(default=0.0, ge=0)
     # Hour-of-day in UTC when the "daily" PnL accounting window resets.
     # Default 0 = UTC midnight (legacy). Set to 6 to align with HL HIP-4
     # binary settlement (markets resolve at 06:00 UTC = 11:30 IST). Aligning
     # the window with settlement means losses from a market that just
     # settled don't carry into the next market cycle's cap.
-    daily_window_start_hour_utc: int = 0
+    daily_window_start_hour_utc: int = Field(default=0, ge=0, le=23)
     # Event-driven loop cadence (P1). The scan + stop-loss loops wake on a
     # market-data signal but are bounded:
     #   * scan_min_interval_seconds — minimum gap between scans (coalesces a
@@ -111,8 +115,8 @@ class GlobalRiskConfig(BaseModel):
     #     TTE windows). 1.0 = legacy 1 Hz.
     # Defaults keep today's exact 1 Hz behaviour; set min < max to go
     # event-driven (e.g. 0.05 / 1.0 → ≤50 ms reaction, ≤20 scans/s).
-    scan_min_interval_seconds: float = 1.0
-    scan_max_interval_seconds: float = 1.0
+    scan_min_interval_seconds: float = Field(default=1.0, ge=0)
+    scan_max_interval_seconds: float = Field(default=1.0, ge=0)
     # When True, stop-loss enforcement runs in its own event-driven loop (woken
     # by the same market signal, same min/max bounds) instead of the 1 Hz
     # continuous-checks loop — so a stop breach is acted on within

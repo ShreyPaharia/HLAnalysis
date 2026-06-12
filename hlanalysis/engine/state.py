@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -475,11 +476,15 @@ class StateDAL:
             s.commit()
 
     def end_session(self, session_id: str, *, now_ns: int, halt_reason: str | None = None) -> None:
+        # NOTE: halt_reason is accepted in the signature for API compatibility
+        # but Session_ has no halt_reason column (the column was never added
+        # via Alembic, so assigning it would silently set a Python attribute
+        # that is never persisted). The parameter is intentionally a no-op;
+        # add a migration + Session_ field if durable halt logging is needed.
         with _Session(self._engine) as s:
             row = s.get(Session_, session_id)
             if row is not None:
                 row.ended_ts_ns = now_ns
-                row.halt_reason = halt_reason
                 s.add(row)
                 s.commit()
 
@@ -686,18 +691,28 @@ class CachedStateDAL(StateDAL):
 
     def __init__(self, db_path: Path) -> None:
         super().__init__(db_path)
+        self._cache_lock = threading.Lock()
         self._loaded = False
         self._pos_cache: dict[int, Position] = {}
         self._order_cache: dict[str, OpenOrder] = {}
 
     def _ensure_loaded(self) -> None:
+        # Fast path (no lock): already loaded.  The lock is only needed to
+        # prevent two threads from racing through the slow-path initialisation
+        # simultaneously.
         if self._loaded:
             return
-        # Pull current truth from the DB once. live_orders() returns only the
-        # not-terminal statuses, which is all the cache ever needs to serve.
-        self._pos_cache = {p.question_idx: p for p in super().all_positions()}
-        self._order_cache = {o.cloid: o for o in super().live_orders()}
-        self._loaded = True
+        with self._cache_lock:
+            # Re-check under the lock; another thread may have loaded while we
+            # were waiting.
+            if self._loaded:
+                return
+            # Pull current truth from the DB once. live_orders() returns only
+            # the not-terminal statuses, which is all the cache ever needs to
+            # serve.
+            self._pos_cache = {p.question_idx: p for p in super().all_positions()}
+            self._order_cache = {o.cloid: o for o in super().live_orders()}
+            self._loaded = True
 
     # ---- positions: cached reads, write-through writes ----
 
@@ -706,20 +721,24 @@ class CachedStateDAL(StateDAL):
         # DB first; the base writes with expire_on_commit=False so `p` stays
         # readable after the commit and can be cached directly.
         super().upsert_position(p)
-        self._pos_cache[p.question_idx] = p
+        with self._cache_lock:
+            self._pos_cache[p.question_idx] = p
 
     def get_position(self, question_idx: int) -> Position | None:
         self._ensure_loaded()
-        return self._pos_cache.get(question_idx)
+        with self._cache_lock:
+            return self._pos_cache.get(question_idx)
 
     def all_positions(self) -> list[Position]:
         self._ensure_loaded()
-        return list(self._pos_cache.values())
+        with self._cache_lock:
+            return list(self._pos_cache.values())
 
     def delete_position(self, question_idx: int) -> None:
         self._ensure_loaded()
         super().delete_position(question_idx)
-        self._pos_cache.pop(question_idx, None)
+        with self._cache_lock:
+            self._pos_cache.pop(question_idx, None)
 
     # ---- orders: cached reads, write-through writes ----
 
@@ -728,7 +747,8 @@ class CachedStateDAL(StateDAL):
         # DB first; the base writes with expire_on_commit=False so `o` stays
         # readable after the commit and can be cached directly.
         super().upsert_order(o)
-        self._order_cache[o.cloid] = o
+        with self._cache_lock:
+            self._order_cache[o.cloid] = o
 
     def update_order_status(
         self, cloid: str, *, status: str, venue_oid: str | None = None, now_ns: int,
@@ -737,16 +757,18 @@ class CachedStateDAL(StateDAL):
         super().update_order_status(
             cloid, status=status, venue_oid=venue_oid, now_ns=now_ns,
         )
-        o = self._order_cache.get(cloid)
-        if o is not None:
-            o.status = status
-            o.last_update_ts_ns = now_ns
-            if venue_oid is not None:
-                o.venue_oid = venue_oid
+        with self._cache_lock:
+            o = self._order_cache.get(cloid)
+            if o is not None:
+                o.status = status
+                o.last_update_ts_ns = now_ns
+                if venue_oid is not None:
+                    o.venue_oid = venue_oid
 
     def live_orders(self) -> list[OpenOrder]:
         self._ensure_loaded()
-        return [
-            o for o in self._order_cache.values()
-            if o.status in ("pending", "open", "partially_filled")
-        ]
+        with self._cache_lock:
+            return [
+                o for o in self._order_cache.values()
+                if o.status in ("pending", "open", "partially_filled")
+            ]
