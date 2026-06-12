@@ -69,6 +69,7 @@ from hlanalysis.marketdata.position_math import (
     stop_price,
 )
 from hlanalysis.strategy.base import Strategy
+from hlanalysis.strategy.fee import pm_binary_fee
 from hlanalysis.strategy.types import Action, BookState, Position
 
 from ..core.data_source import DataSource, QuestionDescriptor
@@ -285,7 +286,7 @@ def _binary_fee(px: float, qty: float, cfg: RunConfig) -> float:
     """
     if cfg.fee_model == "pm_binary":
         p = max(0.0, min(1.0, px))
-        return qty * cfg.fee_rate * p * (1.0 - p)
+        return pm_binary_fee(cfg.fee_rate, p, qty)
     return px * qty * cfg.fee_taker
 
 
