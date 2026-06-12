@@ -8,16 +8,19 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..strategy.late_resolution import LateResolutionParams
 from ..strategy.theta_harvester import ThetaHarvesterParams
+from ..strategy.live_registry import live_strategy_types
 
 _ENV_RE = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
-# Allowed strategy types. Keep these stable — they map to runtime construction in
-# runtime.py:_build_strategy_for_slot.
-StrategyType = Literal["late_resolution", "theta_harvester"]
+# ``StrategyType`` is now a plain str — validated dynamically against the
+# live registry in StrategyConfig._check_strategy_type below. This removes
+# the frozen Literal so a new live strategy is added by registering it in
+# ``hlanalysis/strategy/live_registry.py`` with no edit here.
+StrategyType = str
 
 
 def _substitute_env(raw: Any) -> Any:
@@ -177,7 +180,19 @@ class StrategyConfig(BaseModel):
     # legacy single-account YAMLs that omit this field.
     account_alias: str = "default"
     # Which Strategy subclass to instantiate. Defaults to the v1 live strategy.
+    # Validated dynamically against the live registry (live_registry.py) so that
+    # adding a new live strategy requires no edit here.
     strategy_type: StrategyType = "late_resolution"
+
+    @field_validator("strategy_type")
+    @classmethod
+    def _check_strategy_type(cls, v: str) -> str:
+        valid = live_strategy_types()
+        if v not in valid:
+            raise ValueError(
+                f"unknown strategy_type {v!r}; registered live types: {valid}"
+            )
+        return v
     # Optional theta_harvester params (ignored when strategy_type != theta_harvester).
     theta: ThetaParams | None = None
     # Optional per-question.klass theta overrides. Maps a question class (e.g.

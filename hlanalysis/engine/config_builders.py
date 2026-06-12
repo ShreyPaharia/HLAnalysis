@@ -25,12 +25,9 @@ from .config import (
 from .exec_client import ExecutionClient
 from .hl_client import HLClient
 from ..strategy.base import Strategy
-from ..strategy.late_resolution import (
-    LateResolutionConfig, LateResolutionStrategy,
-)
-from ..strategy.theta_harvester import (
-    ThetaHarvesterConfig, ThetaHarvesterStrategy,
-)
+from ..strategy.late_resolution import LateResolutionConfig
+from ..strategy.theta_harvester import ThetaHarvesterConfig
+from ..strategy.live_registry import build_live_strategy
 
 
 # LateResolutionConfig fields sourced from the strategy GLOBAL block, not the
@@ -258,16 +255,10 @@ def build_exec_client(alias: str, acct: AccountConfig, paper_mode: bool) -> Exec
 
 
 def _build_strategy_for_slot(cfg: StrategyConfig) -> Strategy:
-    """Dispatch on strategy_type. Add new strategies here as they're surfaced
-    for live trading."""
-    if cfg.strategy_type == "late_resolution":
-        return LateResolutionStrategy(
-            build_late_resolution_config(cfg),
-            cfg_by_class=build_late_resolution_configs_by_class(cfg),
-        )
-    if cfg.strategy_type == "theta_harvester":
-        return ThetaHarvesterStrategy(
-            build_theta_harvester_config(cfg),
-            cfg_by_class=build_theta_harvester_configs_by_class(cfg),
-        )
-    raise ValueError(f"unknown strategy_type: {cfg.strategy_type!r}")
+    """Dispatch on strategy_type via the live registry.
+
+    To add a new live strategy: call ``register_live_strategy`` in
+    ``hlanalysis/strategy/live_registry.py`` — no edit required here or
+    in config.py / slot_config.py.
+    """
+    return build_live_strategy(cfg.strategy_type, cfg)

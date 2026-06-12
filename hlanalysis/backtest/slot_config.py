@@ -27,15 +27,7 @@ from ..engine.config_builders import (
     build_theta_harvester_config,
     build_theta_harvester_configs_by_class,
 )
-
-# Live ``strategy_type`` → backtest registry id. The registry's base builders
-# (no estimator setdefault) are used so the emitted explicit params are the sole
-# source of truth — the v3_2/v3_4 variant builders' bipower setdefault never
-# enters the slot path.
-_STRATEGY_ID_FOR_TYPE = {
-    "late_resolution": "v1_late_resolution",
-    "theta_harvester": "v3_theta_harvester",
-}
+from ..strategy.live_registry import live_registry_id
 
 
 def backtest_params_from_slot(
@@ -49,12 +41,13 @@ def backtest_params_from_slot(
     default at evaluation time.
     """
     try:
-        strategy_id = _STRATEGY_ID_FOR_TYPE[cfg.strategy_type]
+        strategy_id = live_registry_id(cfg.strategy_type)
     except KeyError:
+        from ..strategy.live_registry import live_strategy_types  # noqa: PLC0415
         raise ValueError(
             f"slot {cfg.account_alias!r}: unsupported strategy_type "
             f"{cfg.strategy_type!r} for backtest (supported: "
-            f"{sorted(_STRATEGY_ID_FOR_TYPE)})"
+            f"{live_strategy_types()})"
         ) from None
 
     if cfg.strategy_type == "theta_harvester":
