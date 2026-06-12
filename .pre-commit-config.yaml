@@ -1,0 +1,17 @@
+repos:
+  # Ruff: fast lint + format (replaces flake8, isort, pyupgrade, etc.)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff          # lint (respects pyproject.toml [tool.ruff])
+        args: [--fix]
+      - id: ruff-format   # format (respects pyproject.toml line-length)
+
+  # General hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml

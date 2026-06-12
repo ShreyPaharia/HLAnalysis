@@ -21,10 +21,8 @@ dependencies = [
   "scipy>=1.14",
   "hftbacktest>=2.0",
   "numba>=0.65",
-  "plotly>=5.20",
   "py-clob-client-v2>=1.0.1",
   "httpx[http2]>=0.27",
-  "scikit-learn>=1.6",
   "joblib>=1.4",
   "diskcache>=5.6.3",
   "alembic>=1.18.4",
@@ -39,10 +37,11 @@ analysis = [
   "polars>=1.10",
   "matplotlib>=3.9",
   "pytz>=2024.2",
+  "plotly>=5.20",
 ]
-dev = [
-  "pytest>=8.0",
-  "pytest-asyncio>=0.24",
+# scikit-learn is only used by scripts/train_nba_wp.py (lazy import); keep out of core.
+training = [
+  "scikit-learn>=1.6",
 ]
 
 [build-system]
@@ -61,10 +60,47 @@ hl-bt = "hlanalysis.backtest.cli:main"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
+# Authoritative dev dependencies (merged from both former groups).
+# Removes the now-redundant [project.optional-dependencies].dev group.
 [dependency-groups]
 dev = [
     "dnspython>=2.8.0",
+    "mypy>=1.10",
     "nbformat>=5.10.4",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
+    "ruff>=0.5.0",
 ]
+
+# ---------------------------------------------------------------------------
+# Ruff — fast linter + formatter
+# Line-length=120 matches the repo's de-facto column width (88 would flag ~390
+# lines). Selects: pycodestyle (E), pyflakes (F), isort (I), bugbear (B),
+# pyupgrade (UP), simplify (SIM).
+# Ignored codes are deferred for the serial autofix pass:
+#   E402 — module-import-not-at-top (common for conditional / deferred imports)
+#   E741 — ambiguous variable names (noisy in numeric / scientific code)
+#   B905 — zip-without-explicit-strict (low risk, high noise)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = [
+    "E402",  # module-import-not-at-top-of-file — deferred imports are intentional
+    "E741",  # ambiguous-variable-name — common in math/stats code (l, O, I)
+    "B905",  # zip-without-explicit-strict — low risk, deferred
+]
+
+# ---------------------------------------------------------------------------
+# Mypy — static type checker
+# The codebase has never been type-checked so strict mode would be
+# overwhelming. This config is useful but non-blocking (CI runs with
+# continue-on-error: true). Incrementally tighten as the codebase improves.
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_redundant_casts = true

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    name: Lint, type-check, test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      # Blocking: ruff lint must pass
+      - name: Ruff lint
+        run: uvx ruff check hlanalysis
+
+      # Blocking: ruff format check
+      # Skipped for now — formatter would reformat existing code en-masse.
+      # Enable once the serial autoformat pass lands.
+      # - name: Ruff format check
+      #   run: uvx ruff format --check hlanalysis
+
+      # Non-blocking: mypy type checking (informational until coverage improves)
+      - name: Mypy type check
+        run: uv run mypy hlanalysis
+        continue-on-error: true
+
+      # Blocking: full test suite
+      - name: Pytest
+        run: uv run pytest -q
