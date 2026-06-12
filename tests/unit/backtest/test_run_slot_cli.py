@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hlanalysis.backtest.cli import _load_run_params
+from hlanalysis.backtest.cli import _load_run_params, _run_config_from_args
 from hlanalysis.backtest.slot_config import backtest_params_from_slot
 from hlanalysis.engine.config import load_strategies_config
 
@@ -81,6 +81,54 @@ def test_unknown_slot_errors_with_available_aliases():
     args = _args(slot="does_not_exist")
     with pytest.raises(SystemExit):
         _load_run_params(args)
+
+
+def _runcfg_args(**kw):
+    """A complete Namespace for _run_config_from_args."""
+    base = dict(
+        scanner_interval_seconds=1.0, tick_size=0.001, lot_size=1.0,
+        slippage_bps=0.0, fee_taker=0.0, fee_model="flat", fee_rate=0.0,
+        depth=None, order_latency_ms=50.0, scan_mode=None,
+        scan_min_interval_seconds=0.2, scan_max_interval_seconds=2.0,
+        min_inter_order_seconds=0.0, ioc_fleeting_persistence_seconds=0.0,
+    )
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_slot_run_stashes_live_inventory_caps_on_args():
+    """A slot run must lift the slot's live inventory/daily-loss caps onto args
+    so the sim applies the SAME risk envelope the live engine enforces — without
+    it, backtests over-enter notional live's RiskGate would have blocked, making
+    sim PnL over-optimistic (and untrustworthy for sizing decisions)."""
+    args = _args(slot="v1")
+    _load_run_params(args)
+    cfg = next(c for c in load_strategies_config(LIVE).strategies if c.account_alias == "v1")
+    assert args.sim_max_inventory_usd == cfg.global_.max_total_inventory_usd
+    assert args.sim_max_concurrent_positions == cfg.global_.max_concurrent_positions
+    assert args.sim_daily_loss_cap_usd == cfg.global_.daily_loss_cap_usd
+    assert args.sim_daily_window_start_hour_utc == cfg.global_.daily_window_start_hour_utc
+
+
+def test_run_config_builds_sim_risk_caps_from_args():
+    """_run_config_from_args must translate the stashed caps into RunConfig."""
+    args = _runcfg_args(
+        sim_max_inventory_usd=1000.0, sim_max_concurrent_positions=5,
+        sim_daily_loss_cap_usd=100.0, sim_daily_window_start_hour_utc=6,
+    )
+    rc = _run_config_from_args(args, None)
+    assert rc.sim_risk_caps is not None
+    assert rc.sim_risk_caps.max_total_inventory_usd == 1000.0
+    assert rc.sim_risk_caps.max_concurrent_positions == 5
+    assert rc.sim_risk_caps.daily_loss_cap_usd == 100.0
+    assert rc.sim_risk_caps.daily_window_start_hour_utc == 6
+
+
+def test_run_config_without_caps_leaves_sim_risk_caps_none():
+    """Back-compat: a non-slot run with no cap args must keep sim_risk_caps=None
+    so existing ad-hoc runs stay bit-identical."""
+    rc = _run_config_from_args(_runcfg_args(), None)
+    assert rc.sim_risk_caps is None
 
 
 def test_config_path_still_works(tmp_path):

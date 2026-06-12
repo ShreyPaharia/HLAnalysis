@@ -261,6 +261,28 @@ def _extract_hedge_config(params: dict) -> tuple[dict, dict | None]:
     )
 
 
+def _sim_risk_caps_from_args(args: argparse.Namespace):
+    """Build a SimRiskCaps from cap args stashed by a --slot run, else None.
+
+    None preserves bit-identical behaviour for non-slot / ad-hoc runs (the
+    sim applies no inventory or daily-loss cap, as before).
+    """
+    inv = getattr(args, "sim_max_inventory_usd", None)
+    conc = getattr(args, "sim_max_concurrent_positions", None)
+    dlc = getattr(args, "sim_daily_loss_cap_usd", None)
+    if inv is None and conc is None and dlc is None:
+        return None
+    from .halt_replay import SimRiskCaps
+    return SimRiskCaps(
+        daily_loss_cap_usd=dlc,
+        daily_window_start_hour_utc=int(
+            getattr(args, "sim_daily_window_start_hour_utc", 0) or 0
+        ),
+        max_total_inventory_usd=inv,
+        max_concurrent_positions=conc,
+    )
+
+
 def _run_config_from_args(
     args: argparse.Namespace, hedge_cfg: dict | None
 ) -> RunConfig:
@@ -287,6 +309,7 @@ def _run_config_from_args(
         scan_max_interval_seconds=getattr(args, "scan_max_interval_seconds", 2.0),
         min_inter_order_seconds=getattr(args, "min_inter_order_seconds", 0.0),
         ioc_fleeting_persistence_seconds=getattr(args, "ioc_fleeting_persistence_seconds", 0.0),
+        sim_risk_caps=_sim_risk_caps_from_args(args),
     )
     if hedge_cfg is not None:
         kwargs["hedge_enabled"] = hedge_cfg["hedge_enabled"]
@@ -356,6 +379,16 @@ def _load_run_params(args: argparse.Namespace) -> dict:
             args.scan_mode = "event"
             args.scan_min_interval_seconds = slot_cfg.global_.scan_min_interval_seconds
             args.scan_max_interval_seconds = slot_cfg.global_.scan_max_interval_seconds
+        # Lift the slot's live risk envelope into the sim so a slot run/tune
+        # enforces the SAME inventory + daily-loss caps the engine does. Without
+        # this the sim over-enters notional live's RiskGate would have blocked
+        # (the $100 burn-in inventory cap binds at 2 positions live), making sim
+        # PnL over-optimistic — exactly the figure a sizing decision must trust.
+        # Consumed by _run_config_from_args → RunConfig.sim_risk_caps.
+        args.sim_max_inventory_usd = slot_cfg.global_.max_total_inventory_usd
+        args.sim_max_concurrent_positions = slot_cfg.global_.max_concurrent_positions
+        args.sim_daily_loss_cap_usd = slot_cfg.global_.daily_loss_cap_usd
+        args.sim_daily_window_start_hour_utc = slot_cfg.global_.daily_window_start_hour_utc
         strategy_id, params = backtest_params_from_slot(
             slot_cfg, klass=getattr(args, "slot_class", None)
         )
