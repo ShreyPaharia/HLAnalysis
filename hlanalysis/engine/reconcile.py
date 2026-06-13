@@ -50,7 +50,7 @@ class ReconcileResult:
     drift_events: list[ReconcileDrift]
     # (cloid, symbol) pairs the caller should defensively cancel. Symbol must be
     # non-empty — HL's cancelByCloid rejects empty coin and the SDK silently
-    # reports outer status['ok' even when the per-cancel statuses[] failed.
+    # reports outer status='ok' even when the per-cancel statuses[] failed.
     orphans_to_cancel: list[tuple[str, str]]
     # Local positions that no longer exist on the venue — almost always means
     # the HIP-4 market settled and HL auto-closed the position. The caller is
