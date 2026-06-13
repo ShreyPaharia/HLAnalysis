@@ -128,18 +128,24 @@ class TestFillModelOptimistic:
         assert result.n_fills_sell == 0
 
     def test_sell_fill_at_quote(self) -> None:
-        """Buy-aggressor trades at exactly our ask → filled (optimistic)."""
+        """Buy then sell round-trip: buy at T=5s, sell at exactly our ask at T=15s (optimistic)."""
         MMConfig, MMResult, _run_mm_sim_expiry = _import_sim()
 
-        bbo = _make_bbo([0.0], [0.80], [0.82])
-        trades = _make_trades([10.0], [0.82], [50.0], ["buy"])
+        # Binary tokens cannot be shorted: first buy, then sell the inventory.
+        bbo = _make_bbo([0.0, 10.0], [0.80, 0.80], [0.82, 0.82])
+        trades = _make_trades(
+            [5.0, 15.0],
+            [0.799, 0.82],  # buy: strictly through bid; sell: at ask (optimistic fills at)
+            [50.0, 50.0],
+            ["sell", "buy"],
+        )
         perp = _make_perp_bbo([0.0], [80000.0])
 
-        cfg = MMConfig(fill_model="optimistic", half_edge=0.0, size_usd=100.0, stale_data_halt_seconds=3600.0)
+        cfg = MMConfig(fill_model="optimistic", half_edge=0.0, size_usd=100.0, hedged=False, stale_data_halt_seconds=3600.0)
         result = _run_mm_sim_expiry(bbo, trades, perp, _EXPIRY_NS, "#TEST", "20260601-06", True, cfg)
 
+        assert result.n_fills_buy == 1
         assert result.n_fills_sell == 1
-        assert result.n_fills_buy == 0
 
     def test_buy_fill_through_quote(self) -> None:
         """Sell-aggressor trades BELOW our bid → filled (optimistic, through)."""
@@ -199,27 +205,47 @@ class TestFillModelConservative:
         assert result.n_fills_buy == 1
 
     def test_sell_no_fill_at_ask(self) -> None:
-        """Buy-aggressor trades AT our ask → no fill (conservative)."""
+        """Buy-aggressor trades AT our ask → no fill (conservative, back-of-queue)."""
         MMConfig, MMResult, _run_mm_sim_expiry = _import_sim()
 
-        bbo = _make_bbo([0.0], [0.80], [0.82])
-        trades = _make_trades([10.0], [0.82], [50.0], ["buy"])
+        # Build inventory first, then attempt a sell at exactly the ask (conservative = no fill at ask).
+        # Use skew_threshold_usd=1e6 to disable quote skew (skew would shift ask by 1 tick, changing test logic).
+        bbo = _make_bbo([0.0, 10.0], [0.80, 0.80], [0.82, 0.82])
+        trades = _make_trades(
+            [5.0, 15.0],
+            [0.799, 0.82],  # buy: strictly through bid; sell attempt: AT ask (conservative = no fill)
+            [50.0, 50.0],
+            ["sell", "buy"],
+        )
         perp = _make_perp_bbo([0.0], [80000.0])
 
-        cfg = MMConfig(fill_model="conservative", half_edge=0.0, size_usd=100.0, stale_data_halt_seconds=3600.0)
+        cfg = MMConfig(
+            fill_model="conservative",
+            half_edge=0.0,
+            size_usd=100.0,
+            hedged=False,
+            skew_threshold_usd=1e6,
+            stale_data_halt_seconds=3600.0,
+        )
         result = _run_mm_sim_expiry(bbo, trades, perp, _EXPIRY_NS, "#TEST", "20260601-06", True, cfg)
 
         assert result.n_fills_sell == 0
 
     def test_sell_fill_strictly_through(self) -> None:
-        """Buy-aggressor trades ABOVE our ask → fill (conservative)."""
+        """Buy-aggressor trades ABOVE our ask → sell fill (conservative); requires prior long inventory."""
         MMConfig, MMResult, _run_mm_sim_expiry = _import_sim()
 
-        bbo = _make_bbo([0.0], [0.80], [0.82])
-        trades = _make_trades([10.0], [0.821], [50.0], ["buy"])
+        # Binary tokens cannot be shorted: first build inventory via a buy fill, then sell.
+        bbo = _make_bbo([0.0, 10.0], [0.80, 0.80], [0.82, 0.82])
+        trades = _make_trades(
+            [5.0, 15.0],
+            [0.799, 0.821],  # buy: strictly through bid; sell: strictly through ask
+            [50.0, 50.0],
+            ["sell", "buy"],
+        )
         perp = _make_perp_bbo([0.0], [80000.0])
 
-        cfg = MMConfig(fill_model="conservative", half_edge=0.0, size_usd=100.0, stale_data_halt_seconds=3600.0)
+        cfg = MMConfig(fill_model="conservative", half_edge=0.0, size_usd=100.0, hedged=False, stale_data_halt_seconds=3600.0)
         result = _run_mm_sim_expiry(bbo, trades, perp, _EXPIRY_NS, "#TEST", "20260601-06", True, cfg)
 
         assert result.n_fills_sell == 1

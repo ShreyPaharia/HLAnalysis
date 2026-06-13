@@ -5,75 +5,45 @@
   "oos_period": "2026-06-04 \u2192 2026-06-11",
   "n_is_markets": 25,
   "n_oos_markets": 7,
-  "note": "OOS results are definitive. IS sweep partial (6-cell focused grid in code, 2 cells from old 54-cell sweep available). Full IS results require re-running build_card().",
   "baseline_v1": {
     "is": {
       "n_markets": 25,
-      "n_trades": null,
-      "total_pnl_usd": null,
-      "sharpe": null,
-      "hit_rate": null,
-      "max_drawdown_usd": null,
-      "note": "IS run pending"
+      "n_trades": 63,
+      "total_pnl_usd": -45.76172000000006,
+      "sharpe": -0.7319868852030618,
+      "hit_rate": 0.6,
+      "max_drawdown_usd": 219.28793000000002
     },
     "oos": {
       "n_markets": 7,
-      "n_trades": null,
-      "total_pnl_usd": null,
-      "sharpe": null,
-      "hit_rate": null,
-      "max_drawdown_usd": null,
-      "note": "OOS run pending"
+      "n_trades": 6,
+      "total_pnl_usd": 33.656079999999974,
+      "sharpe": 12.371836012451018,
+      "hit_rate": 0.42857142857142855,
+      "max_drawdown_usd": 0.0
     }
   },
   "flb_best_params": {
     "price_lo": 0.8,
     "price_hi": 0.95,
     "tte_min_h": 1.0,
-    "tte_max_h": 6.0,
-    "selection_basis": "Card E top edge cells: mid 0.80-0.95 TTE 1-6h net_edge ~0.17; IS sweep pending full confirmation"
+    "tte_max_h": 6.0
   },
   "flb_is": {
     "n_markets": 25,
-    "n_trades": null,
-    "total_pnl_usd": null,
-    "sharpe": null,
-    "hit_rate": null,
-    "max_drawdown_usd": null,
-    "partial_sweep_best": {
-      "cell": "lo=0.80, hi=0.90, tte=[1h,3h]",
-      "total_pnl_usd": 28.24,
-      "sharpe": 5.01,
-      "n_trades": 10
-    },
-    "note": "Full IS sweep pending \u2014 using primary OOS params"
+    "n_trades": 47,
+    "total_pnl_usd": -9.052400000000084,
+    "sharpe": -0.8076561330187392,
+    "hit_rate": 0.24,
+    "max_drawdown_usd": 45.30034000000003
   },
   "flb_oos": {
     "n_markets": 7,
     "n_trades": 5,
-    "total_pnl_usd": 31.42,
-    "sharpe": 10.74,
-    "hit_rate": 0.286,
-    "max_drawdown_usd": 0.0,
-    "per_market_pnl": [
-      0.0,
-      0.0,
-      11.86,
-      19.56,
-      0.0,
-      0.0,
-      0.0
-    ],
-    "outcomes": [
-      "no",
-      "no",
-      "no",
-      "yes",
-      "yes",
-      "yes",
-      "no"
-    ],
-    "note": "5 fills, 2 markets had positive PnL, 0 markets had losses. Safety gates (min_safety_d=3.0) filtered most entries."
+    "total_pnl_usd": 31.418099999999995,
+    "sharpe": 10.743464115937657,
+    "hit_rate": 0.2857142857142857,
+    "max_drawdown_usd": 0.0
   },
   "vol_sizing": {
     "sigma_median": 0.1735,
@@ -81,173 +51,97 @@
     "oos_fixed": {
       "n_markets": 7,
       "n_trades": 5,
-      "total_pnl_usd": 31.42,
-      "sharpe": 10.74,
+      "total_pnl_usd": 31.418099999999995,
+      "sharpe": 10.743464115937657,
+      "hit_rate": 0.2857142857142857,
       "max_drawdown_usd": 0.0
     },
     "oos_vol_scaled": {
       "n_markets": 7,
       "n_trades": 6,
-      "total_pnl_usd": 61.03,
-      "sharpe": 10.82,
+      "total_pnl_usd": 61.02832999999998,
+      "sharpe": 10.81692314577736,
+      "hit_rate": 0.2857142857142857,
       "max_drawdown_usd": 0.0
     },
-    "vol_sizing_helps": true,
-    "per_market_breakdown": [
-      {
-        "q": "Q1000149",
-        "sigma": 0.3439,
-        "scale": 1.98,
-        "pnl": 0.0
-      },
-      {
-        "q": "Q1000154",
-        "sigma": 0.4852,
-        "scale": 2.0,
-        "pnl": 0.0
-      },
-      {
-        "q": "Q1000159",
-        "sigma": 0.7173,
-        "scale": 2.0,
-        "pnl": 23.71
-      },
-      {
-        "q": "Q1000164",
-        "sigma": 0.4613,
-        "scale": 2.0,
-        "pnl": 37.32
-      },
-      {
-        "q": "Q1000220",
-        "sigma": 0.3308,
-        "scale": 1.91,
-        "pnl": 0.0
-      },
-      {
-        "q": "Q1000225",
-        "sigma": 0.3856,
-        "scale": 2.0,
-        "pnl": 0.0
-      },
-      {
-        "q": "Q1000234",
-        "sigma": 0.2642,
-        "scale": 1.52,
-        "pnl": 0.0
-      }
-    ],
-    "note": "All OOS markets had \u03c3 >> \u03c3_median (0.26\u20130.72 vs 0.17), so all got 1.5\u20132\u00d7 scaling. This amplifies both gains and potential losses. Result may not generalize when \u03c3 is near median."
+    "vol_sizing_helps": true
   },
   "split_half": {
     "H1": {
       "date_span": "2026-05-06 \u2192 2026-05-24",
-      "n_markets": null,
-      "total_pnl_usd": null,
-      "sharpe": null,
-      "note": "pending"
+      "n_markets": 14,
+      "total_pnl_usd": -18.010880000000036,
+      "sharpe": -2.6553288507493242
     },
     "H2": {
       "date_span": "2026-05-24 \u2192 2026-06-11",
-      "n_markets": null,
-      "total_pnl_usd": null,
-      "sharpe": null,
-      "note": "pending"
+      "n_markets": 18,
+      "total_pnl_usd": 40.37657999999995,
+      "sharpe": 5.427923825853295
     },
-    "sign_stable": null,
-    "note": "Split-half run in progress"
+    "sign_stable": false
   },
   "kpis": {
     "pnl_oos_positive": {
       "pass": true,
-      "value": 31.42,
-      "note": "OOS PnL=0.42"
+      "value": 31.418099999999995
     },
     "sharpe_oos_ge_1": {
       "pass": true,
-      "value": 10.74,
-      "note": "OOS Sharpe=10.74 >> 1.0 threshold"
+      "value": 10.743464115937657
     },
     "max_dd_within_cap": {
       "pass": true,
       "value": 0.0,
-      "cap": 100.0,
-      "note": "DD=/bin/zsh (zero losses in OOS)"
+      "cap": 100.0
     },
     "split_half_sign_stable": {
-      "pass": null,
-      "note": "PENDING \u2014 split-half run in progress"
+      "pass": false
     },
     "no_lookahead": {
-      "pass": true,
-      "note": "Structural: v1_late_resolution only uses pre-settlement data"
+      "pass": true
     },
     "safety_gates_preserved": {
-      "pass": true,
-      "note": "min_safety_d=3.0, exit_safety_d=1.0, vol_max=100"
+      "pass": true
     },
     "capacity_ge_desk": {
       "pass": true,
-      "fill_frac_at_desk": 1.0,
-      "note": " desk <  available depth per market"
+      "fill_frac_at_desk": 1.0
     }
   },
-  "overall_pass": null,
-  "overall_pass_note": "PASS on 6/7 KPIs; split-half KPI pending. If split-half is sign-stable, overall = PASS.",
+  "overall_pass": false,
   "capacity_table": [
     {
-      "desk_usd": 1000,
-      "clip_per_market": 143,
+      "desk_usd": 1000.0,
+      "clip_per_market": 142.9,
       "fill_frac_lo": 1.0,
       "fill_frac_hi": 1.0,
-      "pnl_scaled_lo": 44.9,
-      "pnl_scaled_hi": 44.9,
+      "pnl_scaled_lo": 44.88,
+      "pnl_scaled_hi": 44.88,
       "mkts_needed_for_breadth": 7,
       "saturates": false
     },
     {
-      "desk_usd": 5000,
-      "clip_per_market": 714,
+      "desk_usd": 5000.0,
+      "clip_per_market": 714.3,
       "fill_frac_lo": 0.21,
       "fill_frac_hi": 0.84,
-      "pnl_scaled_lo": 44.9,
-      "pnl_scaled_hi": 179.5,
+      "pnl_scaled_lo": 47.13,
+      "pnl_scaled_hi": 188.51,
       "mkts_needed_for_breadth": 34,
       "saturates": true
     },
     {
-      "desk_usd": 25000,
-      "clip_per_market": 3571,
-      "fill_frac_lo": 0.042,
-      "fill_frac_hi": 0.168,
-      "pnl_scaled_lo": 44.9,
-      "pnl_scaled_hi": 179.5,
+      "desk_usd": 25000.0,
+      "clip_per_market": 3571.4,
+      "fill_frac_lo": 0.04,
+      "fill_frac_hi": 0.17,
+      "pnl_scaled_lo": 47.13,
+      "pnl_scaled_hi": 188.51,
       "mkts_needed_for_breadth": 167,
       "saturates": true
     }
   ],
-  "capacity_note": "Capacity severely limited by HL HIP-4 single-market-per-day structure. k desk: no saturation, 7 markets. k+: saturates, breadth is binding. Multi-asset expansion (ETH, other) required for desk growth beyond -2k.",
-  "is_sweep_top5": [
-    {
-      "price_lo": 0.8,
-      "price_hi": 0.9,
-      "tte_min_h": 1.0,
-      "tte_max_h": 3.0,
-      "total_pnl_usd": 28.24,
-      "sharpe": 5.01,
-      "n_trades": 10,
-      "note": "complete"
-    },
-    {
-      "price_lo": 0.8,
-      "price_hi": 0.9,
-      "tte_min_h": 0.5,
-      "tte_max_h": 3.0,
-      "total_pnl_usd": -4.83,
-      "sharpe": -0.36,
-      "n_trades": 14,
-      "note": "complete \u2014 NEGATIVE, confirms tte_min\u22651h important"
-    }
-  ],
-  "run_time_note": "Full card (IS sweep + split-half + vol-sizing) requires ~2-3h due to sequential market runs. Partial OOS results above are definitive."
+  "is_sweep_top5": [],
+  "run_time_s": 1348.7
 }

@@ -458,11 +458,12 @@ def _run_mm_sim_expiry(
             return None, None, 5
 
         # Inventory cap — stop quoting side that would exceed cap
+        # Binary tokens cannot be shorted: can_sell requires positive inventory.
         inv_usd_equiv = abs(inv_tokens) * mid
         desk_total = desk_inventory_usd + inv_usd_equiv
 
         can_buy = inv_usd_equiv < config.max_inventory_usd and desk_total < config.desk_cap_usd
-        can_sell = True  # selling reduces inventory; allow to close
+        can_sell = inv_tokens > 1e-8  # only sell tokens we actually hold (no shorts)
 
         if inv_tokens > 0 and inv_usd_equiv >= config.max_inventory_usd:
             can_buy = False
@@ -631,8 +632,14 @@ def _run_mm_sim_expiry(
 
             elif filled_sell:
                 # We sold tokens at fill_px
-                tokens = config.size_usd / fill_px
-                proceeds = tokens * fill_px  # = config.size_usd
+                # Cannot short binary tokens: cap sell qty at what we actually hold.
+                target_tokens = config.size_usd / fill_px
+                tokens = min(target_tokens, inv_tokens)
+                if tokens <= 1e-8:
+                    # No inventory left to sell — skip
+                    current_bid_quote, current_ask_quote = None, None  # pull quotes
+                    continue
+                proceeds = tokens * fill_px
 
                 inv_tokens -= tokens
                 cost_basis_usd -= tokens * (cost_basis_usd / (tokens_bought + 1e-12) if tokens_bought > 0 else fill_px)
@@ -691,11 +698,17 @@ def _run_mm_sim_expiry(
             (last_bid_px + last_ask_px) / 2.0 if (math.isfinite(last_bid_px) and math.isfinite(last_ask_px)) else 0.5
         )
 
-    # Net inventory at end
-    net_tokens = inv_tokens
+    # Net inventory at end (must be >= 0 with no-short constraint)
+    net_tokens = max(0.0, inv_tokens)  # guard against floating-point dust going negative
 
-    # Spread PnL: realised from round-trips
-    # Approximate: for each matched buy-sell pair, capture the spread
+    # -----------------------------------------------------------------------
+    # PnL accounting (cash-basis):
+    #   total_pnl = usd_received - usd_spent + settlement_value_of_net_tokens
+    #
+    # Decomposition into spread_pnl + settlement_pnl:
+    #   spread_pnl:   PnL from matched round-trips (buy low, sell high)
+    #   settlement_pnl: PnL from residual long inventory settled at oracle price
+    # -----------------------------------------------------------------------
     matched_tokens = min(tokens_bought, tokens_sold)
     if matched_tokens > 0 and tokens_bought > 0 and tokens_sold > 0:
         avg_buy_px = usd_spent / tokens_bought
@@ -704,26 +717,21 @@ def _run_mm_sim_expiry(
     else:
         spread_pnl = 0.0
 
-    # Settlement PnL: on residual (unmatched) inventory
-    if net_tokens != 0:
-        # Residual cost basis
-        if net_tokens > 0:
-            residual_tokens = net_tokens
-            residual_cost = residual_tokens * (usd_spent / tokens_bought if tokens_bought > 0 else 0.0)
-        else:
-            residual_tokens = net_tokens
-            residual_cost = residual_tokens * (usd_received / tokens_sold if tokens_sold > 0 else 0.0)
-        settlement_pnl = settlement_px * residual_tokens - residual_cost
+    # Settlement PnL: residual long inventory settled at oracle price.
+    # residual_tokens = tokens bought but not yet sold = net_tokens
+    if net_tokens > 1e-8 and tokens_bought > 0:
+        avg_buy_px = usd_spent / tokens_bought
+        settlement_pnl = (settlement_px - avg_buy_px) * net_tokens
     else:
         settlement_pnl = 0.0
 
-    # MTM at end (before settlement)
+    # MTM at end (before settlement) — informational only
     mid_final = (
         (last_bid_px + last_ask_px) / 2.0
         if (math.isfinite(last_bid_px) and math.isfinite(last_ask_px))
         else settlement_px
     )
-    inventory_mtm = (mid_final - (usd_spent / tokens_bought if tokens_bought > 0 else mid_final)) * max(net_tokens, 0)
+    inventory_mtm = (mid_final - (usd_spent / tokens_bought if tokens_bought > 0 else mid_final)) * net_tokens
 
     # Hedge PnL at settlement
     hedge_pnl = 0.0
@@ -907,7 +915,15 @@ def _summarise_results(results: list[MMResult]) -> dict[str, Any]:
     max_dd = float(np.max(drawdowns)) if len(drawdowns) > 0 else 0.0
 
     pnl_std = float(np.std(pnl_series)) if len(pnl_series) > 1 else 0.0
-    sharpe = (float(np.mean(pnl_series)) / pnl_std * math.sqrt(n_expiries)) if pnl_std > 0 else float("nan")
+    pnl_mean = float(np.mean(pnl_series)) if len(pnl_series) > 0 else 0.0
+    if pnl_std > 0:
+        sharpe = pnl_mean / pnl_std * math.sqrt(n_expiries)
+    elif pnl_mean > 0:
+        sharpe = float("inf")
+    elif pnl_mean < 0:
+        sharpe = float("-inf")
+    else:
+        sharpe = 0.0
 
     hit_rate = float(np.mean(pnl_series > 0)) if len(pnl_series) > 0 else 0.0
 
@@ -1332,8 +1348,13 @@ def _capacity_table_html(rows: list[dict[str, Any]]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _check_kpis(is_summary: dict[str, Any], oos_summary: dict[str, Any]) -> list[dict[str, Any]]:
-    """Evaluate pass/fail for key KPIs."""
+def _check_kpis(
+    is_summary: dict[str, Any],
+    oos_summary: dict[str, Any],
+    is_opt_summary: dict[str, Any] | None = None,
+    oos_opt_summary: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Evaluate pass/fail for key KPIs (both fill models if opt summaries provided)."""
     kpis = []
 
     def _kpi(name: str, value: Any, passed: bool, target: str, note: str = "") -> dict[str, Any]:
@@ -1349,24 +1370,91 @@ def _check_kpis(is_summary: dict[str, Any], oos_summary: dict[str, Any]) -> list
     is_pnl = is_summary.get("total_pnl", 0.0)
     oos_pnl = oos_summary.get("total_pnl", 0.0)
     is_sharpe = is_summary.get("sharpe", float("nan"))
+    oos_sharpe = oos_summary.get("sharpe", float("nan"))
     is_dd = is_summary.get("max_drawdown", 0.0)
     is_fills = is_summary.get("n_fills", 0)
     is_hit = is_summary.get("hit_rate", 0.0)
+    is_n = is_summary.get("n_expiries", 0)
+    oos_n = oos_summary.get("n_expiries", 0)
 
-    kpis.append(_kpi("IS total PnL > 0", f"${is_pnl:.2f}", is_pnl > 0, ">$0", "Spread capture must be positive"))
-    kpis.append(_kpi("OOS total PnL > 0", f"${oos_pnl:.2f}", oos_pnl > 0, ">$0", "Out-of-sample positive"))
+    is_underpowered = is_n < 15
+    oos_underpowered = oos_n < 15
+
+    # --- Conservative model (primary / honest bar) ---
     kpis.append(
         _kpi(
-            "IS Sharpe > 1.0",
+            "[CONSERVATIVE] IS total PnL > 0",
+            f"${is_pnl:.2f} (n={is_n})",
+            is_pnl > 0,
+            ">$0",
+            ("Spread capture must be positive" + (" [UNDERPOWERED n<15]" if is_underpowered else "")),
+        )
+    )
+    kpis.append(
+        _kpi(
+            "[CONSERVATIVE] OOS total PnL > 0",
+            f"${oos_pnl:.2f} (n={oos_n})",
+            oos_pnl > 0,
+            ">$0",
+            ("Out-of-sample positive" + (" [UNDERPOWERED n<15]" if oos_underpowered else "")),
+        )
+    )
+    kpis.append(
+        _kpi(
+            "[CONSERVATIVE] IS Sharpe > 1.0",
             _fmt(is_sharpe, ".2f"),
             math.isfinite(is_sharpe) and is_sharpe > 1.0,
             ">1.0",
-            "Risk-adjusted return",
+            "Risk-adjusted return (IS)",
+        )
+    )
+    kpis.append(
+        _kpi(
+            "[CONSERVATIVE] OOS Sharpe > 1.0",
+            _fmt(oos_sharpe, ".2f"),
+            math.isfinite(oos_sharpe) and oos_sharpe > 1.0,
+            ">1.0",
+            "OOS Sharpe — flags n_oos<15 as underpowered" + (" [UNDERPOWERED]" if oos_underpowered else ""),
         )
     )
     kpis.append(_kpi("Max Drawdown < $500", f"${is_dd:.2f}", is_dd < 500.0, "<$500", "Desk-scale drawdown gate"))
-    kpis.append(_kpi("n_fills > 100", str(is_fills), is_fills > 100, ">100", "Sufficient fill activity"))
-    kpis.append(_kpi("Hit rate > 50%", f"{is_hit:.1%}", is_hit > 0.50, ">50%", "More profitable expiries than losing"))
+    kpis.append(
+        _kpi(
+            "n_fills > 100 (IS)",
+            str(is_fills),
+            is_fills > 100,
+            ">100",
+            "Sufficient fill activity for statistical validity",
+        )
+    )
+
+    # --- Optimistic model KPIs (upper-bound comparison) ---
+    if is_opt_summary is not None:
+        opt_is_pnl = is_opt_summary.get("total_pnl", 0.0)
+        opt_is_n = is_opt_summary.get("n_expiries", 0)
+        kpis.append(
+            _kpi(
+                "[OPTIMISTIC] IS total PnL > 0",
+                f"${opt_is_pnl:.2f} (n={opt_is_n})",
+                opt_is_pnl > 0,
+                ">$0",
+                "Optimistic (at-quote) fill upper bound",
+            )
+        )
+    if oos_opt_summary is not None:
+        opt_oos_pnl = oos_opt_summary.get("total_pnl", 0.0)
+        opt_oos_n = oos_opt_summary.get("n_expiries", 0)
+        kpis.append(
+            _kpi(
+                "[OPTIMISTIC] OOS total PnL > 0",
+                f"${opt_oos_pnl:.2f} (n={opt_oos_n})",
+                opt_oos_pnl > 0,
+                ">$0",
+                "Optimistic OOS" + (" [UNDERPOWERED n<15]" if opt_oos_n < 15 else ""),
+            )
+        )
+
+    # --- Common KPIs (sign stability, fills) ---
     kpis.append(
         _kpi(
             "IS-OOS PnL sign agreement",
@@ -1376,6 +1464,7 @@ def _check_kpis(is_summary: dict[str, Any], oos_summary: dict[str, Any]) -> list
             "Robustness check",
         )
     )
+    kpis.append(_kpi("Hit rate > 50%", f"{is_hit:.1%}", is_hit > 0.50, ">50%", "More profitable expiries than losing"))
 
     return kpis
 
@@ -1469,11 +1558,33 @@ def build_card(
         con, data_root, expiry_df, outcomes_df, unhedged_config, IS_START, IS_END
     )
 
+    # Optimistic OOS (for KPI table)
+    _log.info("Strategy MM: running optimistic OOS sim")
+    oos_results_opt = _run_mm_all_expiries(con, data_root, expiry_df, outcomes_df, opt_config, OOS_START, OOS_END)
+
+    # Favorites-only (IS and OOS)
+    fav_config = copy.copy(base_config)
+    fav_config.favorites_only = True
+    _log.info("Strategy MM: running favorites-only IS sim")
+    is_results_fav = _run_mm_all_expiries(con, data_root, expiry_df, outcomes_df, fav_config, IS_START, IS_END)
+    _log.info("Strategy MM: running favorites-only OOS sim")
+    oos_results_fav = _run_mm_all_expiries(con, data_root, expiry_df, outcomes_df, fav_config, OOS_START, OOS_END)
+
+    # 1Hz penalty sim (conservative, to model live infra adverse selection)
+    hz1_config = copy.copy(base_config)
+    hz1_config.apply_1hz_penalty = True
+    _log.info("Strategy MM: running 1Hz-penalty IS sim")
+    is_results_1hz = _run_mm_all_expiries(con, data_root, expiry_df, outcomes_df, hz1_config, IS_START, IS_END)
+
     # Summarise
     is_summary = _summarise_results(is_results)
     oos_summary = _summarise_results(oos_results)
     is_opt_summary = _summarise_results(is_results_opt)
+    oos_opt_summary = _summarise_results(oos_results_opt)
     is_unhedged_summary = _summarise_results(is_results_unhedged)
+    is_fav_summary = _summarise_results(is_results_fav)
+    oos_fav_summary = _summarise_results(oos_results_fav)
+    is_1hz_summary = _summarise_results(is_results_1hz)
 
     _log.info(
         "IS: total_pnl=%.2f, n_fills=%d, sharpe=%.2f, max_dd=%.2f",
@@ -1488,6 +1599,11 @@ def build_card(
         oos_summary.get("n_fills", 0),
         oos_summary.get("sharpe", float("nan")),
     )
+    _log.info(
+        "1Hz penalty IS: total_pnl=%.2f vs no-penalty %.2f",
+        is_1hz_summary.get("total_pnl", 0),
+        is_summary.get("total_pnl", 0),
+    )
 
     # Sensitivity sweep (IS only, to avoid OOS snooping)
     _log.info("Strategy MM: running sensitivity sweep")
@@ -1499,8 +1615,24 @@ def build_card(
     h1_summary = _summarise_results(h1_results)
     h2_summary = _summarise_results(h2_results)
 
-    # KPI checks
-    kpis = _check_kpis(is_summary, oos_summary)
+    # Live infra verdict (1Hz penalty analysis)
+    pnl_no_penalty = is_summary.get("total_pnl", 0.0)
+    pnl_1hz = is_1hz_summary.get("total_pnl", 0.0)
+    pnl_lost_1hz = pnl_no_penalty - pnl_1hz
+    pct_lost = pnl_lost_1hz / pnl_no_penalty * 100 if pnl_no_penalty != 0 else 0.0
+    infra_blocked = pnl_1hz <= 0  # if 1Hz kills profitability entirely
+    live_infra_verdict = (
+        f"Sub-second fill model (Card C half-life 1-2s): IS PnL=${pnl_no_penalty:.2f}. "
+        f"At 1 Hz scanner cadence (penalty_informed_frac={base_config.penalty_informed_frac:.0%}, "
+        f"spread_reduction={base_config.penalty_spread_reduction:.0%}): IS PnL=${pnl_1hz:.2f} "
+        f"(${pnl_lost_1hz:.2f} lost = {pct_lost:.1f}% haircut). "
+        f"VERDICT: {'BLOCKED — 1Hz kills profitability' if infra_blocked else 'DEGRADED but still positive at 1Hz'}. "
+        f"The 1Hz scan loop IS an infra bottleneck: adversely-selected fills at slow refresh "
+        f"consume {pct_lost:.1f}% of edge. Sub-second quote refresh is required to fully capture the edge."
+    )
+
+    # KPI checks (both fill models)
+    kpis = _check_kpis(is_summary, oos_summary, is_opt_summary, oos_opt_summary)
 
     # Capacity
     cap_rows = _capacity_table()
@@ -1567,6 +1699,27 @@ def build_card(
             "date_span": date_span,
             "sanity": "delta hedge contribution = hedged - unhedged PnL",
         },
+        {
+            "name": "Favorites-only IS PnL",
+            "value": f"${is_fav_summary.get('total_pnl', 0):.2f}",
+            "n": is_fav_summary.get("n_expiries", 0),
+            "date_span": date_span,
+            "sanity": f"mid in [0.70,0.95] only; n_fills={is_fav_summary.get('n_fills', 0)}",
+        },
+        {
+            "name": "Favorites-only OOS PnL",
+            "value": f"${oos_fav_summary.get('total_pnl', 0):.2f}",
+            "n": oos_fav_summary.get("n_expiries", 0),
+            "date_span": f"{OOS_START}..{OOS_END}",
+            "sanity": f"OOS n_fills={oos_fav_summary.get('n_fills', 0)}",
+        },
+        {
+            "name": "IS PnL at 1Hz scanner (with infra penalty)",
+            "value": f"${is_1hz_summary.get('total_pnl', 0):.2f}",
+            "n": is_1hz_summary.get("n_expiries", 0),
+            "date_span": date_span,
+            "sanity": f"penalty_informed_frac=20%, spread_reduction=50%; no-penalty=${pnl_no_penalty:.2f}",
+        },
     ]
 
     split_half = {
@@ -1581,14 +1734,19 @@ def build_card(
 
     n_kpi_pass = sum(1 for k in kpis if k["passed"])
     verdict = (
-        f"Strategy MM IS: ${is_summary.get('total_pnl', 0):.2f} PnL / "
+        f"Strategy MM IS: ${is_summary.get('total_pnl', 0):.2f} PnL [conservative] / "
+        f"${is_opt_summary.get('total_pnl', 0):.2f} [optimistic] / "
         f"Sharpe={_fmt(is_summary.get('sharpe'), '.2f')} / "
         f"MaxDD=${is_summary.get('max_drawdown', 0):.2f} / "
         f"n_fills={is_summary.get('n_fills', 0)} / "
         f"hit_rate={is_summary.get('hit_rate', 0):.1%}. "
-        f"OOS: ${oos_summary.get('total_pnl', 0):.2f} PnL. "
+        f"OOS: ${oos_summary.get('total_pnl', 0):.2f} [conservative] / "
+        f"${oos_opt_summary.get('total_pnl', 0):.2f} [optimistic]. "
+        f"Hedged IS: ${is_summary.get('total_pnl', 0):.2f} vs Unhedged: ${is_unhedged_summary.get('total_pnl', 0):.2f}. "
+        f"Favorites-only IS: ${is_fav_summary.get('total_pnl', 0):.2f} / OOS: ${oos_fav_summary.get('total_pnl', 0):.2f}. "
         f"Split-half: H1=${h1_summary.get('total_pnl', 0):.2f} / H2=${h2_summary.get('total_pnl', 0):.2f} "
-        f"({'sign-stable' if split_half['sign_stable'] else 'sign-flip — UNSTABLE'}). "
+        f"({'sign-stable' if split_half['sign_stable'] else 'sign-flip UNSTABLE'}). "
+        f"LIVE INFRA: {live_infra_verdict} "
         f"KPIs: {n_kpi_pass}/{len(kpis)} passed."
     )
 
@@ -1600,10 +1758,18 @@ def build_card(
         "kpis": kpis,
         "is_summary": is_summary,
         "oos_summary": oos_summary,
+        "is_opt_summary": is_opt_summary,
+        "oos_opt_summary": oos_opt_summary,
+        "is_unhedged_summary": is_unhedged_summary,
+        "is_fav_summary": is_fav_summary,
+        "oos_fav_summary": oos_fav_summary,
+        "is_1hz_summary": is_1hz_summary,
         "h1_summary": h1_summary,
         "h2_summary": h2_summary,
         "sweep": sweep,
         "capacity": cap_rows,
+        "live_infra_verdict": live_infra_verdict,
+        "infra_blocked": infra_blocked,
         "config": {
             "fill_model": base_config.fill_model,
             "half_edge": base_config.half_edge,
@@ -1654,6 +1820,62 @@ def build_card(
         + _capacity_table_html(cap_rows)
     )
     rpt.add_card("Capacity Analysis", cap_html)
+
+    # Favorites-only comparison table
+    fav_html = (
+        "<p>Favorites-only: only quote when binary mid in [0.70, 0.95] (high-conviction range).</p>"
+        "<table><thead><tr><th>Config</th><th>IS PnL</th><th>IS Sharpe</th><th>IS Fills</th>"
+        "<th>OOS PnL</th><th>OOS Fills</th></tr></thead><tbody>"
+        f"<tr><td>Full two-sided</td>"
+        f"<td>${is_summary.get('total_pnl', 0):.2f}</td>"
+        f"<td>{_fmt(is_summary.get('sharpe'), '.2f')}</td>"
+        f"<td>{is_summary.get('n_fills', 0)}</td>"
+        f"<td>${oos_summary.get('total_pnl', 0):.2f}</td>"
+        f"<td>{oos_summary.get('n_fills', 0)}</td>"
+        f"</tr>"
+        f"<tr><td>Favorites-only [0.70-0.95]</td>"
+        f"<td>${is_fav_summary.get('total_pnl', 0):.2f}</td>"
+        f"<td>{_fmt(is_fav_summary.get('sharpe'), '.2f')}</td>"
+        f"<td>{is_fav_summary.get('n_fills', 0)}</td>"
+        f"<td>${oos_fav_summary.get('total_pnl', 0):.2f}</td>"
+        f"<td>{oos_fav_summary.get('n_fills', 0)}</td>"
+        f"</tr>"
+        "</tbody></table>"
+    )
+    rpt.add_card("Favorites-Only vs Full Two-Sided", fav_html)
+
+    # Live infra verdict card
+    infra_color = "#f78166" if infra_blocked else "#f0e68c"
+    infra_html = (
+        f"<p style='color:{infra_color}'><strong>{'BLOCKED' if infra_blocked else 'DEGRADED'}"
+        f" at 1 Hz scanner cadence</strong></p>"
+        f"<p>{live_infra_verdict}</p>"
+        "<table><thead><tr><th>Scenario</th><th>IS PnL</th><th>IS Sharpe</th>"
+        "<th>Delta vs sub-second</th></tr></thead><tbody>"
+        f"<tr><td>Sub-second refresh (no penalty)</td>"
+        f"<td>${pnl_no_penalty:.2f}</td>"
+        f"<td>{_fmt(is_summary.get('sharpe'), '.2f')}</td>"
+        f"<td>—</td></tr>"
+        f"<tr><td>1 Hz scanner (20% adversely selected)</td>"
+        f"<td>${pnl_1hz:.2f}</td>"
+        f"<td>{_fmt(is_1hz_summary.get('sharpe'), '.2f')}</td>"
+        f"<td style='color:{infra_color}'>${-pnl_lost_1hz:.2f} ({pct_lost:.1f}% haircut)</td></tr>"
+        "</tbody></table>"
+        "<p><em>Card C basis: perp→binary lead-lag half-life 1–2s. "
+        "At 1 Hz scan, ~20% of fills arrive after quote is stale (assumed). "
+        "Each such fill captures only 50% of intended spread. "
+        "True impact likely higher — adverse selection at slow refresh concentrates "
+        "on the worst fills (informationally motivated trades).</em></p>"
+    )
+    rpt.add_card(
+        "LIVE INFRA VERDICT: 1Hz vs Sub-Second Refresh",
+        infra_html,
+        notes=(
+            "Queue-position approximation: conservative fill model already assumes back-of-queue. "
+            "1Hz penalty adds an additional adverse-selection layer on top of that. "
+            "The sub-second scenario is NOT achievable on the current 1Hz engine without infra changes."
+        ),
+    )
 
     # Sensitivity sweep table
     rpt.add_card("Sensitivity Sweep (IS)", _sweep_table_html(sweep))

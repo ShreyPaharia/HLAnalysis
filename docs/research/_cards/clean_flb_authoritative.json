@@ -1,0 +1,256 @@
+{
+  "rule": {
+    "price_band": [
+      0.8,
+      0.95
+    ],
+    "tte_window_h": [
+      1.0,
+      6.0
+    ],
+    "entry": "buy favorite leg at ask, first qualifying tick, hold to oracle settlement",
+    "fee": "HL HIP-4 exchange fee = 0; cost = half-spread (entry at ask)"
+  },
+  "full": {
+    "label": "clean_FLB_full",
+    "n": 28,
+    "hit_rate": 0.9286,
+    "total_pnl_per_dollar": 1.7222,
+    "mean_edge_pp": 6.151,
+    "edge_sd_pp": 27.49,
+    "sharpe_per_trade": 0.224,
+    "max_dd_per_dollar": -0.982,
+    "mean_entry_ask": 0.8671,
+    "mean_tob_ask_sz": 681.1
+  },
+  "in_sample": {
+    "label": "IS (<2026-06-04)",
+    "n": 20,
+    "hit_rate": 0.95,
+    "total_pnl_per_dollar": 1.8263,
+    "mean_edge_pp": 9.132,
+    "edge_sd_pp": 21.859,
+    "sharpe_per_trade": 0.418,
+    "max_dd_per_dollar": -0.83,
+    "mean_entry_ask": 0.8587,
+    "mean_tob_ask_sz": 879.6
+  },
+  "out_of_sample": {
+    "label": "OOS (>=2026-06-04)",
+    "n": 8,
+    "hit_rate": 0.875,
+    "total_pnl_per_dollar": -0.1041,
+    "mean_edge_pp": -1.301,
+    "edge_sd_pp": 37.05,
+    "sharpe_per_trade": -0.035,
+    "max_dd_per_dollar": -0.982,
+    "mean_entry_ask": 0.888,
+    "mean_tob_ask_sz": 184.6
+  },
+  "split_h1": {
+    "label": "H1 (<2026-05-24)",
+    "n": 14,
+    "hit_rate": 0.9286,
+    "total_pnl_per_dollar": 0.965,
+    "mean_edge_pp": 6.893,
+    "edge_sd_pp": 25.551,
+    "sharpe_per_trade": 0.27,
+    "max_dd_per_dollar": -0.83,
+    "mean_entry_ask": 0.8596,
+    "mean_tob_ask_sz": 97.1
+  },
+  "split_h2": {
+    "label": "H2 (>=2026-05-24)",
+    "n": 14,
+    "hit_rate": 0.9286,
+    "total_pnl_per_dollar": 0.7572,
+    "mean_edge_pp": 5.408,
+    "edge_sd_pp": 29.282,
+    "sharpe_per_trade": 0.185,
+    "max_dd_per_dollar": -0.982,
+    "mean_entry_ask": 0.8745,
+    "mean_tob_ask_sz": 1265.0
+  },
+  "band_sweep": [
+    {
+      "label": "[0.8,0.9]@1.0-6.0h",
+      "n": 25,
+      "hit_rate": 0.92,
+      "total_pnl_per_dollar": 1.6723,
+      "mean_edge_pp": 6.689,
+      "edge_sd_pp": 29.106,
+      "sharpe_per_trade": 0.23,
+      "max_dd_per_dollar": -0.982,
+      "mean_entry_ask": 0.8531,
+      "mean_tob_ask_sz": 745.2
+    },
+    {
+      "label": "[0.8,0.9]@0.5-12.0h",
+      "n": 38,
+      "hit_rate": 0.9211,
+      "total_pnl_per_dollar": 2.8175,
+      "mean_edge_pp": 7.414,
+      "edge_sd_pp": 29.52,
+      "sharpe_per_trade": 0.251,
+      "max_dd_per_dollar": -1.0192,
+      "mean_entry_ask": 0.8469,
+      "mean_tob_ask_sz": 135.8
+    },
+    {
+      "label": "[0.8,0.9]@3.0-6.0h",
+      "n": 24,
+      "hit_rate": 0.9167,
+      "total_pnl_per_dollar": 1.4902,
+      "mean_edge_pp": 6.209,
+      "edge_sd_pp": 29.609,
+      "sharpe_per_trade": 0.21,
+      "max_dd_per_dollar": -0.982,
+      "mean_entry_ask": 0.8546,
+      "mean_tob_ask_sz": 762.3
+    },
+    {
+      "label": "[0.85,0.95]@1.0-6.0h",
+      "n": 25,
+      "hit_rate": 1.0,
+      "total_pnl_per_dollar": 2.6073,
+      "mean_edge_pp": 10.429,
+      "edge_sd_pp": 3.775,
+      "sharpe_per_trade": 2.763,
+      "max_dd_per_dollar": 0.0,
+      "mean_entry_ask": 0.8957,
+      "mean_tob_ask_sz": 773.6
+    },
+    {
+      "label": "[0.85,0.95]@0.5-12.0h",
+      "n": 39,
+      "hit_rate": 0.9487,
+      "total_pnl_per_dollar": 2.813,
+      "mean_edge_pp": 7.213,
+      "edge_sd_pp": 22.451,
+      "sharpe_per_trade": 0.321,
+      "max_dd_per_dollar": -0.91,
+      "mean_entry_ask": 0.8766,
+      "mean_tob_ask_sz": 537.5
+    },
+    {
+      "label": "[0.85,0.95]@3.0-6.0h",
+      "n": 23,
+      "hit_rate": 1.0,
+      "total_pnl_per_dollar": 2.4105,
+      "mean_edge_pp": 10.481,
+      "edge_sd_pp": 3.664,
+      "sharpe_per_trade": 2.861,
+      "max_dd_per_dollar": 0.0,
+      "mean_entry_ask": 0.8952,
+      "mean_tob_ask_sz": 787.1
+    },
+    {
+      "label": "[0.8,0.95]@1.0-6.0h",
+      "n": 28,
+      "hit_rate": 0.9286,
+      "total_pnl_per_dollar": 1.7222,
+      "mean_edge_pp": 6.151,
+      "edge_sd_pp": 27.49,
+      "sharpe_per_trade": 0.224,
+      "max_dd_per_dollar": -0.982,
+      "mean_entry_ask": 0.8671,
+      "mean_tob_ask_sz": 681.1
+    },
+    {
+      "label": "[0.8,0.95]@0.5-12.0h",
+      "n": 40,
+      "hit_rate": 0.925,
+      "total_pnl_per_dollar": 2.9053,
+      "mean_edge_pp": 7.263,
+      "edge_sd_pp": 28.773,
+      "sharpe_per_trade": 0.252,
+      "max_dd_per_dollar": -1.0192,
+      "mean_entry_ask": 0.8524,
+      "mean_tob_ask_sz": 130.2
+    },
+    {
+      "label": "[0.8,0.95]@3.0-6.0h",
+      "n": 27,
+      "hit_rate": 0.9259,
+      "total_pnl_per_dollar": 1.5401,
+      "mean_edge_pp": 5.704,
+      "edge_sd_pp": 27.895,
+      "sharpe_per_trade": 0.204,
+      "max_dd_per_dollar": -0.982,
+      "mean_entry_ask": 0.8689,
+      "mean_tob_ask_sz": 693.9
+    },
+    {
+      "label": "[0.9,0.97]@1.0-6.0h",
+      "n": 25,
+      "hit_rate": 1.0,
+      "total_pnl_per_dollar": 1.7078,
+      "mean_edge_pp": 6.831,
+      "edge_sd_pp": 2.852,
+      "sharpe_per_trade": 2.395,
+      "max_dd_per_dollar": 0.0,
+      "mean_entry_ask": 0.9317,
+      "mean_tob_ask_sz": 808.0
+    },
+    {
+      "label": "[0.9,0.97]@0.5-12.0h",
+      "n": 35,
+      "hit_rate": 0.9714,
+      "total_pnl_per_dollar": 1.7669,
+      "mean_edge_pp": 5.048,
+      "edge_sd_pp": 16.663,
+      "sharpe_per_trade": 0.303,
+      "max_dd_per_dollar": -0.91,
+      "mean_entry_ask": 0.9209,
+      "mean_tob_ask_sz": 731.5
+    },
+    {
+      "label": "[0.9,0.97]@3.0-6.0h",
+      "n": 22,
+      "hit_rate": 1.0,
+      "total_pnl_per_dollar": 1.5348,
+      "mean_edge_pp": 6.976,
+      "edge_sd_pp": 2.942,
+      "sharpe_per_trade": 2.371,
+      "max_dd_per_dollar": 0.0,
+      "mean_entry_ask": 0.9302,
+      "mean_tob_ask_sz": 193.6
+    },
+    {
+      "label": "[0.65,0.8]@1.0-6.0h",
+      "n": 26,
+      "hit_rate": 0.7692,
+      "total_pnl_per_dollar": 0.9675,
+      "mean_edge_pp": 3.721,
+      "edge_sd_pp": 41.323,
+      "sharpe_per_trade": 0.09,
+      "max_dd_per_dollar": -1.33,
+      "mean_entry_ask": 0.732,
+      "mean_tob_ask_sz": 124.9
+    },
+    {
+      "label": "[0.65,0.8]@0.5-12.0h",
+      "n": 42,
+      "hit_rate": 0.7143,
+      "total_pnl_per_dollar": -0.6284,
+      "mean_edge_pp": -1.496,
+      "edge_sd_pp": 43.818,
+      "sharpe_per_trade": -0.034,
+      "max_dd_per_dollar": -1.8583,
+      "mean_entry_ask": 0.7292,
+      "mean_tob_ask_sz": 151.6
+    },
+    {
+      "label": "[0.65,0.8]@3.0-6.0h",
+      "n": 24,
+      "hit_rate": 0.7917,
+      "total_pnl_per_dollar": 1.4579,
+      "mean_edge_pp": 6.075,
+      "edge_sd_pp": 40.162,
+      "sharpe_per_trade": 0.151,
+      "max_dd_per_dollar": -1.33,
+      "mean_entry_ask": 0.7309,
+      "mean_tob_ask_sz": 117.1
+    }
+  ]
+}

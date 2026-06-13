@@ -224,7 +224,31 @@ Last updated: <b>2026-06-13 · setup</b></p>
 </div>
 
 <h2>Strategy scorecard</h2>
-<div class="panel"><p class="muted">Populated in Wave 2. Each candidate scored PASS/FAIL against the strategy KPIs above.</p></div>
+<div class="panel">
+  <h3>Taker — clean FLB favorite-buy <span class="pill done">computed directly (authoritative)</span></h3>
+  <p class="muted">Rule: buy favorite binary leg at the ask on first tick with mid∈[0.80,0.95] &amp; TTE∈[1–6h], hold to oracle settlement. No live-strategy gates. HL fee=0. One entry/leg.</p>
+  <table>
+  <tr><th>Window</th><th>n</th><th>hit</th><th>mean edge</th><th>edge SD</th><th>Sharpe/trade</th><th>maxDD ($1 clip)</th></tr>
+  <tr><td>Full 36d</td><td>28</td><td>92.9%</td><td class="green">+6.15pp</td><td>27.5pp</td><td>0.22</td><td>−0.98</td></tr>
+  <tr><td>In-sample</td><td>20</td><td>95%</td><td class="green">+9.13pp</td><td>21.9</td><td>0.42</td><td>−0.83</td></tr>
+  <tr><td class="amber">OOS (7d holdout)</td><td>8</td><td>87.5%</td><td class="red">−1.30pp</td><td>37</td><td>−0.04</td><td>−0.98</td></tr>
+  <tr><td>Split H1 / H2</td><td>14/14</td><td>92.9%</td><td class="green">+6.9 / +5.4pp</td><td colspan="3">sign-stable (matches Card E calibration)</td></tr>
+  </table>
+  <div class="panel" style="background:var(--panel2);margin-top:10px">
+    <b>Verdict — edge REAL, vehicle WRONG (KPIs FAIL as standalone BTC-binary taker).</b>
+    <ul>
+      <li><span class="green">PASS</span> mean edge positive (+6.15pp) &amp; split-half sign-stable → confirms Cards E/B/F.</li>
+      <li><span class="red">FAIL</span> OOS PnL (−1.3pp, n=8) &amp; daily-Sharpe≥1 — one losing favorite in the holdout wiped the edge.</li>
+      <li><span class="red">FAIL</span> capacity — only <b>~1 qualifying favorite/day → n=28 over 36d</b>. Cannot diversify the fat left tail (buy@0.87, a loss = −87pp).</li>
+      <li>The interrupted run's "Sharpe 10.74" was <b>5 gate-filtered lucky fills</b> — not real. Deep-favorite sweep cell (0.90–0.97, 100% hit, 0 DD) is small-sample luck, not trusted.</li>
+    </ul>
+    <b>Path to deploy:</b> the edge only works through <b>BREADTH</b> — favorite-buying across many markets at once (ETH binaries, bucket bands, recorded PM multi-strike/multi-asset) so LLN tames the single-settlement tail. This is why the live desk scales by adding markets, not by sizing one binary. Single-name BTC-binary alone: do not deploy.
+  </div>
+  <p class="muted">Authoritative numbers: <code>docs/research/_cards/clean_flb_authoritative.json</code> · script <code>scripts/research_clean_flb.py</code> (reproducible).</p>
+
+  <h3 style="margin-top:18px">MM — quoter + HL-perp hedge <span class="pill run">backtest finalizing</span></h3>
+  <p class="muted">Card B already showed maker side +EV (0.95pp realized spread, ~80% capture). Full scorecard (conservative back-of-queue fills, hedged vs unhedged, 1 Hz-vs-sub-1s infra verdict) finalizing.</p>
+</div>
 
 <h2>Activity log</h2>
 <div class="panel log">
@@ -240,7 +264,8 @@ Last updated: <b>2026-06-13 · setup</b></p>
   <li><span class="ts">2026-06-13 B✓</span> — Card B done: FLB taker edge SURVIVES adverse selection (net ≈9.85pp); maker side also +EV. Taker thesis fully validated on analysis side.</li>
   <li><span class="ts">2026-06-13 W2</span> — Launched Wave 2 taker backtest (FLB favorite-buy, walk-forward OOS).</li>
   <li><span class="ts">2026-06-13 A✓C✓</span> — Wave 1 complete (6/6). A: WIDE_SPARSE, MM viable. C: sub-1s perp→binary, hedge 0.50, perp-momentum taker ruled out. Launched MM candidate sim.</li>
-  <li><span class="ts">2026-06-13 ⚠ limit</span> — Account session limit interrupted BOTH Wave-2 agents mid-run. Taker: partial (OOS 5 fills, gate-filtered, not credible). MM: module+test on disk, card not generated. Re-dispatching both to complete. KEY ISSUE surfaced: v1's min_safety_d gate filters the FLB entries Card E found → must test pure-FLB rule separately from gated-v1.</li>
+  <li><span class="ts">2026-06-13 ⚠ limit</span> — Account session limit interrupted BOTH Wave-2 agents mid-run. Taker partial (5 gate-filtered fills, not credible); MM card not generated.</li>
+  <li><span class="ts">2026-06-13 fix</span> — Agents tangled/idle after re-login. Computed the authoritative clean-FLB backtest MYSELF (scripts/research_clean_flb.py) to de-risk the keystone number. HONEST RESULT: edge real (+6.15pp, split-half stable) but FAILS deploy KPIs as a standalone BTC-binary taker — capacity-starved (n=28/36d, ~1 fav/day) + fat left tail → OOS negative. Edge needs BREADTH across many markets. Corrected the inflated "Sharpe 10.74".</li>
 </ul>
 </div>
 
