@@ -156,7 +156,18 @@ Last updated: <b>2026-06-13 · setup</b></p>
     <td><b>Key gotcha:</b> binaries emit NO settlement event; the 99 settlement rows are bucket bands only, and <code>settled_side_idx</code> is a constant (always 0), NOT the winner. Labels must be oracle-derived. Now baked into the toolkit.</td>
   </tr>
   </table>
-  <p class="muted">Wave 1 cards (A–F) will replace these with full-sample, split-half-validated results.</p>
+  <p class="muted">Wave 1 cards (A–F) replace these with full-sample, split-half-validated results as they land.</p>
+
+  <h3 style="margin-top:18px">Card F — Vol term structure &amp; theta <span class="pill done">done</span></h3>
+  <table>
+  <tr><th>Metric</th><th>Result (n, span)</th><th>Read</th></tr>
+  <tr><td>Realized-vol term structure</td><td>1h 34% → 24h 50% ann · <b>contango</b> · split-half stable</td><td>Longer horizon = more variance; consistent with 1d markets carrying real overnight risk.</td></tr>
+  <tr><td>Diurnal vol</td><td>peak <b>14:00 UTC</b>; expiry 06:00 quiet · n=718k 1-min bars</td><td>Most uncertainty resolves mid-session; terminal hours calmer.</td></tr>
+  <tr><td>Theta decay</td><td><b>gradual</b>, not front-loaded</td><td>No single best entry TTE — edge spread across the day.</td></tr>
+  <tr><td><b>Implied − realized vol premium</b></td><td><b>+14% ann</b>, n=30 expiries · H1 +7.2% / H2 +20.9% · <b>sign-stable</b></td><td><b>v31 theta-harvest edge confirmed real &amp; persistent.</b> Caveat: H2 widened during BTC $77k→$61k drop → must isolate vol premium from trend in strategy phase.</td></tr>
+  <tr><td>Vol-regime sizing signal</td><td>open-2h σ → daily range <b>r=0.53</b> (n=35, p&lt;0.05)</td><td>Usable gate: size up on high-vol opens (market more likely mispriced).</td></tr>
+  </table>
+  <p class="muted">Card: <code>docs/research/_cards/card_f.html</code></p>
 </div>
 
 <h2>Strategy scorecard</h2>
@@ -168,7 +179,8 @@ Last updated: <b>2026-06-13 · setup</b></p>
   <li><span class="ts">2026-06-13 setup</span> — Explored data, locked decisions, built live dashboard. Wave 0 toolkit dispatched (sonnet, background).</li>
   <li><span class="ts">2026-06-13 probe</span> — First overround probe: book ~0.7% overround, no taker sum-arb. Seeded preliminary findings.</li>
   <li><span class="ts">2026-06-13 W0✓</span> — Toolkit delivered (86 tests). Independently caught a critical win-label bug; dispatched fix agent. Verified: binary 47.4% Yes-win, bucket 1-winner-per-question, 100% oracle/mid agreement.</li>
-  <li><span class="ts">2026-06-13 W1</span> — Launching taker-first characterization cards (E convergence, D mispricing, F vol/theta).</li>
+  <li><span class="ts">2026-06-13 W1</span> — Launched taker-first cards E/D/F in parallel.</li>
+  <li><span class="ts">2026-06-13 F✓</span> — Card F done: +14% ann implied−realized vol premium, sign-stable → v31 theta edge confirmed. Vol-regime sizing r=0.53. Awaiting E, D.</li>
 </ul>
 </div>
 

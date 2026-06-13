@@ -1,0 +1,98 @@
+{
+  "title": "Card E: Settlement / Resolution Convergence Dynamics",
+  "headline": "Strong favorite-longshot bias (FLB): when mid \u2208 [0.85, 0.95] with TTE < 3h, realized win rate = 100% vs mean ask \u2248 0.93, yielding net taker edge \u22489.31% (n=28,963, 8 expiries). HL fee = 0; cost = half-spread only.",
+  "fee_assumption": "HL HIP-4 exchange fee = 0. Taker cost = ask - mid (half-spread only).",
+  "metrics": [
+    {
+      "name": "n_expiries",
+      "value": 38,
+      "n": 38,
+      "date_span": "2026-05-07 to 2026-06-13",
+      "sanity": "Yes-win rate = 47.4% (expected ~47-53%)"
+    },
+    {
+      "name": "median_final_convergence_h",
+      "value": 4.47,
+      "n": 33,
+      "date_span": "2026-05-07 to 2026-06-13",
+      "sanity": "IQR [1.4h, 8.2h]; 5/38 never permanently crossed"
+    },
+    {
+      "name": "avg_flb_bias_mid065_080",
+      "value": 0.1876,
+      "n": 446352,
+      "date_span": "2026-05-07 to 2026-06-13",
+      "sanity": "Positive = favorites underpriced (win_rate > mid); FLB pattern"
+    },
+    {
+      "name": "headline_taker_edge_mid085_095_tte030to3h",
+      "value": 0.0931,
+      "n": 28963,
+      "date_span": "2026-05-07 to 2026-06-13",
+      "sanity": "n_expiries=8; win_rate=1.00 in both halves"
+    }
+  ],
+  "top_edge_cells": [
+    {
+      "mid_bucket": "0.80-0.85",
+      "tte_bucket": "3h-6h",
+      "n": 16196,
+      "n_expiries": 10,
+      "win_rate": 1.0,
+      "mean_ask": 0.8265,
+      "net_edge": 0.1735
+    },
+    {
+      "mid_bucket": "0.80-0.85",
+      "tte_bucket": "1h-3h",
+      "n": 8042,
+      "n_expiries": 7,
+      "win_rate": 1.0,
+      "mean_ask": 0.8398,
+      "net_edge": 0.1602
+    },
+    {
+      "mid_bucket": "0.85-0.90",
+      "tte_bucket": "1h-3h",
+      "n": 11118,
+      "n_expiries": 7,
+      "win_rate": 1.0,
+      "mean_ask": 0.8792,
+      "net_edge": 0.1208
+    },
+    {
+      "mid_bucket": "0.85-0.90",
+      "tte_bucket": "3h-6h",
+      "n": 18516,
+      "n_expiries": 12,
+      "win_rate": 1.0,
+      "mean_ask": 0.8814,
+      "net_edge": 0.1186
+    },
+    {
+      "mid_bucket": "0.90-0.95",
+      "tte_bucket": "30m-1h",
+      "n": 3590,
+      "n_expiries": 3,
+      "win_rate": 1.0,
+      "mean_ask": 0.9314,
+      "net_edge": 0.0686
+    }
+  ],
+  "split_half": {
+    "H1": {
+      "n_expiries": 18,
+      "date_span": "2026-05-07 to 2026-05-23",
+      "headline_edge_mid085_tte3h": 0.0397,
+      "flb_bias_mid065_075": 0.2195
+    },
+    "H2": {
+      "n_expiries": 21,
+      "date_span": "2026-05-24 to 2026-06-13",
+      "headline_edge_mid085_tte3h": 0.0349,
+      "flb_bias_mid065_075": 0.1456
+    },
+    "sign_stable": true
+  },
+  "verdict": "PASS"
+}

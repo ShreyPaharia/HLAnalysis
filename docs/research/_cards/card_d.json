@@ -1,0 +1,103 @@
+{
+  "title": "Card D: Mispricing Surface",
+  "headline": "Binary overround p50=0.0090; model edge p50=0.0102; n_binary_expiries=38; n_bucket_questions=37",
+  "metrics": [
+    {
+      "name": "overround_p50",
+      "value": 0.009020000000000028,
+      "n": 3177391,
+      "date_span": "2026-05-06\u21922026-06-10",
+      "sanity": "buy-both - 1, tick level"
+    },
+    {
+      "name": "overround_p75",
+      "value": 0.01812999999999998,
+      "n": 3177391,
+      "date_span": "2026-05-06\u21922026-06-10",
+      "sanity": ""
+    },
+    {
+      "name": "frac_buy_arb_net",
+      "value": 4.9411608454861234e-05,
+      "n": 3177391,
+      "date_span": "2026-05-06\u21922026-06-10",
+      "sanity": "fee threshold 0.0050"
+    },
+    {
+      "name": "frac_sell_arb_net",
+      "value": 0.00019607281571578695,
+      "n": 3177391,
+      "date_span": "2026-05-06\u21922026-06-10",
+      "sanity": ""
+    },
+    {
+      "name": "model_edge_p50",
+      "value": 0.010231466405530798,
+      "n": 49254,
+      "date_span": "2026-05-06\u21922026-06-10",
+      "sanity": "yes_mid - GBM_prob; +ve = market rich vs GBM"
+    },
+    {
+      "name": "model_edge_sell_freq",
+      "value": 0.5556706054330612,
+      "n": 49254,
+      "date_span": "2026-05-06\u21922026-06-10",
+      "sanity": "frac 60s bars yes_mid > p_model + fee"
+    },
+    {
+      "name": "bucket_sum_mids_p50",
+      "value": 1.029355,
+      "n": 13883,
+      "date_span": "2026-05-06\u21922026-06-10",
+      "sanity": "coherent = 1; overround adds to sum"
+    },
+    {
+      "name": "bucket_sub_arb_net_freq",
+      "value": 0.002881221637974501,
+      "n": 13883,
+      "date_span": "2026-05-06\u21922026-06-10",
+      "sanity": "sum_asks < 0.9925"
+    }
+  ],
+  "split_half": {
+    "overround": {
+      "first_half": {
+        "n": 1594371,
+        "n_expiries": 18,
+        "overround_p50": 0.007260000000000044,
+        "overround_mean": 0.015642889521949407,
+        "frac_buy_arb_net": 6.711110525718292e-05
+      },
+      "second_half": {
+        "n": 1583020,
+        "n_expiries": 21,
+        "overround_p50": 0.01150999999999991,
+        "overround_mean": 0.03089358143295728,
+        "frac_buy_arb_net": 3.158519791285012e-05
+      }
+    },
+    "model_edge": {
+      "first_half": {
+        "n": 23525,
+        "n_symbols": 18,
+        "model_edge_p50": 0.017371448066470174,
+        "model_edge_mean": 0.02187606814113443,
+        "pct_pos_edge": 0.3806163655685441
+      },
+      "second_half": {
+        "n": 25729,
+        "n_symbols": 21,
+        "model_edge_p50": 0.004861797949384905,
+        "model_edge_mean": 0.008504005044303604,
+        "pct_pos_edge": 0.4216642698900074
+      }
+    }
+  },
+  "verdict": "PASS \u2014 Measurable taker edge exists (see D5 metrics)",
+  "fee_assumption": {
+    "model": "flat",
+    "per_leg": 0.0025,
+    "round_trip": 0.005,
+    "note": "HL fee_taker=0.0 in prod; 25bp/leg conservative estimate for taker cost"
+  }
+}
