@@ -108,7 +108,7 @@ Last updated: <b>2026-06-13 · setup</b></p>
     <span class="pill run">running</span> &nbsp;<b>Wave 2 — Strategy candidates</b>
     <span class="tag">sonnet ×N</span>
     <ul>
-      <li><span class="pill run">running</span> <b>Taker</b> FLB favorite-buy: walk-forward OOS backtest on recorded HL binary book vs v1/v31 baselines + vol-regime sizing</li>
+      <li><span class="pill run">partial</span> <b>Taker</b> FLB favorite-buy backtest — agent hit account session limit mid-run. OOS ran but only <b>5 fills/7 mkts</b> (v1 <code>min_safety_d=3.0</code> gate filtered most FLB entries → Sharpe 10.74 NOT credible at n=5). Baselines, full IS sweep, split-half, capacity PENDING. <b>Re-dispatching to complete + isolate pure-FLB vs gated.</b></li>
       <li><span class="pill run">running</span> <b>MM</b> Quoter + HL-perp hedge (lightweight sim; maker +EV Card B, WIDE_SPARSE Card A, hedge 0.50 / &lt;1s Card C)</li>
       <li><span class="kill pill">dropped</span> <b>Cross-market arb &amp; perp-momentum taker</b> — killed by data (Card D no static arb; Card C perp-taker −0.36pp net)</li>
     </ul>
@@ -240,6 +240,7 @@ Last updated: <b>2026-06-13 · setup</b></p>
   <li><span class="ts">2026-06-13 B✓</span> — Card B done: FLB taker edge SURVIVES adverse selection (net ≈9.85pp); maker side also +EV. Taker thesis fully validated on analysis side.</li>
   <li><span class="ts">2026-06-13 W2</span> — Launched Wave 2 taker backtest (FLB favorite-buy, walk-forward OOS).</li>
   <li><span class="ts">2026-06-13 A✓C✓</span> — Wave 1 complete (6/6). A: WIDE_SPARSE, MM viable. C: sub-1s perp→binary, hedge 0.50, perp-momentum taker ruled out. Launched MM candidate sim.</li>
+  <li><span class="ts">2026-06-13 ⚠ limit</span> — Account session limit interrupted BOTH Wave-2 agents mid-run. Taker: partial (OOS 5 fills, gate-filtered, not credible). MM: module+test on disk, card not generated. Re-dispatching both to complete. KEY ISSUE surfaced: v1's min_safety_d gate filters the FLB entries Card E found → must test pure-FLB rule separately from gated-v1.</li>
 </ul>
 </div>
 

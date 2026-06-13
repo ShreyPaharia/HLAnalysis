@@ -103,9 +103,9 @@ def _make_run_cfg(max_position_usd: float = 100.0) -> Any:
 def _live_v1_params_binary() -> dict[str, Any]:
     """Return v1 priceBinary params from live config, for use as baseline."""
     from hlanalysis.backtest.slot_config import backtest_params_from_slot
-    from hlanalysis.engine.config import load_strategy_config
+    from hlanalysis.engine.config import load_strategies_config
 
-    cfg = load_strategy_config(Path("config/strategy.yaml"))
+    cfg = load_strategies_config(Path("config/strategy.yaml"))
     v1_slot = next(s for s in cfg.strategies if s.account_alias == "v1")
     _, params = backtest_params_from_slot(v1_slot, klass="priceBinary")
     return params
@@ -114,9 +114,9 @@ def _live_v1_params_binary() -> dict[str, Any]:
 def _live_v31_params_binary() -> dict[str, Any]:
     """Return v31 priceBinary params from live config, for use as baseline."""
     from hlanalysis.backtest.slot_config import backtest_params_from_slot
-    from hlanalysis.engine.config import load_strategy_config
+    from hlanalysis.engine.config import load_strategies_config
 
-    cfg = load_strategy_config(Path("config/strategy.yaml"))
+    cfg = load_strategies_config(Path("config/strategy.yaml"))
     v31_slot = next(s for s in cfg.strategies if s.account_alias == "v31")
     _, params = backtest_params_from_slot(v31_slot, klass="priceBinary")
     return params
@@ -415,50 +415,60 @@ TTE_MIN_H_GRID = [0.5, 1.0, 1.5]
 
 
 def _sweep_is(questions_is: list, data_root: str) -> list[dict[str, Any]]:
-    """Sweep FLB param grid on IS questions. Returns sorted list of results."""
+    """Sweep a focused FLB param grid on IS questions.
+
+    Grid is deliberately small (6 cells) — informed by Card E top edge cells:
+    - Card E top cells: mid [0.80–0.85] TTE 3–6h (net_edge=0.1735),
+      mid [0.85–0.90] TTE 3–6h, mid [0.85–0.95] TTE 1–3h.
+    - Sweep tests the natural entry-band boundaries around those cells.
+    - Each cell runs all IS questions (~25 markets × ~18s = ~7 min per cell).
+    """
     cells = []
-    # Focus grid on Card E's top cells to keep sweep tractable
-    for price_lo in [0.80, 0.82, 0.85]:
-        for price_hi in [0.90, 0.95, 0.99]:
-            if price_hi <= price_lo:
-                continue
-            for tte_max_h in [3.0, 6.0, 8.0]:
-                for tte_min_h in [0.5, 1.0]:
-                    if tte_min_h >= tte_max_h:
-                        continue
-                    params = _flb_params(
-                        price_lo=price_lo,
-                        price_hi=price_hi,
-                        tte_min_h=tte_min_h,
-                        tte_max_h=tte_max_h,
-                    )
-                    pnl_list, n_trades, _ = _run_strategy(
-                        strategy_id="v1_late_resolution",
-                        params=params,
-                        questions=questions_is,
-                        data_root=data_root,
-                        n_workers=1,
-                    )
-                    stats = _summarise(pnl_list, n_trades)
-                    cells.append(
-                        {
-                            "price_lo": price_lo,
-                            "price_hi": price_hi,
-                            "tte_min_h": tte_min_h,
-                            "tte_max_h": tte_max_h,
-                            **stats,
-                        }
-                    )
-                    logger.info(
-                        "IS sweep: lo=%.2f hi=%.2f tte=[%.1fh,%.1fh] PnL=$%.2f n_trades=%d Sharpe=%.2f",
-                        price_lo,
-                        price_hi,
-                        tte_min_h,
-                        tte_max_h,
-                        stats["total_pnl_usd"],
-                        n_trades,
-                        stats["sharpe"],
-                    )
+    # 6 focused cells: 2 price bands × 3 TTE ceilings
+    # Price bands informed by Card E: 0.80–0.95 (wide), 0.82–0.92 (narrow/conservative)
+    # TTE ceilings: 3h (Card E sweet spot), 6h (Card E extended), 8h (conservative test)
+    grid = [
+        (0.80, 0.95, 1.0, 6.0),  # wide band, 1–6h (primary hypothesis)
+        (0.80, 0.95, 1.0, 3.0),  # wide band, 1–3h (Card E sweet spot)
+        (0.82, 0.92, 1.0, 6.0),  # narrow band, 1–6h
+        (0.85, 0.95, 0.5, 6.0),  # high favorites only, 0.5–6h
+        (0.80, 0.95, 0.5, 8.0),  # wide band, extended TTE
+        (0.80, 0.90, 1.0, 6.0),  # mid-range ceiling 0.90 (avoids thin top)
+    ]
+    for price_lo, price_hi, tte_min_h, tte_max_h in grid:
+        params = _flb_params(
+            price_lo=price_lo,
+            price_hi=price_hi,
+            tte_min_h=tte_min_h,
+            tte_max_h=tte_max_h,
+        )
+        pnl_list, n_trades, _ = _run_strategy(
+            strategy_id="v1_late_resolution",
+            params=params,
+            questions=questions_is,
+            data_root=data_root,
+            n_workers=1,
+        )
+        stats = _summarise(pnl_list, n_trades)
+        cells.append(
+            {
+                "price_lo": price_lo,
+                "price_hi": price_hi,
+                "tte_min_h": tte_min_h,
+                "tte_max_h": tte_max_h,
+                **stats,
+            }
+        )
+        logger.info(
+            "IS sweep: lo=%.2f hi=%.2f tte=[%.1fh,%.1fh] PnL=$%.2f n_trades=%d Sharpe=%.2f",
+            price_lo,
+            price_hi,
+            tte_min_h,
+            tte_max_h,
+            stats["total_pnl_usd"],
+            n_trades,
+            stats["sharpe"],
+        )
     return sorted(cells, key=lambda c: c["total_pnl_usd"], reverse=True)
 
 
