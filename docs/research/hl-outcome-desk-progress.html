@@ -84,15 +84,13 @@ Last updated: <b>2026-06-13 · setup</b></p>
 <h2>Wave status</h2>
 <div class="grid">
   <div class="panel">
-    <span class="pill run">running</span> &nbsp;<b>Wave 0 — Reusable toolkit</b>
-    <span class="tag">sonnet ×1</span>
+    <span class="pill done">done</span> &nbsp;<b>Wave 0 — Reusable toolkit</b>
+    <span class="tag">sonnet ×2</span>
     <ul>
-      <li><code>hlanalysis/research/outcome_markets.py</code> — symbol↔question↔class↔expiry↔strike↔settlement resolver</li>
-      <li><code>dataset.py</code> — cached cross-venue research panels (configurable dt)</li>
-      <li><code>metrics.py</code> — desk metrics (spread, depth, markout, overround, implied-prob, theta, convergence)</li>
-      <li><code>report.py</code> — self-contained HTML card registry</li>
+      <li><code>hlanalysis/research/</code> — resolver, cached cross-venue panels, 9 desk metrics, HTML card builder. 86 tests green, smoke report renders real data.</li>
+      <li class="amber"><b>Caught + fixed a critical win-label bug</b>: <code>settled_side_idx</code> is a constant artifact (always 0), and binaries emit no settlement event. Labels now oracle-derived &amp; cross-checked.</li>
     </ul>
-    <span class="muted">Gate: toolkit produces a smoke HTML from a 2-day slice; tests green.</span>
+    <span class="muted">Gate PASSED: tests green + smoke HTML renders correct labels.</span>
   </div>
   <div class="panel">
     <span class="pill wait">queued</span> &nbsp;<b>Wave 1 — Characterization (taker-relevant first)</b>
@@ -153,9 +151,9 @@ Last updated: <b>2026-06-13 · setup</b></p>
     <td>Binary book is tight &amp; slightly <b>overround (~0.7%)</b> → no naked Yes+No taker arb; the overround is gross edge to a <b>maker</b>. Reinforces taker-edge must come from mispricing/convergence, not sum-arb.</td>
   </tr>
   <tr>
-    <td>Settlement schema</td>
-    <td><code>settled_side_idx</code> = winning side (0=Yes/1=No), per outcome symbol <code>#NNN0</code></td>
-    <td>Clean win-label join confirmed; 99 settlements.</td>
+    <td>Win-label structure<br><span class="muted">whole corpus</span></td>
+    <td>Binary Yes-win <b>47.4%</b> (38 expiries, oracle&gt;target) · buckets <b>37 q × 3 bands</b>, exactly 1 winner each, <b>100%</b> oracle/mid agreement</td>
+    <td><b>Key gotcha:</b> binaries emit NO settlement event; the 99 settlement rows are bucket bands only, and <code>settled_side_idx</code> is a constant (always 0), NOT the winner. Labels must be oracle-derived. Now baked into the toolkit.</td>
   </tr>
   </table>
   <p class="muted">Wave 1 cards (A–F) will replace these with full-sample, split-half-validated results.</p>
@@ -168,7 +166,9 @@ Last updated: <b>2026-06-13 · setup</b></p>
 <div class="panel log">
 <ul>
   <li><span class="ts">2026-06-13 setup</span> — Explored data, locked decisions, built live dashboard. Wave 0 toolkit dispatched (sonnet, background).</li>
-  <li><span class="ts">2026-06-13 probe</span> — Verified settlement schema (settled_side_idx) + binary bbo. First overround probe: book ~0.7% overround, no taker sum-arb. Seeded preliminary findings.</li>
+  <li><span class="ts">2026-06-13 probe</span> — First overround probe: book ~0.7% overround, no taker sum-arb. Seeded preliminary findings.</li>
+  <li><span class="ts">2026-06-13 W0✓</span> — Toolkit delivered (86 tests). Independently caught a critical win-label bug; dispatched fix agent. Verified: binary 47.4% Yes-win, bucket 1-winner-per-question, 100% oracle/mid agreement.</li>
+  <li><span class="ts">2026-06-13 W1</span> — Launching taker-first characterization cards (E convergence, D mispricing, F vol/theta).</li>
 </ul>
 </div>
 
