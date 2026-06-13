@@ -76,6 +76,12 @@ class Session_(SQLModel, table=True):
     session_id: str = Field(primary_key=True)
     started_ts_ns: int
     ended_ts_ns: int | None = None
+    # Finding #47: halt_reason column exists in the DB DDL (0001_baseline) but
+    # was absent from the ORM model, causing end_session() writes to be silently
+    # dropped (a transient Python attribute, never SQL-bound). Adding it here
+    # makes the field round-trip through the ORM. No migration is needed because
+    # the column already exists in the schema.
+    halt_reason: str | None = None
 
 
 class SeenQuestion(SQLModel, table=True):
@@ -499,15 +505,16 @@ class StateDAL:
             s.commit()
 
     def end_session(self, session_id: str, *, now_ns: int, halt_reason: str | None = None) -> None:
-        # NOTE: halt_reason is accepted in the signature for API compatibility
-        # but Session_ has no halt_reason column (the column was never added
-        # via Alembic, so assigning it would silently set a Python attribute
-        # that is never persisted). The parameter is intentionally a no-op;
-        # add a migration + Session_ field if durable halt logging is needed.
+        # Finding #47: halt_reason is now persisted via the ORM (Session_ model
+        # was updated to include the field). The column already existed in the DB
+        # DDL (0001_baseline), so no migration is required — the field was simply
+        # missing from the ORM class and silently discarded on commit.
         with _Session(self._engine) as s:
             row = s.get(Session_, session_id)
             if row is not None:
                 row.ended_ts_ns = now_ns
+                if halt_reason is not None:
+                    row.halt_reason = halt_reason
                 s.add(row)
                 s.commit()
 
