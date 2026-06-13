@@ -168,6 +168,17 @@ Last updated: <b>2026-06-13 · setup</b></p>
   <tr><td>Vol-regime sizing signal</td><td>open-2h σ → daily range <b>r=0.53</b> (n=35, p&lt;0.05)</td><td>Usable gate: size up on high-vol opens (market more likely mispriced).</td></tr>
   </table>
   <p class="muted">Card: <code>docs/research/_cards/card_f.html</code></p>
+
+  <h3 style="margin-top:18px">Card D — Mispricing surface <span class="pill done">done</span></h3>
+  <table>
+  <tr><th>Metric</th><th>Result (n, span)</th><th>Read</th></tr>
+  <tr><td>Yes+No overround (full)</td><td>p50 <b>90bp</b> · buy-arb <b>0%</b> of 3.18M ticks · net sell-arb 0.02%</td><td><b>No static taker sum-arb.</b> Widest overround at short TTE &amp; off-hours.</td></tr>
+  <tr><td>GBM model-edge</td><td>YES p50 +100bp "rich" vs GBM(1h σ); 55.6% bars · sign-stable, magnitude −3.5× in H2</td><td class="amber"><b>Reconcile before trusting:</b> used 1h σ (34%) for multi-hour binaries in a contango term structure → σ-horizon bias can flip sign by moneyness. Cross-check vs Card F premium + Card E calibration.</td></tr>
+  <tr><td>Bucket coherence</td><td>3-band mid sum p50 <b>1.029</b> (~3% overround) · sub-arb 0.29%</td><td>Buckets ~3× richer than binaries; no reliable intra-question arb.</td></tr>
+  <tr><td>Bucket↔binary cross</td><td>no net structural arb beyond noise</td><td>Strike aligns w/ bucket hi in ~70% expiries; consistent, not exploitable.</td></tr>
+  <tr><td class="red">Capacity (binding)</td><td>TOB <b>$50–$200 notional/level</b></td><td>Small clips → any taker/MM edge needs breadth across many markets to scale to desk size.</td></tr>
+  </table>
+  <p class="muted">Card: <code>docs/research/_cards/card_d.html</code> · Verdict: pure arb FAIL, directional model-edge PASS (pending σ-horizon reconciliation).</p>
 </div>
 
 <h2>Strategy scorecard</h2>
@@ -180,7 +191,8 @@ Last updated: <b>2026-06-13 · setup</b></p>
   <li><span class="ts">2026-06-13 probe</span> — First overround probe: book ~0.7% overround, no taker sum-arb. Seeded preliminary findings.</li>
   <li><span class="ts">2026-06-13 W0✓</span> — Toolkit delivered (86 tests). Independently caught a critical win-label bug; dispatched fix agent. Verified: binary 47.4% Yes-win, bucket 1-winner-per-question, 100% oracle/mid agreement.</li>
   <li><span class="ts">2026-06-13 W1</span> — Launched taker-first cards E/D/F in parallel.</li>
-  <li><span class="ts">2026-06-13 F✓</span> — Card F done: +14% ann implied−realized vol premium, sign-stable → v31 theta edge confirmed. Vol-regime sizing r=0.53. Awaiting E, D.</li>
+  <li><span class="ts">2026-06-13 F✓</span> — Card F done: +14% ann implied−realized vol premium, sign-stable → v31 theta edge confirmed. Vol-regime sizing r=0.53.</li>
+  <li><span class="ts">2026-06-13 D✓</span> — Card D done: no static taker arb (90bp overround), GBM model-edge present but σ-horizon-sensitive (flagged for reconciliation); capacity binding at $50–200/level. Awaiting E.</li>
 </ul>
 </div>
 
