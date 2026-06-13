@@ -10,6 +10,11 @@ set -euo pipefail
 #   ./scripts/deploy.sh --service recorder       # recorder only, main
 #   ./scripts/deploy.sh --service engine         # engine only, main
 #   ./scripts/deploy.sh --service engine my-br   # engine only, my-br
+#   ./scripts/deploy.sh --force-config           # allow overwriting box-local config/ edits
+#
+# By default the deploy ABORTS if config/ has uncommitted changes on the box
+# (so a hand-set emergency risk cap is never silently reset away). Pass
+# --force-config only when you intend to overwrite those box-local edits.
 #
 # Restarting the engine triggers its restart-drift gate (spec §5.5). If any
 # ghost/orphan/position-mismatch fires at startup, the engine writes
@@ -20,6 +25,9 @@ STACK_NAME="HLRecorderStack"
 REGION="${AWS_REGION:-$(aws configure get region)}"
 SERVICE="both"
 BRANCH="main"
+# Safety guard: refuse to `git reset --hard` over uncommitted config/ changes on
+# the box (risk caps may be hand-set in an incident). Override with --force-config.
+FORCE_CONFIG=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -29,6 +37,10 @@ while [ $# -gt 0 ]; do
       ;;
     --service=*)
       SERVICE="${1#--service=}"
+      shift
+      ;;
+    --force-config)
+      FORCE_CONFIG=1
       shift
       ;;
     -h|--help)
@@ -119,7 +131,9 @@ COMMAND_ID=$(aws ssm send-command \
     "commands": [
       "set -xe",
       "cd /opt/hl-recorder",
+      "if [ \"'"$FORCE_CONFIG"'\" != \"1\" ] && [ -n \"$(sudo -u ec2-user git -C /opt/hl-recorder status --porcelain config/)\" ]; then echo ABORT: uncommitted config changes on the box. Reconcile on the box or rerun deploy with the force-config flag.; sudo -u ec2-user git -C /opt/hl-recorder status --porcelain config/; exit 1; fi",
       "sudo -u ec2-user git fetch origin",
+      "echo Incoming config changes on this deploy:; sudo -u ec2-user git -C /opt/hl-recorder --no-pager diff --stat HEAD origin/'"$BRANCH"' -- config/ || true",
       "sudo -u ec2-user git checkout '"$BRANCH"'",
       "sudo -u ec2-user git reset --hard origin/'"$BRANCH"'",
       "/root/.local/bin/uv pip install --python /opt/hl-recorder/.venv/bin/python -e /opt/hl-recorder",
