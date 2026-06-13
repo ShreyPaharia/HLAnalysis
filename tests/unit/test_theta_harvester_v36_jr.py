@@ -5,6 +5,7 @@ Tests:
 2. Pure continuous returns → trust scalar near 1.0.
 3. Jump-heavy returns → trust ≪ 1 → tilt less aggressive.
 """
+
 from __future__ import annotations
 
 from hlanalysis.strategy.theta_harvester import (
@@ -39,12 +40,22 @@ def _books_yes_fav() -> dict:
     """YES at ~0.95 mid (bid=ask=0.94). Edge vs ask ≈ p_yes - 0.94."""
     return {
         "YES": BookState(
-            symbol="YES", bid_px=0.94, bid_sz=10.0, ask_px=0.94, ask_sz=10.0,
-            last_trade_ts_ns=0, last_l2_ts_ns=0,
+            symbol="YES",
+            bid_px=0.94,
+            bid_sz=10.0,
+            ask_px=0.94,
+            ask_sz=10.0,
+            last_trade_ts_ns=0,
+            last_l2_ts_ns=0,
         ),
         "NO": BookState(
-            symbol="NO", bid_px=0.05, bid_sz=10.0, ask_px=0.06, ask_sz=10.0,
-            last_trade_ts_ns=0, last_l2_ts_ns=0,
+            symbol="NO",
+            bid_px=0.05,
+            bid_sz=10.0,
+            ask_px=0.06,
+            ask_sz=10.0,
+            last_trade_ts_ns=0,
+            last_l2_ts_ns=0,
         ),
     }
 
@@ -77,6 +88,7 @@ def _cfg(**over) -> ThetaHarvesterConfig:
 # Test 1: Default off is v3.5 bit-identical
 # ---------------------------------------------------------------------------
 
+
 def test_jr_default_off_is_v35_bit_identical() -> None:
     """momentum_mr_jr_trust_weight=False (default) must produce identical decisions
     to a config where the field is simply absent (i.e., the dataclass default)."""
@@ -104,13 +116,21 @@ def test_jr_default_off_is_v35_bit_identical() -> None:
     strat_b = ThetaHarvesterStrategy(cfg_b)
 
     dec_a = strat_a.evaluate(
-        question=_qv(), books=_books_yes_fav(), reference_price=110.0,
-        recent_returns=rets, recent_volume_usd=0.0, position=None,
+        question=_qv(),
+        books=_books_yes_fav(),
+        reference_price=110.0,
+        recent_returns=rets,
+        recent_volume_usd=0.0,
+        position=None,
         now_ns=_NOW_NS,
     )
     dec_b = strat_b.evaluate(
-        question=_qv(), books=_books_yes_fav(), reference_price=110.0,
-        recent_returns=rets, recent_volume_usd=0.0, position=None,
+        question=_qv(),
+        books=_books_yes_fav(),
+        reference_price=110.0,
+        recent_returns=rets,
+        recent_volume_usd=0.0,
+        position=None,
         now_ns=_NOW_NS,
     )
 
@@ -122,6 +142,7 @@ def test_jr_default_off_is_v35_bit_identical() -> None:
 # ---------------------------------------------------------------------------
 # Test 2: Pure continuous returns → trust near 1.0
 # ---------------------------------------------------------------------------
+
 
 def test_jr_with_pure_continuous_returns_full_trust() -> None:
     """Smooth returns (no jumps) → BPV ≈ RV → JR ≈ 0 → trust ≈ 1.0.
@@ -143,8 +164,12 @@ def test_jr_with_pure_continuous_returns_full_trust() -> None:
     )
     strat = ThetaHarvesterStrategy(cfg)
     dec = strat.evaluate(
-        question=_qv(), books=_books_yes_fav(), reference_price=110.0,
-        recent_returns=smooth_rets, recent_volume_usd=0.0, position=None,
+        question=_qv(),
+        books=_books_yes_fav(),
+        reference_price=110.0,
+        recent_returns=smooth_rets,
+        recent_volume_usd=0.0,
+        position=None,
         now_ns=_NOW_NS,
     )
 
@@ -167,6 +192,7 @@ def test_jr_with_pure_continuous_returns_full_trust() -> None:
 # ---------------------------------------------------------------------------
 # Test 3: Jump-heavy returns → trust ≪ 1 → tilt less aggressive
 # ---------------------------------------------------------------------------
+
 
 def test_jr_with_jump_returns_shrinks_score() -> None:
     """One giant spike among zeros → JR near 1 → trust near 0 → tilt suppressed.
@@ -213,13 +239,21 @@ def test_jr_with_jump_returns_shrinks_score() -> None:
 
     books = _books_yes_fav()
     dec_off = strat_off.evaluate(
-        question=_qv(), books=books, reference_price=110.0,
-        recent_returns=jump_rets, recent_volume_usd=0.0, position=None,
+        question=_qv(),
+        books=books,
+        reference_price=110.0,
+        recent_returns=jump_rets,
+        recent_volume_usd=0.0,
+        position=None,
         now_ns=_NOW_NS,
     )
     dec_on = strat_on.evaluate(
-        question=_qv(), books=books, reference_price=110.0,
-        recent_returns=jump_rets, recent_volume_usd=0.0, position=None,
+        question=_qv(),
+        books=books,
+        reference_price=110.0,
+        recent_returns=jump_rets,
+        recent_volume_usd=0.0,
+        position=None,
         now_ns=_NOW_NS,
     )
 
@@ -250,8 +284,7 @@ def test_jr_with_jump_returns_shrinks_score() -> None:
     # Loosening tilt means eff_eb < base. JR on should loosen LESS than JR off.
     # i.e. eff_on should be >= eff_off (closer to base edge_buffer).
     assert eff_on >= eff_off, (
-        f"JR on eff_edge_buffer ({eff_on:.5f}) should be >= JR off ({eff_off:.5f}) "
-        f"because jump trust shrinks the tilt."
+        f"JR on eff_edge_buffer ({eff_on:.5f}) should be >= JR off ({eff_off:.5f}) because jump trust shrinks the tilt."
     )
 
     # Also verify the helper directly returns a low trust for this input

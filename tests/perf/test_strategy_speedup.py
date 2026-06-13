@@ -6,6 +6,7 @@ to override the σ helpers with the original list-based implementations and
 by holding a deque-backed MarketState mirror of the legacy logic. This
 makes the comparison self-contained — no need to wire up an "old" tree.
 """
+
 from __future__ import annotations
 
 import math
@@ -36,31 +37,46 @@ def _build_klines(n: int) -> list[Kline]:
     price = 80_000.0
     for i in range(n):
         price *= math.exp(0.0001 * math.sin(i / 50.0))
-        out.append(Kline(ts_ns=i * NS_PER_MIN, open=price,
-                         high=price * 1.001, low=price * 0.999,
-                         close=price, volume=1000.0))
+        out.append(
+            Kline(ts_ns=i * NS_PER_MIN, open=price, high=price * 1.001, low=price * 0.999, close=price, volume=1000.0)
+        )
     return out
 
 
 def _cfg() -> LateResolutionConfig:
     return LateResolutionConfig(
-        tte_min_seconds=60, tte_max_seconds=86_400,
-        price_extreme_threshold=0.90, distance_from_strike_usd_min=0.0,
-        vol_max=2.0, max_position_usd=100.0, stop_loss_pct=10.0,
-        max_strike_distance_pct=50.0, min_recent_volume_usd=0.0,
-        stale_data_halt_seconds=60_000, price_extreme_max=0.995,
-        min_safety_d=1.0, vol_lookback_seconds=1800,
-        exit_safety_d=0.5, exit_safety_d_5m=0.3,
-        exit_vol_lookback_5m_seconds=300, vol_ewma_lambda=0.94,
-        vol_estimator="parkinson", drift_aware_d=True,
+        tte_min_seconds=60,
+        tte_max_seconds=86_400,
+        price_extreme_threshold=0.90,
+        distance_from_strike_usd_min=0.0,
+        vol_max=2.0,
+        max_position_usd=100.0,
+        stop_loss_pct=10.0,
+        max_strike_distance_pct=50.0,
+        min_recent_volume_usd=0.0,
+        stale_data_halt_seconds=60_000,
+        price_extreme_max=0.995,
+        min_safety_d=1.0,
+        vol_lookback_seconds=1800,
+        exit_safety_d=0.5,
+        exit_safety_d_5m=0.3,
+        exit_vol_lookback_5m_seconds=300,
+        vol_ewma_lambda=0.94,
+        vol_estimator="parkinson",
+        drift_aware_d=True,
     )
 
 
 def _q(expiry_ns: int) -> QuestionView:
     return QuestionView(
-        question_idx=1, yes_symbol="@30", no_symbol="@31",
-        strike=80_000.0, expiry_ns=expiry_ns,
-        underlying="BTC", klass="priceBinary", period="1d",
+        question_idx=1,
+        yes_symbol="@30",
+        no_symbol="@31",
+        strike=80_000.0,
+        expiry_ns=expiry_ns,
+        underlying="BTC",
+        klass="priceBinary",
+        period="1d",
         leg_symbols=("@30", "@31"),
     )
 
@@ -92,10 +108,7 @@ class _LegacyMarketState:
 
     def recent_hl_bars(self, *, now_ns: int, lookback_seconds: int):
         cutoff = now_ns - lookback_seconds * 1_000_000_000
-        return tuple(
-            (h, l) for (t, h, l, _c) in self._k
-            if cutoff <= t <= now_ns and h > 0 and l > 0
-        )
+        return tuple((h, l) for (t, h, l, _c) in self._k if cutoff <= t <= now_ns and h > 0 and l > 0)
 
 
 class _LegacySigmaStrategy(LateResolutionStrategy):
@@ -138,10 +151,8 @@ def _replay(strat_cls, state) -> float:
     strat = strat_cls(cfg)
     klines = _build_klines(N_TICKS)
     q = _q(expiry_ns=(N_TICKS + 60) * NS_PER_MIN)
-    yes = BookState(symbol="@30", bid_px=0.93, bid_sz=100, ask_px=0.94, ask_sz=100,
-                    last_trade_ts_ns=0, last_l2_ts_ns=0)
-    no_ = BookState(symbol="@31", bid_px=0.05, bid_sz=100, ask_px=0.06, ask_sz=100,
-                    last_trade_ts_ns=0, last_l2_ts_ns=0)
+    yes = BookState(symbol="@30", bid_px=0.93, bid_sz=100, ask_px=0.94, ask_sz=100, last_trade_ts_ns=0, last_l2_ts_ns=0)
+    no_ = BookState(symbol="@31", bid_px=0.05, bid_sz=100, ask_px=0.06, ask_sz=100, last_trade_ts_ns=0, last_l2_ts_ns=0)
 
     t0 = time.perf_counter()
     for k in klines:
@@ -150,24 +161,48 @@ def _replay(strat_cls, state) -> float:
         if hasattr(state, "apply_kline"):
             state.apply_kline(k)
         else:
-            state.apply_reference(ReferenceEvent(
-                ts_ns=k.ts_ns, symbol="BTC",
-                high=k.high, low=k.low, close=k.close,
-            ))
+            state.apply_reference(
+                ReferenceEvent(
+                    ts_ns=k.ts_ns,
+                    symbol="BTC",
+                    high=k.high,
+                    low=k.low,
+                    close=k.close,
+                )
+            )
         now = k.ts_ns
         books = {
-            "@30": BookState(symbol="@30", bid_px=yes.bid_px, bid_sz=yes.bid_sz,
-                            ask_px=yes.ask_px, ask_sz=yes.ask_sz,
-                            last_trade_ts_ns=now, last_l2_ts_ns=now),
-            "@31": BookState(symbol="@31", bid_px=no_.bid_px, bid_sz=no_.bid_sz,
-                            ask_px=no_.ask_px, ask_sz=no_.ask_sz,
-                            last_trade_ts_ns=now, last_l2_ts_ns=now),
+            "@30": BookState(
+                symbol="@30",
+                bid_px=yes.bid_px,
+                bid_sz=yes.bid_sz,
+                ask_px=yes.ask_px,
+                ask_sz=yes.ask_sz,
+                last_trade_ts_ns=now,
+                last_l2_ts_ns=now,
+            ),
+            "@31": BookState(
+                symbol="@31",
+                bid_px=no_.bid_px,
+                bid_sz=no_.bid_sz,
+                ask_px=no_.ask_px,
+                ask_sz=no_.ask_sz,
+                last_trade_ts_ns=now,
+                last_l2_ts_ns=now,
+            ),
         }
         rets = state.recent_returns(now_ns=now, lookback_seconds=86_400)
         hls = state.recent_hl_bars(now_ns=now, lookback_seconds=86_400)
-        strat.evaluate(question=q, books=books, reference_price=k.close,
-                       recent_returns=rets, recent_volume_usd=1000.0,
-                       position=None, now_ns=now, recent_hl_bars=hls)
+        strat.evaluate(
+            question=q,
+            books=books,
+            reference_price=k.close,
+            recent_returns=rets,
+            recent_volume_usd=1000.0,
+            position=None,
+            now_ns=now,
+            recent_hl_bars=hls,
+        )
     return time.perf_counter() - t0
 
 
@@ -188,8 +223,7 @@ def test_jit_path_at_least_5x_faster_than_pure_python(capsys):
     t_jit = _replay(LateResolutionStrategy, MarketState())
     speedup = t_legacy / t_jit
     with capsys.disabled():
-        print(f"\n10k-tick replay  legacy={t_legacy:.3f}s  "
-              f"jit={t_jit:.3f}s  speedup={speedup:.2f}×")
+        print(f"\n10k-tick replay  legacy={t_legacy:.3f}s  jit={t_jit:.3f}s  speedup={speedup:.2f}×")
     assert speedup >= 5.0, f"expected ≥5× speedup, got {speedup:.2f}×"
 
 
@@ -205,6 +239,4 @@ def test_jit_calls_are_cached_after_first_compile():
     for _ in range(1000):
         ewma_std(arr, 0.94)
     t_warm = time.perf_counter() - t0
-    assert t_warm < 0.5, (
-        f"warm 1000 calls of ewma_std took {t_warm:.3f}s — JIT cache likely missed"
-    )
+    assert t_warm < 0.5, f"warm 1000 calls of ewma_std took {t_warm:.3f}s — JIT cache likely missed"

@@ -23,6 +23,7 @@ imports) is safe. The heavy imports inside each builder function execute only
 when the engine actually constructs a strategy, long after all modules have
 been fully loaded.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -41,6 +42,7 @@ class LiveStrategyEntry(NamedTuple):
     registry_id   — backtest registry id used by slot_config.backtest_params_from_slot
                     to look up the matching sim builder (e.g. "v1_late_resolution").
     """
+
     live_builder: Callable[[StrategyConfig], Strategy]
     registry_id: str
 
@@ -60,9 +62,7 @@ def register_live_strategy(
     accidental double-registration during import).
     """
     if strategy_type in _LIVE_REGISTRY:
-        raise ValueError(
-            f"strategy_type {strategy_type!r} is already registered in the live registry"
-        )
+        raise ValueError(f"strategy_type {strategy_type!r} is already registered in the live registry")
     _LIVE_REGISTRY[strategy_type] = LiveStrategyEntry(
         live_builder=live_builder,
         registry_id=registry_id,
@@ -81,10 +81,7 @@ def build_live_strategy(strategy_type: str, cfg: StrategyConfig) -> Strategy:
     """
     entry = _LIVE_REGISTRY.get(strategy_type)
     if entry is None:
-        raise ValueError(
-            f"unknown strategy_type: {strategy_type!r} "
-            f"(registered: {live_strategy_types()})"
-        )
+        raise ValueError(f"unknown strategy_type: {strategy_type!r} (registered: {live_strategy_types()})")
     return entry.live_builder(cfg)
 
 
@@ -97,8 +94,7 @@ def live_registry_id(strategy_type: str) -> str:
         return _LIVE_REGISTRY[strategy_type].registry_id
     except KeyError:
         raise KeyError(
-            f"strategy_type {strategy_type!r} has no live registry entry "
-            f"(supported: {live_strategy_types()})"
+            f"strategy_type {strategy_type!r} has no live registry entry (supported: {live_strategy_types()})"
         ) from None
 
 
@@ -116,12 +112,14 @@ def _reset_for_tests() -> None:
 # after all modules are fully loaded.
 # ---------------------------------------------------------------------------
 
+
 def _late_resolution_builder(cfg: StrategyConfig) -> Strategy:
     from ..engine.config_builders import (  # noqa: PLC0415
         build_late_resolution_config,
         build_late_resolution_configs_by_class,
     )
     from .late_resolution import LateResolutionStrategy  # noqa: PLC0415
+
     return LateResolutionStrategy(
         build_late_resolution_config(cfg),
         cfg_by_class=build_late_resolution_configs_by_class(cfg),
@@ -134,6 +132,7 @@ def _theta_harvester_builder(cfg: StrategyConfig) -> Strategy:
         build_theta_harvester_configs_by_class,
     )
     from .theta_harvester import ThetaHarvesterStrategy  # noqa: PLC0415
+
     return ThetaHarvesterStrategy(
         build_theta_harvester_config(cfg),
         cfg_by_class=build_theta_harvester_configs_by_class(cfg),

@@ -23,10 +23,10 @@ class Strategy(ABC):
         self,
         *,
         question: QuestionView,
-        books: Mapping[str, BookState],   # symbol -> BookState; includes both legs + ref market
-        reference_price: float,           # underlying spot/perp mark, e.g. BTC
+        books: Mapping[str, BookState],  # symbol -> BookState; includes both legs + ref market
+        reference_price: float,  # underlying spot/perp mark, e.g. BTC
         recent_returns: tuple[float, ...],  # log-returns over a fixed lookback for vol calc
-        recent_volume_usd: float,         # last-hour notional volume on this question
+        recent_volume_usd: float,  # last-hour notional volume on this question
         position: Position | None,
         now_ns: int,
         # Optional side-channel: (high, low) for each 1m kline in the lookback

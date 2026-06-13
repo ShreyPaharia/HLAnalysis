@@ -8,6 +8,7 @@ phantom-liquidity when its size exceeds that contemporaneous volume.
 All tests are filesystem-free — they build small in-memory prints frames and
 ``FillRecord``s, so they exercise the logic, not the recorder layout.
 """
+
 from __future__ import annotations
 
 import pandas as pd
@@ -38,54 +39,82 @@ def _prints(rows) -> pd.DataFrame:
 def test_hittable_buy_keeps_prints_at_or_below_limit():
     # A marketable BUY at 0.90 lifts asks; real buy-aggressor prints at <=0.90
     # are the competing liquidity. 0.95 is above the limit -> excluded.
-    pr = _prints([
-        (100 * S, 0.88, 10.0, "buy"),
-        (100 * S, 0.90, 20.0, "buy"),
-        (100 * S, 0.95, 30.0, "buy"),
-    ])
+    pr = _prints(
+        [
+            (100 * S, 0.88, 10.0, "buy"),
+            (100 * S, 0.90, 20.0, "buy"),
+            (100 * S, 0.95, 30.0, "buy"),
+        ]
+    )
     hp = hittable_prints(
-        pr, side="buy", price=0.90, fill_ts_ns=100 * S, window_ns=S,
+        pr,
+        side="buy",
+        price=0.90,
+        fill_ts_ns=100 * S,
+        window_ns=S,
     )
     assert sorted(hp["size"].tolist()) == [10.0, 20.0]
 
 
 def test_hittable_sell_keeps_prints_at_or_above_limit():
-    pr = _prints([
-        (100 * S, 0.10, 10.0, "sell"),
-        (100 * S, 0.20, 20.0, "sell"),
-        (100 * S, 0.25, 30.0, "sell"),
-    ])
+    pr = _prints(
+        [
+            (100 * S, 0.10, 10.0, "sell"),
+            (100 * S, 0.20, 20.0, "sell"),
+            (100 * S, 0.25, 30.0, "sell"),
+        ]
+    )
     hp = hittable_prints(
-        pr, side="sell", price=0.20, fill_ts_ns=100 * S, window_ns=S,
+        pr,
+        side="sell",
+        price=0.20,
+        fill_ts_ns=100 * S,
+        window_ns=S,
     )
     assert sorted(hp["size"].tolist()) == [20.0, 30.0]
 
 
 def test_hittable_filters_outside_time_window():
-    pr = _prints([
-        (98 * S, 0.90, 11.0, "buy"),   # 2s before -> out (window 1s)
-        (100 * S, 0.90, 22.0, "buy"),  # in
-        (102 * S, 0.90, 33.0, "buy"),  # 2s after -> out
-    ])
+    pr = _prints(
+        [
+            (98 * S, 0.90, 11.0, "buy"),  # 2s before -> out (window 1s)
+            (100 * S, 0.90, 22.0, "buy"),  # in
+            (102 * S, 0.90, 33.0, "buy"),  # 2s after -> out
+        ]
+    )
     hp = hittable_prints(
-        pr, side="buy", price=0.90, fill_ts_ns=100 * S, window_ns=S,
+        pr,
+        side="buy",
+        price=0.90,
+        fill_ts_ns=100 * S,
+        window_ns=S,
     )
     assert hp["size"].tolist() == [22.0]
 
 
 def test_hittable_match_aggressor_excludes_opposite_side():
     # A sim BUY: only real buy-aggressor prints count when match_aggressor.
-    pr = _prints([
-        (100 * S, 0.90, 10.0, "buy"),
-        (100 * S, 0.90, 99.0, "sell"),
-    ])
+    pr = _prints(
+        [
+            (100 * S, 0.90, 10.0, "buy"),
+            (100 * S, 0.90, 99.0, "sell"),
+        ]
+    )
     matched = hittable_prints(
-        pr, side="buy", price=0.90, fill_ts_ns=100 * S, window_ns=S,
+        pr,
+        side="buy",
+        price=0.90,
+        fill_ts_ns=100 * S,
+        window_ns=S,
         match_aggressor=True,
     )
     assert matched["size"].tolist() == [10.0]
     both = hittable_prints(
-        pr, side="buy", price=0.90, fill_ts_ns=100 * S, window_ns=S,
+        pr,
+        side="buy",
+        price=0.90,
+        fill_ts_ns=100 * S,
+        window_ns=S,
         match_aggressor=False,
     )
     assert sorted(both["size"].tolist()) == [10.0, 99.0]
@@ -95,12 +124,20 @@ def test_hittable_price_tol_boundary():
     # A print a hair above the limit is kept only within price_tol.
     pr = _prints([(100 * S, 0.9000005, 5.0, "buy")])
     keep = hittable_prints(
-        pr, side="buy", price=0.90, fill_ts_ns=100 * S, window_ns=S,
+        pr,
+        side="buy",
+        price=0.90,
+        fill_ts_ns=100 * S,
+        window_ns=S,
         price_tol=1e-6,
     )
     assert keep["size"].tolist() == [5.0]
     drop = hittable_prints(
-        pr, side="buy", price=0.90, fill_ts_ns=100 * S, window_ns=S,
+        pr,
+        side="buy",
+        price=0.90,
+        fill_ts_ns=100 * S,
+        window_ns=S,
         price_tol=1e-9,
     )
     assert drop.empty
@@ -111,8 +148,13 @@ def test_hittable_price_tol_boundary():
 # --------------------------------------------------------------------------- #
 def _fill(size, side="buy", price=0.90, ts=100 * S, symbol="#1670"):
     return FillRecord(
-        cloid="c1", ts_ns=ts, side=side, price=price, size=size,
-        symbol=symbol, question_id="Q31",
+        cloid="c1",
+        ts_ns=ts,
+        side=side,
+        price=price,
+        size=size,
+        symbol=symbol,
+        question_id="Q31",
     )
 
 
@@ -127,10 +169,12 @@ def test_classify_phantom_when_size_exceeds_hittable():
 
 
 def test_classify_not_phantom_when_market_traded_enough():
-    pr = _prints([
-        (100 * S, 0.90, 60.0, "buy"),
-        (100 * S, 0.89, 60.0, "buy"),
-    ])
+    pr = _prints(
+        [
+            (100 * S, 0.90, 60.0, "buy"),
+            (100 * S, 0.89, 60.0, "buy"),
+        ]
+    )
     v = classify_fill(_fill(100.0), pr, window_ns=S)
     assert v.is_phantom is False
     assert v.hittable_size == 120.0
@@ -162,10 +206,12 @@ def test_ledger_does_not_double_count_overlapping_refire():
     # The #2230 shape: two BUY 100@0.90 fired 0.5s apart, but only 100 really
     # traded at 0.90 in the window. Independent matching would excuse both
     # (each sees 100); the ledger credits the first and flags the second.
-    pr = _prints([
-        (100 * S, 0.90, 60.0, "buy"),
-        (100 * S + 10, 0.90, 40.0, "buy"),
-    ])
+    pr = _prints(
+        [
+            (100 * S, 0.90, 60.0, "buy"),
+            (100 * S + 10, 0.90, 40.0, "buy"),
+        ]
+    )
     fills = [_fill(100.0, ts=100 * S), _fill(100.0, ts=100 * S + S // 2)]
     v1, v2 = ledger_verdicts(fills, pr, window_ns=S)
     assert v1.tape_filled == 100.0 and v1.phantom_excess == 0.0 and not v1.is_phantom
@@ -205,9 +251,9 @@ def test_aggregate_rolls_up_counts_sizes_and_fractions():
     pr_thick = _prints([(100 * S, 0.90, 200.0, "buy")])
     empty = _prints([])
     verdicts = [
-        classify_fill(_fill(100.0), pr_thin, window_ns=S),    # phantom, excess 70
-        classify_fill(_fill(50.0), pr_thick, window_ns=S),    # ok
-        classify_fill(_fill(40.0), empty, window_ns=S),       # phantom no-tape, excess 40
+        classify_fill(_fill(100.0), pr_thin, window_ns=S),  # phantom, excess 70
+        classify_fill(_fill(50.0), pr_thick, window_ns=S),  # ok
+        classify_fill(_fill(40.0), empty, window_ns=S),  # phantom no-tape, excess 40
     ]
     agg = aggregate(verdicts)
     assert isinstance(agg, CellAgg)
@@ -239,11 +285,14 @@ def _write_fills(run_dir, rows):
 
 def test_load_sim_fills_excludes_settle_and_hedge(tmp_path):
     run = tmp_path / "ioc_v31_bucket_0607"
-    _write_fills(run, [
-        ("c1", 100 * S, "buy", 0.90, 57.0, "Q31", "#1670", False),   # keep
-        ("settle", 200 * S, "buy", 1.00, 57.0, "Q31", "#1670", False),  # drop (settle)
-        ("c2", 300 * S, "sell", 0.50, 10.0, "Q31", "BTC", True),     # drop (hedge)
-    ])
+    _write_fills(
+        run,
+        [
+            ("c1", 100 * S, "buy", 0.90, 57.0, "Q31", "#1670", False),  # keep
+            ("settle", 200 * S, "buy", 1.00, 57.0, "Q31", "#1670", False),  # drop (settle)
+            ("c2", 300 * S, "sell", 0.50, 10.0, "Q31", "BTC", True),  # drop (hedge)
+        ],
+    )
     fills = load_sim_fills(run)
     assert [f.cloid for f in fills] == ["c1"]
 
@@ -261,7 +310,10 @@ def test_run_matrix_marks_missing_cells_none(tmp_path):
         return _prints([(100 * S, 0.90, 30.0, "buy")])  # 30 < 57 -> phantom
 
     cells, verdicts = run_matrix(
-        runs_dir=tmp_path, prefix="ioc_", tape_loader=loader, window_ns=S,
+        runs_dir=tmp_path,
+        prefix="ioc_",
+        tape_loader=loader,
+        window_ns=S,
     )
     assert cells[("0607", "v31", "bucket")].n_phantom == 1
     assert cells[("0606", "v1", "binary")] is None
@@ -271,7 +323,9 @@ def test_run_matrix_marks_missing_cells_none(tmp_path):
 def test_validate_cell_uses_injected_loader():
     fills = [FillRecord("c1", 100 * S, "buy", 0.90, 100.0, "#1670", "Q31")]
     agg, verdicts = validate_cell(
-        fills, lambda sym: _prints([(100 * S, 0.90, 40.0, "buy")]), window_ns=S,
+        fills,
+        lambda sym: _prints([(100 * S, 0.90, 40.0, "buy")]),
+        window_ns=S,
     )
     assert agg.n_fills == 1 and agg.n_phantom == 1
     assert verdicts[0].phantom_excess == 60.0

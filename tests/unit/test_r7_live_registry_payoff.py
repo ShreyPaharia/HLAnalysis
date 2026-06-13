@@ -9,6 +9,7 @@ Verifies that:
 4. The backtest slot path (backtest_params_from_slot) resolves registry_id from
    the live registry (not from a hardcoded dict).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from hlanalysis.strategy.live_registry import (
 # ---------------------------------------------------------------------------
 # Minimal fixtures
 # ---------------------------------------------------------------------------
+
 
 def _entry(**kw) -> AllowlistEntry:
     base = dict(
@@ -78,6 +80,7 @@ def _make_cfg(strategy_type: str = "late_resolution") -> StrategyConfig:
 # Minimal dummy strategy for payoff test
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class _DummyConfig:
     tag: str = "dummy"
@@ -97,10 +100,12 @@ class _DummyStrategy(Strategy):
 # 1. Dummy strategy builds via engine path without touching the 3 dispatch points
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(autouse=False)
 def _restore_live_registry():
     """Snapshot and restore the live registry after each test that mutates it."""
     from hlanalysis.strategy.live_registry import _LIVE_REGISTRY
+
     snapshot = dict(_LIVE_REGISTRY)
     yield
     _LIVE_REGISTRY.clear()
@@ -139,6 +144,7 @@ def test_dummy_strategy_builds_via_engine_path(_restore_live_registry):
 # 2. Unknown strategy_type is still rejected
 # ---------------------------------------------------------------------------
 
+
 def test_unknown_strategy_type_rejected_by_config():
     """StrategyConfig must raise a ValidationError for an unregistered strategy_type."""
     with pytest.raises(Exception, match="unknown strategy_type"):
@@ -155,6 +161,7 @@ def test_build_live_strategy_raises_for_unknown():
 # ---------------------------------------------------------------------------
 # 3. Live registry exposes correct types and registry_ids
 # ---------------------------------------------------------------------------
+
 
 def test_live_strategy_types_includes_builtins():
     """Both built-in types must be in the live registry."""
@@ -179,6 +186,7 @@ def test_live_registry_id_raises_for_unknown():
 # ---------------------------------------------------------------------------
 # 4. Backtest slot path uses live registry_id
 # ---------------------------------------------------------------------------
+
 
 def test_slot_config_uses_live_registry_id():
     """backtest_params_from_slot must resolve its strategy_id from the live

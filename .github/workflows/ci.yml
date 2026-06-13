@@ -24,11 +24,9 @@ jobs:
       - name: Ruff lint
         run: uvx ruff check hlanalysis
 
-      # Blocking: ruff format check
-      # Skipped for now — formatter would reformat existing code en-masse.
-      # Enable once the serial autoformat pass lands.
-      # - name: Ruff format check
-      #   run: uvx ruff format --check hlanalysis
+      # Blocking: ruff format check (serial autoformat pass landed 2026-06-13)
+      - name: Ruff format check
+        run: uvx ruff format --check hlanalysis tests
 
       # Non-blocking: mypy type checking (informational until coverage improves)
       - name: Mypy type check

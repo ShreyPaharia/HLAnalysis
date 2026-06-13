@@ -7,6 +7,7 @@ the hive-partition structure produced by the recorder:
 
 All timestamps are nanoseconds since epoch.  BASE_NS is around 2001-09-09.
 """
+
 from __future__ import annotations
 
 import math
@@ -78,9 +79,7 @@ def con() -> duckdb.DuckDBPyConnection:
 # ---------------------------------------------------------------------------
 
 
-def _write_bbo(
-    root: Path, venue: str, product_type: str, symbol: str, rows: list[tuple]
-) -> None:
+def _write_bbo(root: Path, venue: str, product_type: str, symbol: str, rows: list[tuple]) -> None:
     """rows: list of (local_recv_ts, bid_px, ask_px)"""
     table = pa.table(
         {
@@ -573,8 +572,8 @@ class TestTobChurn:
             bin_s=10,
         )
 
-        assert int(df.iloc[0]["n_updates"]) == 0   # [0,10s) — empty
-        assert int(df.iloc[1]["n_updates"]) == 1   # [10,20s) — one event
+        assert int(df.iloc[0]["n_updates"]) == 0  # [0,10s) — empty
+        assert int(df.iloc[1]["n_updates"]) == 1  # [10,20s) — one event
 
 
 # ===========================================================================
@@ -702,9 +701,7 @@ class TestCrossCorrelation:
 
         # Retrieve lag=1 value.
         ccf_lag1 = float(result.loc[result["lag"] == 1, "ccf"].iloc[0])
-        assert abs(ccf_lag1 - phi) < 0.05, (
-            f"CCF at lag=1 ({ccf_lag1:.4f}) not within ±0.05 of phi={phi}"
-        )
+        assert abs(ccf_lag1 - phi) < 0.05, f"CCF at lag=1 ({ccf_lag1:.4f}) not within ±0.05 of phi={phi}"
 
     def test_output_columns_and_shape(self):
         """max_lag=3 → 7 rows with lags [-3..3]."""

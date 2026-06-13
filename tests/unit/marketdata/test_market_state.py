@@ -7,6 +7,7 @@ it into both contexts. These tests pin both halves: direct-bar parity against
 ``KlineRingBuffer.slice_window`` (the SHR-66 windowing rule) and tick-bucketing
 parity against the live ``engine.market_state.MarketState``.
 """
+
 from __future__ import annotations
 
 import math
@@ -29,6 +30,7 @@ HOUR_NS = 3600 * S
 # --------------------------------------------------------------------------
 # book()
 # --------------------------------------------------------------------------
+
 
 def test_book_none_for_unknown_symbol() -> None:
     ms = MarketState()
@@ -68,6 +70,7 @@ def test_trade_updates_last_trade_ts_on_book() -> None:
 # recent_returns / recent_hl_bars / recent_returns_and_hl
 # (bit-identical to KlineRingBuffer.slice_window — the SHR-66 rule)
 # --------------------------------------------------------------------------
+
 
 def _reference_bars() -> list[tuple[int, float, float, float]]:
     # (ts_ns, high, low, close) — irregular spacing, a couple of wicks.
@@ -143,12 +146,8 @@ def test_recent_returns_and_hl_matches_separate_calls() -> None:
     now = 241 * S
     lookback = 600
     rets, hl = ms.recent_returns_and_hl("BTC", now_ns=now, lookback_seconds=lookback)
-    np.testing.assert_array_equal(
-        rets, ms.recent_returns("BTC", now_ns=now, lookback_seconds=lookback)
-    )
-    np.testing.assert_array_equal(
-        hl, ms.recent_hl_bars("BTC", now_ns=now, lookback_seconds=lookback)
-    )
+    np.testing.assert_array_equal(rets, ms.recent_returns("BTC", now_ns=now, lookback_seconds=lookback))
+    np.testing.assert_array_equal(hl, ms.recent_hl_bars("BTC", now_ns=now, lookback_seconds=lookback))
 
 
 def test_recent_returns_empty_for_unknown_symbol() -> None:
@@ -161,6 +160,7 @@ def test_recent_returns_empty_for_unknown_symbol() -> None:
 # --------------------------------------------------------------------------
 # last_mark
 # --------------------------------------------------------------------------
+
 
 def test_last_mark_tracks_latest_bar_close() -> None:
     ms = MarketState()
@@ -181,6 +181,7 @@ def test_last_mark_tracks_latest_tick() -> None:
 # --------------------------------------------------------------------------
 # recent_volume_usd — 1h window, eviction on insert AND on read
 # --------------------------------------------------------------------------
+
 
 def test_recent_volume_usd_sums_price_times_size() -> None:
     ms = MarketState()
@@ -224,6 +225,7 @@ def test_recent_volume_usd_unknown_symbol_is_zero() -> None:
 # σ estimators — parkinson / stdev / bipower
 # --------------------------------------------------------------------------
 
+
 def test_sigma_stdev_matches_estimator() -> None:
     from hlanalysis.strategy.vol import sample_std_returns
 
@@ -261,11 +263,12 @@ def test_sigma_parkinson_matches_estimator() -> None:
         ms.apply_reference_bar("BTC", ts_ns=ts, high=h, low=l, close=c)
     now, lookback = 241 * S, 600
     hl = ms.recent_hl_bars("BTC", now_ns=now, lookback_seconds=lookback)
-    want = parkinson_sigma_window(
-        np.ascontiguousarray(hl[:, 0]), np.ascontiguousarray(hl[:, 1]), 0.0
-    )
+    want = parkinson_sigma_window(np.ascontiguousarray(hl[:, 0]), np.ascontiguousarray(hl[:, 1]), 0.0)
     got = ms.sigma(
-        "BTC", estimator="parkinson", now_ns=now, lookback_seconds=lookback,
+        "BTC",
+        estimator="parkinson",
+        now_ns=now,
+        lookback_seconds=lookback,
     )
     assert got == pytest.approx(want)
 
@@ -281,13 +284,14 @@ def test_sigma_unknown_estimator_raises() -> None:
 # tick-bucketing — coalescing within a dt bucket (engine semantics, ohlc.py)
 # --------------------------------------------------------------------------
 
+
 def test_tick_bucketing_coalesces_within_bucket() -> None:
     ms = MarketState()
     ms.set_reference_cadence("BTC", sampling_dt_seconds=60)
     # Three sub-minute ticks all in bucket 0, then one in bucket 1.
     ms.apply_reference_tick("BTC", ts_ns=1 * S, price=100.0)
     ms.apply_reference_tick("BTC", ts_ns=2 * S, price=103.0)  # high
-    ms.apply_reference_tick("BTC", ts_ns=3 * S, price=98.0)   # low, close
+    ms.apply_reference_tick("BTC", ts_ns=3 * S, price=98.0)  # low, close
     ms.apply_reference_tick("BTC", ts_ns=61 * S, price=99.0)
     now = 61 * S
     hl = ms.recent_hl_bars("BTC", now_ns=now, lookback_seconds=600)
@@ -303,6 +307,7 @@ def test_tick_bucketing_coalesces_within_bucket() -> None:
 # --------------------------------------------------------------------------
 # determinism — pure function of the event sequence
 # --------------------------------------------------------------------------
+
 
 def test_determinism_same_events_same_outputs() -> None:
     bars = _reference_bars()
@@ -332,6 +337,7 @@ def test_determinism_same_events_same_outputs() -> None:
 # apply() dispatch over the shared event structs
 # --------------------------------------------------------------------------
 
+
 def test_apply_dispatches_all_event_types() -> None:
     ms = MarketState()
     ms.set_reference_cadence("BTC", sampling_dt_seconds=60)
@@ -348,23 +354,36 @@ def test_apply_dispatches_all_event_types() -> None:
 # parity with the live engine MarketState (tick-bucketing path)
 # --------------------------------------------------------------------------
 
+
 def test_parity_with_engine_marketstate_tick_path() -> None:
     from hlanalysis.engine.market_state import MarketState as EngineMS
     from hlanalysis.events import MarkEvent, Mechanism, ProductType
 
     ticks = [
-        (1 * S, 100.0), (2 * S, 100.4), (3 * S, 99.8),
-        (61 * S, 100.9), (75 * S, 101.3),
-        (121 * S, 100.2), (181 * S, 102.0), (245 * S, 101.1),
+        (1 * S, 100.0),
+        (2 * S, 100.4),
+        (3 * S, 99.8),
+        (61 * S, 100.9),
+        (75 * S, 101.3),
+        (121 * S, 100.2),
+        (181 * S, 102.0),
+        (245 * S, 101.1),
     ]
     eng = EngineMS()
     core = MarketState()
     core.set_reference_cadence("BTC", sampling_dt_seconds=60)
     for ts, px in ticks:
-        eng.apply(MarkEvent(
-            venue="hl", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
-            symbol="BTC", exchange_ts=ts, local_recv_ts=ts, mark_px=px,
-        ))
+        eng.apply(
+            MarkEvent(
+                venue="hl",
+                product_type=ProductType.PERP,
+                mechanism=Mechanism.CLOB,
+                symbol="BTC",
+                exchange_ts=ts,
+                local_recv_ts=ts,
+                mark_px=px,
+            )
+        )
         core.apply_reference_tick("BTC", ts_ns=ts, price=px)
 
     now = 300 * S
@@ -399,22 +418,29 @@ def test_parity_with_engine_volume_window() -> None:
     eng = EngineMS()
     core = MarketState()
     for ts, px, sz in trades:
-        eng.apply(EngTrade(
-            venue="pm", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="YES",
-            exchange_ts=ts, local_recv_ts=ts, price=px, size=sz, side="buy",
-        ))
+        eng.apply(
+            EngTrade(
+                venue="pm",
+                product_type=ProductType.PREDICTION_BINARY,
+                mechanism=Mechanism.CLOB,
+                symbol="YES",
+                exchange_ts=ts,
+                local_recv_ts=ts,
+                price=px,
+                size=sz,
+                side="buy",
+            )
+        )
         core.apply_trade("YES", ts_ns=ts, price=px, size=sz)
 
     now = trades[-1][0]
-    assert core.recent_volume_usd("YES", now_ns=now) == pytest.approx(
-        eng.recent_volume_usd("YES", now=now)
-    )
+    assert core.recent_volume_usd("YES", now_ns=now) == pytest.approx(eng.recent_volume_usd("YES", now=now))
 
 
 # --------------------------------------------------------------------------
 # parity with the backtest runner MarketState (pre-bucketed bar path)
 # --------------------------------------------------------------------------
+
 
 def test_parity_with_backtest_marketstate_bar_path() -> None:
     from hlanalysis.backtest.core.events import BookSnapshot, ReferenceEvent
@@ -451,21 +477,18 @@ def test_parity_with_backtest_marketstate_bar_path() -> None:
     np.testing.assert_array_equal(c_rets, b_rets)
     np.testing.assert_array_equal(c_hl, b_hl)
 
-    assert core.recent_volume_usd(("YES",), now_ns=now) == pytest.approx(
-        bt.recent_volume_usd(("YES",), now_ns=now)
-    )
+    assert core.recent_volume_usd(("YES",), now_ns=now) == pytest.approx(bt.recent_volume_usd(("YES",), now_ns=now))
     assert core.last_mark("BTC") == bt.latest_btc_close()
 
     cb, bb = core.book("YES"), bt.book("YES")
-    assert (cb.bid_px, cb.ask_px, cb.bid_sz, cb.ask_sz) == (
-        bb.bid_px, bb.ask_px, bb.bid_sz, bb.ask_sz
-    )
+    assert (cb.bid_px, cb.ask_px, cb.bid_sz, cb.ask_sz) == (bb.bid_px, bb.ask_px, bb.bid_sz, bb.ask_sz)
     assert cb.last_l2_ts_ns == bb.last_l2_ts_ns
 
 
 # --------------------------------------------------------------------------
 # R9: independent buffers for two cadences on the same symbol
 # --------------------------------------------------------------------------
+
 
 def test_multi_cadence_independent_buffers() -> None:
     """R9 capability: two cadences registered on the same symbol maintain
@@ -494,9 +517,7 @@ def test_multi_cadence_independent_buffers() -> None:
     rets60 = ms.recent_returns("BTC", now_ns=now, lookback_seconds=lookback, dt=60)
 
     # dt=5 series must have more returns than dt=60 (finer bucketing → more bars).
-    assert rets5.size > rets60.size, (
-        f"Expected more dt=5 returns ({rets5.size}) than dt=60 ({rets60.size})"
-    )
+    assert rets5.size > rets60.size, f"Expected more dt=5 returns ({rets5.size}) than dt=60 ({rets60.size})"
     # dt=5 series must NOT be empty.
     assert rets5.size > 0, "dt=5 series produced no returns"
     # dt=60 series must NOT be empty (multiple 60s buckets have elapsed).
@@ -510,6 +531,4 @@ def test_multi_cadence_independent_buffers() -> None:
     # HL bars are also independent.
     hl5 = ms.recent_hl_bars("BTC", now_ns=now, lookback_seconds=lookback, dt=5)
     hl60 = ms.recent_hl_bars("BTC", now_ns=now, lookback_seconds=lookback, dt=60)
-    assert hl5.shape[0] > hl60.shape[0], (
-        f"Expected more dt=5 HL bars ({hl5.shape[0]}) than dt=60 ({hl60.shape[0]})"
-    )
+    assert hl5.shape[0] > hl60.shape[0], f"Expected more dt=5 HL bars ({hl5.shape[0]}) than dt=60 ({hl60.shape[0]})"

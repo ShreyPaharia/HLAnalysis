@@ -6,6 +6,7 @@ The backtest and live engine disagree on ``question_idx`` for the same market
 silently drops markets. The stable HL ``symbol`` (``#NNNN``) is present on both
 sides and on every fill, so reconciliation must be able to key on it.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,10 +24,29 @@ from hlanalysis.parity.sources import (
 
 
 def test_symbol_key_matches_despite_mismatched_question_idx():
-    live = [LiveMarket(question_idx=31, symbol="#1670", realized_pnl=-133.0, traded=True,
-                       halt_active=False, sigma=None, reference_price=None, n_fills=48)]
-    sim = [SimMarket(question_idx=1000167, symbol="#1670", realized_pnl=-196.0,
-                     traded=True, sigma=None, reference_price=None, n_fills=17)]
+    live = [
+        LiveMarket(
+            question_idx=31,
+            symbol="#1670",
+            realized_pnl=-133.0,
+            traded=True,
+            halt_active=False,
+            sigma=None,
+            reference_price=None,
+            n_fills=48,
+        )
+    ]
+    sim = [
+        SimMarket(
+            question_idx=1000167,
+            symbol="#1670",
+            realized_pnl=-196.0,
+            traded=True,
+            sigma=None,
+            reference_price=None,
+            n_fills=17,
+        )
+    ]
 
     # question_idx keying (default) can't pair them → two one-sided pairs.
     assert all(not p.is_matched for p in build_pairs(live, sim))
@@ -53,16 +73,36 @@ def test_symbol_rollup_separates_unindexed_venue_fills(tmp_path):
     (PnL summed, symbol arbitrary); a symbol rollup keeps them separate and
     credits each market's closed_pnl correctly."""
     dal = _dal(tmp_path)
-    dal.append_fill(Fill(
-        fill_id="f1", cloid="c1", question_idx=-1, symbol="#2250", side="sell",
-        price=0.80, size=100.0, fee=0.0, ts_ns=1_000, closed_pnl=-5.0,
-        source=FILL_SOURCE_VENUE,
-    ))
-    dal.append_fill(Fill(
-        fill_id="f2", cloid="c2", question_idx=-1, symbol="#1591", side="sell",
-        price=0.95, size=100.0, fee=0.0, ts_ns=2_000, closed_pnl=8.0,
-        source=FILL_SOURCE_VENUE,
-    ))
+    dal.append_fill(
+        Fill(
+            fill_id="f1",
+            cloid="c1",
+            question_idx=-1,
+            symbol="#2250",
+            side="sell",
+            price=0.80,
+            size=100.0,
+            fee=0.0,
+            ts_ns=1_000,
+            closed_pnl=-5.0,
+            source=FILL_SOURCE_VENUE,
+        )
+    )
+    dal.append_fill(
+        Fill(
+            fill_id="f2",
+            cloid="c2",
+            question_idx=-1,
+            symbol="#1591",
+            side="sell",
+            price=0.95,
+            size=100.0,
+            fee=0.0,
+            ts_ns=2_000,
+            closed_pnl=8.0,
+            source=FILL_SOURCE_VENUE,
+        )
+    )
 
     # question_idx rollup collapses both into a single -1 market.
     by_q = load_live_markets_from_db(dal.db_path)

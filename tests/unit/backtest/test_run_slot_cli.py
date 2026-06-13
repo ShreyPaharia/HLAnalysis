@@ -4,6 +4,7 @@ The run path must be able to reference a live strategy.yaml slot directly
 instead of a hand-written params JSON, so a sim run is config-faithful by
 construction.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -20,8 +21,14 @@ LIVE = Path("config/strategy.yaml")
 
 def _args(**kw):
     base = dict(
-        slot=None, slot_config=str(LIVE), slot_class=None, config=None, strategy=None,
-        scan_mode=None, scan_min_interval_seconds=0.2, scan_max_interval_seconds=2.0,
+        slot=None,
+        slot_config=str(LIVE),
+        slot_class=None,
+        config=None,
+        strategy=None,
+        scan_mode=None,
+        scan_min_interval_seconds=0.2,
+        scan_max_interval_seconds=2.0,
     )
     base.update(kw)
     return argparse.Namespace(**base)
@@ -86,11 +93,20 @@ def test_unknown_slot_errors_with_available_aliases():
 def _runcfg_args(**kw):
     """A complete Namespace for _run_config_from_args."""
     base = dict(
-        scanner_interval_seconds=1.0, tick_size=0.001, lot_size=1.0,
-        slippage_bps=0.0, fee_taker=0.0, fee_model="flat", fee_rate=0.0,
-        depth=None, order_latency_ms=50.0, scan_mode=None,
-        scan_min_interval_seconds=0.2, scan_max_interval_seconds=2.0,
-        min_inter_order_seconds=0.0, ioc_fleeting_persistence_seconds=0.0,
+        scanner_interval_seconds=1.0,
+        tick_size=0.001,
+        lot_size=1.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        fee_model="flat",
+        fee_rate=0.0,
+        depth=None,
+        order_latency_ms=50.0,
+        scan_mode=None,
+        scan_min_interval_seconds=0.2,
+        scan_max_interval_seconds=2.0,
+        min_inter_order_seconds=0.0,
+        ioc_fleeting_persistence_seconds=0.0,
     )
     base.update(kw)
     return argparse.Namespace(**base)
@@ -113,8 +129,10 @@ def test_slot_run_stashes_live_inventory_caps_on_args():
 def test_run_config_builds_sim_risk_caps_from_args():
     """_run_config_from_args must translate the stashed caps into RunConfig."""
     args = _runcfg_args(
-        sim_max_inventory_usd=1000.0, sim_max_concurrent_positions=5,
-        sim_daily_loss_cap_usd=100.0, sim_daily_window_start_hour_utc=6,
+        sim_max_inventory_usd=1000.0,
+        sim_max_concurrent_positions=5,
+        sim_daily_loss_cap_usd=100.0,
+        sim_daily_window_start_hour_utc=6,
     )
     rc = _run_config_from_args(args, None)
     assert rc.sim_risk_caps is not None

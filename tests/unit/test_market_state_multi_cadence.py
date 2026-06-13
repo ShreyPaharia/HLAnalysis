@@ -5,6 +5,7 @@ Lets a single slot run different vol_sampling_dt_seconds per question class
 (v31 buckets dt=2 vs v31 binary/v1 dt=5) off the SAME feed. Single-cadence
 reads must stay bit-identical to the legacy per-symbol path.
 """
+
 from __future__ import annotations
 
 import math
@@ -16,9 +17,13 @@ from hlanalysis.events import MarkEvent, Mechanism, ProductType
 def _mark(symbol: str, px: float, ts_s: float) -> MarkEvent:
     ts = int(ts_s * 1_000_000_000)
     return MarkEvent(
-        venue="hyperliquid", product_type=ProductType.PERP,
-        mechanism=Mechanism.CLOB, symbol=symbol,
-        exchange_ts=ts, local_recv_ts=ts, mark_px=px,
+        venue="hyperliquid",
+        product_type=ProductType.PERP,
+        mechanism=Mechanism.CLOB,
+        symbol=symbol,
+        exchange_ts=ts,
+        local_recv_ts=ts,
+        mark_px=px,
     )
 
 

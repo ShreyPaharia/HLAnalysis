@@ -2,6 +2,7 @@
 pulled engine snapshots. Covers snapshot resolution, the gzip→read-only open, and
 the PnL/row-count summary against a synthetic state.db matching the engine schema.
 """
+
 from __future__ import annotations
 
 import gzip

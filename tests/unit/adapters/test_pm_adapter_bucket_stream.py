@@ -8,6 +8,7 @@ Harness mirrors tests/unit/test_pm_adapter.py:
   QuestionMetaEvents that land on the queue before the WS exits.
 - asyncio.wait_for / pytest-asyncio drives the async test.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -30,6 +31,7 @@ from hlanalysis.events import Mechanism, ProductType, QuestionMetaEvent
 
 def _bucket_event():
     """One multi-strike event with two sub-markets (out of order by strike)."""
+
     def mk(s, y, n, c):
         return {
             "conditionId": c,
@@ -38,6 +40,7 @@ def _bucket_event():
             "outcomePrices": json.dumps(["0", "0"]),
             "endDate": "2026-06-12T16:00:00Z",
         }
+
     return [
         {
             "slug": "btc-multi-strikes-weekly-x",
@@ -126,8 +129,7 @@ def test_bucket_series_emits_one_pricebucket_meta_with_all_legs():
     with class=priceBucket, carrying all leg token IDs in ascending-strike order
     and bucketLayout=above_ladder."""
     gamma = GammaClient(http_get=lambda url, params: _bucket_event())
-    metas = _run_one_poll(gamma, klass="priceBucket",
-                          series="btc-multi-strikes-weekly", underlying="BTC")
+    metas = _run_one_poll(gamma, klass="priceBucket", series="btc-multi-strikes-weekly", underlying="BTC")
     bucket_metas = [m for m in metas if dict(zip(m.keys, m.values)).get("class") == "priceBucket"]
     assert len(bucket_metas) == 1, f"expected 1 priceBucket meta, got {len(bucket_metas)}"
     kv = dict(zip(bucket_metas[0].keys, bucket_metas[0].values))
@@ -139,8 +141,7 @@ def test_updown_series_still_emits_per_market_binaries():
     """A priceBinary subscription (legacy up/down path) must still emit one
     QuestionMetaEvent per sub-market — regression guard for the existing path."""
     gamma = GammaClient(http_get=lambda url, params: _bucket_event())
-    metas = _run_one_poll(gamma, klass="priceBinary",
-                          series="btc-up-or-down-daily", underlying="BTC")
+    metas = _run_one_poll(gamma, klass="priceBinary", series="btc-up-or-down-daily", underlying="BTC")
     classes = [dict(zip(m.keys, m.values)).get("class") for m in metas]
     assert classes == ["priceBinary", "priceBinary"], (
         f"expected 2 priceBinary metas (one per sub-market), got: {classes}"
@@ -186,6 +187,7 @@ def test_one_series_http_error_does_not_starve_other_series():
     series is listed FIRST so that, without per-subscription isolation, it would
     starve the good series entirely (the live `eth-up-or-down-daily` 500 that
     suppressed the BTC multi-strike buckets)."""
+
     def _http_get(url, params):
         if params.get("series_slug") == "eth-up-or-down-daily":
             raise requests.exceptions.HTTPError("500 Server Error: boom")
@@ -199,6 +201,5 @@ def test_one_series_http_error_does_not_starve_other_series():
     metas = _run_poll_multi(gamma, subs)
     bucket_metas = [m for m in metas if dict(zip(m.keys, m.values)).get("class") == "priceBucket"]
     assert len(bucket_metas) == 1, (
-        f"good series starved by the bad series' 500: expected 1 priceBucket "
-        f"meta, got {len(bucket_metas)}"
+        f"good series starved by the bad series' 500: expected 1 priceBucket meta, got {len(bucket_metas)}"
     )

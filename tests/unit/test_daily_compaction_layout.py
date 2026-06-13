@@ -15,6 +15,7 @@ These tests pin that contract: the standard reader path must read a mixed
 hourly + daily tree, and the daily file's `hour` partition value is the
 harmless string "all".
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -34,13 +35,7 @@ def _write(path: Path, n: int, px0: float) -> None:
 def _tree(root: Path) -> Path:
     """A single stream with one legacy hourly partition and one daily one."""
     stream = (
-        root
-        / "venue=test"
-        / "product_type=perp"
-        / "mechanism=clob"
-        / "event=trade"
-        / "symbol=BTC"
-        / "date=2026-06-04"
+        root / "venue=test" / "product_type=perp" / "mechanism=clob" / "event=trade" / "symbol=BTC" / "date=2026-06-04"
     )
     _write(stream / "hour=05" / "compacted.parquet", 3, 100.0)  # legacy hourly
     _write(stream / "hour=all" / "compacted.parquet", 4, 200.0)  # daily-compacted
@@ -54,10 +49,14 @@ def test_duckdb_hive_glob_reads_mixed_hourly_and_daily(tmp_path: Path, monkeypat
     _tree(tmp_path)
 
     glob = glob_for(venue="test", product_type="perp", event="trade", symbol="BTC")
-    df = duckdb.connect().execute(
-        f"SELECT hour, count(*) AS n FROM read_parquet('{glob}', hive_partitioning=true) "
-        "GROUP BY hour ORDER BY hour"
-    ).df()
+    df = (
+        duckdb.connect()
+        .execute(
+            f"SELECT hour, count(*) AS n FROM read_parquet('{glob}', hive_partitioning=true) "
+            "GROUP BY hour ORDER BY hour"
+        )
+        .df()
+    )
 
     # Both partitions are read through the single unchanged glob.
     assert dict(zip(df["hour"], df["n"])) == {"05": 3, "all": 4}

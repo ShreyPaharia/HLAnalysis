@@ -4,6 +4,7 @@ Moved verbatim from ``hlanalysis/sim/data/binance_klines.py``. The reference
 stream is consumed via ``ReferenceEvent`` by the runner regardless of which
 data source emits it.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -34,9 +35,7 @@ def _interval_ms(interval: str) -> int:
     try:
         return _INTERVAL_MS[interval]
     except KeyError:
-        raise ValueError(
-            f"unsupported kline interval {interval!r}; known: {sorted(_INTERVAL_MS)}"
-        ) from None
+        raise ValueError(f"unsupported kline interval {interval!r}; known: {sorted(_INTERVAL_MS)}") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,14 +126,16 @@ def fetch_perp_klines(
         if not page:
             break
         for row in page:
-            out.append(Kline(
-                ts_ns=int(row[0]) * 1_000_000,
-                open=float(row[1]),
-                high=float(row[2]),
-                low=float(row[3]),
-                close=float(row[4]),
-                volume=float(row[5]),
-            ))
+            out.append(
+                Kline(
+                    ts_ns=int(row[0]) * 1_000_000,
+                    open=float(row[1]),
+                    high=float(row[2]),
+                    low=float(row[3]),
+                    close=float(row[4]),
+                    volume=float(row[5]),
+                )
+            )
         cursor = int(page[-1][0]) + 60_000  # advance past last bar's open_time
         if len(page) < _LIMIT:
             break

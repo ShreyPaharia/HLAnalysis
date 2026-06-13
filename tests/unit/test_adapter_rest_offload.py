@@ -7,6 +7,7 @@ These tests assert the network I/O is offloaded to a worker thread (mirrors the
 engine ExecutionClient offload, SHR-41), while the cache mutation stays on the
 loop thread (no data races).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -35,6 +36,7 @@ class _RecordingResp:
 
 # ---- Hyperliquid info endpoint ----
 
+
 @pytest.mark.asyncio
 async def test_hl_fetch_outcome_meta_runs_off_event_loop(monkeypatch):
     box: dict = {}
@@ -51,8 +53,7 @@ async def test_hl_fetch_outcome_meta_runs_off_event_loop(monkeypatch):
     assert payload == {"outcomes": [], "questions": []}
     assert box["thread"] is not None, "requests.post was never called"
     assert box["thread"] != loop_thread, (
-        "HL outcomeMeta requests.post ran on the event-loop thread — must be "
-        "offloaded via asyncio.to_thread()."
+        "HL outcomeMeta requests.post ran on the event-loop thread — must be offloaded via asyncio.to_thread()."
     )
 
 
@@ -77,6 +78,7 @@ def test_hl_meta_fetch_helpers_are_async():
 
 # ---- Polymarket Gamma endpoint ----
 
+
 class _RecordingGamma:
     """Records the thread `fetch_events` runs on; returns one open BTC market."""
 
@@ -85,19 +87,23 @@ class _RecordingGamma:
 
     def fetch_events(self, **kw):
         self.fetch_thread = threading.get_ident()
-        return [{
-            "markets": [{
-                "conditionId": "0xfixturecond",
-                "clobTokenIds": '["tok-yes","tok-no"]',
-                "endDate": "2026-05-25T00:00:00Z",
-                "description": (
-                    "Will BTC go up or down? Resolves based on the "
-                    "Binance 1 minute candle for BTC/USDT May 24 '26 "
-                    "20:00 in the ET timezone..."
-                ),
-                "outcomePrices": '["0.5","0.5"]',
-            }]
-        }]
+        return [
+            {
+                "markets": [
+                    {
+                        "conditionId": "0xfixturecond",
+                        "clobTokenIds": '["tok-yes","tok-no"]',
+                        "endDate": "2026-05-25T00:00:00Z",
+                        "description": (
+                            "Will BTC go up or down? Resolves based on the "
+                            "Binance 1 minute candle for BTC/USDT May 24 '26 "
+                            "20:00 in the ET timezone..."
+                        ),
+                        "outcomePrices": '["0.5","0.5"]',
+                    }
+                ]
+            }
+        ]
 
     @staticmethod
     def iter_binary_markets(events):
@@ -124,8 +130,11 @@ async def test_pm_gamma_fetch_runs_off_event_loop():
     gamma = _RecordingGamma()
     adapter = PolymarketAdapter(ws_factory=lambda url: _IdleWS(), gamma_client=gamma)
     sub = Subscription(
-        venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="*", channels=("book",),
+        venue="polymarket",
+        product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB,
+        symbol="*",
+        channels=("book",),
         match={"series_slug": "btc-up-or-down-daily", "underlying": "BTC"},
     )
     loop_thread = threading.get_ident()

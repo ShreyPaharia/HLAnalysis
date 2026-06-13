@@ -8,6 +8,7 @@ flag position drift, and alert on Telegram when any drift is detected.
 Split into a PURE core (SlotRecon / compare_slot / format_report — no IO, fully
 unit-tested) and a thin IO shell (gather_slot / build_report / main).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -49,7 +50,7 @@ _24H_NS = 24 * 3600 * 1_000_000_000
 
 @dataclass(frozen=True, slots=True)
 class Drift:
-    kind: str       # "qty_mismatch" | "vanished" | "orphan"
+    kind: str  # "qty_mismatch" | "vanished" | "orphan"
     symbol: str
     db_qty: float
     venue_qty: float
@@ -61,6 +62,7 @@ class KlassStat:
     the venue closedPnl-fee of fills in this class; open_mtm is the unrealized
     PnL of still-open positions in this class. total_pnl mirrors the slot's
     total_true_pnl decomposition (realized + open MTM)."""
+
     realized_pnl: float
     open_mtm: float
     fills: int
@@ -73,14 +75,14 @@ class KlassStat:
 @dataclass(frozen=True, slots=True)
 class SlotRecon:
     alias: str
-    realized_pnl: float                       # local DB realized (diagnostic)
+    realized_pnl: float  # local DB realized (diagnostic)
     open_mtm: float
     account_value_usd: float
     positions_known: bool
-    venue_realized_pnl: float | None = None   # venue realized closedPnl (Σ closedPnl-fee)
-    account_pnl_all_time: float | None = None # HL portfolio equity-based PnL (matches UI)
-    fills_count: int | None = None            # # of strategy (outcome-market) fills
-    pnl_mismatch: bool = False                # local vs venue closedPnl diverge > tolerance
+    venue_realized_pnl: float | None = None  # venue realized closedPnl (Σ closedPnl-fee)
+    account_pnl_all_time: float | None = None  # HL portfolio equity-based PnL (matches UI)
+    fills_count: int | None = None  # # of strategy (outcome-market) fills
+    pnl_mismatch: bool = False  # local vs venue closedPnl diverge > tolerance
     # SHR-77: per-market-class (priceBinary/priceBucket/unknown) split of the
     # outcome PnL + fills. Populated for HL slots only (PM is binary by
     # construction); None for PM and for slots whose venue read failed.
@@ -123,9 +125,7 @@ class SlotRecon:
         Uses venue_realized_pnl_window (HL) when available; falls back to
         realized_pnl_window (local, PM). Open MTM is always today's figure."""
         base = (
-            self.venue_realized_pnl_window
-            if self.venue_realized_pnl_window is not None
-            else self.realized_pnl_window
+            self.venue_realized_pnl_window if self.venue_realized_pnl_window is not None else self.realized_pnl_window
         )
         return base + self.open_mtm
 
@@ -137,7 +137,7 @@ class SlotRecon:
 def compare_slot(
     *,
     alias: str,
-    db_positions: list[tuple[str, float]],   # (symbol, qty)
+    db_positions: list[tuple[str, float]],  # (symbol, qty)
     db_realized_pnl: float,
     venue: ClearinghouseState,
     qty_tolerance: float,
@@ -173,8 +173,10 @@ def compare_slot(
             if v_qty is None:
                 drift.append(Drift("vanished", sym, db_qty, 0.0))
             elif not math.isclose(
-                v_qty, db_qty,
-                rel_tol=_QTY_MISMATCH_REL_TOL, abs_tol=qty_tolerance,
+                v_qty,
+                db_qty,
+                rel_tol=_QTY_MISMATCH_REL_TOL,
+                abs_tol=qty_tolerance,
             ):
                 drift.append(Drift("qty_mismatch", sym, db_qty, v_qty))
         for sym, v_qty in venue_by_sym.items():
@@ -192,8 +194,7 @@ def compare_slot(
     # window must stay within HL's fill-API retention; the 24h default is well
     # inside it. PM has no venue realized (window is None) → never flags here.
     pnl_mismatch = (
-        venue_realized_pnl_window is not None
-        and abs(realized_pnl_window - venue_realized_pnl_window) > pnl_tolerance
+        venue_realized_pnl_window is not None and abs(realized_pnl_window - venue_realized_pnl_window) > pnl_tolerance
     )
 
     return SlotRecon(
@@ -216,7 +217,9 @@ def compare_slot(
 
 
 def _split_by_klass(
-    outcome_fills, venue_positions, coin_klass: dict[str, str],
+    outcome_fills,
+    venue_positions,
+    coin_klass: dict[str, str],
 ) -> dict[str, KlassStat]:
     """Group outcome fills + open positions by market class via the persisted
     coin("#N")→klass map (SHR-77). Pure: callers pass the already-filtered
@@ -258,22 +261,11 @@ def format_report(recon: list[SlotRecon]) -> str:
     for r in recon:
         status = "DRIFT" if r.has_drift else "OK"
         lines.append(f"[{r.alias}] {status}")
-        venue_str = (
-            f"{r.venue_realized_pnl:+.2f}" if r.venue_realized_pnl is not None else "n/a"
-        )
-        lines.append(
-            f"  strategy_pnl(outcome-only)={r.total_true_pnl:+.2f}  "
-            f"acct_value={r.account_value_usd:.2f}"
-        )
-        lines.append(
-            f"    venue_outcome_realized={venue_str}  local={r.realized_pnl:+.2f}  "
-            f"open_mtm={r.open_mtm:+.2f}"
-        )
+        venue_str = f"{r.venue_realized_pnl:+.2f}" if r.venue_realized_pnl is not None else "n/a"
+        lines.append(f"  strategy_pnl(outcome-only)={r.total_true_pnl:+.2f}  acct_value={r.account_value_usd:.2f}")
+        lines.append(f"    venue_outcome_realized={venue_str}  local={r.realized_pnl:+.2f}  open_mtm={r.open_mtm:+.2f}")
         if r.account_pnl_all_time is not None:
-            lines.append(
-                f"    full_account_pnl(all-time, incl non-strategy perp/spot)="
-                f"{r.account_pnl_all_time:+.2f}"
-            )
+            lines.append(f"    full_account_pnl(all-time, incl non-strategy perp/spot)={r.account_pnl_all_time:+.2f}")
         if not r.positions_known:
             lines.append("  (positions unknown — recon skipped this cycle)")
         if r.pnl_mismatch:
@@ -282,9 +274,7 @@ def format_report(recon: list[SlotRecon]) -> str:
                 f"(local ledger diverges from venue truth)"
             )
         for d in r.drift:
-            lines.append(
-                f"  ! {d.kind} {d.symbol}: db_qty={d.db_qty} venue_qty={d.venue_qty}"
-            )
+            lines.append(f"  ! {d.kind} {d.symbol}: db_qty={d.db_qty} venue_qty={d.venue_qty}")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -335,9 +325,7 @@ def format_daily_summary(recon: list[SlotRecon], *, date_str: str | None = None)
                 all_klasses |= set(r.klass_breakdown)
             if r.klass_breakdown_window:
                 all_klasses |= set(r.klass_breakdown_window)
-            for klass in _KLASS_ORDER + tuple(
-                k for k in sorted(all_klasses) if k not in _KLASS_ORDER
-            ):
+            for klass in _KLASS_ORDER + tuple(k for k in sorted(all_klasses) if k not in _KLASS_ORDER):
                 if klass not in all_klasses:
                     continue
                 st_tot = r.klass_breakdown.get(klass) if r.klass_breakdown else None
@@ -354,8 +342,7 @@ def format_daily_summary(recon: list[SlotRecon], *, date_str: str | None = None)
                 win_pnl_str, win_fills_str = _klass_cell(st_win, win_known)
                 tot_pnl_str, tot_fills_str = _klass_cell(st_tot, tot_known)
                 lines.append(
-                    f"    {label}: 24h {win_pnl_str} | total {tot_pnl_str} | "
-                    f"fills {win_fills_str}/{tot_fills_str}"
+                    f"    {label}: 24h {win_pnl_str} | total {tot_pnl_str} | fills {win_fills_str}/{tot_fills_str}"
                 )
         total_window += r.window_total_pnl
         total_alltime += r.total_true_pnl
@@ -363,15 +350,17 @@ def format_daily_summary(recon: list[SlotRecon], *, date_str: str | None = None)
             drifting.append(r.alias)
     lines.append("")
     recon_line = "all reconciled ✅" if not drifting else f"⚠️ DRIFT: {', '.join(drifting)}"
-    lines.append(
-        f"Total strategy PnL: 24h {total_window:+.2f} | total {total_alltime:+.2f}  |  {recon_line}"
-    )
+    lines.append(f"Total strategy PnL: 24h {total_window:+.2f} | total {total_alltime:+.2f}  |  {recon_line}")
     return "\n".join(lines)
 
 
 def gather_slot(
-    *, alias: str, dal: StateDAL, exec_client: ExecutionClient,
-    qty_tolerance: float, pnl_tolerance: float = 1.0,
+    *,
+    alias: str,
+    dal: StateDAL,
+    exec_client: ExecutionClient,
+    qty_tolerance: float,
+    pnl_tolerance: float = 1.0,
     fetch_venue_realized: bool = True,
     now_ns: int | None = None,
     window_hours: float = 24.0,
@@ -411,10 +400,7 @@ def gather_slot(
         # HL's (capped) fill history twice and risk a per-IP 429. outcome_only:
         # strategy = HIP-4 outcome markets ("#N"), excluding non-strategy perp/spot.
         try:
-            outcome = [
-                f for f in exec_client.user_fills(since_ts_ns=0)
-                if f.symbol.startswith("#")
-            ]
+            outcome = [f for f in exec_client.user_fills(since_ts_ns=0) if f.symbol.startswith("#")]
             venue_realized = sum(f.closed_pnl - f.fee for f in outcome)
             fills_count = len(outcome)
             # SHR-77: split realized PnL + fills (and open-MTM) by market class.
@@ -423,20 +409,23 @@ def gather_slot(
             # no mapped class fall into an explicit "unknown" bucket (never
             # silently folded into binary/bucket on a money report).
             klass_breakdown = _split_by_klass(
-                outcome, venue.positions, dal.coin_klass_map(),
+                outcome,
+                venue.positions,
+                dal.coin_klass_map(),
             )
             # Trailing-window: filter the already-fetched fills — no second fetch.
             # Fills carry a ts_ns attribute; filter to those within the window.
             outcome_window = [
-                f for f in outcome
-                if getattr(f, "ts_ns", None) is not None and f.ts_ns >= window_start_ns
+                f for f in outcome if getattr(f, "ts_ns", None) is not None and f.ts_ns >= window_start_ns
             ]
             venue_realized_window = sum(f.closed_pnl - f.fee for f in outcome_window)
             fills_count_window = len(outcome_window)
             # Window klass split: open MTM is passed through (it IS today's
             # unrealized); realized/fills come from the windowed fill list.
             klass_breakdown_window = _split_by_klass(
-                outcome_window, venue.positions, dal.coin_klass_map(),
+                outcome_window,
+                venue.positions,
+                dal.coin_klass_map(),
             )
         except Exception:  # noqa: BLE001 — venue read is best-effort; report still useful
             venue_realized = None
@@ -468,10 +457,15 @@ def gather_slot(
         realized_pnl_window = 0.0
 
     return compare_slot(
-        alias=alias, db_positions=db_positions, db_realized_pnl=db_realized,
-        venue=venue, qty_tolerance=qty_tolerance,
-        venue_realized_pnl=venue_realized, pnl_tolerance=pnl_tolerance,
-        account_pnl_all_time=account_pnl, fills_count=fills_count,
+        alias=alias,
+        db_positions=db_positions,
+        db_realized_pnl=db_realized,
+        venue=venue,
+        qty_tolerance=qty_tolerance,
+        venue_realized_pnl=venue_realized,
+        pnl_tolerance=pnl_tolerance,
+        account_pnl_all_time=account_pnl,
+        fills_count=fills_count,
         klass_breakdown=klass_breakdown,
         venue_realized_pnl_window=venue_realized_window,
         realized_pnl_window=realized_pnl_window,
@@ -481,8 +475,11 @@ def gather_slot(
 
 
 def build_report(
-    deploy_cfg, strategies_cfg, *,
-    qty_tolerance: float, pnl_tolerance: float = 1.0,
+    deploy_cfg,
+    strategies_cfg,
+    *,
+    qty_tolerance: float,
+    pnl_tolerance: float = 1.0,
     now_ns: int | None = None,
     window_hours: float = 24.0,
 ) -> list[SlotRecon]:
@@ -515,21 +512,35 @@ def build_report(
             # Only HL exposes an authoritative venue realized (user_fills
             # closedPnl); PM realized lives in our local settlement/fill ledger.
             fetch_venue_realized = isinstance(acct, HyperliquidAccount)
-            out.append(gather_slot(alias=alias, dal=dal, exec_client=client,
-                                   qty_tolerance=qty_tolerance, pnl_tolerance=pnl_tolerance,
-                                   fetch_venue_realized=fetch_venue_realized,
-                                   now_ns=now_ns, window_hours=window_hours))
+            out.append(
+                gather_slot(
+                    alias=alias,
+                    dal=dal,
+                    exec_client=client,
+                    qty_tolerance=qty_tolerance,
+                    pnl_tolerance=pnl_tolerance,
+                    fetch_venue_realized=fetch_venue_realized,
+                    now_ns=now_ns,
+                    window_hours=window_hours,
+                )
+            )
         except Exception as e:  # noqa: BLE001 — a bad slot must not abort the report
-            out.append(SlotRecon(alias=alias, realized_pnl=0.0, open_mtm=0.0,
-                                 account_value_usd=0.0, positions_known=False,
-                                 drift=[]))
+            out.append(
+                SlotRecon(
+                    alias=alias, realized_pnl=0.0, open_mtm=0.0, account_value_usd=0.0, positions_known=False, drift=[]
+                )
+            )
             logger.warning("recon slot {} failed: {}", alias, e)
     return out
 
 
 async def _post_tg(
-    text: str, *, bot_token: str | None, chat_id: str | None,
-    session_factory=None, tg_factory=None,
+    text: str,
+    *,
+    bot_token: str | None,
+    chat_id: str | None,
+    session_factory=None,
+    tg_factory=None,
 ) -> bool:
     """Send one Telegram message. Credentials are the engine's own
     deploy.alerts.telegram (env TG_BOT_TOKEN/TG_CHAT_ID) — NOT TELEGRAM_*.
@@ -539,45 +550,70 @@ async def _post_tg(
         return False
     if session_factory is None:
         import aiohttp as _aiohttp
+
         session_factory = _aiohttp.ClientSession
     if tg_factory is None:
         from hlanalysis.alerts.telegram import TelegramClient
+
         tg_factory = TelegramClient
     async with session_factory() as session:
         return await tg_factory(bot_token=bot_token, chat_id=chat_id, session=session).send(text)
 
 
 async def _maybe_alert(
-    report_text: str, has_drift: bool, *,
-    bot_token: str | None = None, chat_id: str | None = None,
-    session_factory=None, tg_factory=None,
+    report_text: str,
+    has_drift: bool,
+    *,
+    bot_token: str | None = None,
+    chat_id: str | None = None,
+    session_factory=None,
+    tg_factory=None,
 ) -> None:
     """Send the full reconciliation report to Telegram ONLY when there is drift."""
     if not has_drift:
         return
-    await _post_tg("⚠️ Reconciliation DRIFT\n\n" + report_text, bot_token=bot_token,
-                   chat_id=chat_id, session_factory=session_factory, tg_factory=tg_factory)
+    await _post_tg(
+        "⚠️ Reconciliation DRIFT\n\n" + report_text,
+        bot_token=bot_token,
+        chat_id=chat_id,
+        session_factory=session_factory,
+        tg_factory=tg_factory,
+    )
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Out-of-band venue reconciliation report.")
     p.add_argument("--strategy-config", type=Path, default=Path("config/strategy.yaml"))
     p.add_argument("--deploy-config", type=Path, default=Path("config/deploy.yaml"))
-    p.add_argument("--qty-tolerance", type=float, default=_QTY_MISMATCH_ABS_TOL,
-                   help="abs share tolerance for position qty drift; defaults to the "
-                        "engine reconcile's (2e-2) so benign PM data-api rounding "
-                        "doesn't false-flag DRIFT")
-    p.add_argument("--pnl-tolerance", type=float, default=1.0,
-                   help="USD divergence between local and venue realized that counts as drift")
+    p.add_argument(
+        "--qty-tolerance",
+        type=float,
+        default=_QTY_MISMATCH_ABS_TOL,
+        help="abs share tolerance for position qty drift; defaults to the "
+        "engine reconcile's (2e-2) so benign PM data-api rounding "
+        "doesn't false-flag DRIFT",
+    )
+    p.add_argument(
+        "--pnl-tolerance",
+        type=float,
+        default=1.0,
+        help="USD divergence between local and venue realized that counts as drift",
+    )
     p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
-    p.add_argument("--summary", action="store_true",
-                   help="send the compact one-message daily summary to Telegram (always)")
+    p.add_argument(
+        "--summary", action="store_true", help="send the compact one-message daily summary to Telegram (always)"
+    )
     p.add_argument("--date", type=str, default=None, help="date label for the summary header")
-    p.add_argument("--window-hours", type=float, default=24.0,
-                   help="look-back window in hours for the trailing PnL figures (default 24)")
+    p.add_argument(
+        "--window-hours",
+        type=float,
+        default=24.0,
+        help="look-back window in hours for the trailing PnL figures (default 24)",
+    )
     args = p.parse_args()
 
     from .config import load_deploy_config, load_strategies_config
+
     deploy_cfg = load_deploy_config(args.deploy_config)
     strategies_cfg = load_strategies_config(args.strategy_config)
 
@@ -587,9 +623,14 @@ def main() -> None:
     chat_id = getattr(tg, "chat_id", None)
 
     now_ns = time.time_ns()
-    recon = build_report(deploy_cfg, strategies_cfg, qty_tolerance=args.qty_tolerance,
-                         pnl_tolerance=args.pnl_tolerance, now_ns=now_ns,
-                         window_hours=args.window_hours)
+    recon = build_report(
+        deploy_cfg,
+        strategies_cfg,
+        qty_tolerance=args.qty_tolerance,
+        pnl_tolerance=args.pnl_tolerance,
+        now_ns=now_ns,
+        window_hours=args.window_hours,
+    )
     has_drift = any(r.has_drift for r in recon)
     text = format_report(recon)
 
@@ -602,21 +643,29 @@ def main() -> None:
         raise SystemExit(1 if has_drift else 0)
 
     if args.json:
-        print(json.dumps({
-            "generated_at_ns": now_ns,
-            "has_drift": has_drift,
-            "slots": [
-                {"alias": r.alias, "realized_pnl": r.realized_pnl,
-                 "venue_realized_pnl": r.venue_realized_pnl,
-                 "account_pnl_all_time": r.account_pnl_all_time,
-                 "pnl_mismatch": r.pnl_mismatch,
-                 "open_mtm": r.open_mtm, "total_true_pnl": r.total_true_pnl,
-                 "account_value_usd": r.account_value_usd,
-                 "positions_known": r.positions_known,
-                 "drift": [vars(d) for d in r.drift]}
-                for r in recon
-            ],
-        }))
+        print(
+            json.dumps(
+                {
+                    "generated_at_ns": now_ns,
+                    "has_drift": has_drift,
+                    "slots": [
+                        {
+                            "alias": r.alias,
+                            "realized_pnl": r.realized_pnl,
+                            "venue_realized_pnl": r.venue_realized_pnl,
+                            "account_pnl_all_time": r.account_pnl_all_time,
+                            "pnl_mismatch": r.pnl_mismatch,
+                            "open_mtm": r.open_mtm,
+                            "total_true_pnl": r.total_true_pnl,
+                            "account_value_usd": r.account_value_usd,
+                            "positions_known": r.positions_known,
+                            "drift": [vars(d) for d in r.drift],
+                        }
+                        for r in recon
+                    ],
+                }
+            )
+        )
     else:
         print(text)
 

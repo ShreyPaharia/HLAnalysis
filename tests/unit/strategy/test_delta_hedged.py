@@ -1,4 +1,5 @@
 """Tests for v5 delta-hedged strategy (Phase F)."""
+
 from __future__ import annotations
 
 import pytest
@@ -28,12 +29,21 @@ def test_emits_hedge_intent_on_binary_entry() -> None:
     from hlanalysis.backtest.core.registry import build as build_strategy
 
     params = dict(
-        vol_lookback_seconds=3600, vol_sampling_dt_seconds=60,
-        edge_buffer=0.02, stop_loss_pct=None, drift_lookback_seconds=0,
-        favorite_threshold=0.0, tte_min_seconds=0, tte_max_seconds=10**9,
+        vol_lookback_seconds=3600,
+        vol_sampling_dt_seconds=60,
+        edge_buffer=0.02,
+        stop_loss_pct=None,
+        drift_lookback_seconds=0,
+        favorite_threshold=0.0,
+        tte_min_seconds=0,
+        tte_max_seconds=10**9,
         max_position_usd=100.0,
-        exit_edge_threshold=-0.01, take_profit_price=None, time_stop_seconds=0,
-        hedge_symbol="BTC-PERP", rebalance_interval_s=0, rebalance_threshold=0.0,
+        exit_edge_threshold=-0.01,
+        take_profit_price=None,
+        time_stop_seconds=0,
+        hedge_symbol="BTC-PERP",
+        rebalance_interval_s=0,
+        rebalance_threshold=0.0,
     )
     strat = build_strategy("v5_delta_hedged", params)
 
@@ -42,20 +52,38 @@ def test_emits_hedge_intent_on_binary_entry() -> None:
     # ATM also ensures binary_delta is near its maximum (phi(0)/denom), giving a
     # meaningful non-zero hedge size.
     qv = QuestionView(
-        question_idx=0, yes_symbol="YES", no_symbol="NO",
-        strike=100_000.0, expiry_ns=3600 * 10**9, settled=False,
-        underlying="BTC", klass="priceBinary", period="1d", kv=(),
+        question_idx=0,
+        yes_symbol="YES",
+        no_symbol="NO",
+        strike=100_000.0,
+        expiry_ns=3600 * 10**9,
+        settled=False,
+        underlying="BTC",
+        klass="priceBinary",
+        period="1d",
+        kv=(),
     )
     books = {
-        "YES": BookState("YES", bid_px=0.24, bid_sz=100.0, ask_px=0.25, ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=0),
-        "NO": BookState("NO", bid_px=0.74, bid_sz=100.0, ask_px=0.75, ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=0),
-        "BTC-PERP": BookState("BTC-PERP", bid_px=99_988.0, bid_sz=1e6, ask_px=100_012.0, ask_sz=1e6, last_trade_ts_ns=0, last_l2_ts_ns=0),
+        "YES": BookState(
+            "YES", bid_px=0.24, bid_sz=100.0, ask_px=0.25, ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=0
+        ),
+        "NO": BookState(
+            "NO", bid_px=0.74, bid_sz=100.0, ask_px=0.75, ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=0
+        ),
+        "BTC-PERP": BookState(
+            "BTC-PERP", bid_px=99_988.0, bid_sz=1e6, ask_px=100_012.0, ask_sz=1e6, last_trade_ts_ns=0, last_l2_ts_ns=0
+        ),
     }
     rets = tuple([0.0001] * 120)
 
     d = strat.evaluate(
-        question=qv, books=books, reference_price=100_000.0,
-        recent_returns=rets, recent_volume_usd=1000.0, position=None, now_ns=0,
+        question=qv,
+        books=books,
+        reference_price=100_000.0,
+        recent_returns=rets,
+        recent_volume_usd=1000.0,
+        position=None,
+        now_ns=0,
     )
 
     assert d.action == Action.ENTER

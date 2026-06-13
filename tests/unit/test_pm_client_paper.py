@@ -13,9 +13,13 @@ def paper() -> PMClient:
 
 def test_paper_place_marketable_fills(paper):
     req = PlaceRequest(
-        cloid="hla-v31_pm-1", symbol="71321...992563",
-        side="buy", size=100.0, price=0.92,
-        reduce_only=False, time_in_force="ioc",
+        cloid="hla-v31_pm-1",
+        symbol="71321...992563",
+        side="buy",
+        size=100.0,
+        price=0.92,
+        reduce_only=False,
+        time_in_force="ioc",
     )
     ack = paper.place(req)
     assert ack.status == "filled"
@@ -24,8 +28,13 @@ def test_paper_place_marketable_fills(paper):
 
 def test_paper_place_rejects_nonpositive_price(paper):
     req = PlaceRequest(
-        cloid="hla-v31_pm-2", symbol="t", side="buy", size=10, price=0.0,
-        reduce_only=False, time_in_force="ioc",
+        cloid="hla-v31_pm-2",
+        symbol="t",
+        side="buy",
+        size=10,
+        price=0.0,
+        reduce_only=False,
+        time_in_force="ioc",
     )
     ack = paper.place(req)
     assert ack.status == "rejected"
@@ -33,10 +42,17 @@ def test_paper_place_rejects_nonpositive_price(paper):
 
 
 def test_paper_clearinghouse_state_reflects_fills(paper):
-    paper.place(PlaceRequest(
-        cloid="hla-v31_pm-3", symbol="tok", side="buy", size=100, price=0.9,
-        reduce_only=False, time_in_force="ioc",
-    ))
+    paper.place(
+        PlaceRequest(
+            cloid="hla-v31_pm-3",
+            symbol="tok",
+            side="buy",
+            size=100,
+            price=0.9,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
     state = paper.clearinghouse_state()
     pos = [p for p in state.positions if p.symbol == "tok"]
     assert pos and pos[0].qty == 100
@@ -44,17 +60,29 @@ def test_paper_clearinghouse_state_reflects_fills(paper):
 
 
 def test_paper_realized_pnl_zero_on_open(paper):
-    paper.place(PlaceRequest(
-        cloid="hla-v31_pm-4", symbol="tok", side="buy", size=50, price=0.9,
-        reduce_only=False, time_in_force="ioc",
-    ))
+    paper.place(
+        PlaceRequest(
+            cloid="hla-v31_pm-4",
+            symbol="tok",
+            side="buy",
+            size=50,
+            price=0.9,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
     assert paper.realized_pnl_since(0) == 0.0
 
 
 def test_paper_place_idempotent_per_cloid(paper):
     req = PlaceRequest(
-        cloid="hla-v31_pm-5", symbol="tok", side="buy", size=10, price=0.5,
-        reduce_only=False, time_in_force="ioc",
+        cloid="hla-v31_pm-5",
+        symbol="tok",
+        side="buy",
+        size=10,
+        price=0.5,
+        reduce_only=False,
+        time_in_force="ioc",
     )
     a = paper.place(req)
     b = paper.place(req)
@@ -64,14 +92,28 @@ def test_paper_place_idempotent_per_cloid(paper):
 
 
 def test_paper_avg_up_on_add(paper):
-    paper.place(PlaceRequest(
-        cloid="c1", symbol="tok", side="buy", size=100, price=0.9,
-        reduce_only=False, time_in_force="ioc",
-    ))
-    paper.place(PlaceRequest(
-        cloid="c2", symbol="tok", side="buy", size=100, price=0.8,
-        reduce_only=False, time_in_force="ioc",
-    ))
+    paper.place(
+        PlaceRequest(
+            cloid="c1",
+            symbol="tok",
+            side="buy",
+            size=100,
+            price=0.9,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
+    paper.place(
+        PlaceRequest(
+            cloid="c2",
+            symbol="tok",
+            side="buy",
+            size=100,
+            price=0.8,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
     state = paper.clearinghouse_state()
     pos = next(p for p in state.positions if p.symbol == "tok")
     assert pos.qty == 200
@@ -79,14 +121,28 @@ def test_paper_avg_up_on_add(paper):
 
 
 def test_paper_position_removed_when_netted_to_zero(paper):
-    paper.place(PlaceRequest(
-        cloid="c1", symbol="tok", side="buy", size=100, price=0.9,
-        reduce_only=False, time_in_force="ioc",
-    ))
-    paper.place(PlaceRequest(
-        cloid="c2", symbol="tok", side="sell", size=100, price=0.95,
-        reduce_only=False, time_in_force="ioc",
-    ))
+    paper.place(
+        PlaceRequest(
+            cloid="c1",
+            symbol="tok",
+            side="buy",
+            size=100,
+            price=0.9,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
+    paper.place(
+        PlaceRequest(
+            cloid="c2",
+            symbol="tok",
+            side="sell",
+            size=100,
+            price=0.95,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
     state = paper.clearinghouse_state()
     assert all(p.symbol != "tok" for p in state.positions)
 
@@ -104,7 +160,9 @@ def test_live_mode_construct_does_not_touch_network():
         paper_mode=False,
         clob_host="https://clob.polymarket.com",
         private_key="0xdead",
-        clob_api_key="k", clob_api_secret="s", clob_api_passphrase="p",
+        clob_api_key="k",
+        clob_api_secret="s",
+        clob_api_passphrase="p",
     )
     # SDK is not constructed at __init__ — paper-only tests don't need
     # py-clob-client-v2 installed in some hypothetical future env.
@@ -112,8 +170,15 @@ def test_live_mode_construct_does_not_touch_network():
     # First live call lazily attempts construction; with a stub key the
     # SDK raises in ClobClient.__init__, which our wrapper turns into a
     # rejected ack rather than letting it crash the engine.
-    ack = c.place(PlaceRequest(
-        cloid="x", symbol="t", side="buy", size=1, price=0.5,
-        reduce_only=False, time_in_force="ioc",
-    ))
+    ack = c.place(
+        PlaceRequest(
+            cloid="x",
+            symbol="t",
+            side="buy",
+            size=1,
+            price=0.5,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
     assert ack.status == "rejected"

@@ -40,6 +40,7 @@ Acceptance tests
    ``MarketState.set_reference_cadence(dt_seconds)`` method exists and
    registers the cadence on the underlying shared core.
 """
+
 from __future__ import annotations
 
 import math
@@ -68,8 +69,7 @@ _LOOKBACK_SECONDS = 300  # wide enough to capture all bars in the fixture
 _BASE_PRICE = 95_000.0
 
 _TICKS: list[tuple[int, float]] = [
-    (i * _S, _BASE_PRICE * (1.0 + 0.001 * math.sin(i * 0.7) + 0.0003 * (i % 7 - 3)))
-    for i in range(120)
+    (i * _S, _BASE_PRICE * (1.0 + 0.001 * math.sin(i * 0.7) + 0.0003 * (i % 7 - 3))) for i in range(120)
 ]
 _LAST_TS = _TICKS[-1][0]
 _NOW_NS = _LAST_TS + 1  # query point just past the last tick
@@ -129,8 +129,9 @@ def test_raw_tick_returns_match_bars_returns() -> None:
         f"Return series lengths differ: raw={len(rets_raw)}, bars={len(rets_bars)}. "
         f"set_reference_cadence({_DT_SECONDS}) may not have been applied."
     )
-    np.testing.assert_allclose(rets_raw, rets_bars, rtol=0, atol=1e-10,
-                               err_msg="Raw-tick returns differ from bars returns")
+    np.testing.assert_allclose(
+        rets_raw, rets_bars, rtol=0, atol=1e-10, err_msg="Raw-tick returns differ from bars returns"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +201,9 @@ def test_raw_tick_scan_cadence_independent() -> None:
     assert len(rets_event) == len(rets_fixed), (
         f"Return series lengths differ: fixed={len(rets_fixed)}, event={len(rets_event)}"
     )
-    np.testing.assert_allclose(rets_event, rets_fixed, rtol=0, atol=1e-10,
-                               err_msg="Event-cadence returns differ from fixed-cadence")
+    np.testing.assert_allclose(
+        rets_event, rets_fixed, rtol=0, atol=1e-10, err_msg="Event-cadence returns differ from fixed-cadence"
+    )
 
     # σ must agree.
     sigma_fixed = float(np.std(rets_fixed, ddof=1)) if len(rets_fixed) > 1 else 0.0
@@ -220,9 +222,7 @@ def test_raw_tick_scan_cadence_independent() -> None:
     if len(last_intermediate) > 1:
         sigma_intermediate = float(np.std(last_intermediate, ddof=1))
         bars_ms_ref = _build_bars_state()
-        rets_bars_ref = bars_ms_ref.recent_returns(
-            now_ns=_NOW_NS, lookback_seconds=_LOOKBACK_SECONDS
-        )
+        rets_bars_ref = bars_ms_ref.recent_returns(now_ns=_NOW_NS, lookback_seconds=_LOOKBACK_SECONDS)
         sigma_bars_ref = float(np.std(rets_bars_ref, ddof=1))
         # Inflation guard: intermediate σ must be < 2× bars σ (pre-fix was ~3.46×).
         ratio = sigma_intermediate / max(sigma_bars_ref, 1e-8)
@@ -288,13 +288,25 @@ def test_runner_market_state_set_reference_cadence_api() -> None:
     ms.set_reference_cadence(5)
 
     # Feed a tick so the buffer is materialised.
-    ms.apply_reference_tick(ReferenceEvent(
-        ts_ns=1 * _S, symbol="BTC", high=100.0, low=100.0, close=100.0,
-    ))
+    ms.apply_reference_tick(
+        ReferenceEvent(
+            ts_ns=1 * _S,
+            symbol="BTC",
+            high=100.0,
+            low=100.0,
+            close=100.0,
+        )
+    )
     # A second tick in a new dt=5s bucket must produce a return.
-    ms.apply_reference_tick(ReferenceEvent(
-        ts_ns=6 * _S, symbol="BTC", high=101.0, low=101.0, close=101.0,
-    ))
+    ms.apply_reference_tick(
+        ReferenceEvent(
+            ts_ns=6 * _S,
+            symbol="BTC",
+            high=101.0,
+            low=101.0,
+            close=101.0,
+        )
+    )
     rets = ms.recent_returns(now_ns=7 * _S, lookback_seconds=60)
     assert len(rets) == 1, (
         f"Expected exactly 1 return (from bucket 0→1 crossing) but got {len(rets)}. "
@@ -331,5 +343,6 @@ def test_bars_path_unaffected_by_cadence_call() -> None:
         f"Bars path returned different lengths with/without cadence registration: "
         f"no_reg={len(rets_no)}, reg={len(rets_reg)}"
     )
-    np.testing.assert_allclose(rets_no, rets_reg, rtol=0, atol=1e-10,
-                               err_msg="Bars path changed behaviour with cadence registration")
+    np.testing.assert_allclose(
+        rets_no, rets_reg, rtol=0, atol=1e-10, err_msg="Bars path changed behaviour with cadence registration"
+    )

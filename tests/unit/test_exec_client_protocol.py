@@ -12,8 +12,10 @@ def test_hl_client_satisfies_execution_client_protocol():
     so any future HLClient/PMClient change that drops a method fails fast.
     """
     paper = HLClient(
-        account_address="0xtest", api_secret_key="0xfake",
-        base_url="https://api.hyperliquid.xyz", paper_mode=True,
+        account_address="0xtest",
+        api_secret_key="0xfake",
+        base_url="https://api.hyperliquid.xyz",
+        paper_mode=True,
     )
     assert isinstance(paper, ExecutionClient)
 
@@ -51,9 +53,15 @@ def test_pm_client_live_constructs_without_sdk_import():
     # place / cancel return failure ack / False — surfaces a misconfigured
     # slot loudly via OrderRejected alerts rather than crashing the engine.
     from hlanalysis.engine.exec_types import PlaceRequest
+
     req = PlaceRequest(
-        cloid="x", symbol="tok", side="buy", size=1.0, price=0.9,
-        reduce_only=False, time_in_force="ioc",
+        cloid="x",
+        symbol="tok",
+        side="buy",
+        size=1.0,
+        price=0.9,
+        reduce_only=False,
+        time_in_force="ioc",
     )
     ack = live.place(req)
     assert ack.status == "rejected"

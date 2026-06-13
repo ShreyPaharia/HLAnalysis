@@ -15,6 +15,7 @@ assembler — guaranteeing bit-identical output to the legacy path while
 allowing the result to be disk-cached so repeated grid cells pay only the
 cache lookup cost.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -28,9 +29,7 @@ from ._fastpath_core import (
 )
 
 
-def read_pm_book_columns(
-    book_glob: str, start_ns: int, end_ns: int
-) -> dict[str, np.ndarray] | None:
+def read_pm_book_columns(book_glob: str, start_ns: int, end_ns: int) -> dict[str, np.ndarray] | None:
     """Read the recorded PM book parquet for one token leg and return flat
     column arrays suitable for ``build_leg_event_array_from_columns``.
 
@@ -156,16 +155,10 @@ def build_pm_fast_path_bundle(
     """
     leg_arrays: dict[str, LegArrays] = {}
     for leg in q.leg_symbols:
-        book_cols = read_pm_book_columns(
-            book_glob_for(leg), q.start_ts_ns, q.end_ts_ns
-        )
+        book_cols = read_pm_book_columns(book_glob_for(leg), q.start_ts_ns, q.end_ts_ns)
         trade_cols = read_pm_trade_columns(trades, leg)
         arr = build_leg_event_array_from_columns(book_cols, trade_cols)
-        bts = (
-            book_cols["ts"]
-            if book_cols is not None
-            else np.zeros(0, dtype=np.int64)
-        )
+        bts = book_cols["ts"] if book_cols is not None else np.zeros(0, dtype=np.int64)
         leg_arrays[leg] = LegArrays(events=arr, book_ts=bts)
     return FastPathBundle(
         leg_arrays=leg_arrays,

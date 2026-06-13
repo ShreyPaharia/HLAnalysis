@@ -4,6 +4,7 @@ Consolidates what used to live across `sim/{fills,metrics,diagnostics}.py`.
 The dataclasses are stable wire types — `DiagnosticRow` / `FillRow` schemas
 in particular are consumed by reporting and downstream plotting.
 """
+
 from __future__ import annotations
 
 import math
@@ -18,6 +19,7 @@ from hlanalysis.strategy.types import Decision
 # ---------------------------------------------------------------------------
 # Fill (per simulated order match)
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class Fill:
@@ -34,6 +36,7 @@ class Fill:
 # ---------------------------------------------------------------------------
 # RunResult
 # ---------------------------------------------------------------------------
+
 
 @dataclass(slots=True)
 class RunResult:
@@ -64,6 +67,7 @@ class RunResult:
 # ---------------------------------------------------------------------------
 # Aggregate summary
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class RunSummary:
@@ -159,9 +163,7 @@ FILLS_SCHEMA = pa.schema(
 )
 
 
-_EDGE_FLOAT_FIELDS = frozenset(
-    {"p_model", "edge_yes", "edge_no", "sigma", "tau_yr", "ln_sk"}
-)
+_EDGE_FLOAT_FIELDS = frozenset({"p_model", "edge_yes", "edge_no", "sigma", "tau_yr", "ln_sk"})
 
 
 @dataclass(slots=True)
@@ -303,20 +305,12 @@ def write_fills(rows: list[FillRow], path: Path) -> None:
         "question_id": pa.array([r.question_id for r in rows], type=pa.string()),
         "question_idx": pa.array([r.question_idx for r in rows], type=pa.int64()),
         "symbol": pa.array([r.symbol for r in rows], type=pa.string()),
-        "entry_p_model": pa.array(
-            [r.entry_p_model for r in rows], type=pa.float64()
-        ),
-        "entry_edge_chosen_side": pa.array(
-            [r.entry_edge_chosen_side for r in rows], type=pa.float64()
-        ),
+        "entry_p_model": pa.array([r.entry_p_model for r in rows], type=pa.float64()),
+        "entry_edge_chosen_side": pa.array([r.entry_edge_chosen_side for r in rows], type=pa.float64()),
         "entry_sigma": pa.array([r.entry_sigma for r in rows], type=pa.float64()),
         "entry_tau_yr": pa.array([r.entry_tau_yr for r in rows], type=pa.float64()),
-        "realized_pnl_at_settle": pa.array(
-            [r.realized_pnl_at_settle for r in rows], type=pa.float64()
-        ),
-        "resolved_outcome": pa.array(
-            [r.resolved_outcome for r in rows], type=pa.string()
-        ),
+        "realized_pnl_at_settle": pa.array([r.realized_pnl_at_settle for r in rows], type=pa.float64()),
+        "resolved_outcome": pa.array([r.resolved_outcome for r in rows], type=pa.string()),
         "is_hedge": pa.array([r.is_hedge for r in rows], type=pa.bool_()),
     }
     pq.write_table(pa.table(arrays, schema=FILLS_SCHEMA), path)

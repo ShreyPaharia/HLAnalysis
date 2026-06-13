@@ -5,6 +5,7 @@ event streams are interleaved fairly via an asyncio.Queue. The engine's
 ingest loop sees one merged stream and doesn't need to care that
 hyperliquid and polymarket are separate WS connections under the hood.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -25,7 +26,8 @@ class CompositeAdapter(VenueAdapter):
         return any(a.supports(p, m) for a in self._adapters)
 
     async def stream(
-        self, subscriptions: list[Subscription],
+        self,
+        subscriptions: list[Subscription],
     ) -> AsyncIterator[NormalizedEvent]:
         queue: asyncio.Queue[NormalizedEvent] = asyncio.Queue(maxsize=10000)
 

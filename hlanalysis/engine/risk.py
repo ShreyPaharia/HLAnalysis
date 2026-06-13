@@ -16,12 +16,12 @@ from .config import StrategyConfig, match_question
 @dataclass(frozen=True, slots=True)
 class RiskInputs:
     question: QuestionView
-    question_fields: dict[str, str]      # for allowlist matcher
+    question_fields: dict[str, str]  # for allowlist matcher
     reference_price: float
-    book: BookState                       # the leg being targeted
-    recent_volume_usd: float              # last-hour notional on this question
-    positions: list[Position]             # all currently held positions
-    live_orders_total_notional: float     # USD across all live (pending/open) orders
+    book: BookState  # the leg being targeted
+    recent_volume_usd: float  # last-hour notional on this question
+    positions: list[Position]  # all currently held positions
+    live_orders_total_notional: float  # USD across all live (pending/open) orders
     realized_pnl_today: float
     kill_switch_active: bool
     last_reconcile_ns: int
@@ -78,7 +78,9 @@ class RiskGate:
 
         # 1. Allowlist
         matched = match_question(
-            self.cfg, question_idx=inp.question.question_idx, fields=inp.question_fields,
+            self.cfg,
+            question_idx=inp.question.question_idx,
+            fields=inp.question_fields,
         )
         if matched is None:
             if inp.question.question_idx in self.cfg.blocklist_question_idxs:
@@ -88,31 +90,23 @@ class RiskGate:
         # 2. Per-position cap (using matched-class override)
         notional = intent.size * intent.limit_price
         if notional > matched.max_position_usd:
-            return RiskVerdict(False, "max_position_usd",
-                                {"notional": f"{notional:.2f}", "cap": f"{matched.max_position_usd}"})
+            return RiskVerdict(
+                False, "max_position_usd", {"notional": f"{notional:.2f}", "cap": f"{matched.max_position_usd}"}
+            )
 
         # 3. Global inventory cap
-        held_plus_orders = inp.live_orders_total_notional + sum(
-            abs(p.qty) * p.avg_entry for p in inp.positions
-        )
-        if inventory_cap_exceeded(
-            held_plus_orders, notional, self.cfg.global_.max_total_inventory_usd
-        ):
+        held_plus_orders = inp.live_orders_total_notional + sum(abs(p.qty) * p.avg_entry for p in inp.positions)
+        if inventory_cap_exceeded(held_plus_orders, notional, self.cfg.global_.max_total_inventory_usd):
             new_total = held_plus_orders + notional
-            return RiskVerdict(False, "max_total_inventory",
-                                {"new_total": f"{new_total:.2f}"})
+            return RiskVerdict(False, "max_total_inventory", {"new_total": f"{new_total:.2f}"})
 
         # 4. Concurrent-positions cap
         is_topup = any(p.question_idx == intent.question_idx for p in inp.positions)
-        if concurrent_cap_exceeded(
-            len(inp.positions), is_topup, self.cfg.global_.max_concurrent_positions
-        ):
+        if concurrent_cap_exceeded(len(inp.positions), is_topup, self.cfg.global_.max_concurrent_positions):
             return RiskVerdict(False, "max_concurrent_positions")
 
         # 5. Daily loss cap
-        if daily_loss_exceeded(
-            inp.realized_pnl_today, self.cfg.global_.daily_loss_cap_usd
-        ):
+        if daily_loss_exceeded(inp.realized_pnl_today, self.cfg.global_.daily_loss_cap_usd):
             return RiskVerdict(False, "daily_loss_cap")
 
         # 7. TTE bounds
@@ -124,13 +118,11 @@ class RiskGate:
         if inp.reference_price > 0:
             distance = abs(inp.question.strike - inp.reference_price) / inp.reference_price
             if distance > (self.cfg.global_.max_strike_distance_pct / 100.0):
-                return RiskVerdict(False, "strike_distance",
-                                    {"pct": f"{distance*100:.2f}"})
+                return RiskVerdict(False, "strike_distance", {"pct": f"{distance * 100:.2f}"})
 
         # 9. Min recent volume
         if inp.recent_volume_usd < self.cfg.global_.min_recent_volume_usd:
-            return RiskVerdict(False, "low_volume",
-                                {"usd": f"{inp.recent_volume_usd:.0f}"})
+            return RiskVerdict(False, "low_volume", {"usd": f"{inp.recent_volume_usd:.0f}"})
 
         # 10. Engine health
         if inp.kill_switch_active:
@@ -147,8 +139,7 @@ class RiskGate:
             return RiskVerdict(False, "stale_reference")
         # last_reconcile_ns: tolerate 2x the configured interval
         if inp.last_reconcile_ns > 0 and (
-            inp.now_ns - inp.last_reconcile_ns
-            > 2 * self.cfg.global_.reconcile_interval_seconds * 1_000_000_000
+            inp.now_ns - inp.last_reconcile_ns > 2 * self.cfg.global_.reconcile_interval_seconds * 1_000_000_000
         ):
             return RiskVerdict(False, "stale_reconcile")
 
@@ -182,16 +173,22 @@ class RiskGate:
             effective_size = clamped_size if clamped_size is not None else intent.size
             effective_ntl = effective_size * intent.limit_price
             if effective_ntl < min_ntl:
-                return RiskVerdict(False, "order_below_min_notional",
-                                   {"effective_ntl": f"{effective_ntl:.2f}",
-                                    "min_ntl": f"{min_ntl:.2f}"})
+                return RiskVerdict(
+                    False,
+                    "order_below_min_notional",
+                    {"effective_ntl": f"{effective_ntl:.2f}", "min_ntl": f"{min_ntl:.2f}"},
+                )
 
         return RiskVerdict(True, "approved", clamped_size=clamped_size)
 
     # ---- depth-walk helper (shared by entry and exit paths) ----
 
     def _depth_walk_clamp(
-        self, intent: OrderIntent, inp: RiskInputs, *, approve_reason: str,
+        self,
+        intent: OrderIntent,
+        inp: RiskInputs,
+        *,
+        approve_reason: str,
     ) -> RiskVerdict:
         """Apply the depth-walk slippage clamp to an intent.
 
@@ -216,10 +213,7 @@ class RiskGate:
         if slip_cap <= 0 or intent.size <= 0 or intent.limit_price <= 0:
             return RiskVerdict(True, approve_reason)
 
-        levels = (
-            inp.book.ask_levels if intent.side == "buy"
-            else inp.book.bid_levels
-        )
+        levels = inp.book.ask_levels if intent.side == "buy" else inp.book.bid_levels
         if not levels:
             return RiskVerdict(True, approve_reason)
 
@@ -229,8 +223,7 @@ class RiskGate:
             usable = [(px, sz) for px, sz in levels if px >= intent.limit_price]
 
         if not usable:
-            return RiskVerdict(False, "depth_walk_no_fill",
-                               {"shortfall": f"{intent.size:.4f}"})
+            return RiskVerdict(False, "depth_walk_no_fill", {"shortfall": f"{intent.size:.4f}"})
 
         remaining = intent.size
         cost = 0.0
@@ -247,8 +240,7 @@ class RiskGate:
         # size level before the real size arrives).  Treat as no fillable
         # liquidity — mirror the empty-book path above.
         if filled <= 0:
-            return RiskVerdict(False, "depth_walk_no_fill",
-                               {"shortfall": f"{intent.size:.4f}"})
+            return RiskVerdict(False, "depth_walk_no_fill", {"shortfall": f"{intent.size:.4f}"})
 
         avg_px = cost / filled
         slip = (avg_px - intent.limit_price) / intent.limit_price
@@ -256,10 +248,11 @@ class RiskGate:
             slip = -slip
 
         if slip > slip_cap:
-            return RiskVerdict(False, "depth_walk_slip",
-                               {"avg_px": f"{avg_px:.5f}",
-                                "limit": f"{intent.limit_price:.5f}",
-                                "slip_pct": f"{slip*100:.3f}"})
+            return RiskVerdict(
+                False,
+                "depth_walk_slip",
+                {"avg_px": f"{avg_px:.5f}", "limit": f"{intent.limit_price:.5f}", "slip_pct": f"{slip * 100:.3f}"},
+            )
 
         clamped_size = filled if remaining > 1e-9 else None
         return RiskVerdict(True, approve_reason, clamped_size=clamped_size)
@@ -267,7 +260,9 @@ class RiskGate:
     # ---- continuous checks ----
 
     def breached_stops(
-        self, positions: list[Position], books: Mapping[str, BookState],
+        self,
+        positions: list[Position],
+        books: Mapping[str, BookState],
     ) -> list[Position]:
         """Return positions whose stop-loss has been breached at the current top-of-book."""
         breached: list[Position] = []
@@ -278,9 +273,7 @@ class RiskGate:
             ref = b.bid_px if p.qty > 0 else b.ask_px
             if ref is None:
                 continue
-            if (p.qty > 0 and ref <= p.stop_loss_price) or (
-                p.qty < 0 and ref >= p.stop_loss_price
-            ):
+            if (p.qty > 0 and ref <= p.stop_loss_price) or (p.qty < 0 and ref >= p.stop_loss_price):
                 breached.append(p)
         return breached
 
@@ -291,10 +284,10 @@ class RiskGate:
             return False
 
     def stale_books(
-        self, books: Mapping[str, BookState], *, now_ns: int,
+        self,
+        books: Mapping[str, BookState],
+        *,
+        now_ns: int,
     ) -> list[str]:
         stale_ns = self.cfg.global_.stale_data_halt_seconds * 1_000_000_000
-        return [
-            sym for sym, b in books.items()
-            if b.last_l2_ts_ns > 0 and (now_ns - b.last_l2_ts_ns) > stale_ns
-        ]
+        return [sym for sym, b in books.items() if b.last_l2_ts_ns > 0 and (now_ns - b.last_l2_ts_ns) > stale_ns]

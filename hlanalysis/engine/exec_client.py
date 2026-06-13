@@ -37,9 +37,7 @@ class ExecutionClient(Protocol):
     def user_fills(self, *, since_ts_ns: int = 0) -> list[UserFillRow]: ...
     def realized_pnl_since(self, since_ts_ns: int, *, outcome_only: bool = False) -> float: ...
 
-    def realized_pnl_for_symbol(
-        self, symbol: str, *, since_ts_ns: int = 0
-    ) -> float:
+    def realized_pnl_for_symbol(self, symbol: str, *, since_ts_ns: int = 0) -> float:
         """Venue-truth realized PnL for one leg: Σ(closedPnl − fee) over this
         account's fills on `symbol` since the cutoff. On settlement-as-fill
         venues this captures the settlement payout exactly, so a settlement

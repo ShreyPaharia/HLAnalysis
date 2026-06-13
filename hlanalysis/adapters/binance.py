@@ -29,6 +29,7 @@ def _label_product_type(label: str) -> ProductType:
     """Health events for the spot connection must not be mislabelled PERP."""
     return ProductType.SPOT if label == "spot" else ProductType.PERP
 
+
 SPOT_WS = "wss://stream.binance.com:9443/ws"
 PERP_WS = "wss://fstream.binance.com/ws"
 PERP_REST_PREMIUM_INDEX = "https://fapi.binance.com/fapi/v1/premiumIndex"
@@ -65,31 +66,18 @@ class BinanceAdapter(BaseWsAdapter):
             ProductType.SPOT,
         }
 
-    async def stream(
-        self, subscriptions: list[Subscription]
-    ) -> AsyncIterator[NormalizedEvent]:
+    async def stream(self, subscriptions: list[Subscription]) -> AsyncIterator[NormalizedEvent]:
         spot_subs = [s for s in subscriptions if s.product_type == ProductType.SPOT]
         perp_subs = [s for s in subscriptions if s.product_type == ProductType.PERP]
 
         queue: asyncio.Queue[NormalizedEvent] = asyncio.Queue(maxsize=10000)
         tasks: list[asyncio.Task] = []
         if spot_subs:
-            tasks.append(
-                asyncio.create_task(
-                    self._run_one(SPOT_WS, spot_subs, _STREAMS_SPOT, queue, "spot")
-                )
-            )
+            tasks.append(asyncio.create_task(self._run_one(SPOT_WS, spot_subs, _STREAMS_SPOT, queue, "spot")))
         if perp_subs:
-            tasks.append(
-                asyncio.create_task(
-                    self._run_one(PERP_WS, perp_subs, _STREAMS_PERP, queue, "perp")
-                )
-            )
+            tasks.append(asyncio.create_task(self._run_one(PERP_WS, perp_subs, _STREAMS_PERP, queue, "perp")))
             # Mark/funding via REST polling because the WS streams are IP-restricted.
-            rest_subs = [
-                s for s in perp_subs
-                if any(c in _PERP_REST_CHANNELS for c in s.channels)
-            ]
+            rest_subs = [s for s in perp_subs if any(c in _PERP_REST_CHANNELS for c in s.channels)]
             if rest_subs:
                 tasks.append(asyncio.create_task(self._poll_perp_premium(rest_subs, queue)))
         try:
@@ -126,9 +114,7 @@ class BinanceAdapter(BaseWsAdapter):
         product_type = _label_product_type(label)
 
         async def _subscribe(ws) -> None:
-            await ws.send(
-                json.dumps({"method": "SUBSCRIBE", "params": streams, "id": 1})
-            )
+            await ws.send(json.dumps({"method": "SUBSCRIBE", "params": streams, "id": 1}))
 
         def _handle(msg: dict, recv_ns: int) -> list[NormalizedEvent]:
             return self._handle(msg, recv_ns, sym_to_sub, label, product_type)
@@ -319,7 +305,8 @@ class BinanceAdapter(BaseWsAdapter):
                     if r.status_code != 200:
                         log.warning(
                             "binance premiumIndex non-200: status=%d symbol=%s; backing off",
-                            r.status_code, sub.symbol.upper(),
+                            r.status_code,
+                            sub.symbol.upper(),
                         )
                         await asyncio.sleep(min(PERP_MARK_POLL_INTERVAL_S * 2, 30.0))
                         continue
@@ -340,9 +327,7 @@ class BinanceAdapter(BaseWsAdapter):
                 if "mark" in sub.channels and p.get("markPrice") is not None:
                     await queue.put(MarkEvent(**common, mark_px=float(p["markPrice"])))
                 if "funding" in sub.channels and p.get("lastFundingRate") is not None:
-                    next_funding = (
-                        int(p["nextFundingTime"]) * 1_000_000 if p.get("nextFundingTime") else None
-                    )
+                    next_funding = int(p["nextFundingTime"]) * 1_000_000 if p.get("nextFundingTime") else None
                     await queue.put(
                         FundingEvent(
                             **common,

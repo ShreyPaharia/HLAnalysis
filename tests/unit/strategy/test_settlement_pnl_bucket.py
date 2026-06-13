@@ -5,9 +5,16 @@ from hlanalysis.strategy.render import settlement_pnl_usd
 
 def _qv(**kw):
     base = dict(
-        question_idx=1, yes_symbol="", no_symbol="", strike=float("nan"),
-        expiry_ns=0, underlying="BTC", klass="priceBucket", period="1d",
-        settled=True, leg_symbols=("y80", "n80", "y90", "n90"),
+        question_idx=1,
+        yes_symbol="",
+        no_symbol="",
+        strike=float("nan"),
+        expiry_ns=0,
+        underlying="BTC",
+        klass="priceBucket",
+        period="1d",
+        settled=True,
+        leg_symbols=("y80", "n80", "y90", "n90"),
     )
     base.update(kw)
     return QuestionView(**base)
@@ -29,9 +36,17 @@ def test_held_losing_leg_booked_as_loss():
 
 def test_binary_settled_symbol_still_works():
     qv = QuestionView(
-        question_idx=1, yes_symbol="yA", no_symbol="nA", strike=100.0,
-        expiry_ns=0, underlying="BTC", klass="priceBinary", period="1d",
-        settled=True, settled_symbol="yA", leg_symbols=("yA", "nA"),
+        question_idx=1,
+        yes_symbol="yA",
+        no_symbol="nA",
+        strike=100.0,
+        expiry_ns=0,
+        underlying="BTC",
+        klass="priceBinary",
+        period="1d",
+        settled=True,
+        settled_symbol="yA",
+        leg_symbols=("yA", "nA"),
     )
     assert math.isclose(settlement_pnl_usd(qv, "yA", qty=5.0, avg_entry=0.8), 5.0 * 0.2)
 
@@ -40,9 +55,17 @@ def test_binary_via_settled_symbols_path():
     # After the _mark_settled change, live binaries ALSO populate settled_symbols
     # (single winner). Confirm the membership branch books a binary correctly.
     qv = QuestionView(
-        question_idx=1, yes_symbol="yA", no_symbol="nA", strike=100.0,
-        expiry_ns=0, underlying="BTC", klass="priceBinary", period="1d",
-        settled=True, settled_symbol="yA", settled_symbols=("yA",),
+        question_idx=1,
+        yes_symbol="yA",
+        no_symbol="nA",
+        strike=100.0,
+        expiry_ns=0,
+        underlying="BTC",
+        klass="priceBinary",
+        period="1d",
+        settled=True,
+        settled_symbol="yA",
+        settled_symbols=("yA",),
         leg_symbols=("yA", "nA"),
     )
     assert math.isclose(settlement_pnl_usd(qv, "yA", qty=5.0, avg_entry=0.8), 5.0 * 0.2)

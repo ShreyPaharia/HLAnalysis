@@ -23,7 +23,7 @@ class OpenOrder(SQLModel, table=True):
     venue_oid: str | None = None
     question_idx: int
     symbol: str
-    side: str   # "buy" | "sell"
+    side: str  # "buy" | "sell"
     price: float
     size: float
     status: str  # "pending" | "open" | "partially_filled" | "filled" | "cancelled" | "rejected"
@@ -53,7 +53,7 @@ class Fill(SQLModel, table=True):
     cloid: str
     question_idx: int
     symbol: str
-    side: str   # "buy" | "sell"
+    side: str  # "buy" | "sell"
     price: float
     size: float
     fee: float
@@ -81,6 +81,7 @@ class Session_(SQLModel, table=True):
 class SeenQuestion(SQLModel, table=True):
     """Tracks question_idxs the engine has notified about. Persists across
     restarts so NewQuestion alerts don't re-fire for already-known markets."""
+
     __tablename__ = "seen_question"
     question_idx: int = Field(primary_key=True)
     first_seen_ts_ns: int
@@ -91,6 +92,7 @@ class PmStrike(SQLModel, table=True):
     markets have no static strike; the engine stamps it from the Binance SPOT
     1m candle close at strike_ref_ts_ns. Persisting it lets a restarted engine
     reuse the strike instead of skipping markets whose open it can no longer see."""
+
     __tablename__ = "pm_strike"
     question_idx: int = Field(primary_key=True)
     strike: float
@@ -107,6 +109,7 @@ class CoinKlass(SQLModel, table=True):
     already derives the leg coins ``f"#{10*outcome_idx + side_idx}"`` and the
     class from the question's metadata, so we persist that pair keyed by the exact
     coin user_fills returns. HL-only (PM fills are binary by construction)."""
+
     __tablename__ = "coin_klass"
     coin: str = Field(primary_key=True)
     klass: str
@@ -118,6 +121,7 @@ class Settlement(SQLModel, table=True):
     close via settlement payouts, not HL fills, so this PnL was previously only
     alerted, never stored — leaving the daily-loss gate blind to it. Keyed by
     question_idx so the two close paths can't double-book (first writer wins)."""
+
     __tablename__ = "settlement"
     question_idx: int = Field(primary_key=True)
     symbol: str
@@ -143,12 +147,13 @@ class TradeJournalRow(SQLModel, table=True):
     nullable columns are populated by later lifecycle hooks; the JSON blobs
     follow the ``events.payload_json`` precedent (free-form, query via the
     explicit columns)."""
+
     __tablename__ = "trade_journal"
     cloid: str = Field(primary_key=True)
     question_idx: int
     decision_ts_ns: int
-    action: str               # "enter" | "exit"
-    side: str | None = None   # "buy" | "sell"
+    action: str  # "enter" | "exit"
+    side: str | None = None  # "buy" | "sell"
     symbol: str | None = None
     intended_size: float | None = None
     intended_price: float | None = None
@@ -176,6 +181,7 @@ class Event(SQLModel, table=True):
     not on every insert. The unbounded-_questions→OOM scar (hl_live_eval_2026_05_31)
     is why the row ceiling is non-optional.
     """
+
     __tablename__ = "events"
     id: int | None = Field(default=None, primary_key=True)
     ts_ns: int
@@ -229,11 +235,7 @@ class StateDAL:
 
     def _existing_tables(self) -> set[str]:
         with sqlite3.connect(self.db_path) as conn:
-            return {
-                r[0] for r in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
+            return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
 
     def run_migrations(self) -> None:
         """Bring the DB to the Alembic head. Three cases:
@@ -282,7 +284,12 @@ class StateDAL:
             return s.get(OpenOrder, cloid)
 
     def update_order_status(
-        self, cloid: str, *, status: str, venue_oid: str | None = None, now_ns: int,
+        self,
+        cloid: str,
+        *,
+        status: str,
+        venue_oid: str | None = None,
+        now_ns: int,
     ) -> None:
         with _Session(self._engine) as s:
             o = s.get(OpenOrder, cloid)
@@ -297,9 +304,7 @@ class StateDAL:
 
     def live_orders(self) -> list[OpenOrder]:
         with _Session(self._engine) as s:
-            stmt = select(OpenOrder).where(
-                OpenOrder.status.in_(("pending", "open", "partially_filled"))
-            )
+            stmt = select(OpenOrder).where(OpenOrder.status.in_(("pending", "open", "partially_filled")))
             return list(s.exec(stmt).all())
 
     # ---- positions ----
@@ -385,7 +390,12 @@ class StateDAL:
     # ---- settlements ----
 
     def record_settlement(
-        self, *, question_idx: int, symbol: str, realized_pnl: float, ts_ns: int,
+        self,
+        *,
+        question_idx: int,
+        symbol: str,
+        realized_pnl: float,
+        ts_ns: int,
     ) -> None:
         """Persist a settled position's realized PnL, keyed by question_idx
         (SHR-53). Upsert (single row per qidx) so the two close paths — the
@@ -398,10 +408,14 @@ class StateDAL:
         with _Session(self._engine) as s:
             existing = s.get(Settlement, question_idx)
             if existing is None:
-                s.add(Settlement(
-                    question_idx=question_idx, symbol=symbol,
-                    realized_pnl=realized_pnl, ts_ns=ts_ns,
-                ))
+                s.add(
+                    Settlement(
+                        question_idx=question_idx,
+                        symbol=symbol,
+                        realized_pnl=realized_pnl,
+                        ts_ns=ts_ns,
+                    )
+                )
             else:
                 existing.symbol = symbol
                 existing.realized_pnl = realized_pnl
@@ -411,9 +425,7 @@ class StateDAL:
 
     def settlement_pnl_since(self, since_ts_ns: int) -> float:
         with _Session(self._engine) as s:
-            rows = list(s.exec(
-                select(Settlement).where(Settlement.ts_ns >= since_ts_ns)
-            ).all())
+            rows = list(s.exec(select(Settlement).where(Settlement.ts_ns >= since_ts_ns)).all())
         return sum(r.realized_pnl for r in rows)
 
     # ---- fills ----
@@ -431,7 +443,10 @@ class StateDAL:
         return False
 
     def mirror_venue_fills(
-        self, fills, *, symbol_to_question: dict[str, int] | None = None,
+        self,
+        fills,
+        *,
+        symbol_to_question: dict[str, int] | None = None,
     ) -> int:
         """Book HL venue user_fills into the local Fill table as source='venue'
         (SHR-74). Only outcome ("#") fills are mirrored — perp/spot legs are not
@@ -448,13 +463,21 @@ class StateDAL:
         for f in fills:
             if not f.symbol.startswith("#"):
                 continue
-            if self.append_fill(Fill(
-                fill_id=f.fill_id, cloid=f.cloid,
-                question_idx=sym_q.get(f.symbol, -1),
-                symbol=f.symbol, side=f.side, price=f.price, size=f.size,
-                fee=f.fee, ts_ns=f.ts_ns, closed_pnl=f.closed_pnl,
-                source=FILL_SOURCE_VENUE,
-            )):
+            if self.append_fill(
+                Fill(
+                    fill_id=f.fill_id,
+                    cloid=f.cloid,
+                    question_idx=sym_q.get(f.symbol, -1),
+                    symbol=f.symbol,
+                    side=f.side,
+                    price=f.price,
+                    size=f.size,
+                    fee=f.fee,
+                    ts_ns=f.ts_ns,
+                    closed_pnl=f.closed_pnl,
+                    source=FILL_SOURCE_VENUE,
+                )
+            ):
                 inserted += 1
         return inserted
 
@@ -503,18 +526,22 @@ class StateDAL:
         """Insert one event row. Thread-safe (each call opens its own session
         on the shared engine, same connect-per-call isolation as before)."""
         with _Session(self._engine) as s:
-            s.add(Event(
-                ts_ns=ts_ns, alias=alias, kind=kind,
-                question_idx=question_idx, reason=reason, payload_json=payload_json,
-            ))
+            s.add(
+                Event(
+                    ts_ns=ts_ns,
+                    alias=alias,
+                    kind=kind,
+                    question_idx=question_idx,
+                    reason=reason,
+                    payload_json=payload_json,
+                )
+            )
             s.commit()
 
     def events_since(self, since_ts_ns: int) -> list[dict[str, Any]]:
         """Return all events with ts_ns >= since_ts_ns, ordered by ts_ns asc."""
         with _Session(self._engine) as s:
-            rows = s.exec(
-                select(Event).where(Event.ts_ns >= since_ts_ns).order_by(Event.ts_ns)
-            ).all()
+            rows = s.exec(select(Event).where(Event.ts_ns >= since_ts_ns).order_by(Event.ts_ns)).all()
             return [r.model_dump() for r in rows]
 
     def reject_counts_since(self, since_ts_ns: int) -> list[dict[str, Any]]:
@@ -542,16 +569,10 @@ class StateDAL:
     def events_for_question(self, question_idx: int) -> list[dict[str, Any]]:
         """Return all events for a given question_idx, ordered by ts_ns asc."""
         with _Session(self._engine) as s:
-            rows = s.exec(
-                select(Event)
-                .where(Event.question_idx == question_idx)
-                .order_by(Event.ts_ns)
-            ).all()
+            rows = s.exec(select(Event).where(Event.question_idx == question_idx).order_by(Event.ts_ns)).all()
             return [r.model_dump() for r in rows]
 
-    def last_event_by_kind(
-        self, kind: str, *, alias: str | None = None
-    ) -> dict[str, Any] | None:
+    def last_event_by_kind(self, kind: str, *, alias: str | None = None) -> dict[str, Any] | None:
         """Return the single most-recent event of the given kind.
 
         When alias is provided, filter to that slot. Returns None if no match.
@@ -585,9 +606,7 @@ class StateDAL:
             count = s.exec(select(func.count()).select_from(Event)).one()
             excess = count - max_rows
             if excess > 0:
-                oldest_ids = (
-                    select(Event.id).order_by(Event.id.asc()).limit(excess)
-                )
+                oldest_ids = select(Event.id).order_by(Event.id.asc()).limit(excess)
                 s.exec(delete(Event).where(Event.id.in_(oldest_ids)))
             s.commit()
 
@@ -652,10 +671,7 @@ class StateDAL:
         ledger is authoritative.
         """
         with _Session(self._engine) as s:
-            has_venue = s.exec(
-                select(func.count()).select_from(Fill)
-                .where(Fill.source == FILL_SOURCE_VENUE)
-            ).one() > 0
+            has_venue = s.exec(select(func.count()).select_from(Fill).where(Fill.source == FILL_SOURCE_VENUE)).one() > 0
             stmt = select(Fill).where(Fill.ts_ns >= since_ts_ns)
             if has_venue:
                 stmt = stmt.where(Fill.source == FILL_SOURCE_VENUE)
@@ -663,10 +679,7 @@ class StateDAL:
         # Settlement payouts are not fills (HIP-4 binaries close via settlement,
         # not HL trades), so without this the dominant PnL component of the
         # binary strategy is invisible here (SHR-53/49).
-        return (
-            sum(getattr(f, "closed_pnl", 0.0) - f.fee for f in fills)
-            + self.settlement_pnl_since(since_ts_ns)
-        )
+        return sum(getattr(f, "closed_pnl", 0.0) - f.fee for f in fills) + self.settlement_pnl_since(since_ts_ns)
 
 
 class CachedStateDAL(StateDAL):
@@ -751,11 +764,19 @@ class CachedStateDAL(StateDAL):
             self._order_cache[o.cloid] = o
 
     def update_order_status(
-        self, cloid: str, *, status: str, venue_oid: str | None = None, now_ns: int,
+        self,
+        cloid: str,
+        *,
+        status: str,
+        venue_oid: str | None = None,
+        now_ns: int,
     ) -> None:
         self._ensure_loaded()
         super().update_order_status(
-            cloid, status=status, venue_oid=venue_oid, now_ns=now_ns,
+            cloid,
+            status=status,
+            venue_oid=venue_oid,
+            now_ns=now_ns,
         )
         with self._cache_lock:
             o = self._order_cache.get(cloid)
@@ -768,7 +789,4 @@ class CachedStateDAL(StateDAL):
     def live_orders(self) -> list[OpenOrder]:
         self._ensure_loaded()
         with self._cache_lock:
-            return [
-                o for o in self._order_cache.values()
-                if o.status in ("pending", "open", "partially_filled")
-            ]
+            return [o for o in self._order_cache.values() if o.status in ("pending", "open", "partially_filled")]

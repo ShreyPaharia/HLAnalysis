@@ -3,6 +3,7 @@
 `save_fig(fig, out_path)` writes a Plotly figure to HTML, creating parent
 directories as needed. Returns `out_path`.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

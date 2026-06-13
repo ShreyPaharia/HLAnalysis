@@ -9,6 +9,7 @@ estimators (sample stdev, bipower variation) moved to
 These functions must match their reference Python implementations to 1e-12
 relative (asserted in ``tests/unit/strategy/test_numba_vol.py``).
 """
+
 from __future__ import annotations
 
 import math
@@ -34,9 +35,7 @@ def ewma_std(returns: np.ndarray, lam: float) -> float:
 
 
 @njit(cache=True, fastmath=False)
-def parkinson_sigma_window(
-    highs: np.ndarray, lows: np.ndarray, lam: float
-) -> float:
+def parkinson_sigma_window(highs: np.ndarray, lows: np.ndarray, lam: float) -> float:
     """Window-level Parkinson σ.
 
     Per-bar variance: σ²_i = (ln(H_i/L_i))² / (4 ln 2) for bars with H > 0,

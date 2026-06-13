@@ -51,8 +51,7 @@ async def test_send_uses_correct_url_and_payload():
 @pytest.mark.asyncio
 async def test_send_retries_on_5xx_and_succeeds():
     session = _FakeSession([_FakeResp(503, {}), _FakeResp(200, {"ok": True})])
-    client = TelegramClient(bot_token="abc", chat_id="123", session=session,
-                             max_retries=2, retry_delay_s=0.0)
+    client = TelegramClient(bot_token="abc", chat_id="123", session=session, max_retries=2, retry_delay_s=0.0)
     ok = await client.send("hi")
     assert ok is True
     assert len(session.calls) == 2
@@ -61,7 +60,6 @@ async def test_send_retries_on_5xx_and_succeeds():
 @pytest.mark.asyncio
 async def test_send_gives_up_after_max_retries():
     session = _FakeSession([_FakeResp(500, {}), _FakeResp(500, {}), _FakeResp(500, {})])
-    client = TelegramClient(bot_token="abc", chat_id="123", session=session,
-                             max_retries=2, retry_delay_s=0.0)
+    client = TelegramClient(bot_token="abc", chat_id="123", session=session, max_retries=2, retry_delay_s=0.0)
     ok = await client.send("hi")
     assert ok is False

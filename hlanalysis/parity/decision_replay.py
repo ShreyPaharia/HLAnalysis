@@ -25,6 +25,7 @@ This is the PURE core: it takes already-extracted :class:`LiveDecision`s and
 (sqlite ``state.db``) and the sim ``diagnostics.parquet`` lives in the ``tools``
 shell so the matching/attribution logic stays unit-testable on synthetic inputs.
 """
+
 from __future__ import annotations
 
 import bisect
@@ -135,13 +136,11 @@ class DecisionReplayReport:
             "decision_match_rate": self.decision_match_rate(),
             "field_skews": {k: v.to_dict() for k, v in self.field_skews.items()},
             "unmatched_live": [
-                {"question_idx": d.question_idx, "ts_ns": d.ts_ns,
-                 "action": d.action, "symbol": d.symbol}
+                {"question_idx": d.question_idx, "ts_ns": d.ts_ns, "action": d.action, "symbol": d.symbol}
                 for d in self.unmatched_live
             ],
             "phantom_sim": [
-                {"question_idx": t.question_idx, "ts_ns": t.ts_ns, "action": t.action}
-                for t in self.phantom_sim
+                {"question_idx": t.question_idx, "ts_ns": t.ts_ns, "action": t.action} for t in self.phantom_sim
             ],
         }
 
@@ -171,9 +170,7 @@ def _nearest_tick(ticks: list[SimTick], ts_list: list[int], ts: int, tol: int) -
     return best, best_dt
 
 
-def _action_in_window(
-    action_ts: list[int], ts: int, tol: int
-) -> bool:
+def _action_in_window(action_ts: list[int], ts: int, tol: int) -> bool:
     """True if any action timestamp lies within [ts-tol, ts+tol]."""
     if not action_ts:
         return False
@@ -235,9 +232,7 @@ def replay(
         ticks = cmp_by_q.get(d.question_idx, [])
         ts_list = ts_by_q.get(d.question_idx, [])
         tick, dt = _nearest_tick(ticks, ts_list, d.ts_ns, ts_tol_ns)
-        act_match = _action_in_window(
-            action_ts_by_qa.get((d.question_idx, d.action), []), d.ts_ns, ts_tol_ns
-        )
+        act_match = _action_in_window(action_ts_by_qa.get((d.question_idx, d.action), []), d.ts_ns, ts_tol_ns)
         matched.append(MatchedDecision(live=d, sim_tick=tick, sim_action_match=act_match, dt_ns=dt))
         if act_match:
             n_live_matched += 1
@@ -300,10 +295,7 @@ def format_report(r: DecisionReplayReport) -> str:
     for f in _ALL_FIELDS:
         sk = r.field_skews[f]
         rel = f"  rel_med={sk.median_rel:.2%}" if sk.median_rel is not None else ""
-        lines.append(
-            f"  {f:16} n={sk.n:4}  |Δ| med={sk.median_abs:.5g} "
-            f"p90={sk.p90_abs:.5g} max={sk.max_abs:.5g}{rel}"
-        )
+        lines.append(f"  {f:16} n={sk.n:4}  |Δ| med={sk.median_abs:.5g} p90={sk.p90_abs:.5g} max={sk.max_abs:.5g}{rel}")
     return "\n".join(lines)
 
 

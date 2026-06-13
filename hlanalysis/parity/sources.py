@@ -14,6 +14,7 @@ The DB read is strictly **read-only** (a fresh sqlite connection over the engine
 state DB) so this never touches the live engine or its DAL write-path — SHR-90 is
 a pure consumer of SHR-83's journal and the venue mirror.
 """
+
 from __future__ import annotations
 
 import json
@@ -47,10 +48,10 @@ class LiveMarket:
 
     question_idx: int
     symbol: str
-    realized_pnl: float          # Σ venue closed_pnl + settlement payout
-    traded: bool                 # ≥1 non-rejected order reached a fill
-    halt_active: bool            # a halt/cap gate was active on any decision
-    sigma: float | None          # representative journal σ input
+    realized_pnl: float  # Σ venue closed_pnl + settlement payout
+    traded: bool  # ≥1 non-rejected order reached a fill
+    halt_active: bool  # a halt/cap gate was active on any decision
+    sigma: float | None  # representative journal σ input
     reference_price: float | None
     n_fills: int
 
@@ -81,9 +82,7 @@ def _rel_diverged(a: float | None, b: float | None, rel_tol: float) -> bool:
 
 
 def _leg(realized_pnl: float, fill_price: float | None, fill_size: float) -> TradeLeg:
-    return TradeLeg(
-        realized_pnl=realized_pnl, fill_price=fill_price, fill_size=fill_size
-    )
+    return TradeLeg(realized_pnl=realized_pnl, fill_price=fill_price, fill_size=fill_size)
 
 
 def _pair_for_market(
@@ -95,22 +94,14 @@ def _pair_for_market(
     ref_rel_tol: float,
 ) -> tuple[str, DecisionPair]:
     """Build the (symbol, DecisionPair) for one market from its live/sim records."""
-    live_leg = (
-        _leg(lm.realized_pnl, None, float(lm.n_fills))
-        if lm is not None and lm.traded
-        else None
-    )
-    sim_leg = (
-        _leg(sm.realized_pnl, None, float(sm.n_fills))
-        if sm is not None and sm.traded
-        else None
-    )
+    live_leg = _leg(lm.realized_pnl, None, float(lm.n_fills)) if lm is not None and lm.traded else None
+    sim_leg = _leg(sm.realized_pnl, None, float(sm.n_fills)) if sm is not None and sm.traded else None
     halt_active = bool(lm is not None and lm.halt_active)
     inputs_diverged = False
     if lm is not None and sm is not None:
-        inputs_diverged = _rel_diverged(
-            lm.sigma, sm.sigma, sigma_rel_tol
-        ) or _rel_diverged(lm.reference_price, sm.reference_price, ref_rel_tol)
+        inputs_diverged = _rel_diverged(lm.sigma, sm.sigma, sigma_rel_tol) or _rel_diverged(
+            lm.reference_price, sm.reference_price, ref_rel_tol
+        )
     symbol = lm.symbol if lm is not None else sm.symbol  # type: ignore[union-attr]
     pair = DecisionPair(
         key=f"q{q}:{symbol}",
@@ -149,8 +140,11 @@ def build_pairs(
     pairs: list[DecisionPair] = []
     for k in sorted(set(live_by) | set(sim_by), key=str):
         _, pair = _pair_for_market(
-            k, live_by.get(k), sim_by.get(k),
-            sigma_rel_tol=sigma_rel_tol, ref_rel_tol=ref_rel_tol,
+            k,
+            live_by.get(k),
+            sim_by.get(k),
+            sigma_rel_tol=sigma_rel_tol,
+            ref_rel_tol=ref_rel_tol,
         )
         pairs.append(pair)
     return pairs
@@ -173,7 +167,11 @@ def reconcile_markets(
     for k in sorted(set(live_by) | set(sim_by), key=str):
         lm, sm = live_by.get(k), sim_by.get(k)
         symbol, pair = _pair_for_market(
-            k, lm, sm, sigma_rel_tol=sigma_rel_tol, ref_rel_tol=ref_rel_tol,
+            k,
+            lm,
+            sm,
+            sigma_rel_tol=sigma_rel_tol,
+            ref_rel_tol=ref_rel_tol,
         )
         # question_idx for reporting comes from a present record (the group key
         # may itself be a symbol string when key="symbol").
@@ -219,7 +217,9 @@ def _halt_active_from_json(halt_json: str | None) -> bool:
 
 
 def load_live_markets_from_db(
-    db_path: Path | str, *, key: str = "question_idx",
+    db_path: Path | str,
+    *,
+    key: str = "question_idx",
 ) -> list[LiveMarket]:
     """Build per-market :class:`LiveMarket` records from an engine state DB,
     read-only. Joins the trade journal (decisions + halt + σ/reference inputs),
@@ -239,12 +239,8 @@ def load_live_markets_from_db(
             "reference_price, halt_json, reject_reason, fill_ts_ns "
             "FROM trade_journal ORDER BY question_idx, decision_ts_ns"
         ).fetchall()
-        fills = con.execute(
-            "SELECT question_idx, symbol, closed_pnl FROM fill"
-        ).fetchall()
-        settlements = con.execute(
-            "SELECT question_idx, symbol, realized_pnl FROM settlement"
-        ).fetchall()
+        fills = con.execute("SELECT question_idx, symbol, closed_pnl FROM fill").fetchall()
+        settlements = con.execute("SELECT question_idx, symbol, realized_pnl FROM settlement").fetchall()
     finally:
         con.close()
 

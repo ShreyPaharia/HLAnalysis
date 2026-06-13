@@ -5,6 +5,7 @@ All `timestamp` fields are milliseconds since epoch; we convert to ns to
 match the rest of the engine. Token IDs are 76-digit ERC-1155 ID strings
 and are carried through verbatim as `symbol`.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -30,7 +31,9 @@ def _ts_ms_to_ns(ms_str: str | int) -> int:
 
 
 def _levels_best_first(
-    raw: list[dict[str, Any]], *, is_bid: bool,
+    raw: list[dict[str, Any]],
+    *,
+    is_bid: bool,
 ) -> tuple[list[float], list[float]]:
     """Return (prices, sizes) sorted best-first: bids descending (highest
     price = best bid first), asks ascending (lowest price = best ask first).
@@ -82,7 +85,9 @@ def parse_trade_message(payload: dict[str, Any], *, local_recv_ts: int) -> Trade
 
 
 def parse_price_change_message(
-    payload: dict[str, Any], *, local_recv_ts: int,
+    payload: dict[str, Any],
+    *,
+    local_recv_ts: int,
 ) -> BookSnapshotEvent | None:
     """PM `price_change` events carry a partial book delta (changed levels
     only). We snapshot what's present; missing sides yield empty lists.
@@ -135,23 +140,13 @@ class PmBook:
         self._bids: dict[float, float] = {}  # price → size
         self._asks: dict[float, float] = {}
 
-    def apply_book(
-        self, payload: dict[str, Any], *, local_recv_ts: int = 0
-    ) -> BookSnapshotEvent:
+    def apply_book(self, payload: dict[str, Any], *, local_recv_ts: int = 0) -> BookSnapshotEvent:
         """Full replace: reset internal state from a complete book snapshot."""
-        self._bids = {
-            float(lvl["price"]): float(lvl["size"])
-            for lvl in (payload.get("bids") or [])
-        }
-        self._asks = {
-            float(lvl["price"]): float(lvl["size"])
-            for lvl in (payload.get("asks") or [])
-        }
+        self._bids = {float(lvl["price"]): float(lvl["size"]) for lvl in (payload.get("bids") or [])}
+        self._asks = {float(lvl["price"]): float(lvl["size"]) for lvl in (payload.get("asks") or [])}
         return self._emit(payload, local_recv_ts)
 
-    def apply_price_change(
-        self, payload: dict[str, Any], *, local_recv_ts: int = 0
-    ) -> BookSnapshotEvent | None:
+    def apply_price_change(self, payload: dict[str, Any], *, local_recv_ts: int = 0) -> BookSnapshotEvent | None:
         """Apply a delta and return the merged full-book snapshot.
 
         Returns None when ``changes`` is empty so the caller can skip the emit
@@ -179,7 +174,7 @@ class PmBook:
 
     def _emit(self, payload: dict[str, Any], local_recv_ts: int) -> BookSnapshotEvent:
         bid_px = sorted(self._bids, reverse=True)  # best (highest) first
-        ask_px = sorted(self._asks)                # best (lowest) first
+        ask_px = sorted(self._asks)  # best (lowest) first
         return BookSnapshotEvent(
             venue=_VENUE,
             product_type=ProductType.PREDICTION_BINARY,
@@ -199,8 +194,20 @@ _BTC_UPDOWN_STRIKE_RULE = re.compile(
     r"(\d{1,2}):(\d{2})\s+in the ET timezone",
     re.IGNORECASE,
 )
-_MONTHS = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
-           "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
+_MONTHS = {
+    "Jan": 1,
+    "Feb": 2,
+    "Mar": 3,
+    "Apr": 4,
+    "May": 5,
+    "Jun": 6,
+    "Jul": 7,
+    "Aug": 8,
+    "Sep": 9,
+    "Oct": 10,
+    "Nov": 11,
+    "Dec": 12,
+}
 
 
 def _parse_strike_ref_ts_ns(description: str) -> int | None:
@@ -211,6 +218,7 @@ def _parse_strike_ref_ts_ns(description: str) -> int | None:
         return None
     try:
         from zoneinfo import ZoneInfo
+
         et = ZoneInfo("America/New_York")
     except Exception:
         return None
@@ -283,7 +291,10 @@ def _strike_from_group_item_title(title: str) -> float | None:
 
 
 def parse_gamma_market_to_question_meta(
-    market: dict, *, series_slug: str, local_recv_ts: int,
+    market: dict,
+    *,
+    series_slug: str,
+    local_recv_ts: int,
     underlying: str = "BTC",
 ) -> QuestionMetaEvent:
     cond_id = str(market.get("conditionId") or market.get("id") or "")
@@ -297,9 +308,7 @@ def parse_gamma_market_to_question_meta(
     # the first sentence of the long-form description so daily up/down
     # markets still get a useful label on Telegram.
     question_text = (
-        market.get("question")
-        or market.get("groupItemTitle")
-        or (desc.split(".", 1)[0].strip() if desc else "")
+        market.get("question") or market.get("groupItemTitle") or (desc.split(".", 1)[0].strip() if desc else "")
     )
     strike_ref_ts_ns = _parse_strike_ref_ts_ns(desc)
     strike = _strike_from_group_item_title(market.get("groupItemTitle") or "")
@@ -312,12 +321,28 @@ def parse_gamma_market_to_question_meta(
     # `question_name` is the human-readable label rendered as a fallback by
     # the alert formatter when no numeric strike is available (daily PM
     # up/down markets).
-    keys = ["class", "underlying", "yes_token_id", "no_token_id",
-            "expiry", "expiry_ns", "series_slug", "condition_id",
-            "question_name"]
-    values = ["priceBinary", underlying, yes_t, no_t,
-              expiry_hl, expiry_ns_str,
-              series_slug, cond_id, str(question_text)]
+    keys = [
+        "class",
+        "underlying",
+        "yes_token_id",
+        "no_token_id",
+        "expiry",
+        "expiry_ns",
+        "series_slug",
+        "condition_id",
+        "question_name",
+    ]
+    values = [
+        "priceBinary",
+        underlying,
+        yes_t,
+        no_t,
+        expiry_hl,
+        expiry_ns_str,
+        series_slug,
+        cond_id,
+        str(question_text),
+    ]
     if strike is not None:
         keys.append("targetPrice")
         values.append(f"{strike:.0f}")
@@ -376,7 +401,11 @@ def parse_bucket_event(ev: dict) -> dict | None:
 
 
 def parse_gamma_event_to_bucket_question_meta(
-    ev: dict, *, series_slug: str, local_recv_ts: int, underlying: str = "BTC",
+    ev: dict,
+    *,
+    series_slug: str,
+    local_recv_ts: int,
+    underlying: str = "BTC",
 ) -> QuestionMetaEvent | None:
     """One priceBucket QuestionMetaEvent for a multi-strike event, or None.
 
@@ -392,15 +421,29 @@ def parse_gamma_event_to_bucket_question_meta(
     thresholds = rec["thresholds"]
     flat_legs = [t for pair in rec["leg_tokens"] for t in pair]
     end_iso = ev.get("endDate") or ""
-    keys = ["class", "underlying", "leg_token_ids", "priceThresholds",
-            "bucketLayout", "expiry", "expiry_ns", "series_slug",
-            "condition_id", "question_name"]
+    keys = [
+        "class",
+        "underlying",
+        "leg_token_ids",
+        "priceThresholds",
+        "bucketLayout",
+        "expiry",
+        "expiry_ns",
+        "series_slug",
+        "condition_id",
+        "question_name",
+    ]
     values = [
-        "priceBucket", underlying, ",".join(flat_legs),
-        ",".join(f"{t:.0f}" for t in thresholds), "above_ladder",
+        "priceBucket",
+        underlying,
+        ",".join(flat_legs),
+        ",".join(f"{t:.0f}" for t in thresholds),
+        "above_ladder",
         _iso_to_hl_expiry(end_iso),
         str(_parse_iso_ns(end_iso)) if end_iso else "0",
-        series_slug, slug, slug,
+        series_slug,
+        slug,
+        slug,
     ]
     return QuestionMetaEvent(
         venue=_VENUE,
@@ -417,7 +460,10 @@ def parse_gamma_event_to_bucket_question_meta(
 
 
 def parse_gamma_market_to_settlement(
-    market: dict, *, series_slug: str, local_recv_ts: int,
+    market: dict,
+    *,
+    series_slug: str,
+    local_recv_ts: int,
 ) -> SettlementEvent | None:
     """Returns a SettlementEvent iff the market has actually resolved: the poll
     time is at/after the market's ``endDate`` AND one of YES/NO has an outcome

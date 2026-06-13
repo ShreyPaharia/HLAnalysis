@@ -9,6 +9,7 @@ orchestration state here — every function is pure (cfg in, config out), except
 ``build_exec_client``, which constructs the venue ExecutionClient from an
 AccountConfig.
 """
+
 from __future__ import annotations
 
 from dataclasses import (
@@ -43,7 +44,9 @@ _LR_GLOBAL_SOURCED = {
 
 
 def _late_resolution_config_from_entry(
-    entry, *, global_,
+    entry,
+    *,
+    global_,
 ) -> LateResolutionConfig:
     """Build a LateResolutionConfig from a single AllowlistEntry plus the
     strategy's global block.
@@ -107,7 +110,8 @@ def build_late_resolution_configs_by_class(
         if not klass:
             continue
         by_class[klass] = _late_resolution_config_from_entry(
-            entry, global_=cfg.global_,
+            entry,
+            global_=cfg.global_,
         )
     return by_class
 
@@ -131,7 +135,10 @@ def build_theta_harvester_config(cfg: StrategyConfig) -> ThetaHarvesterConfig:
     # `defaults:` block instead and are not part of the theta block.
     # test_theta_config_parity.py guards that ThetaParams stays a full mirror.
     _ALLOWLIST_SOURCED = {
-        "max_position_usd", "tte_min_seconds", "tte_max_seconds", "stop_loss_pct",
+        "max_position_usd",
+        "tte_min_seconds",
+        "tte_max_seconds",
+        "stop_loss_pct",
     }
     dataclass_fields = {f.name for f in dataclass_fields_of(ThetaHarvesterConfig)}
     forwarded = {
@@ -206,7 +213,9 @@ def reference_vol_lookback_seconds(cfg: StrategyConfig) -> int:
         secs = max(secs, entry.vol_lookback_seconds)
     if cfg.theta is not None:
         secs = max(
-            secs, cfg.theta.vol_lookback_seconds, cfg.theta.drift_lookback_seconds,
+            secs,
+            cfg.theta.vol_lookback_seconds,
+            cfg.theta.drift_lookback_seconds,
         )
     # Per-class theta overrides may request a longer σ/drift window for one
     # class; size MarketState history for the largest across all of them so a
@@ -239,6 +248,7 @@ def build_exec_client(alias: str, acct: AccountConfig, paper_mode: bool) -> Exec
         )
     if isinstance(acct, PolymarketAccount):
         from .pm_client import PMClient
+
         return PMClient(
             paper_mode=paper_mode,
             clob_host=acct.clob_host,
@@ -250,9 +260,7 @@ def build_exec_client(alias: str, acct: AccountConfig, paper_mode: bool) -> Exec
             funder_address=acct.funder_address,
             signature_type=acct.signature_type,
         )
-    raise TypeError(
-        f"unknown account type for alias {alias!r}: {type(acct).__name__}"
-    )
+    raise TypeError(f"unknown account type for alias {alias!r}: {type(acct).__name__}")
 
 
 def _build_strategy_for_slot(cfg: StrategyConfig) -> Strategy:

@@ -212,8 +212,13 @@ NormalizedEvent = Union[
 # Shared base-event field order (declaration order on `_BaseEvent`). Used to
 # rebuild the legacy column order in `to_record`.
 _BASE_FIELD_ORDER = (
-    "venue", "product_type", "mechanism", "symbol",
-    "exchange_ts", "local_recv_ts", "seq",
+    "venue",
+    "product_type",
+    "mechanism",
+    "symbol",
+    "exchange_ts",
+    "local_recv_ts",
+    "seq",
 )
 
 

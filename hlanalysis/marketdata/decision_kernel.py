@@ -61,6 +61,7 @@ DATA-SOURCE-SPECIFIC and cannot be shared: the engine reads from live L2 and the
 backtest reads from hftbacktest depth arrays.  Those assembly steps stay in their
 respective callers.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

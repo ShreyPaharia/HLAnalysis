@@ -20,6 +20,7 @@ NEVER raise or block order submission. All persistence is wrapped here and a
 failure is logged and swallowed. The journal observes; it must not influence
 trading.
 """
+
 from __future__ import annotations
 
 import json
@@ -48,6 +49,7 @@ class HaltSnapshot:
     augmented by the router (reject_breaker_tripped / stale_reference) so the
     journal row records exactly which gates were live when the decision was
     made — the input the sim's halt-replay needs."""
+
     restart_blocked: bool = False
     daily_loss_halted: bool = False
     realized_pnl_today: float = 0.0
@@ -110,11 +112,7 @@ def _book_snapshot(book: BookState | None, top_n: int) -> dict | None:
 
 
 def _diagnostics_snapshot(diagnostics) -> list | None:
-    out = [
-        {"level": d.level, "message": d.message,
-         "fields": [list(f) for f in d.fields]}
-        for d in diagnostics or ()
-    ]
+    out = [{"level": d.level, "message": d.message, "fields": [list(f) for f in d.fields]} for d in diagnostics or ()]
     return out or None
 
 
@@ -177,10 +175,18 @@ class TradeJournal:
         self._update(cloid, reject_reason=reject_reason)
 
     def record_fill(
-        self, *, cloid: str, fill_ts_ns: int, fill_px: float, fill_sz: float,
+        self,
+        *,
+        cloid: str,
+        fill_ts_ns: int,
+        fill_px: float,
+        fill_sz: float,
     ) -> None:
         self._update(
-            cloid, fill_ts_ns=fill_ts_ns, fill_px=fill_px, fill_sz=fill_sz,
+            cloid,
+            fill_ts_ns=fill_ts_ns,
+            fill_px=fill_px,
+            fill_sz=fill_sz,
         )
 
     def _update(self, cloid: str, **changes) -> None:

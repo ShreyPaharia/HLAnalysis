@@ -12,6 +12,7 @@ Routing (operator decision 2026-06-08):
 esd=0.5 is below the binary baseline (1.0); allowed via the documented
 (v31_pm, priceBucket) exemption in test_bucket_override_risk_gates_not_below_binary.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -20,8 +21,7 @@ from hlanalysis.engine.config import load_strategies_config
 from hlanalysis.engine.config_builders import build_theta_harvester_configs_by_class
 from hlanalysis.engine.runtime import build_theta_harvester_config
 
-_TUNED = {"favorite_threshold": 0.75, "edge_buffer": 0.02,
-          "vol_lookback_seconds": 1800, "exit_safety_d": 0.5}
+_TUNED = {"favorite_threshold": 0.75, "edge_buffer": 0.02, "vol_lookback_seconds": 1800, "exit_safety_d": 0.5}
 
 
 def _by_alias():
@@ -39,10 +39,7 @@ def test_btc_multistrike_folded_onto_v31_pm():
     # v31_pm stays LIVE; the bucket fold trades live on deploy.
     assert v31_pm.paper_mode is False
     # The slot now allowlists the multistrike bucket series alongside up/down.
-    series = {
-        (e.match or {}).get("series_slug")
-        for e in v31_pm.allowlist
-    }
+    series = {(e.match or {}).get("series_slug") for e in v31_pm.allowlist}
     assert "btc-up-or-down-daily" in series
     assert "btc-multi-strikes-weekly" in series
     # priceBucket override carries the tuned cell; binary base stays protective.
@@ -52,7 +49,7 @@ def test_btc_multistrike_folded_onto_v31_pm():
     for k, v in _TUNED.items():
         assert getattr(bucket, k) == v, f"v31_pm bucket {k}={getattr(bucket, k)}"
     base = build_theta_harvester_config(v31_pm)
-    assert base.favorite_threshold == 0.85   # binary baseline unchanged
+    assert base.favorite_threshold == 0.85  # binary baseline unchanged
     assert base.exit_safety_d == 1.0
 
 

@@ -8,6 +8,7 @@ forever with no exception and no reconnect. The receive path must force-close
 watchdog window. Thanks to wait_for, the same window is also the first-data
 deadline.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +54,8 @@ async def test_watchdog_emits_feed_stale_and_returns_on_silent_stream():
     q: asyncio.Queue = asyncio.Queue()
 
     await asyncio.wait_for(
-        adapter._recv_until_stale(_SilentWS(), lambda m, t: [], "perp", q), timeout=1.0,
+        adapter._recv_until_stale(_SilentWS(), lambda m, t: [], "perp", q),
+        timeout=1.0,
     )
 
     kinds = await _drain_kinds(q)
@@ -79,6 +81,7 @@ async def test_watchdog_fires_after_a_frame_then_silence():
 # Fix 1: _poll_perp_premium must pass a (connect, read) tuple to requests.get.
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_poll_perp_premium_passes_tuple_timeout(monkeypatch):
     """_poll_perp_premium must call requests.get with a (connect, read) tuple.
@@ -91,9 +94,14 @@ async def test_poll_perp_premium_passes_tuple_timeout(monkeypatch):
 
     class _FakeResponse:
         status_code = 200
+
         def json(self):
-            return {"markPrice": "95000", "lastFundingRate": "0.001",
-                    "nextFundingTime": 1700000000000, "time": 1700000000000}
+            return {
+                "markPrice": "95000",
+                "lastFundingRate": "0.001",
+                "nextFundingTime": 1700000000000,
+                "time": 1700000000000,
+            }
 
     def fake_get(url, **kwargs):
         captured.append(kwargs)
@@ -109,9 +117,13 @@ async def test_poll_perp_premium_passes_tuple_timeout(monkeypatch):
 
     from hlanalysis.config import Subscription
     from hlanalysis.events import Mechanism, ProductType
+
     sub = Subscription(
-        venue="binance", symbol="BTCUSDT", product_type=ProductType.PERP,
-        mechanism=Mechanism.CLOB, channels=("mark", "funding"),
+        venue="binance",
+        symbol="BTCUSDT",
+        product_type=ProductType.PERP,
+        mechanism=Mechanism.CLOB,
+        channels=("mark", "funding"),
     )
     adapter = BinanceAdapter()
     q: asyncio.Queue = asyncio.Queue(maxsize=100)
@@ -139,10 +151,9 @@ async def test_poll_perp_premium_passes_tuple_timeout(monkeypatch):
 # tight-spin), so a 418/4xx IP ban doesn't burn the rate-limit silently.
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
-async def test_poll_perp_premium_non200_logs_warning_and_backs_off(
-    monkeypatch, caplog
-):
+async def test_poll_perp_premium_non200_logs_warning_and_backs_off(monkeypatch, caplog):
     """On non-200 the poll loop must: (a) log a warning, (b) sleep before
     the next iteration so a 418/4xx ban doesn't tight-spin.
 
@@ -161,6 +172,7 @@ async def test_poll_perp_premium_non200_logs_warning_and_backs_off(
 
     class _Non200Response:
         status_code = 429
+
         def json(self):
             return {}
 
@@ -172,9 +184,13 @@ async def test_poll_perp_premium_non200_logs_warning_and_backs_off(
 
     from hlanalysis.config import Subscription
     from hlanalysis.events import Mechanism, ProductType
+
     sub = Subscription(
-        venue="binance", symbol="BTCUSDT", product_type=ProductType.PERP,
-        mechanism=Mechanism.CLOB, channels=("mark",),
+        venue="binance",
+        symbol="BTCUSDT",
+        product_type=ProductType.PERP,
+        mechanism=Mechanism.CLOB,
+        channels=("mark",),
     )
     adapter = BinanceAdapter()
     q: asyncio.Queue = asyncio.Queue(maxsize=100)
@@ -193,8 +209,9 @@ async def test_poll_perp_premium_non200_logs_warning_and_backs_off(
 
     # (a) A warning was emitted mentioning the status code.
     warning_msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("429" in str(m) or "non-200" in str(m) for m in warning_msgs), \
+    assert any("429" in str(m) or "non-200" in str(m) for m in warning_msgs), (
         f"no non-200 warning found; records={warning_msgs}"
+    )
 
     # (b) A sleep > 0 was called (backoff before retry), not a tight spin.
     assert sleeps, "no sleep called after non-200 — loop tight-spins on ban"

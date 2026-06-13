@@ -9,6 +9,7 @@ and one PM `v31_pm` slot (paper_mode=True) and verifies all three
 AccountSlots build without network. The PM slot's exec client must be a
 PMClient (not an HLClient swapped in by accident).
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -34,9 +35,13 @@ from hlanalysis.engine.runtime import EngineRuntime
 def _late_resolution_strategy(alias: str) -> StrategyConfig:
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC"},
-        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=0,
-        tte_max_seconds=3600, price_extreme_threshold=0.90,
-        distance_from_strike_usd_min=0, vol_max=100,
+        max_position_usd=100,
+        stop_loss_pct=10,
+        tte_min_seconds=0,
+        tte_max_seconds=3600,
+        price_extreme_threshold=0.90,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
     )
     return StrategyConfig(
         name=f"late_resolution_{alias}",
@@ -46,22 +51,31 @@ def _late_resolution_strategy(alias: str) -> StrategyConfig:
         allowlist=[entry],
         blocklist_question_idxs=[],
         defaults=entry,
-        **{"global": GlobalRiskConfig(
-            max_total_inventory_usd=500, max_concurrent_positions=5,
-            daily_loss_cap_usd=200, max_strike_distance_pct=50,
-            min_recent_volume_usd=0, stale_data_halt_seconds=30,
-            reconcile_interval_seconds=15,
-        )},
+        **{
+            "global": GlobalRiskConfig(
+                max_total_inventory_usd=500,
+                max_concurrent_positions=5,
+                daily_loss_cap_usd=200,
+                max_strike_distance_pct=50,
+                min_recent_volume_usd=0,
+                stale_data_halt_seconds=30,
+                reconcile_interval_seconds=15,
+            )
+        },
     )
 
 
 def _theta_strategy(alias: str) -> StrategyConfig:
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC"},
-        max_position_usd=200, stop_loss_pct=None, tte_min_seconds=0,
-        tte_max_seconds=86400, price_extreme_threshold=0.0,
+        max_position_usd=200,
+        stop_loss_pct=None,
+        tte_min_seconds=0,
+        tte_max_seconds=86400,
+        price_extreme_threshold=0.0,
         price_extreme_max=1.0,
-        distance_from_strike_usd_min=0, vol_max=100,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
     )
     return StrategyConfig(
         name=f"theta_harvester_{alias}",
@@ -72,15 +86,23 @@ def _theta_strategy(alias: str) -> StrategyConfig:
         blocklist_question_idxs=[],
         defaults=entry,
         theta=ThetaParams(
-            favorite_threshold=0.90, edge_buffer=0.03, topup_enabled=False,
-            min_bid_notional_usd=10.0, exit_safety_d=1.0,
+            favorite_threshold=0.90,
+            edge_buffer=0.03,
+            topup_enabled=False,
+            min_bid_notional_usd=10.0,
+            exit_safety_d=1.0,
         ),
-        **{"global": GlobalRiskConfig(
-            max_total_inventory_usd=1000, max_concurrent_positions=5,
-            daily_loss_cap_usd=100, max_strike_distance_pct=50,
-            min_recent_volume_usd=100, stale_data_halt_seconds=30,
-            reconcile_interval_seconds=15,
-        )},
+        **{
+            "global": GlobalRiskConfig(
+                max_total_inventory_usd=1000,
+                max_concurrent_positions=5,
+                daily_loss_cap_usd=100,
+                max_strike_distance_pct=50,
+                min_recent_volume_usd=100,
+                stale_data_halt_seconds=30,
+                reconcile_interval_seconds=15,
+            )
+        },
     )
 
 
@@ -90,11 +112,13 @@ def three_slot_deploy(tmp_path):
         env="dev",
         accounts={
             "v1": HyperliquidAccount(
-                account_address="0xv1", api_secret_key="0xv1",
+                account_address="0xv1",
+                api_secret_key="0xv1",
                 base_url="https://api.hyperliquid.xyz",
             ),
             "v31": HyperliquidAccount(
-                account_address="0xv31", api_secret_key="0xv31",
+                account_address="0xv31",
+                api_secret_key="0xv31",
                 base_url="https://api.hyperliquid.xyz",
             ),
             "v31_pm": PolymarketAccount(

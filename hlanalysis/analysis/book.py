@@ -14,6 +14,7 @@ Per-venue exchange_ts caveats (from docs/reports/00-overview.md §4):
   Cross-venue comparisons should subtract per-venue median transport latency
   before drawing lead-lag conclusions.
 """
+
 from __future__ import annotations
 
 from typing import Literal
@@ -233,9 +234,7 @@ def depth_at_offset_bps(
     Venue note: Binance spot ``exchange_ts`` is 0 (sentinel); this function
     uses ``local_recv_ts`` for ordering and is unaffected.
     """
-    glob = glob_for(
-        venue=venue, product_type=product_type, event="book_snapshot", symbol=symbol
-    )
+    glob = glob_for(venue=venue, product_type=product_type, event="book_snapshot", symbol=symbol)
 
     # Step 1: find the most recent snapshot row.
     find_sql = f"""
@@ -260,20 +259,12 @@ def depth_at_offset_bps(
             return 0.0
         best_bid = float(bid_pxs[0])
         threshold = best_bid * (1.0 - offset_bps / 10_000.0)
-        total = sum(
-            float(sz)
-            for px, sz in zip(bid_pxs, bid_szs)
-            if float(px) >= threshold
-        )
+        total = sum(float(sz) for px, sz in zip(bid_pxs, bid_szs) if float(px) >= threshold)
     else:  # side == "ask"
         if not ask_pxs:
             return 0.0
         best_ask = float(ask_pxs[0])
         threshold = best_ask * (1.0 + offset_bps / 10_000.0)
-        total = sum(
-            float(sz)
-            for px, sz in zip(ask_pxs, ask_szs)
-            if float(px) <= threshold
-        )
+        total = sum(float(sz) for px, sz in zip(ask_pxs, ask_szs) if float(px) <= threshold)
 
     return float(total)

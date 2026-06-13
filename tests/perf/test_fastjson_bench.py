@@ -24,8 +24,10 @@ def test_fastjson_is_not_slower(capsys):
     t_ms = time.perf_counter() - t0
 
     with capsys.disabled():
-        print(f"\njson.loads: {t_json*1e6/n:.2f} us/frame | "
-              f"msgspec: {t_ms*1e6/n:.2f} us/frame | "
-              f"speedup: {t_json/t_ms:.2f}x")
+        print(
+            f"\njson.loads: {t_json * 1e6 / n:.2f} us/frame | "
+            f"msgspec: {t_ms * 1e6 / n:.2f} us/frame | "
+            f"speedup: {t_json / t_ms:.2f}x"
+        )
     # Lenient guard: msgspec must not be materially slower (CI jitter tolerant).
     assert t_ms <= t_json * 1.5

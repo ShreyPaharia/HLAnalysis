@@ -19,6 +19,7 @@ Subclasses provide, per websocket connection, a ``subscribe(ws)`` coroutine and
 a ``handle(msg, recv_ns) -> list[NormalizedEvent]`` callable, and drive
 everything through :meth:`_run_ws`.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -89,13 +90,9 @@ class BaseWsAdapter(VenueAdapter):
         Override (or pass ``connect=`` to :meth:`_run_ws`) to inject a factory
         — e.g. Polymarket's tests, or a non-default ping config.
         """
-        return websockets.connect(
-            url, ping_interval=20, ping_timeout=20, max_size=2**24
-        )
+        return websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=2**24)
 
-    def _health(
-        self, kind: str, detail: str = "", product_type: ProductType | None = None
-    ) -> HealthEvent:
+    def _health(self, kind: str, detail: str = "", product_type: ProductType | None = None) -> HealthEvent:
         now = time.time_ns()
         return HealthEvent(
             venue=self.venue,
@@ -150,12 +147,12 @@ class BaseWsAdapter(VenueAdapter):
                 n = self.decode_failures
                 if n == self._decode_fail_warn_threshold or (
                     n > self._decode_fail_warn_threshold
-                    and (n - self._decode_fail_warn_threshold)
-                    % self._decode_fail_warn_every == 0
+                    and (n - self._decode_fail_warn_threshold) % self._decode_fail_warn_every == 0
                 ):
                     log.warning(
                         "%s: %d JSON decode failures so far — venue wire format may have changed",
-                        self.venue, n,
+                        self.venue,
+                        n,
                     )
                 continue
             for ev in handle(msg, recv_ns):
@@ -201,16 +198,18 @@ class BaseWsAdapter(VenueAdapter):
                     await queue.put(self._health(f"connected{suffix}", "", product_type))
                     await subscribe(ws)
                     await self._recv_until_stale(
-                        ws, handle, label, queue,
-                        product_type=product_type, after_message=after_message,
+                        ws,
+                        handle,
+                        label,
+                        queue,
+                        product_type=product_type,
+                        after_message=after_message,
                     )
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - any ws/transport error → reconnect
                 now = time.monotonic()
-                await queue.put(
-                    self._health(f"reconnect{suffix}", str(e)[:200], product_type)
-                )
+                await queue.put(self._health(f"reconnect{suffix}", str(e)[:200], product_type))
                 if circuit_breaker:
                     reconnect_times.append(now)
                     if (
@@ -220,8 +219,7 @@ class BaseWsAdapter(VenueAdapter):
                         await queue.put(
                             self._health(
                                 "circuit-breaker",
-                                f"{len(reconnect_times)} reconnects in "
-                                f"{now - reconnect_times[0]:.0f}s",
+                                f"{len(reconnect_times)} reconnects in {now - reconnect_times[0]:.0f}s",
                                 product_type,
                             )
                         )

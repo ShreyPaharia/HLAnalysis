@@ -7,6 +7,7 @@ None because every revision is hand-written (the baseline must reproduce the
 exact pre-Alembic schema byte-for-byte — autogenerate from SQLModel metadata
 would NOT match, e.g. the ALTER-appended fill.closed_pnl column).
 """
+
 from __future__ import annotations
 
 from alembic import context

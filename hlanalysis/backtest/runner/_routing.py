@@ -2,6 +2,7 @@
 
 Extracted verbatim from ``hftbt_runner.py`` — no logic changes.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -141,8 +142,12 @@ class _RunState:
             self.realized_floor_by_window[ws] = running
 
     def entry_blocked(
-        self, *, intent_notional: float, is_topup: bool,
-        held_notional: float, n_held: int,
+        self,
+        *,
+        intent_notional: float,
+        is_topup: bool,
+        held_notional: float,
+        n_held: int,
     ) -> str | None:
         """Return a veto reason if this entry would be suppressed, else ``None``.
 
@@ -158,9 +163,7 @@ class _RunState:
         if caps is None and not self.halt_windows:
             return None
         caps = caps or SimRiskCaps()
-        ws = daily_window_start_ns(
-            self.now_ns, hour=caps.daily_window_start_hour_utc
-        )
+        ws = daily_window_start_ns(self.now_ns, hour=caps.daily_window_start_hour_utc)
         inp = EntryGateInputs(
             now_ns=self.now_ns,
             intent_notional=intent_notional,
@@ -172,7 +175,12 @@ class _RunState:
         return entry_veto(caps, self.halt_windows, inp)
 
     def record_fill_from_order(
-        self, oid: int, asset_no: int, symbol: str, side: str, cloid: str,
+        self,
+        oid: int,
+        asset_no: int,
+        symbol: str,
+        side: str,
+        cloid: str,
         intent_size: float,
     ) -> Fill | None:
         order = self.hbt.orders(asset_no).get(oid)
@@ -197,12 +205,22 @@ class _RunState:
             exec_qty = min(exec_qty, intent_size)
         fee = _binary_fee(exec_px, exec_qty, self.cfg)
         return Fill(
-            cloid=cloid, symbol=symbol, side=side, price=exec_px, size=exec_qty,
-            fee=fee, partial=exec_qty < intent_size,
+            cloid=cloid,
+            symbol=symbol,
+            side=side,
+            price=exec_px,
+            size=exec_qty,
+            fee=fee,
+            partial=exec_qty < intent_size,
         )
 
     def record_hedge_fill_from_order(
-        self, oid: int, asset_no: int, symbol: str, side: str, cloid: str,
+        self,
+        oid: int,
+        asset_no: int,
+        symbol: str,
+        side: str,
+        cloid: str,
         intent_size: float,
     ) -> Fill | None:
         """Like ``record_fill_from_order`` but for the hedge leg: no [0, 1] price
@@ -220,8 +238,14 @@ class _RunState:
         fee_rate = self.cfg.hedge_fee_bps / 1e4
         fee = exec_px * exec_qty * fee_rate
         return Fill(
-            cloid=cloid, symbol=symbol, side=side, price=exec_px, size=exec_qty,
-            fee=fee, partial=exec_qty < intent_size, is_hedge=True,
+            cloid=cloid,
+            symbol=symbol,
+            side=side,
+            price=exec_px,
+            size=exec_qty,
+            fee=fee,
+            partial=exec_qty < intent_size,
+            is_hedge=True,
         )
 
 
@@ -241,7 +265,13 @@ def _route_stop_loss(st: _RunState) -> None:
     st.last_order_ns[pos.symbol] = st.now_ns
     oid = st.next_oid()
     st.hbt.submit_sell_order(
-        asset_no, oid, held_bid, abs(pos.qty), hb_order.IOC, hb_order.LIMIT, True,
+        asset_no,
+        oid,
+        held_bid,
+        abs(pos.qty),
+        hb_order.IOC,
+        hb_order.LIMIT,
+        True,
     )
     cloid = f"stop-{oid}"
     stop_book = st.books[pos.symbol]
@@ -251,17 +281,20 @@ def _route_stop_loss(st: _RunState) -> None:
     fill = st.record_fill_from_order(oid, asset_no, pos.symbol, "sell", cloid, abs(pos.qty))
     if fill is None:
         fill = Fill(
-            cloid=cloid, symbol=pos.symbol, side="sell", price=px,
-            size=abs(pos.qty), fee=_binary_fee(px, abs(pos.qty), st.cfg), partial=False,
+            cloid=cloid,
+            symbol=pos.symbol,
+            side="sell",
+            price=px,
+            size=abs(pos.qty),
+            fee=_binary_fee(px, abs(pos.qty), st.cfg),
+            partial=False,
         )
     st.result.fills.append(fill)
     st.fill_ts[cloid] = st.now_ns
     st.fill_question_idx[cloid] = st.q.question_idx
     # SHR-85: a stop-loss is a closing reduce — realize PnL into the daily-loss
     # window accumulator. Long-leg close realizes (sell_px - avg_entry)*size − fee.
-    st.record_realized(
-        st.now_ns, (fill.price - pos.avg_entry) * fill.size - fill.fee
-    )
+    st.record_realized(st.now_ns, (fill.price - pos.avg_entry) * fill.size - fill.fee)
     # SHR-91: record the completed position window for the shared-inventory ledger.
     if st._pos_open_ts_ns is not None:
         notional = abs(pos.qty) * pos.avg_entry
@@ -282,29 +315,38 @@ def _route_hedge(st: _RunState, decision: Any) -> None:
             continue
         h_book = st.books[cfg.hedge_symbol]
         if h_intent.side == "buy":
-            h_slipped = (
-                h_book.ask_px * (1.0 + cfg.hedge_slippage_bps / 1e4)
-                if h_book.ask_px is not None else 0.0
-            )
+            h_slipped = h_book.ask_px * (1.0 + cfg.hedge_slippage_bps / 1e4) if h_book.ask_px is not None else 0.0
             h_oid = st.next_oid()
             st.hbt.submit_buy_order(
-                st.hedge_asset_no, h_oid, h_slipped, h_intent.size,
-                hb_order.IOC, hb_order.LIMIT, True,
+                st.hedge_asset_no,
+                h_oid,
+                h_slipped,
+                h_intent.size,
+                hb_order.IOC,
+                hb_order.LIMIT,
+                True,
             )
             h_side = "buy"
         else:
-            h_slipped = (
-                h_book.bid_px * (1.0 - cfg.hedge_slippage_bps / 1e4)
-                if h_book.bid_px is not None else 0.0
-            )
+            h_slipped = h_book.bid_px * (1.0 - cfg.hedge_slippage_bps / 1e4) if h_book.bid_px is not None else 0.0
             h_oid = st.next_oid()
             st.hbt.submit_sell_order(
-                st.hedge_asset_no, h_oid, h_slipped, h_intent.size,
-                hb_order.IOC, hb_order.LIMIT, True,
+                st.hedge_asset_no,
+                h_oid,
+                h_slipped,
+                h_intent.size,
+                hb_order.IOC,
+                hb_order.LIMIT,
+                True,
             )
             h_side = "sell"
         h_fill = st.record_hedge_fill_from_order(
-            h_oid, st.hedge_asset_no, cfg.hedge_symbol, h_side, h_intent.cloid, h_intent.size,
+            h_oid,
+            st.hedge_asset_no,
+            cfg.hedge_symbol,
+            h_side,
+            h_intent.cloid,
+            h_intent.size,
         )
         if h_fill is None:
             # SHR-89: marketable hedge IOC with no fill → reject (re-fires next scan).
@@ -321,11 +363,19 @@ def _route_hedge(st: _RunState, decision: Any) -> None:
             prev_qty = h_pos.qty if h_pos is not None else 0.0
             prev_avg = h_pos.avg_entry if h_pos is not None else 0.0
             new_qty, new_avg = _hedge_avg_entry(
-                prev_qty, prev_avg, h_fill.side, h_fill.size, h_fill.price,
+                prev_qty,
+                prev_avg,
+                h_fill.side,
+                h_fill.size,
+                h_fill.price,
             )
             st.hedge_positions[cfg.hedge_symbol] = Position(
-                question_idx=st.q.question_idx, symbol=cfg.hedge_symbol, qty=new_qty,
-                avg_entry=new_avg, stop_loss_price=0.0, last_update_ts_ns=st.now_ns,
+                question_idx=st.q.question_idx,
+                symbol=cfg.hedge_symbol,
+                qty=new_qty,
+                avg_entry=new_avg,
+                stop_loss_price=0.0,
+                last_update_ts_ns=st.now_ns,
             )
 
 
@@ -336,9 +386,7 @@ def _route_enter(st: _RunState, decision: Any) -> None:
     intent = decision.intents[0]
     # Skip hedge intents for binary position management.
     if cfg.hedge_enabled and intent.symbol == cfg.hedge_symbol:
-        intent = next(
-            (i for i in decision.intents if i.symbol != cfg.hedge_symbol), None
-        )
+        intent = next((i for i in decision.intents if i.symbol != cfg.hedge_symbol), None)
     # Topup intents target the held position's symbol; reject any other.
     if intent is not None and st.pos is not None and intent.symbol != st.pos.symbol:
         intent = None
@@ -357,7 +405,9 @@ def _route_enter(st: _RunState, decision: Any) -> None:
     n_held = 1 if st.pos is not None else 0
     veto = st.entry_blocked(
         intent_notional=intent.size * intent.limit_price,
-        is_topup=is_topup, held_notional=held_notional, n_held=n_held,
+        is_topup=is_topup,
+        held_notional=held_notional,
+        n_held=n_held,
     )
     if veto is not None:
         st.result.n_entries_suppressed += 1
@@ -380,8 +430,13 @@ def _route_enter(st: _RunState, decision: Any) -> None:
         latency_ns = int(cfg.order_latency_ms * 1_000_000)
         persistence_ns = int(cfg.ioc_fleeting_persistence_seconds * 1_000_000_000)
         if _is_fleeting_ask(
-            intent.symbol, slipped, st.now_ns, latency_ns,
-            st.snap_best_ask_per_leg, st.book_ts_per_leg, st._book_idx,
+            intent.symbol,
+            slipped,
+            st.now_ns,
+            latency_ns,
+            st.snap_best_ask_per_leg,
+            st.book_ts_per_leg,
+            st._book_idx,
             persistence_ns=persistence_ns,
         ):
             st.result.n_rejects += 1
@@ -389,7 +444,13 @@ def _route_enter(st: _RunState, decision: Any) -> None:
     # Submit IOC limit at the slipped/limit price.
     oid = st.next_oid()
     st.hbt.submit_buy_order(
-        asset_no, oid, slipped, intent.size, hb_order.IOC, hb_order.LIMIT, True,
+        asset_no,
+        oid,
+        slipped,
+        intent.size,
+        hb_order.IOC,
+        hb_order.LIMIT,
+        True,
     )
     fill = st.record_fill_from_order(oid, asset_no, intent.symbol, "buy", intent.cloid, intent.size)
     if fill is None:
@@ -426,7 +487,9 @@ def _route_enter(st: _RunState, decision: Any) -> None:
         st._pos_open_ts_ns = st.now_ns
     st.pos = Position(
         question_idx=st.pos.question_idx if st.pos is not None else q.question_idx,
-        symbol=intent.symbol, qty=new_pos.qty, avg_entry=new_pos.avg_entry,
+        symbol=intent.symbol,
+        qty=new_pos.qty,
+        avg_entry=new_pos.avg_entry,
         stop_loss_price=_stop_price(new_pos.avg_entry, st.stop_pct),
         last_update_ts_ns=st.now_ns,
     )
@@ -442,9 +505,7 @@ def _route_exit(st: _RunState, decision: Any) -> None:
     intent = decision.intents[0]
     # Skip hedge intents for binary position management.
     if cfg.hedge_enabled and intent.symbol == cfg.hedge_symbol:
-        intent = next(
-            (i for i in decision.intents if i.symbol != cfg.hedge_symbol), None
-        )
+        intent = next((i for i in decision.intents if i.symbol != cfg.hedge_symbol), None)
     if intent is None or st.leg_to_asset.get(intent.symbol) is None or intent.symbol not in st.books:
         return
     exit_asset_no = st.leg_to_asset[intent.symbol]
@@ -467,15 +528,26 @@ def _route_exit(st: _RunState, decision: Any) -> None:
         latency_ns = int(cfg.order_latency_ms * 1_000_000)
         persistence_ns = int(cfg.ioc_fleeting_persistence_seconds * 1_000_000_000)
         if _is_fleeting_bid(
-            intent.symbol, slipped, st.now_ns, latency_ns,
-            st.snap_best_bid_per_leg, st.book_ts_per_leg, st._book_idx,
+            intent.symbol,
+            slipped,
+            st.now_ns,
+            latency_ns,
+            st.snap_best_bid_per_leg,
+            st.book_ts_per_leg,
+            st._book_idx,
             persistence_ns=persistence_ns,
         ):
             st.result.n_rejects += 1
             return
     oid = st.next_oid()
     st.hbt.submit_sell_order(
-        exit_asset_no, oid, slipped, size, hb_order.IOC, hb_order.LIMIT, True,
+        exit_asset_no,
+        oid,
+        slipped,
+        size,
+        hb_order.IOC,
+        hb_order.LIMIT,
+        True,
     )
     fill = st.record_fill_from_order(oid, exit_asset_no, intent.symbol, "sell", intent.cloid, size)
     if fill is None:
@@ -494,7 +566,10 @@ def _route_exit(st: _RunState, decision: Any) -> None:
     # exit) closes it — but anything below one lot is unfillable, so treat it as
     # closed to avoid an infinite-exit loop.
     new_pos, realized = apply_fill(
-        PositionState(pos.qty, pos.avg_entry), fill.side, fill.size, fill.price,
+        PositionState(pos.qty, pos.avg_entry),
+        fill.side,
+        fill.size,
+        fill.price,
         close_atol=cfg.lot_size,
     )
     # SHR-85: feed the realized PnL on this reduce into the daily-loss window
@@ -509,8 +584,11 @@ def _route_exit(st: _RunState, decision: Any) -> None:
         st.pos = None
     else:
         st.pos = Position(
-            question_idx=pos.question_idx, symbol=pos.symbol, qty=new_pos.qty,
-            avg_entry=new_pos.avg_entry, stop_loss_price=pos.stop_loss_price,
+            question_idx=pos.question_idx,
+            symbol=pos.symbol,
+            qty=new_pos.qty,
+            avg_entry=new_pos.avg_entry,
+            stop_loss_price=pos.stop_loss_price,
             last_update_ts_ns=st.now_ns,
         )
 
@@ -531,9 +609,13 @@ def _settle(st: _RunState) -> None:
         else:
             settle_px = _settle_px_for_outcome(pos, q, outcome)
         settle_fill = Fill(
-            cloid="settle", symbol=pos.symbol,
+            cloid="settle",
+            symbol=pos.symbol,
             side="sell" if pos.qty > 0 else "buy",
-            price=settle_px, size=abs(pos.qty), fee=0.0, partial=False,
+            price=settle_px,
+            size=abs(pos.qty),
+            fee=0.0,
+            partial=False,
         )
         st.result.fills.append(settle_fill)
         st.fill_ts["settle"] = q.end_ts_ns

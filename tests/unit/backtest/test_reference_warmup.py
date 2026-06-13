@@ -13,6 +13,7 @@ Spec:
   - CLI auto-derives warmup from the strategy's max vol_lookback_seconds across
     all classes; --reference-warmup-seconds N overrides; N=0 disables.
 """
+
 from __future__ import annotations
 
 import pickle
@@ -31,11 +32,11 @@ FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "fixtures" / "hl_hip4"
 # BBO fixture covers 2026-05-10 04:00:00.039 to 05:59:59.776 UTC.
 # We create a synthetic QuestionDescriptor whose start_ts_ns sits at 04:30 so
 # the 30-minute window [04:00, 04:30) is available as warm-up data.
-_BBO_FIXTURE_START_NS = 1_778_385_600_039_000_000   # 2026-05-10 04:00:00.039 UTC
+_BBO_FIXTURE_START_NS = 1_778_385_600_039_000_000  # 2026-05-10 04:00:00.039 UTC
 _WARMUP_WINDOW_S = 1_800  # 30 min of pre-start BBO data available in fixture
 _SYNTHETIC_START_NS = _BBO_FIXTURE_START_NS + _WARMUP_WINDOW_S * 1_000_000_000
 # end_ts_ns must be beyond the BBO fixture end (~05:59:59) — use 06:00:00 UTC
-_SYNTHETIC_END_NS = 1_778_392_800_000_000_000       # 2026-05-10 06:00:00 UTC
+_SYNTHETIC_END_NS = 1_778_392_800_000_000_000  # 2026-05-10 06:00:00 UTC
 
 
 def _synthetic_q() -> QuestionDescriptor:
@@ -97,8 +98,7 @@ def test_events_without_warmup_no_pre_start_reference():
     for ev in src.events(q):
         if isinstance(ev, ReferenceEvent):
             assert ev.ts_ns >= q.start_ts_ns, (
-                f"Cold-start source emitted pre-start ReferenceEvent at {ev.ts_ns} "
-                f"(start_ts_ns={q.start_ts_ns})"
+                f"Cold-start source emitted pre-start ReferenceEvent at {ev.ts_ns} (start_ts_ns={q.start_ts_ns})"
             )
 
 
@@ -114,9 +114,7 @@ def test_events_warmup_non_reference_streams_unchanged():
     q = _synthetic_q()
     for ev in src.events(q):
         if isinstance(ev, (BookSnapshot, TradeEvent, SettlementEvent)):
-            assert ev.ts_ns >= q.start_ts_ns, (
-                f"{type(ev).__name__} emitted at {ev.ts_ns} < start {q.start_ts_ns}"
-            )
+            assert ev.ts_ns >= q.start_ts_ns, f"{type(ev).__name__} emitted at {ev.ts_ns} < start {q.start_ts_ns}"
 
 
 def test_events_warmup_reference_ordering():
@@ -128,9 +126,7 @@ def test_events_warmup_reference_ordering():
     q = _synthetic_q()
     prev = -1
     for ev in src.events(q):
-        assert ev.ts_ns >= prev, (
-            f"Non-monotone ts_ns: {prev} then {ev.ts_ns}"
-        )
+        assert ev.ts_ns >= prev, f"Non-monotone ts_ns: {prev} then {ev.ts_ns}"
         prev = ev.ts_ns
 
 
@@ -164,15 +160,14 @@ def test_runner_no_fill_during_warmup_prefix(tmp_path):
     # No fill may carry ts_ns < q.start_ts_ns (warmup is σ-only).
     # We read the fill rows from the written parquet to get fill timestamps.
     import pyarrow.parquet as pq
+
     fills_parquet = tmp_path / f"{q.question_id}.parquet"
     if fills_parquet.exists():
         table = pq.read_table(fills_parquet)
         if "ts_ns" in table.schema.names:
             for ts_val in table["ts_ns"].to_pylist():
                 if ts_val is not None:
-                    assert ts_val >= q.start_ts_ns, (
-                        f"Fill at ts_ns={ts_val} is before start_ts_ns={q.start_ts_ns}"
-                    )
+                    assert ts_val >= q.start_ts_ns, f"Fill at ts_ns={ts_val} is before start_ts_ns={q.start_ts_ns}"
 
 
 def test_runner_no_diagnostic_row_during_warmup_prefix(tmp_path):
@@ -197,6 +192,7 @@ def test_runner_no_diagnostic_row_during_warmup_prefix(tmp_path):
     result = run_one_question(strategy, src, q, cfg, diagnostics_dir=tmp_path)
 
     import pyarrow.parquet as pq
+
     diag_parquet = tmp_path / f"{q.question_id}.parquet"
     if diag_parquet.exists():
         table = pq.read_table(diag_parquet)
@@ -240,9 +236,7 @@ def test_warmup_sigma_not_cold_after_prefix():
     assert n_pre_start > 0, "No pre-start reference events fed into MarketState"
 
     # Query σ at exactly start_ts_ns with a 900s lookback.
-    returns = state.recent_returns(
-        now_ns=q.start_ts_ns, lookback_seconds=900
-    )
+    returns = state.recent_returns(now_ns=q.start_ts_ns, lookback_seconds=900)
     assert len(returns) > 0, (
         "MarketState σ is still cold after 1800s of warm-up reference bars. "
         "Expected recent_returns to be non-empty at start_ts_ns."
@@ -256,12 +250,8 @@ def test_cold_start_sigma_empty_without_warmup():
     state = MarketState()
     q = _synthetic_q()
 
-    returns = state.recent_returns(
-        now_ns=q.start_ts_ns, lookback_seconds=900
-    )
-    assert len(returns) == 0, (
-        f"Expected empty returns for cold-start (no warmup), got {len(returns)}"
-    )
+    returns = state.recent_returns(now_ns=q.start_ts_ns, lookback_seconds=900)
+    assert len(returns) == 0, f"Expected empty returns for cold-start (no warmup), got {len(returns)}"
 
 
 # ---------------------------------------------------------------------------
@@ -299,8 +289,7 @@ def test_events_arrays_config_sig_warmup_differs(monkeypatch):
     key_warm = cache_key("Q1000015", [], src_warm._bundle_config_sig())
 
     assert key_cold != key_warm, (
-        "Cache key is identical for warmup=0 and warmup=900 — "
-        "cache will silently serve cold bundles for warm requests."
+        "Cache key is identical for warmup=0 and warmup=900 — cache will silently serve cold bundles for warm requests."
     )
 
 
@@ -335,8 +324,7 @@ def test_source_config_warmup_propagates_to_built_source(tmp_path):
     )
     src = cfg.build()
     assert src.reference_warmup_seconds == 1800, (
-        f"Expected reference_warmup_seconds=1800 on built source, "
-        f"got {src.reference_warmup_seconds}"
+        f"Expected reference_warmup_seconds=1800 on built source, got {src.reference_warmup_seconds}"
     )
 
 
@@ -394,9 +382,7 @@ def test_cli_derive_warmup_no_vol_lookback():
     from hlanalysis.backtest.cli import _derive_reference_warmup_seconds
 
     assert _derive_reference_warmup_seconds({}, data_source="hl_hip4") == 0
-    assert _derive_reference_warmup_seconds(
-        {"some_other_param": 42}, data_source="hl_hip4"
-    ) == 0
+    assert _derive_reference_warmup_seconds({"some_other_param": 42}, data_source="hl_hip4") == 0
 
 
 def test_cli_warmup_override_zero_disables(monkeypatch, tmp_path):
@@ -406,9 +392,7 @@ def test_cli_warmup_override_zero_disables(monkeypatch, tmp_path):
 
     params = {"vol_lookback_seconds": 900}
     # Explicit 0 must win over auto-derived 900
-    result = _resolve_reference_warmup_seconds(
-        params, data_source="hl_hip4", cli_override=0
-    )
+    result = _resolve_reference_warmup_seconds(params, data_source="hl_hip4", cli_override=0)
     assert result == 0
 
 
@@ -417,9 +401,7 @@ def test_cli_warmup_override_explicit(monkeypatch, tmp_path):
     from hlanalysis.backtest.cli import _resolve_reference_warmup_seconds
 
     params = {"vol_lookback_seconds": 900}
-    result = _resolve_reference_warmup_seconds(
-        params, data_source="hl_hip4", cli_override=1800
-    )
+    result = _resolve_reference_warmup_seconds(params, data_source="hl_hip4", cli_override=1800)
     assert result == 1800
 
 
@@ -428,9 +410,7 @@ def test_cli_warmup_auto_when_no_override(monkeypatch, tmp_path):
     from hlanalysis.backtest.cli import _resolve_reference_warmup_seconds
 
     params = {"vol_lookback_seconds": 3600}
-    result = _resolve_reference_warmup_seconds(
-        params, data_source="hl_hip4", cli_override=None
-    )
+    result = _resolve_reference_warmup_seconds(params, data_source="hl_hip4", cli_override=None)
     assert result == 3600
 
 
@@ -447,9 +427,7 @@ def test_source_config_ref_event_propagates_to_built_source():
     from hlanalysis.backtest.core.source_config import SourceConfig
 
     ds_bbo = SourceConfig(kind="hl_hip4", cache_root=str(FIXTURE_ROOT)).build()
-    ds_mark = SourceConfig(
-        kind="hl_hip4", cache_root=str(FIXTURE_ROOT), hl_ref_event="mark"
-    ).build()
+    ds_mark = SourceConfig(kind="hl_hip4", cache_root=str(FIXTURE_ROOT), hl_ref_event="mark").build()
     assert ds_bbo.ref_event == "bbo"  # default mirrors historical behaviour
     assert ds_mark.ref_event == "mark"
 
@@ -466,9 +444,7 @@ def test_source_config_ref_event_picklable():
     """hl_ref_event must survive the spawn-worker pickle boundary."""
     from hlanalysis.backtest.core.source_config import SourceConfig
 
-    cfg = SourceConfig(
-        kind="hl_hip4", cache_root=str(FIXTURE_ROOT), hl_ref_event="mark"
-    )
+    cfg = SourceConfig(kind="hl_hip4", cache_root=str(FIXTURE_ROOT), hl_ref_event="mark")
     cfg2 = pickle.loads(pickle.dumps(cfg))
     assert cfg2.hl_ref_event == "mark"
     assert cfg2 == cfg

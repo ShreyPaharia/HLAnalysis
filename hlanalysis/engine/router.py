@@ -52,9 +52,7 @@ def _pm_settlement_winner_known(qv: QuestionView | None) -> bool:
     ``settlement_pnl_usd`` can compute the real PnL instead of falling back to
     ``prior_realized`` (≈$0). ``settled`` can flip True (meta poll) before the
     SettlementEvent resolves the winner, hence the separate check."""
-    return qv is not None and qv.settled and bool(
-        qv.settled_symbols or qv.settled_symbol or qv.settled_side
-    )
+    return qv is not None and qv.settled and bool(qv.settled_symbols or qv.settled_symbol or qv.settled_side)
 
 
 def _pm_balance_shortfall(error: str | None) -> bool:
@@ -204,14 +202,19 @@ class Router:
         # hyphens (uuid str form has 4 of them) to land on a contiguous hex run.
         tail = intent.cloid
         if tail.startswith("hla-"):
-            tail = tail[len("hla-"):]
+            tail = tail[len("hla-") :]
         tail = tail.replace("-", "")
         new_cloid = f"{self.cloid_prefix}{tail}"
         return _dc_replace(intent, cloid=new_cloid)
 
     async def handle(
-        self, decision: Decision, *, inputs: RiskInputs, now_ns: int,
-        recent_returns: tuple[float, ...] = (), halt: HaltSnapshot | None = None,
+        self,
+        decision: Decision,
+        *,
+        inputs: RiskInputs,
+        now_ns: int,
+        recent_returns: tuple[float, ...] = (),
+        halt: HaltSnapshot | None = None,
     ) -> None:
         if decision.action is Action.HOLD:
             return
@@ -220,8 +223,7 @@ class Router:
             # SHR-83: journal the decision the instant the cloid is final, so
             # every emitted order has a row regardless of whether it is later
             # vetoed, rejected, or filled. Best-effort, off the hot path.
-            self._journal_decision(decision, intent, inputs, now_ns,
-                                   recent_returns, halt)
+            self._journal_decision(decision, intent, inputs, now_ns, recent_returns, halt)
             # Post-exit cooldown — applies to ENTRIES only (reduce_only exits
             # are always allowed, otherwise we couldn't close fast on a flip).
             # Catches v1-style churn where the strategy re-enters at the top
@@ -229,41 +231,47 @@ class Router:
             # spread on every cycle. Lives in the router because the strategy
             # doesn't see realized fills; the router does, in _book_fill.
             cooldown_s = getattr(self.strategy_cfg.defaults, "entry_cooldown_seconds", 0)
-            if (
-                cooldown_s > 0
-                and not intent.reduce_only
-                and decision.action is Action.ENTER
-            ):
+            if cooldown_s > 0 and not intent.reduce_only and decision.action is Action.ENTER:
                 last_exit = self._last_exit_ts.get(intent.question_idx, 0)
                 elapsed_s = (now_ns - last_exit) / 1e9
                 if last_exit > 0 and elapsed_s < cooldown_s:
-                    await self.bus.publish(RiskVeto(
-                        ts_ns=now_ns, account_alias=self.account_alias,
-                        reason="post_exit_cooldown",
-                        question_idx=intent.question_idx,
-                        detail={
-                            "cooldown_s": f"{cooldown_s}",
-                            "elapsed_s": f"{elapsed_s:.1f}",
-                        },
-                    ))
+                    await self.bus.publish(
+                        RiskVeto(
+                            ts_ns=now_ns,
+                            account_alias=self.account_alias,
+                            reason="post_exit_cooldown",
+                            question_idx=intent.question_idx,
+                            detail={
+                                "cooldown_s": f"{cooldown_s}",
+                                "elapsed_s": f"{elapsed_s:.1f}",
+                            },
+                        )
+                    )
                     logger.info(
                         "post_exit_cooldown veto q={} elapsed_s={:.1f} cooldown_s={}",
-                        intent.question_idx, elapsed_s, cooldown_s,
+                        intent.question_idx,
+                        elapsed_s,
+                        cooldown_s,
                     )
                     self._journal_reject(intent.cloid, "post_exit_cooldown")
                     continue
             verdict = self.gate.check_pre_trade(intent, inputs)
             if not verdict.approved:
                 self._journal_reject(intent.cloid, verdict.reason)
-                await self.bus.publish(RiskVeto(
-                    ts_ns=now_ns, account_alias=self.account_alias,
-                    reason=verdict.reason,
-                    question_idx=intent.question_idx,
-                    detail=verdict.detail or {},
-                ))
+                await self.bus.publish(
+                    RiskVeto(
+                        ts_ns=now_ns,
+                        account_alias=self.account_alias,
+                        reason=verdict.reason,
+                        question_idx=intent.question_idx,
+                        detail=verdict.detail or {},
+                    )
+                )
                 logger.info(
                     "risk veto cloid={} reason={} detail={}",
-                    intent.cloid, verdict.reason, verdict.detail,
+                    intent.cloid,
+                    verdict.reason,
+                    verdict.detail,
                 )
                 continue
             # Depth-walk may approve with a smaller size when at-limit liquidity
@@ -272,12 +280,19 @@ class Router:
             if verdict.clamped_size is not None and verdict.clamped_size < intent.size:
                 logger.info(
                     "depth_walk_clamp cloid={} intent_size={} clamped_size={} limit={}",
-                    intent.cloid, intent.size, verdict.clamped_size, intent.limit_price,
+                    intent.cloid,
+                    intent.size,
+                    verdict.clamped_size,
+                    intent.limit_price,
                 )
                 intent = _dc_replace(intent, size=verdict.clamped_size)
-            await self._place(intent, now_ns=now_ns, decision=decision,
-                              question=inputs.question,
-                              question_fields=inputs.question_fields)
+            await self._place(
+                intent,
+                now_ns=now_ns,
+                decision=decision,
+                question=inputs.question,
+                question_fields=inputs.question_fields,
+            )
         # Settlement-driven EXIT with no intents: book the close locally.
         if decision.action is Action.EXIT and not decision.intents:
             await self._close_settled(inputs.question.question_idx, now_ns=now_ns, question=inputs.question)
@@ -288,35 +303,45 @@ class Router:
     # lifecycle; it must never gate or delay it.
 
     def _journal_decision(
-        self, decision: Decision, intent: OrderIntent, inputs: RiskInputs,
-        now_ns: int, recent_returns: tuple[float, ...],
+        self,
+        decision: Decision,
+        intent: OrderIntent,
+        inputs: RiskInputs,
+        now_ns: int,
+        recent_returns: tuple[float, ...],
         halt: HaltSnapshot | None,
     ) -> None:
         if self.journal is None:
             return
         self.journal.record_decision(
-            cloid=intent.cloid, question_idx=intent.question_idx,
-            decision_ts_ns=now_ns, action=decision.action.value,
-            side=intent.side, symbol=intent.symbol,
-            intended_size=intent.size, intended_price=intent.limit_price,
-            book=inputs.book, reference_price=inputs.reference_price,
+            cloid=intent.cloid,
+            question_idx=intent.question_idx,
+            decision_ts_ns=now_ns,
+            action=decision.action.value,
+            side=intent.side,
+            symbol=intent.symbol,
+            intended_size=intent.size,
+            intended_price=intent.limit_price,
+            book=inputs.book,
+            reference_price=inputs.reference_price,
             recent_volume_usd=inputs.recent_volume_usd,
-            recent_returns=recent_returns, diagnostics=decision.diagnostics,
+            recent_returns=recent_returns,
+            diagnostics=decision.diagnostics,
             halt=self._augment_halt(halt, intent, inputs),
         )
 
     def _augment_halt(
-        self, halt: HaltSnapshot | None, intent: OrderIntent, inputs: RiskInputs,
+        self,
+        halt: HaltSnapshot | None,
+        intent: OrderIntent,
+        inputs: RiskInputs,
     ) -> HaltSnapshot:
         """Fill in the two halt-state bits only the router knows: whether this
         (question, side) has tripped the reject circuit-breaker, and whether the
         reference feed was stale at decision time (per the slot's
         stale_data_halt_seconds)."""
         base = halt or HaltSnapshot()
-        tripped = (
-            self._consecutive_rejects.get((intent.question_idx, intent.side), 0)
-            >= self._reject_breaker_threshold
-        )
+        tripped = self._consecutive_rejects.get((intent.question_idx, intent.side), 0) >= self._reject_breaker_threshold
         stale_ns = self.strategy_cfg.global_.stale_data_halt_seconds * 1_000_000_000
         stale = inputs.reference_age_ns > stale_ns if inputs.reference_age_ns else False
         return _dc_replace(base, reject_breaker_tripped=tripped, stale_reference=stale)
@@ -332,11 +357,18 @@ class Router:
     def _journal_fill(self, cloid: str, ts_ns: int, px: float, sz: float) -> None:
         if self.journal is not None:
             self.journal.record_fill(
-                cloid=cloid, fill_ts_ns=ts_ns, fill_px=px, fill_sz=sz,
+                cloid=cloid,
+                fill_ts_ns=ts_ns,
+                fill_px=px,
+                fill_sz=sz,
             )
 
     async def _place(
-        self, intent: OrderIntent, *, now_ns: int, decision: Decision,
+        self,
+        intent: OrderIntent,
+        *,
+        now_ns: int,
+        decision: Decision,
         question: QuestionView | None = None,
         question_fields: dict[str, str] | None = None,
     ) -> None:
@@ -351,10 +383,7 @@ class Router:
         if intent.reduce_only:
             pos = self.dal.get_position(intent.question_idx)
             held = pos.qty if pos is not None else 0.0
-            reducing = (
-                (held > 0 and intent.side == "sell")
-                or (held < 0 and intent.side == "buy")
-            )
+            reducing = (held > 0 and intent.side == "sell") or (held < 0 and intent.side == "buy")
             if not reducing or abs(held) <= self._reduce_close_atol:
                 # `abs(held) <= reduce_close_atol` catches un-sellable PM dust:
                 # PM floors a sell to 2dp, so a 0.0079-share residual rounds to
@@ -363,15 +392,21 @@ class Router:
                 logger.info(
                     "reduce_only suppressed cloid={} qidx={} side={} size={} "
                     "held={} (nothing to reduce / wrong direction / dust)",
-                    intent.cloid, intent.question_idx, intent.side,
-                    intent.size, held,
+                    intent.cloid,
+                    intent.question_idx,
+                    intent.side,
+                    intent.size,
+                    held,
                 )
                 return
             if intent.size > abs(held):
                 logger.info(
                     "reduce_only clamp cloid={} qidx={} size={}->{} held={}",
-                    intent.cloid, intent.question_idx, intent.size,
-                    abs(held), held,
+                    intent.cloid,
+                    intent.question_idx,
+                    intent.size,
+                    abs(held),
+                    held,
                 )
                 intent = _dc_replace(intent, size=abs(held))
         # 0.5 Reject circuit-breaker. Once a (question, side) has rejected
@@ -389,25 +424,32 @@ class Router:
             # and the next probe waits another full window; a fill clears it.
             last = self._last_reject_ts.get(breaker_key, 0)
             elapsed_s = (now_ns - last) / 1e9 if last else float("inf")
-            if (
-                self._reject_breaker_reset_seconds > 0
-                and elapsed_s >= self._reject_breaker_reset_seconds
-            ):
+            if self._reject_breaker_reset_seconds > 0 and elapsed_s >= self._reject_breaker_reset_seconds:
                 logger.info(
-                    "reject breaker re-probe qidx={} side={} after {:.0f}s idle "
-                    "(tripped, window elapsed)",
-                    intent.question_idx, intent.side, elapsed_s,
+                    "reject breaker re-probe qidx={} side={} after {:.0f}s idle (tripped, window elapsed)",
+                    intent.question_idx,
+                    intent.side,
+                    elapsed_s,
                 )
             else:
                 self._journal_reject(intent.cloid, "reject_breaker_suppressed")
                 return
         # 1. Persist pending row before the network call (spec §5.5 idempotency).
-        self.dal.upsert_order(OpenOrder(
-            cloid=intent.cloid, venue_oid=None, question_idx=intent.question_idx,
-            symbol=intent.symbol, side=intent.side, price=intent.limit_price,
-            size=intent.size, status="pending", placed_ts_ns=now_ns,
-            last_update_ts_ns=now_ns, strategy_id=self.strategy_id,
-        ))
+        self.dal.upsert_order(
+            OpenOrder(
+                cloid=intent.cloid,
+                venue_oid=None,
+                question_idx=intent.question_idx,
+                symbol=intent.symbol,
+                side=intent.side,
+                price=intent.limit_price,
+                size=intent.size,
+                status="pending",
+                placed_ts_ns=now_ns,
+                last_update_ts_ns=now_ns,
+                strategy_id=self.strategy_id,
+            )
+        )
         # SHR-83: stamp the send timestamp on the journal row right before the
         # network call so decision_ts → send_ts measures the in-engine latency.
         self._journal_send(intent.cloid, now_ns)
@@ -415,14 +457,20 @@ class Router:
         # call wrapped in tenacity retries; running it inline would park the
         # shared event loop (WS ingest, heartbeat, stop-loss enforcer) for the
         # whole network round-trip. Offload to a worker thread (SHR-41).
-        ack = await asyncio.to_thread(self.exec_client.place, PlaceRequest(
-            cloid=intent.cloid, symbol=intent.symbol, side=intent.side,
-            size=intent.size, price=intent.limit_price,
-            reduce_only=intent.reduce_only, time_in_force=intent.time_in_force,
-        ))
+        ack = await asyncio.to_thread(
+            self.exec_client.place,
+            PlaceRequest(
+                cloid=intent.cloid,
+                symbol=intent.symbol,
+                side=intent.side,
+                size=intent.size,
+                price=intent.limit_price,
+                reduce_only=intent.reduce_only,
+                time_in_force=intent.time_in_force,
+            ),
+        )
         # 3. Update DB row from ack.
-        self.dal.update_order_status(intent.cloid, status=ack.status,
-                                      venue_oid=ack.venue_oid, now_ns=now_ns)
+        self.dal.update_order_status(intent.cloid, status=ack.status, venue_oid=ack.venue_oid, now_ns=now_ns)
         # Surface venue-side rejections. The ack.error is dropped on the floor
         # by upsert_order_status (no error column on the openorder table), so
         # without this log the rejection reason is invisible — symptoms are
@@ -438,8 +486,11 @@ class Router:
                     "reject circuit-breaker TRIPPED qidx={} side={} after {} "
                     "consecutive rejects; suppressing further placements until a "
                     "fill clears it or the {:.0f}s auto-reset re-probes (last err: {})",
-                    intent.question_idx, intent.side, n,
-                    self._reject_breaker_reset_seconds, ack.error or "<no_error_field>",
+                    intent.question_idx,
+                    intent.side,
+                    n,
+                    self._reject_breaker_reset_seconds,
+                    ack.error or "<no_error_field>",
                 )
             # SHR-109: an un-sellable stale orphan. Once we have enough evidence
             # (breaker tripped) AND the venue authoritatively reports the CTF
@@ -449,27 +500,30 @@ class Router:
             # balance (not allowance) shortfall so we never abandon a position we
             # actually hold; _pm_balance_shortfall only matches PM's error, so HL
             # is unaffected.
-            if (
-                n >= self._reject_breaker_threshold
-                and intent.reduce_only
-                and _pm_balance_shortfall(ack.error)
-            ):
+            if n >= self._reject_breaker_threshold and intent.reduce_only and _pm_balance_shortfall(ack.error):
                 await self._quarantine_unsellable_position(intent, now_ns=now_ns)
             logger.warning(
                 "order rejected cloid={} symbol={} side={} size={} price={} err={}",
-                intent.cloid, intent.symbol, intent.side, intent.size,
-                intent.limit_price, ack.error or "<no_error_field>",
+                intent.cloid,
+                intent.symbol,
+                intent.side,
+                intent.size,
+                intent.limit_price,
+                ack.error or "<no_error_field>",
             )
-            await self.bus.publish(OrderRejected(
-                ts_ns=now_ns, account_alias=self.account_alias,
-                cloid=intent.cloid,
-                question_idx=intent.question_idx,
-                symbol=intent.symbol,
-                side=intent.side,
-                size=intent.size,
-                price=intent.limit_price,
-                error=ack.error or "",
-            ))
+            await self.bus.publish(
+                OrderRejected(
+                    ts_ns=now_ns,
+                    account_alias=self.account_alias,
+                    cloid=intent.cloid,
+                    question_idx=intent.question_idx,
+                    symbol=intent.symbol,
+                    side=intent.side,
+                    size=intent.size,
+                    price=intent.limit_price,
+                    error=ack.error or "",
+                )
+            )
         # 4. If filled, update Position + emit Entry/Exit.
         # Use `is not None` rather than truthy: a falsy 0.0 is a malformed ack
         # that should be logged as a problem, not silently treated as 'no fill'
@@ -478,7 +532,9 @@ class Router:
             if ack.fill_size is None or ack.fill_price is None or ack.fill_size <= 0 or ack.fill_price <= 0:
                 logger.warning(
                     "filled ack with missing/zero size or price; cloid={} size={} price={}",
-                    intent.cloid, ack.fill_size, ack.fill_price,
+                    intent.cloid,
+                    ack.fill_size,
+                    ack.fill_price,
                 )
                 return
             # Surface IOC partial fills explicitly. Strategy-side topup
@@ -490,16 +546,22 @@ class Router:
             if shortfall >= 1.0:
                 logger.info(
                     "partial_fill cloid={} intent_size={} fill_size={} shortfall={}",
-                    intent.cloid, intent.size, ack.fill_size, shortfall,
+                    intent.cloid,
+                    intent.size,
+                    ack.fill_size,
+                    shortfall,
                 )
-            await self._book_fill(intent, ack.fill_price, ack.fill_size,
-                                  now_ns=now_ns, question=question,
-                                  question_fields=question_fields)
+            await self._book_fill(
+                intent, ack.fill_price, ack.fill_size, now_ns=now_ns, question=question, question_fields=question_fields
+            )
             # SHR-83: record the venue fill (ts + px/sz) for latency calibration.
             self._journal_fill(intent.cloid, now_ns, ack.fill_price, ack.fill_size)
 
     async def _quarantine_unsellable_position(
-        self, intent: OrderIntent, *, now_ns: int,
+        self,
+        intent: OrderIntent,
+        *,
+        now_ns: int,
     ) -> None:
         """Detrack a stale local position the venue says we no longer hold
         (SHR-109). The CLOB rejects its reduce-only exit with a CTF *balance*
@@ -517,28 +579,30 @@ class Router:
         self.dal.delete_position(intent.question_idx)
         self._last_exit_ts[intent.question_idx] = now_ns
         self._save_cooldowns()
-        self._consecutive_rejects = {
-            k: v for k, v in self._consecutive_rejects.items()
-            if k[0] != intent.question_idx
-        }
-        self._last_reject_ts = {
-            k: v for k, v in self._last_reject_ts.items()
-            if k[0] != intent.question_idx
-        }
+        self._consecutive_rejects = {k: v for k, v in self._consecutive_rejects.items() if k[0] != intent.question_idx}
+        self._last_reject_ts = {k: v for k, v in self._last_reject_ts.items() if k[0] != intent.question_idx}
         logger.warning(
             "quarantined un-sellable position qidx={} symbol={} qty={:g} "
             "avg_entry={:g}: venue reports insufficient CTF balance for the "
             "reduce-only exit (stale orphan). Detracked to stop the reject flood.",
-            intent.question_idx, pos.symbol, pos.qty, pos.avg_entry,
+            intent.question_idx,
+            pos.symbol,
+            pos.qty,
+            pos.avg_entry,
         )
-        await self.bus.publish(ReconcileDrift(
-            ts_ns=now_ns, account_alias=self.account_alias,
-            case="position_mismatch", question_idx=intent.question_idx,
-            detail={
-                "resolution": "quarantined_unsellable_orphan",
-                "symbol": pos.symbol, "db_qty": f"{pos.qty}",
-            },
-        ))
+        await self.bus.publish(
+            ReconcileDrift(
+                ts_ns=now_ns,
+                account_alias=self.account_alias,
+                case="position_mismatch",
+                question_idx=intent.question_idx,
+                detail={
+                    "resolution": "quarantined_unsellable_orphan",
+                    "symbol": pos.symbol,
+                    "db_qty": f"{pos.qty}",
+                },
+            )
+        )
 
     def prune(self, active_question_idxs: set[int]) -> None:
         """Drop per-question cache entries for question_idxs no longer active.
@@ -562,7 +626,9 @@ class Router:
             self._last_reject_ts.pop(k, None)
 
     def _stop_loss_price_for(
-        self, fill_price: float, question_idx: int,
+        self,
+        fill_price: float,
+        question_idx: int,
         question_fields: dict[str, str] | None,
     ) -> float:
         """Resolve the per-trade stop loss from the matched allowlist entry.
@@ -583,20 +649,19 @@ class Router:
         return stop_price(fill_price, entry.stop_loss_pct)
 
     async def _book_fill(
-        self, intent: OrderIntent, price: float, size: float, *, now_ns: int,
+        self,
+        intent: OrderIntent,
+        price: float,
+        size: float,
+        *,
+        now_ns: int,
         question: QuestionView | None = None,
         question_fields: dict[str, str] | None = None,
     ) -> None:
         # A fill proves this question's legs are tradeable again — clear any
         # reject-breaker state for it (both sides) so a fresh position can exit.
-        self._consecutive_rejects = {
-            k: v for k, v in self._consecutive_rejects.items()
-            if k[0] != intent.question_idx
-        }
-        self._last_reject_ts = {
-            k: v for k, v in self._last_reject_ts.items()
-            if k[0] != intent.question_idx
-        }
+        self._consecutive_rejects = {k: v for k, v in self._consecutive_rejects.items() if k[0] != intent.question_idx}
+        self._last_reject_ts = {k: v for k, v in self._last_reject_ts.items() if k[0] != intent.question_idx}
         q_desc = question_description(question) if question else ""
         o_desc = outcome_description(question, intent.symbol) if question else ""
         existing = self.dal.get_position(intent.question_idx)
@@ -609,8 +674,14 @@ class Router:
         logger.info(
             "position_write cloid={} qidx={} symbol={} side={} fill_size={:g} "
             "fill_price={:g} qty_before={:g} qty_after={:g}",
-            intent.cloid, intent.question_idx, intent.symbol, intent.side,
-            size, price, _qty_before, _qty_before + signed,
+            intent.cloid,
+            intent.question_idx,
+            intent.symbol,
+            intent.side,
+            size,
+            price,
+            _qty_before,
+            _qty_before + signed,
         )
         # Realized PnL + position update come from the shared, pure
         # ``apply_fill`` (the single source of truth the backtest runner also
@@ -619,34 +690,53 @@ class Router:
         # reduce/close legs, recorded on the Fill row and the Exit event.
         prev_state = (
             PositionState(
-                existing.qty, existing.avg_entry, existing.realized_pnl,
+                existing.qty,
+                existing.avg_entry,
+                existing.realized_pnl,
                 existing.closed_qty,
             )
             if existing is not None
             else None
         )
         new_state, realized_this_fill = apply_fill(
-            prev_state, intent.side, size, price,
+            prev_state,
+            intent.side,
+            size,
+            price,
             close_atol=self._reduce_close_atol,
         )
         if existing is None:
             assert new_state is not None
-            self.dal.upsert_position(Position(
-                question_idx=intent.question_idx, symbol=intent.symbol,
-                qty=new_state.qty, avg_entry=new_state.avg_entry, realized_pnl=0.0,
-                last_update_ts_ns=now_ns,
-                stop_loss_price=self._stop_loss_price_for(
-                    price, intent.question_idx, question_fields,
-                ),
-                closed_qty=new_state.closed_qty,
-            ))
-            await self.bus.publish(Entry(
-                ts_ns=now_ns, account_alias=self.account_alias,
-                cloid=intent.cloid,
-                question_idx=intent.question_idx, symbol=intent.symbol,
-                side=intent.side, size=size, price=price,
-                question_description=q_desc, outcome_description=o_desc,
-            ))
+            self.dal.upsert_position(
+                Position(
+                    question_idx=intent.question_idx,
+                    symbol=intent.symbol,
+                    qty=new_state.qty,
+                    avg_entry=new_state.avg_entry,
+                    realized_pnl=0.0,
+                    last_update_ts_ns=now_ns,
+                    stop_loss_price=self._stop_loss_price_for(
+                        price,
+                        intent.question_idx,
+                        question_fields,
+                    ),
+                    closed_qty=new_state.closed_qty,
+                )
+            )
+            await self.bus.publish(
+                Entry(
+                    ts_ns=now_ns,
+                    account_alias=self.account_alias,
+                    cloid=intent.cloid,
+                    question_idx=intent.question_idx,
+                    symbol=intent.symbol,
+                    side=intent.side,
+                    size=size,
+                    price=price,
+                    question_description=q_desc,
+                    outcome_description=o_desc,
+                )
+            )
         elif new_state is None:
             # Closed. On a full close ``realized_this_fill == (price-avg)*qty``,
             # so the trade's realized PnL is this fill's plus prior partials'.
@@ -660,64 +750,78 @@ class Router:
             # true stop_loss exits. Legacy fallback: reduce_only without a
             # reason was historically tagged "stop_loss" — preserved for
             # callers that haven't been updated.
-            exit_reason = intent.exit_reason or (
-                "stop_loss" if intent.reduce_only else "manual"
-            )
+            exit_reason = intent.exit_reason or ("stop_loss" if intent.reduce_only else "manual")
             # Report the TOTAL quantity closed over the trade (prior partial
             # reduces + this closing lot), so qty and the cumulative realized_pnl
             # describe the same scope. `existing.qty` alone is just the final lot
             # and pairs misleadingly with the whole-trade PnL when the exit
             # filled across several partial reduces.
-            await self.bus.publish(Exit(
-                ts_ns=now_ns, account_alias=self.account_alias,
-                question_idx=intent.question_idx,
-                symbol=intent.symbol, qty=existing.closed_qty + existing.qty,
-                realized_pnl=realized_this_fill + existing.realized_pnl,
-                reason=exit_reason,
-                question_description=q_desc, outcome_description=o_desc,
-            ))
+            await self.bus.publish(
+                Exit(
+                    ts_ns=now_ns,
+                    account_alias=self.account_alias,
+                    question_idx=intent.question_idx,
+                    symbol=intent.symbol,
+                    qty=existing.closed_qty + existing.qty,
+                    realized_pnl=realized_this_fill + existing.realized_pnl,
+                    reason=exit_reason,
+                    question_description=q_desc,
+                    outcome_description=o_desc,
+                )
+            )
         else:
             # Reduce-only partial or add-on. ``apply_fill`` carried realized PnL
             # forward (add-on weighted-averages the basis; partial reduce leaves
             # it unchanged) so later closes don't lose this partial's PnL. The
             # stop price is preserved from the original entry on add-ons.
-            is_addon = (
-                (existing.qty > 0 and intent.side == "buy")
-                or (existing.qty < 0 and intent.side == "sell")
+            is_addon = (existing.qty > 0 and intent.side == "buy") or (existing.qty < 0 and intent.side == "sell")
+            self.dal.upsert_position(
+                Position(
+                    question_idx=intent.question_idx,
+                    symbol=intent.symbol,
+                    qty=new_state.qty,
+                    avg_entry=new_state.avg_entry,
+                    realized_pnl=new_state.realized_pnl,
+                    last_update_ts_ns=now_ns,
+                    stop_loss_price=existing.stop_loss_price,
+                    closed_qty=new_state.closed_qty,
+                )
             )
-            self.dal.upsert_position(Position(
-                question_idx=intent.question_idx, symbol=intent.symbol,
-                qty=new_state.qty, avg_entry=new_state.avg_entry,
-                realized_pnl=new_state.realized_pnl,
-                last_update_ts_ns=now_ns, stop_loss_price=existing.stop_loss_price,
-                closed_qty=new_state.closed_qty,
-            ))
             # Topups / add-on buys reuse the ENTRY Telegram alert so operators
             # see every size-increasing fill, not just the initial open.
             if is_addon:
-                await self.bus.publish(Entry(
-                    ts_ns=now_ns, account_alias=self.account_alias,
-                    cloid=intent.cloid,
-                    question_idx=intent.question_idx, symbol=intent.symbol,
-                    side=intent.side, size=size, price=price,
-                    question_description=q_desc, outcome_description=o_desc,
-                ))
+                await self.bus.publish(
+                    Entry(
+                        ts_ns=now_ns,
+                        account_alias=self.account_alias,
+                        cloid=intent.cloid,
+                        question_idx=intent.question_idx,
+                        symbol=intent.symbol,
+                        side=intent.side,
+                        size=size,
+                        price=price,
+                        question_description=q_desc,
+                        outcome_description=o_desc,
+                    )
+                )
         # Persist a Fill row regardless of branch so the local DB has a
         # coherent trade history for diagnostics. fill_id is derived from the
         # cloid + timestamp to be unique per actual venue fill even when one
         # cloid produces multiple partial fills.
-        self.dal.append_fill(Fill(
-            fill_id=f"{intent.cloid}-{now_ns}",
-            cloid=intent.cloid,
-            question_idx=intent.question_idx,
-            symbol=intent.symbol,
-            side=intent.side,
-            price=price,
-            size=size,
-            fee=0.0,  # HL fee is reported on user_fills; not surfaced in OrderAck
-            ts_ns=now_ns,
-            closed_pnl=realized_this_fill,
-        ))
+        self.dal.append_fill(
+            Fill(
+                fill_id=f"{intent.cloid}-{now_ns}",
+                cloid=intent.cloid,
+                question_idx=intent.question_idx,
+                symbol=intent.symbol,
+                side=intent.side,
+                price=price,
+                size=size,
+                fee=0.0,  # HL fee is reported on user_fills; not surfaced in OrderAck
+                ts_ns=now_ns,
+                closed_pnl=realized_this_fill,
+            )
+        )
 
     async def _close_settled(self, question_idx: int, *, now_ns: int, question: QuestionView | None = None) -> None:
         p = self.dal.get_position(question_idx)
@@ -736,11 +840,14 @@ class Router:
         # the settled flag.)
         if is_hl:
             from .scanner import Scanner
+
             window_start_ns = Scanner._daily_window_start_ns(
-                now_ns, hour=self.strategy_cfg.global_.daily_window_start_hour_utc,
+                now_ns,
+                hour=self.strategy_cfg.global_.daily_window_start_hour_utc,
             )
             venue_realized = self.exec_client.realized_pnl_for_symbol(
-                p.symbol, since_ts_ns=window_start_ns,
+                p.symbol,
+                since_ts_ns=window_start_ns,
             )
             # HL binaries pay 0/1 to legs and avg is strictly between, so a held
             # leg's settlement closedPnl is never exactly 0 — venue_realized==0
@@ -759,13 +866,17 @@ class Router:
                     "settlement_close_deferred qidx={} symbol={} venue={} — PnL "
                     "source not ready (winner/closedPnl lagging settled flag); "
                     "retry next tick",
-                    question_idx, p.symbol, "hl" if is_hl else "pm",
+                    question_idx,
+                    p.symbol,
+                    "hl" if is_hl else "pm",
                 )
                 return
             logger.warning(
                 "settlement_close_defer_timeout qidx={} symbol={} venue={} — PnL "
                 "source still missing after {}s; closing with best-available PnL",
-                question_idx, p.symbol, "hl" if is_hl else "pm",
+                question_idx,
+                p.symbol,
+                "hl" if is_hl else "pm",
                 _SETTLEMENT_DEFER_TIMEOUT_NS // 1_000_000_000,
             )
         self._settled_first_seen.pop(question_idx, None)
@@ -795,7 +906,8 @@ class Router:
             # None (compute path).
             _, realized = settle(
                 PositionState(p.qty, p.avg_entry, p.realized_pnl, p.closed_qty),
-                position_side_idx=0, settled_side_idx=0,
+                position_side_idx=0,
+                settled_side_idx=0,
                 venue_closed_pnl=venue_realized,
             )
         else:
@@ -804,19 +916,32 @@ class Router:
             # daily-loss gate. Idempotent per qidx — if the reconcile
             # vanished-position path already recorded it, this overwrites.
             from ..strategy.render import settlement_pnl_usd
+
             realized = settlement_pnl_usd(
-                question, p.symbol, p.qty, p.avg_entry,
+                question,
+                p.symbol,
+                p.qty,
+                p.avg_entry,
                 prior_realized=p.realized_pnl,
             )
             self.dal.record_settlement(
-                question_idx=question_idx, symbol=p.symbol,
-                realized_pnl=realized, ts_ns=now_ns,
+                question_idx=question_idx,
+                symbol=p.symbol,
+                realized_pnl=realized,
+                ts_ns=now_ns,
             )
         q_desc = question_description(question) if question else ""
         o_desc = outcome_description(question, p.symbol) if question else ""
-        await self.bus.publish(Exit(
-            ts_ns=now_ns, account_alias=self.account_alias,
-            question_idx=question_idx, symbol=p.symbol,
-            qty=p.closed_qty + p.qty, realized_pnl=realized, reason="settlement",
-            question_description=q_desc, outcome_description=o_desc,
-        ))
+        await self.bus.publish(
+            Exit(
+                ts_ns=now_ns,
+                account_alias=self.account_alias,
+                question_idx=question_idx,
+                symbol=p.symbol,
+                qty=p.closed_qty + p.qty,
+                realized_pnl=realized,
+                reason="settlement",
+                question_description=q_desc,
+                outcome_description=o_desc,
+            )
+        )

@@ -20,6 +20,7 @@ F) RSS self-halt publishes a MemoryHalt bus event so AlertRules fires a
    Telegram alert — a silent halt defeats the guard's purpose when the operator
    is not notified.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -37,6 +38,7 @@ _NOW = 1_750_000_000_000_000_000  # arbitrary fixed timestamp
 # ---------------------------------------------------------------------------
 # A) Latching daily-loss kill-switch
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_daily_loss_breach_latches_halt_and_writes_flag(tmp_path):
@@ -60,17 +62,20 @@ async def test_daily_loss_breach_latches_halt_and_writes_flag(tmp_path):
     # Simulate the daily-loss branch
     cap = slot.cfg.global_.daily_loss_cap_usd
     if pnl < -cap:
-        await rt.bus.publish(DailyLossHalt(
-            ts_ns=now, account_alias=slot.alias,
-            realized_pnl=pnl, cap=cap,
-        ))
+        await rt.bus.publish(
+            DailyLossHalt(
+                ts_ns=now,
+                account_alias=slot.alias,
+                realized_pnl=pnl,
+                cap=cap,
+            )
+        )
         slot.halted = True
         rt._latch_kill_switch(slot)
 
     assert slot.halted is True
     assert slot.kill_switch_path.exists(), (
-        "kill-switch flag file must be written on daily-loss halt so a restart "
-        "re-reads it and stays halted"
+        "kill-switch flag file must be written on daily-loss halt so a restart re-reads it and stays halted"
     )
 
 
@@ -97,10 +102,7 @@ async def test_daily_loss_latch_does_not_auto_clear(tmp_path):
     assert pnl2 == pytest.approx(0.0)
 
     # halted must NOT flip back automatically
-    assert slot.halted is True, (
-        "halt must not auto-clear even when PnL recovers — operator must remove "
-        "the flag file"
-    )
+    assert slot.halted is True, "halt must not auto-clear even when PnL recovers — operator must remove the flag file"
     assert slot.kill_switch_path.exists(), "flag file must persist across cycles"
 
 
@@ -120,8 +122,7 @@ async def test_startup_with_flag_file_stays_halted(tmp_path):
         slot.halted = True
 
     assert slot.halted is True, (
-        "slot must come up halted when the flag file was left by a previous "
-        "daily-loss or operator halt"
+        "slot must come up halted when the flag file was left by a previous daily-loss or operator halt"
     )
 
 
@@ -153,14 +154,13 @@ async def test_halted_scan_loop_blocks_new_entries(tmp_path):
             await task
 
     await _run_scan()
-    assert place_calls == [], (
-        "halted slot must not place any orders — new entries are blocked"
-    )
+    assert place_calls == [], "halted slot must not place any orders — new entries are blocked"
 
 
 # ---------------------------------------------------------------------------
 # B) Stop-loss exits still work while halted
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_stop_loss_enforced_while_halted(tmp_path):
@@ -177,8 +177,10 @@ async def test_stop_loss_enforced_while_halted(tmp_path):
     stop_price = 0.9
     slot.dal.upsert_position(
         _Pos(
-            question_idx=42, symbol="@30",
-            qty=10.0, avg_entry=0.95,
+            question_idx=42,
+            symbol="@30",
+            qty=10.0,
+            avg_entry=0.95,
             stop_loss_price=stop_price,
             realized_pnl=0.0,
             last_update_ts_ns=_NOW,
@@ -188,23 +190,32 @@ async def test_stop_loss_enforced_while_halted(tmp_path):
     # Inject a book whose bid is below the stop price
     from hlanalysis.engine.market_state import MarketState
     from hlanalysis.events import (
-        BboEvent, Mechanism, ProductType,
+        BboEvent,
+        Mechanism,
+        ProductType,
     )
     import time as _t
+
     ts = _t.time_ns()
-    rt.market_state.apply(BboEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="@30",
-        exchange_ts=ts, local_recv_ts=ts,
-        bid_px=0.50, bid_sz=5.0, ask_px=0.51, ask_sz=5.0,
-    ))
+    rt.market_state.apply(
+        BboEvent(
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="@30",
+            exchange_ts=ts,
+            local_recv_ts=ts,
+            bid_px=0.50,
+            bid_sz=5.0,
+            ask_px=0.51,
+            ask_sz=5.0,
+        )
+    )
 
     # Track place calls
     place_calls: list = []
     _orig_place = slot.exec_client.place
-    slot.exec_client.place = lambda *a, **kw: (
-        place_calls.append((a, kw)) or _orig_place(*a, **kw)
-    )
+    slot.exec_client.place = lambda *a, **kw: place_calls.append((a, kw)) or _orig_place(*a, **kw)
 
     # Run _enforce_stop_losses directly — this is what _stop_loss_loop calls
     await rt._enforce_stop_losses(slot, now_ns=_t.time_ns())
@@ -220,6 +231,7 @@ async def test_stop_loss_enforced_while_halted(tmp_path):
 # C) RSS self-halt guard
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_rss_guard_halts_all_slots_and_writes_flags(tmp_path, monkeypatch):
     """When process RSS exceeds rss_halt_kb, the heartbeat loop must set all
@@ -230,18 +242,13 @@ async def test_rss_guard_halts_all_slots_and_writes_flags(tmp_path, monkeypatch)
     rt.slots = [slot]  # register slot so the guard can iterate
 
     # Monkeypatch _read_rss_kb to return a value above the default ceiling
-    monkeypatch.setattr(EngineRuntime, "_read_rss_kb",
-                        staticmethod(lambda: 900_000), raising=True)
+    monkeypatch.setattr(EngineRuntime, "_read_rss_kb", staticmethod(lambda: 900_000), raising=True)
 
     # Drive the RSS check directly
     await rt._check_rss_halt(rt.slots)
 
-    assert slot.halted is True, (
-        "RSS above ceiling must halt all slots immediately"
-    )
-    assert slot.kill_switch_path.exists(), (
-        "RSS halt must write the kill-switch flag file so a restart stays halted"
-    )
+    assert slot.halted is True, "RSS above ceiling must halt all slots immediately"
+    assert slot.kill_switch_path.exists(), "RSS halt must write the kill-switch flag file so a restart stays halted"
 
 
 @pytest.mark.asyncio
@@ -253,8 +260,7 @@ async def test_rss_guard_no_halt_below_ceiling(tmp_path, monkeypatch):
     rt.slots = [slot]
 
     # 400_000 KB — well below the 850_000 KB default ceiling
-    monkeypatch.setattr(EngineRuntime, "_read_rss_kb",
-                        staticmethod(lambda: 400_000), raising=True)
+    monkeypatch.setattr(EngineRuntime, "_read_rss_kb", staticmethod(lambda: 400_000), raising=True)
 
     await rt._check_rss_halt(rt.slots)
 
@@ -273,19 +279,17 @@ async def test_rss_halt_kb_configurable(tmp_path, monkeypatch):
     rt.rss_halt_kb = 300_000  # very low custom ceiling
 
     # 350_000 KB — above the custom ceiling, below the default
-    monkeypatch.setattr(EngineRuntime, "_read_rss_kb",
-                        staticmethod(lambda: 350_000), raising=True)
+    monkeypatch.setattr(EngineRuntime, "_read_rss_kb", staticmethod(lambda: 350_000), raising=True)
 
     await rt._check_rss_halt(rt.slots)
 
-    assert slot.halted is True, (
-        "custom rss_halt_kb must be honoured — RSS above it should halt"
-    )
+    assert slot.halted is True, "custom rss_halt_kb must be honoured — RSS above it should halt"
 
 
 # ---------------------------------------------------------------------------
 # D) Real _read_rss_kb reflects CURRENT memory, not peak (regression for W1.9)
 # ---------------------------------------------------------------------------
+
 
 def test_read_rss_kb_returns_current_not_peak():
     """``_read_rss_kb()`` must return CURRENT RSS, not peak (``ru_maxrss``).
@@ -315,9 +319,7 @@ def test_read_rss_kb_returns_current_not_peak():
     # lazy-import overhead is already included.
     baseline_kb = EngineRuntime._read_rss_kb()
     assert baseline_kb > 0, "_read_rss_kb() must return a positive value"
-    assert baseline_kb < 100 * 1024 * 1024, (
-        "_read_rss_kb() sanity: value should be less than 100 GB"
-    )
+    assert baseline_kb < 100 * 1024 * 1024, "_read_rss_kb() sanity: value should be less than 100 GB"
 
     # Allocate ~200 MB and record RSS at peak.
     _big = bytearray(200 * 1024 * 1024)
@@ -341,8 +343,7 @@ def test_read_rss_kb_returns_current_not_peak():
     if sys.platform == "linux":
         slack_kb = 50 * 1024
         assert peak_kb > baseline_kb + 50 * 1024, (
-            "allocation did not raise RSS enough to make the test meaningful; "
-            "check that page-touching above is working"
+            "allocation did not raise RSS enough to make the test meaningful; check that page-touching above is working"
         )
         assert after_free_kb < peak_kb - slack_kb, (
             f"_read_rss_kb() appears to return peak RSS (ru_maxrss) rather than "
@@ -355,6 +356,7 @@ def test_read_rss_kb_returns_current_not_peak():
 # ---------------------------------------------------------------------------
 # E) Integration: _continuous_checks_loop latches on daily-loss breach
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_continuous_checks_loop_latches_and_writes_flag(tmp_path):
@@ -377,14 +379,13 @@ async def test_continuous_checks_loop_latches_and_writes_flag(tmp_path):
     )
 
     assert slot.halted is True
-    assert slot.kill_switch_path.exists(), (
-        "_continuous_checks_loop must call _latch_kill_switch on breach"
-    )
+    assert slot.kill_switch_path.exists(), "_continuous_checks_loop must call _latch_kill_switch on breach"
 
 
 # ---------------------------------------------------------------------------
 # F) RSS self-halt publishes MemoryHalt bus event → Telegram alert
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_rss_halt_publishes_memory_halt_event(tmp_path, monkeypatch):
@@ -396,8 +397,7 @@ async def test_rss_halt_publishes_memory_halt_event(tmp_path, monkeypatch):
     rt, slot = _build_runtime_with_recording(tmp_path)
     rt.slots = [slot]
 
-    monkeypatch.setattr(EngineRuntime, "_read_rss_kb",
-                        staticmethod(lambda: 900_000), raising=True)
+    monkeypatch.setattr(EngineRuntime, "_read_rss_kb", staticmethod(lambda: 900_000), raising=True)
 
     collected: list = []
     sub = rt.bus.subscribe()
@@ -431,6 +431,7 @@ async def test_rss_halt_alert_formats_to_nonempty_telegram_message(tmp_path, mon
     class _FakeTelegram:
         def __init__(self) -> None:
             self.messages: list[str] = []
+
         async def send(self, text: str, *, markdown: bool = True) -> bool:
             self.messages.append(text)
             return True
@@ -438,8 +439,7 @@ async def test_rss_halt_alert_formats_to_nonempty_telegram_message(tmp_path, mon
     rt, slot = _build_runtime_with_recording(tmp_path)
     rt.slots = [slot]
 
-    monkeypatch.setattr(EngineRuntime, "_read_rss_kb",
-                        staticmethod(lambda: 920_000), raising=True)
+    monkeypatch.setattr(EngineRuntime, "_read_rss_kb", staticmethod(lambda: 920_000), raising=True)
 
     tg = _FakeTelegram()
     bus = rt.bus
@@ -457,15 +457,9 @@ async def test_rss_halt_alert_formats_to_nonempty_telegram_message(tmp_path, mon
         pass
 
     memory_msgs = [m for m in tg.messages if "MEMORY" in m or "RSS" in m or "OOM" in m]
-    assert memory_msgs, (
-        "AlertRules must forward MemoryHalt to Telegram with a non-empty message"
-    )
+    assert memory_msgs, "AlertRules must forward MemoryHalt to Telegram with a non-empty message"
     msg = memory_msgs[0]
     # Message must mention the RSS reading and the ceiling so the operator
     # knows how close to the limit the process was.
-    assert "898" in msg or "920" in msg or "MB" in msg, (
-        "Telegram message must include RSS/ceiling size information"
-    )
-    assert "halt" in msg.lower() or "HALT" in msg, (
-        "Telegram message must clearly indicate a halt has occurred"
-    )
+    assert "898" in msg or "920" in msg or "MB" in msg, "Telegram message must include RSS/ceiling size information"
+    assert "halt" in msg.lower() or "HALT" in msg, "Telegram message must clearly indicate a halt has occurred"

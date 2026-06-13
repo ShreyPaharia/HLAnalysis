@@ -6,6 +6,7 @@ Covers:
   iteration) or produce corrupt cache state.
 - end_session with halt_reason no longer attempts the dead attribute assignment.
 """
+
 from __future__ import annotations
 
 import threading
@@ -14,13 +15,17 @@ from pathlib import Path
 import pytest
 
 from hlanalysis.engine.state import (
-    CachedStateDAL, OpenOrder, Position, StateDAL,
+    CachedStateDAL,
+    OpenOrder,
+    Position,
+    StateDAL,
 )
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _mk(tmp_path: Path) -> CachedStateDAL:
     dal = CachedStateDAL(tmp_path / "state.db")
@@ -30,22 +35,36 @@ def _mk(tmp_path: Path) -> CachedStateDAL:
 
 def _pos(qidx: int, qty: float) -> Position:
     return Position(
-        question_idx=qidx, symbol=f"#{qidx}", qty=qty, avg_entry=0.9,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=0.8,
+        question_idx=qidx,
+        symbol=f"#{qidx}",
+        qty=qty,
+        avg_entry=0.9,
+        realized_pnl=0.0,
+        last_update_ts_ns=1,
+        stop_loss_price=0.8,
     )
 
 
 def _ord(cloid: str) -> OpenOrder:
     return OpenOrder(
-        cloid=cloid, venue_oid=None, question_idx=1, symbol="#1", side="buy",
-        price=0.9, size=10.0, status="pending", placed_ts_ns=1,
-        last_update_ts_ns=1, strategy_id="t",
+        cloid=cloid,
+        venue_oid=None,
+        question_idx=1,
+        symbol="#1",
+        side="buy",
+        price=0.9,
+        size=10.0,
+        status="pending",
+        placed_ts_ns=1,
+        last_update_ts_ns=1,
+        strategy_id="t",
     )
 
 
 # ---------------------------------------------------------------------------
 # Thread-safety: concurrent upsert + read must not corrupt cache
 # ---------------------------------------------------------------------------
+
 
 def test_concurrent_upsert_and_read_no_corruption(tmp_path):
     """Spawn N writer threads and M reader threads all hitting the same
@@ -57,7 +76,7 @@ def test_concurrent_upsert_and_read_no_corruption(tmp_path):
     # Pre-load the cache so _ensure_loaded is not in the write path
     assert dal.all_positions() == []
 
-    N = 30   # writer threads
+    N = 30  # writer threads
     errors: list[Exception] = []
     barrier = threading.Barrier(N + 5)  # all threads start simultaneously
 
@@ -169,6 +188,7 @@ def test_concurrent_delete_position_and_read(tmp_path):
 # ---------------------------------------------------------------------------
 # end_session halt_reason: dead assignment removed (no AttributeError)
 # ---------------------------------------------------------------------------
+
 
 def test_end_session_with_halt_reason_does_not_raise(tmp_path):
     """end_session(halt_reason=...) must not raise even though Session_ has

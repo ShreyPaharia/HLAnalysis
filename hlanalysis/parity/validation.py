@@ -25,6 +25,7 @@ and emits per-market + aggregate reports (machine-readable :meth:`to_dict` +
 journal / venue fills / sim ``RunResult`` lives in the ``tools`` CLI shell so
 the attribution logic stays unit-testable on synthetic inputs.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -166,9 +167,7 @@ def attribute_residual(pairs: list[DecisionPair]) -> ResidualAttribution:
             input_skew += d
         else:
             execution += d
-    return ResidualAttribution(
-        input_skew=input_skew, execution=execution, unmodeled_halt=unmodeled_halt
-    )
+    return ResidualAttribution(input_skew=input_skew, execution=execution, unmodeled_halt=unmodeled_halt)
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,9 +199,7 @@ class MarketParity:
         }
 
 
-def reconcile_market(
-    *, question_idx: int, symbol: str, pairs: list[DecisionPair]
-) -> MarketParity:
+def reconcile_market(*, question_idx: int, symbol: str, pairs: list[DecisionPair]) -> MarketParity:
     """Reconcile one settled market from its matched decision pairs."""
     sim_pnl = sum(p.sim.realized_pnl for p in pairs if p.sim is not None)
     live_pnl = sum(p.live.realized_pnl for p in pairs if p.live is not None)
@@ -327,10 +324,8 @@ def format_report(report: FidelityReport) -> str:
         f"markets:          {report.n_markets}",
         f"sim PnL:          {report.total_sim_pnl:+.2f}",
         f"live PnL:         {report.total_live_pnl:+.2f}",
-        f"residual:         {report.total_residual:+.2f}  "
-        f"(|Σ|={report.abs_residual:.2f})",
-        f"residual ratio:   {report.residual_ratio:.4f}  "
-        f"(threshold {report.residual_ratio_threshold:.4f})",
+        f"residual:         {report.total_residual:+.2f}  (|Σ|={report.abs_residual:.2f})",
+        f"residual ratio:   {report.residual_ratio:.4f}  (threshold {report.residual_ratio_threshold:.4f})",
         "attribution:",
         f"  input-skew:     {a.input_skew:+.2f}",
         f"  execution:      {a.execution:+.2f}",

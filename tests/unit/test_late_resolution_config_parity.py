@@ -16,6 +16,7 @@ inherits automatically; (2) add the same field to ``LateResolutionConfig`` → t
 parity test below enforces both name and default match.
 ``test_single_source_property`` is the structural guard for that invariant.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -80,10 +81,7 @@ def test_allowlist_entry_declares_every_late_resolution_knob() -> None:
     must_be_settable = dataclass_fields - _GLOBAL_SOURCED
 
     missing = must_be_settable - entry_fields
-    assert not missing, (
-        f"AllowlistEntry is missing late_resolution knobs (silently unsettable "
-        f"live): {sorted(missing)}"
-    )
+    assert not missing, f"AllowlistEntry is missing late_resolution knobs (silently unsettable live): {sorted(missing)}"
 
 
 def test_allowlist_entry_rejects_unknown_keys() -> None:
@@ -129,14 +127,10 @@ def test_builder_forwards_all_shared_fields() -> None:
         fee_rate=0.07,
     )
     cfg = _late_resolution_config_from_entry(entry, global_=_global())
-    shared = (
-        set(AllowlistEntry.model_fields.keys())
-        & {f.name for f in dataclasses.fields(LateResolutionConfig)}
-    )
+    shared = set(AllowlistEntry.model_fields.keys()) & {f.name for f in dataclasses.fields(LateResolutionConfig)}
     for name in shared - _GLOBAL_SOURCED - {"stop_loss_pct"}:
         assert getattr(cfg, name) == getattr(entry, name), (
-            f"field {name!r} not forwarded: entry={getattr(entry, name)!r} "
-            f"cfg={getattr(cfg, name)!r}"
+            f"field {name!r} not forwarded: entry={getattr(entry, name)!r} cfg={getattr(cfg, name)!r}"
         )
 
 
@@ -195,8 +189,7 @@ def test_single_source_property() -> None:
     # accidentally re-declares a field on AllowlistEntry with a different type).
     missing_from_ae = set(params_fields) - set(ae_fields)
     assert not missing_from_ae, (
-        f"LateResolutionParams fields not inherited by AllowlistEntry: "
-        f"{sorted(missing_from_ae)}"
+        f"LateResolutionParams fields not inherited by AllowlistEntry: {sorted(missing_from_ae)}"
     )
 
     # Invariant 2: every LateResolutionParams field appears in LateResolutionConfig
@@ -222,8 +215,7 @@ def test_single_source_property() -> None:
                 f"!= LateResolutionConfig default={dc_field.default!r}"
             )
     assert not missing_from_lr, (
-        f"LateResolutionParams fields not present in LateResolutionConfig: "
-        f"{sorted(missing_from_lr)}"
+        f"LateResolutionParams fields not present in LateResolutionConfig: {sorted(missing_from_lr)}"
     )
     assert not default_mismatch, (
         "Default mismatch between LateResolutionParams and LateResolutionConfig:\n"

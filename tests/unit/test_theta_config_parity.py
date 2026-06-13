@@ -14,6 +14,7 @@ inherits automatically; (2) add the same field to ``ThetaHarvesterConfig`` →
 the parity test below enforces both name and default match.
 ``test_single_source_property`` is the structural guard for that invariant.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -45,10 +46,7 @@ def test_theta_params_declares_every_theta_block_knob() -> None:
     must_be_settable = dataclass_fields - _ALLOWLIST_SOURCED
 
     missing = must_be_settable - theta_param_fields
-    assert not missing, (
-        f"ThetaParams is missing theta-block knobs (silently unsettable live): "
-        f"{sorted(missing)}"
-    )
+    assert not missing, f"ThetaParams is missing theta-block knobs (silently unsettable live): {sorted(missing)}"
 
 
 def test_theta_params_rejects_unknown_keys() -> None:
@@ -91,13 +89,10 @@ def test_build_forwards_all_declared_theta_fields() -> None:
     cfgs = load_strategies_config(Path("config/strategy.yaml"))
     c = next(c for c in cfgs.strategies if c.strategy_type == "theta_harvester")
     built = build_theta_harvester_config(c)
-    shared = set(ThetaParams.model_fields.keys()) & {
-        f.name for f in dataclasses.fields(ThetaHarvesterConfig)
-    }
+    shared = set(ThetaParams.model_fields.keys()) & {f.name for f in dataclasses.fields(ThetaHarvesterConfig)}
     for name in shared - _ALLOWLIST_SOURCED:
         assert getattr(built, name) == getattr(c.theta, name), (
-            f"field {name!r} not forwarded: theta={getattr(c.theta, name)!r} "
-            f"built={getattr(built, name)!r}"
+            f"field {name!r} not forwarded: theta={getattr(c.theta, name)!r} built={getattr(built, name)!r}"
         )
 
 
@@ -135,10 +130,7 @@ def test_single_source_property() -> None:
     # (guaranteed by inheritance, but an explicit check catches if someone
     # accidentally re-declares a field on ThetaParams with a different type).
     missing_from_tp = set(params_fields) - set(tp_fields)
-    assert not missing_from_tp, (
-        f"ThetaHarvesterParams fields not inherited by ThetaParams: "
-        f"{sorted(missing_from_tp)}"
-    )
+    assert not missing_from_tp, f"ThetaHarvesterParams fields not inherited by ThetaParams: {sorted(missing_from_tp)}"
 
     # Invariant 2: every ThetaHarvesterParams field appears in ThetaHarvesterConfig
     # with the same default — canonical default in one place only.
@@ -163,8 +155,7 @@ def test_single_source_property() -> None:
                 f"!= ThetaHarvesterConfig default={dc_field.default!r}"
             )
     assert not missing_from_dc, (
-        f"ThetaHarvesterParams fields not present in ThetaHarvesterConfig: "
-        f"{sorted(missing_from_dc)}"
+        f"ThetaHarvesterParams fields not present in ThetaHarvesterConfig: {sorted(missing_from_dc)}"
     )
     assert not default_mismatch, (
         "Default mismatch between ThetaHarvesterParams and ThetaHarvesterConfig:\n"

@@ -15,6 +15,7 @@ run:
   step_markets: 15
 ```
 """
+
 from __future__ import annotations
 
 import itertools
@@ -41,6 +42,7 @@ from .runner.walkforward import walk_forward_splits
 # YAML grid config
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class TuningConfig:
     grids: dict[str, dict[str, list[Any]]] = field(default_factory=dict)
@@ -58,6 +60,7 @@ def load_tuning_yaml(path: Path) -> TuningConfig:
 # ---------------------------------------------------------------------------
 # Grid iteration
 # ---------------------------------------------------------------------------
+
 
 def iter_grid(grid: dict[str, list[Any]]) -> Iterator[dict[str, Any]]:
     keys = list(grid.keys())
@@ -114,11 +117,7 @@ def run_tuning(
     strike_for: Callable[[QuestionDescriptor], float] = lambda _q: 0.0,
 ) -> Iterator[TuningCellResult]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    splits = list(
-        walk_forward_splits(
-            descriptors, train=train, test=test, step=step, drop_short_tail=True
-        )
-    )
+    splits = list(walk_forward_splits(descriptors, train=train, test=test, step=step, drop_short_tail=True))
     log_path = out_dir / "results.jsonl"
     completed = _load_completed_cells(log_path)
     with log_path.open("a") as f:
@@ -211,6 +210,7 @@ def _run_one_cell(args: tuple) -> dict:
     # This mirrors how with_reference_resample overrides the cadence per cell.
     if source_config.reference_warmup_seconds == 0:
         from .cli import _derive_reference_warmup_seconds
+
         _warmup = _derive_reference_warmup_seconds(params, data_source="hl_hip4")
         if _warmup > 0:
             source_config = source_config.with_reference_warmup(_warmup)
@@ -247,14 +247,14 @@ def _run_one_cell(args: tuple) -> dict:
             continue
         hedge_events = None
         if hedge_source is not None:
-            hedge_events = list(
-                hedge_source.book_events(
-                    start_ts_ns=match.start_ts_ns, end_ts_ns=match.end_ts_ns
-                )
-            )
+            hedge_events = list(hedge_source.book_events(start_ts_ns=match.start_ts_ns, end_ts_ns=match.end_ts_ns))
         res = run_one_question(
-            strategy, data_source, match, run_cfg,
-            strike=strike, hedge_events=hedge_events,
+            strategy,
+            data_source,
+            match,
+            run_cfg,
+            strike=strike,
+            hedge_events=hedge_events,
         )
         pnl.append(res.realized_pnl_usd or 0.0)
         n_trades += len(res.fills)
@@ -286,11 +286,7 @@ def run_tuning_parallel(
     hedge_half_spread_bps: float = 1.0,
 ) -> Iterator[dict]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    splits = list(
-        walk_forward_splits(
-            descriptors, train=train, test=test, step=step, drop_short_tail=True
-        )
-    )
+    splits = list(walk_forward_splits(descriptors, train=train, test=test, step=step, drop_short_tail=True))
     log_path = out_dir / "results.jsonl"
     completed = _load_completed_cells(log_path)
     run_cfg_kwargs = asdict(run_cfg)
@@ -319,10 +315,15 @@ def run_tuning_parallel(
     # so each child self-limits to total/n_workers (SHR-71 OOM guard).
     _set_inproc_memo_worker_env(n_workers)
 
-    with log_path.open("a") as f, ProcessPoolExecutor(
-        max_workers=n_workers, mp_context=mp.get_context("spawn"),
-        initializer=worker_path_init, initargs=(parent_package_root(),),
-    ) as ex:
+    with (
+        log_path.open("a") as f,
+        ProcessPoolExecutor(
+            max_workers=n_workers,
+            mp_context=mp.get_context("spawn"),
+            initializer=worker_path_init,
+            initargs=(parent_package_root(),),
+        ) as ex,
+    ):
         for row in ex.map(_run_one_cell, work):
             f.write(json.dumps(row, default=str) + "\n")
             f.flush()

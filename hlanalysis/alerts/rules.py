@@ -19,6 +19,7 @@ def _e(s) -> str:
         return ""
     return html.escape(str(s), quote=False)
 
+
 from loguru import logger
 
 from ..engine.event_bus import EventBus
@@ -62,19 +63,21 @@ class _TelegramLike(Protocol):
 # (daily_loss_cap, kill_switch_active, max_*_usd / max_concurrent_positions,
 # stale_reconcile, stale_reference, opposite_leg_held, size_invalid) and any
 # newly-added reason stay visible until explicitly classified as benign.
-_BENIGN_VETO_REASONS = frozenset({
-    "low_volume",            # market notional below floor (thin book)
-    "stale_data",            # the trading leg's book has gone quiet (PM favorites do)
-    "strike_distance",       # favorite too far from the reference price
-    "tte_out_of_window",     # outside the slot's time-to-expiry window
-    "depth_walk_no_fill",    # no level marketable at our limit (book ticked away)
-    "depth_walk_slip",       # at-limit fill would exceed the slippage cap
-    "order_below_min_notional",  # effective size clamped below the min-notional floor
-    "post_exit_cooldown",    # churn guard — re-entry too soon after an exit
-    "settled",               # market already cash-settled
-    "allowlist_no_match",    # question not in this slot's allowlist
-    "blocklist",             # question explicitly blocked
-})
+_BENIGN_VETO_REASONS = frozenset(
+    {
+        "low_volume",  # market notional below floor (thin book)
+        "stale_data",  # the trading leg's book has gone quiet (PM favorites do)
+        "strike_distance",  # favorite too far from the reference price
+        "tte_out_of_window",  # outside the slot's time-to-expiry window
+        "depth_walk_no_fill",  # no level marketable at our limit (book ticked away)
+        "depth_walk_slip",  # at-limit fill would exceed the slippage cap
+        "order_below_min_notional",  # effective size clamped below the min-notional floor
+        "post_exit_cooldown",  # churn guard — re-entry too soon after an exit
+        "settled",  # market already cash-settled
+        "allowlist_no_match",  # question not in this slot's allowlist
+        "blocklist",  # question explicitly blocked
+    }
+)
 
 
 # PM reconcile drift resolutions that are informational and PERSISTENT: the
@@ -90,11 +93,13 @@ _BENIGN_VETO_REASONS = frozenset({
 # periodically — kept visible (not silenced) because an untracked real position
 # still needs eventual manual resolution or settlement. Mirrors the benign
 # RiskVeto / throttled stale-halt suppression.
-_PERSISTENT_DRIFT_RESOLUTIONS = frozenset({
-    "venue_orphan_alert_only",
-    "venue_absent_alert_only",
-    "qty_mismatch_alert_only",
-})
+_PERSISTENT_DRIFT_RESOLUTIONS = frozenset(
+    {
+        "venue_orphan_alert_only",
+        "venue_absent_alert_only",
+        "qty_mismatch_alert_only",
+    }
+)
 
 
 class AlertRules:
@@ -177,10 +182,7 @@ class AlertRules:
             case KillSwitchActivated():
                 return None, f"<b>KILL SWITCH ACTIVATED</b>\nPath: <code>{_e(ev.path)}</code>"
             case DailyLossHalt():
-                return None, (
-                    f"<b>DAILY LOSS HALT</b>\n"
-                    f"Realized: ${ev.realized_pnl:.2f} / Cap: ${ev.cap:.2f}"
-                )
+                return None, (f"<b>DAILY LOSS HALT</b>\nRealized: ${ev.realized_pnl:.2f} / Cap: ${ev.cap:.2f}")
             case MemoryHalt():
                 rss_mb = ev.rss_kb / 1024
                 ceil_mb = ev.ceiling_kb / 1024
@@ -205,8 +207,7 @@ class AlertRules:
                 return "feed_recovered", "✅ <b>FEED RECOVERED</b> — ingest resumed."
             case StaleDataHalt():
                 return f"stale:{ev.symbol}", (
-                    f"<b>STALE DATA HALT</b> <code>{_e(ev.symbol)}</code> "
-                    f"({ev.age_seconds:.1f}s)"
+                    f"<b>STALE DATA HALT</b> <code>{_e(ev.symbol)}</code> ({ev.age_seconds:.1f}s)"
                 )
             case RiskHalt():
                 return f"halt:{ev.reason}", f"<b>RISK HALT</b> {_e(ev.reason)}"
@@ -218,14 +219,15 @@ class AlertRules:
                 if ev.reason in _BENIGN_VETO_REASONS:
                     logger.debug(
                         "suppressing benign risk veto reason={} q={} detail={}",
-                        ev.reason, ev.question_idx, ev.detail,
+                        ev.reason,
+                        ev.question_idx,
+                        ev.detail,
                     )
                     return None
                 # Include question_idx in the dedupe key so identical reasons
                 # on different questions don't collapse into one alert.
                 return f"veto:{ev.reason}:{ev.question_idx}", (
-                    f"<i>risk veto</i> {_e(ev.reason)} "
-                    f"q={ev.question_idx} {_e(str(ev.detail))}"
+                    f"<i>risk veto</i> {_e(ev.reason)} q={ev.question_idx} {_e(str(ev.detail))}"
                 )
             case StopLossTriggered():
                 return None, (
@@ -240,13 +242,9 @@ class AlertRules:
                 # alert-only drift to the long window (kills the every-cycle
                 # flood) while loud/actionable drift keeps the short window.
                 resolution = (ev.detail or {}).get("resolution", "")
-                key = (
-                    f"drift:{ev.case}:{ev.question_idx}:{ev.cloid or ''}"
-                    f":{resolution}"
-                )
+                key = f"drift:{ev.case}:{ev.question_idx}:{ev.cloid or ''}:{resolution}"
                 return key, (
-                    f"<b>DRIFT</b> {_e(ev.case)} cloid={_e(ev.cloid)} "
-                    f"q={ev.question_idx} {_e(str(ev.detail))}"
+                    f"<b>DRIFT</b> {_e(ev.case)} cloid={_e(ev.cloid)} q={ev.question_idx} {_e(str(ev.detail))}"
                 )
             case Entry():
                 notional = ev.size * ev.price
@@ -255,10 +253,7 @@ class AlertRules:
                     lines.append(f"<i>{_e(ev.question_description)}</i>")
                 if ev.outcome_description:
                     lines.append(f"<b>{_e(ev.outcome_description)}</b>")
-                lines.append(
-                    f"{ev.side.upper()} {ev.size:g} @ ${ev.price:.4f}  "
-                    f"(notional ${notional:,.2f})"
-                )
+                lines.append(f"{ev.side.upper()} {ev.size:g} @ ${ev.price:.4f}  (notional ${notional:,.2f})")
                 lines.append(f"<code>q={ev.question_idx}</code> <code>{_e(ev.symbol)}</code>")
                 # Dedup by cloid so reconciler-driven double-Entry collapses.
                 return f"entry:{ev.cloid}", "\n".join(lines)
@@ -300,16 +295,14 @@ class AlertRules:
                 # alerts separately, so suppressing the single reject is safe.
                 if ev.error and "no orders found to match" in ev.error.lower():
                     logger.debug(
-                        "suppressing self-healing FAK no-match reject "
-                        "q={} sym={}", ev.question_idx, _e(ev.symbol),
+                        "suppressing self-healing FAK no-match reject q={} sym={}",
+                        ev.question_idx,
+                        _e(ev.symbol),
                     )
                     return None
                 notional = ev.size * ev.price
                 lines = ["❌ <b>ORDER REJECTED</b>"]
-                lines.append(
-                    f"{ev.side.upper()} {ev.size:g} @ ${ev.price:.4f}  "
-                    f"(notional ${notional:,.2f})"
-                )
+                lines.append(f"{ev.side.upper()} {ev.size:g} @ ${ev.price:.4f}  (notional ${notional:,.2f})")
                 lines.append(f"<code>q={ev.question_idx}</code> <code>{_e(ev.symbol)}</code>")
                 lines.append(f"<i>{_e(ev.error) or 'no_error_field'}</i>")
                 # Dedupe by error string + symbol — repeated identical rejects
@@ -345,8 +338,7 @@ class AlertRules:
             case PMStrikeMismatch():
                 lines = [
                     f"⚠️ PM strike vs spot-mark divergence q={ev.question_idx}",
-                    f"captured={ev.captured_strike:.2f}  mark={ev.reference_mark:.2f}  "
-                    f"Δ={ev.divergence_bps:.1f}bps",
+                    f"captured={ev.captured_strike:.2f}  mark={ev.reference_mark:.2f}  Δ={ev.divergence_bps:.1f}bps",
                     "(alert only — strike still trades)",
                 ]
                 return (ev.account_alias or None, "\n".join(lines))

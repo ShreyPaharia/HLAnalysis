@@ -5,7 +5,11 @@ import pytest
 from hyperliquid.utils.error import ClientError
 
 from hlanalysis.engine.hl_client import (
-    HLClient, OrderAck, PlaceRequest, RateLimitError, RestError,
+    HLClient,
+    OrderAck,
+    PlaceRequest,
+    RateLimitError,
+    RestError,
 )
 
 
@@ -21,8 +25,13 @@ def paper_client() -> HLClient:
 
 def test_paper_place_returns_synthesized_ack(paper_client):
     req = PlaceRequest(
-        cloid="hla-1", symbol="@30", side="buy", size=10.0, price=0.95,
-        reduce_only=False, time_in_force="ioc",
+        cloid="hla-1",
+        symbol="@30",
+        side="buy",
+        size=10.0,
+        price=0.95,
+        reduce_only=False,
+        time_in_force="ioc",
     )
     ack = paper_client.place(req)
     assert isinstance(ack, OrderAck)
@@ -33,8 +42,13 @@ def test_paper_place_returns_synthesized_ack(paper_client):
 
 def test_paper_place_is_idempotent_per_cloid(paper_client):
     req = PlaceRequest(
-        cloid="hla-2", symbol="@30", side="buy", size=10.0, price=0.95,
-        reduce_only=False, time_in_force="ioc",
+        cloid="hla-2",
+        symbol="@30",
+        side="buy",
+        size=10.0,
+        price=0.95,
+        reduce_only=False,
+        time_in_force="ioc",
     )
     a = paper_client.place(req)
     b = paper_client.place(req)
@@ -44,8 +58,13 @@ def test_paper_place_is_idempotent_per_cloid(paper_client):
 def test_paper_open_orders_returns_what_we_placed_and_did_not_fill(paper_client):
     # Force a non-marketable IOC: paper mode treats price <= 0.0 as "no fill"
     req = PlaceRequest(
-        cloid="hla-3", symbol="@30", side="buy", size=10.0, price=0.0,
-        reduce_only=False, time_in_force="ioc",
+        cloid="hla-3",
+        symbol="@30",
+        side="buy",
+        size=10.0,
+        price=0.0,
+        reduce_only=False,
+        time_in_force="ioc",
     )
     ack = paper_client.place(req)
     assert ack.status == "rejected"
@@ -53,10 +72,17 @@ def test_paper_open_orders_returns_what_we_placed_and_did_not_fill(paper_client)
 
 
 def test_paper_clearinghouse_state_tracks_filled_orders(paper_client):
-    paper_client.place(PlaceRequest(
-        cloid="hla-4", symbol="@30", side="buy", size=10.0, price=0.95,
-        reduce_only=False, time_in_force="ioc",
-    ))
+    paper_client.place(
+        PlaceRequest(
+            cloid="hla-4",
+            symbol="@30",
+            side="buy",
+            size=10.0,
+            price=0.95,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
     state = paper_client.clearinghouse_state()
     assert any(p.symbol == "@30" and p.qty == 10.0 for p in state.positions)
 
@@ -66,20 +92,30 @@ def test_live_mode_requires_sdk(monkeypatch):
     # constructing a non-paper client doesn't crash and that place() raises if
     # the SDK is unreachable.
     c = HLClient(
-        account_address="0xtest", api_secret_key="0xfake",
-        base_url="https://api.hyperliquid.xyz", paper_mode=False,
+        account_address="0xtest",
+        api_secret_key="0xfake",
+        base_url="https://api.hyperliquid.xyz",
+        paper_mode=False,
     )
 
     # Patch the underlying sdk Exchange with one that always raises
     class _Boom:
         def order(self, *a, **kw):
             raise ConnectionError("network")
+
     c._exchange = _Boom()  # type: ignore[attr-defined]
     with pytest.raises(RestError):
-        c.place(PlaceRequest(
-            cloid="hla-5", symbol="@30", side="buy", size=1.0, price=0.5,
-            reduce_only=False, time_in_force="ioc",
-        ))
+        c.place(
+            PlaceRequest(
+                cloid="hla-5",
+                symbol="@30",
+                side="buy",
+                size=1.0,
+                price=0.5,
+                reduce_only=False,
+                time_in_force="ioc",
+            )
+        )
 
 
 class _FakeInfo:
@@ -105,8 +141,10 @@ class _FakeInfo:
 
 def _live_client_with(perp_state: dict, spot_state: dict) -> HLClient:
     c = HLClient(
-        account_address="0xtest", api_secret_key="0xfake",
-        base_url="https://api.hyperliquid.xyz", paper_mode=False,
+        account_address="0xtest",
+        api_secret_key="0xfake",
+        base_url="https://api.hyperliquid.xyz",
+        paper_mode=False,
     )
     c._info = _FakeInfo(perp_state=perp_state, spot_state=spot_state)  # type: ignore[assignment]
     return c
@@ -128,8 +166,8 @@ def test_clearinghouse_state_merges_hip4_spot_balances():
             {"coin": "HYPE", "total": "0.02", "entryNtl": "1.07"},
             {"coin": "+551", "total": "500.0", "entryNtl": "494.236736"},
             {"coin": "+580", "total": "570.0", "entryNtl": "539.45930939"},
-            {"coin": "+581", "total": "0.0", "entryNtl": "0.0"},   # zero qty
-            {"coin": "o468", "total": "0.0", "entryNtl": "0.0"},    # non-HIP4
+            {"coin": "+581", "total": "0.0", "entryNtl": "0.0"},  # zero qty
+            {"coin": "o468", "total": "0.0", "entryNtl": "0.0"},  # non-HIP4
         ],
     }
     c = _live_client_with(perp, spot)
@@ -164,21 +202,49 @@ def test_realized_pnl_since_sums_closedpnl_minus_fee():
     spot = {"balances": []}
     fills = [
         # Older than cutoff — excluded.
-        {"time": 999, "hash": "f0", "cloid": "0x0", "coin": "#601",
-         "side": "B", "px": "0.99", "sz": "200", "fee": "0.10",
-         "closedPnl": "0"},
+        {
+            "time": 999,
+            "hash": "f0",
+            "cloid": "0x0",
+            "coin": "#601",
+            "side": "B",
+            "px": "0.99",
+            "sz": "200",
+            "fee": "0.10",
+            "closedPnl": "0",
+        },
         # Open at midnight+1ms — closed_pnl=0, fee=0.07 → contributes -0.07.
-        {"time": 1001, "hash": "f1", "cloid": "0x1", "coin": "#601",
-         "side": "B", "px": "0.99", "sz": "200", "fee": "0.07",
-         "closedPnl": "0"},
+        {
+            "time": 1001,
+            "hash": "f1",
+            "cloid": "0x1",
+            "coin": "#601",
+            "side": "B",
+            "px": "0.99",
+            "sz": "200",
+            "fee": "0.07",
+            "closedPnl": "0",
+        },
         # Reduce later → closedPnl=-10.0, fee=0.02 → contributes -10.02.
-        {"time": 2000, "hash": "f2", "cloid": "0x2", "coin": "#601",
-         "side": "A", "px": "0.94", "sz": "200", "fee": "0.02",
-         "closedPnl": "-10.0"},
+        {
+            "time": 2000,
+            "hash": "f2",
+            "cloid": "0x2",
+            "coin": "#601",
+            "side": "A",
+            "px": "0.94",
+            "sz": "200",
+            "fee": "0.02",
+            "closedPnl": "-10.0",
+        },
     ]
-    c = HLClient(account_address="0xtest", api_secret_key="0xfake",
-                 base_url="https://api.hyperliquid.xyz", paper_mode=False,
-                 pnl_cache_ttl_s=0.0)
+    c = HLClient(
+        account_address="0xtest",
+        api_secret_key="0xfake",
+        base_url="https://api.hyperliquid.xyz",
+        paper_mode=False,
+        pnl_cache_ttl_s=0.0,
+    )
     c._info = _FakeInfo(perp_state=perp, spot_state=spot, fills=fills)  # type: ignore[assignment]
     cutoff_ns = 1000 * 1_000_000  # 1000 ms in ns
     pnl = c.realized_pnl_since(cutoff_ns)
@@ -191,21 +257,35 @@ def test_realized_pnl_since_is_cached_to_bound_rest_calls():
     perp = {"assetPositions": [], "marginSummary": {"accountValue": "0.0"}}
     spot = {"balances": []}
     fills = [
-        {"time": 1000, "hash": "f1", "cloid": "0x1", "coin": "#601",
-         "side": "B", "px": "0.99", "sz": "200", "fee": "0.10",
-         "closedPnl": "0"},
+        {
+            "time": 1000,
+            "hash": "f1",
+            "cloid": "0x1",
+            "coin": "#601",
+            "side": "B",
+            "px": "0.99",
+            "sz": "200",
+            "fee": "0.10",
+            "closedPnl": "0",
+        },
     ]
-    c = HLClient(account_address="0xtest", api_secret_key="0xfake",
-                 base_url="https://api.hyperliquid.xyz", paper_mode=False,
-                 pnl_cache_ttl_s=60.0)
+    c = HLClient(
+        account_address="0xtest",
+        api_secret_key="0xfake",
+        base_url="https://api.hyperliquid.xyz",
+        paper_mode=False,
+        pnl_cache_ttl_s=60.0,
+    )
     fake = _FakeInfo(perp_state=perp, spot_state=spot, fills=fills)
     c._info = fake  # type: ignore[assignment]
     # Count REST calls by wrapping the paginating fetch (user_fills_by_time).
     call_count = {"n": 0}
     orig = fake.user_fills_by_time
+
     def counted(addr, start_time=0, end_time=None):  # noqa: ANN001
         call_count["n"] += 1
         return orig(addr, start_time=start_time, end_time=end_time)
+
     fake.user_fills_by_time = counted  # type: ignore[assignment]
     for _ in range(5):
         c.realized_pnl_since(0)
@@ -239,8 +319,10 @@ class _FlakyInfo:
 
 def _live_client() -> HLClient:
     return HLClient(
-        account_address="0xtest", api_secret_key="0xfake",
-        base_url="https://api.hyperliquid.xyz", paper_mode=False,
+        account_address="0xtest",
+        api_secret_key="0xfake",
+        base_url="https://api.hyperliquid.xyz",
+        paper_mode=False,
     )
 
 
@@ -278,8 +360,7 @@ def test_clearinghouse_state_does_not_retry_non_rate_limit_errors():
 def test_clearinghouse_state_empty_spot_balances_ok():
     perp = {
         "assetPositions": [
-            {"position": {"coin": "BTC", "szi": "0.1", "entryPx": "100000",
-                          "unrealizedPnl": "0"}},
+            {"position": {"coin": "BTC", "szi": "0.1", "entryPx": "100000", "unrealizedPnl": "0"}},
         ],
         "marginSummary": {"accountValue": "10000.0"},
     }
@@ -294,19 +375,22 @@ def test_clearinghouse_state_empty_spot_balances_ok():
 def test_user_fills_paginates_past_2000_cap():
     """HL caps each fills response at 2000; the client must paginate by time so
     realized PnL isn't silently truncated for >2000-fill accounts (the v1 bug)."""
+
     class _PagedInfo:
         def __init__(self):
             self.fills = [
-                {"tid": i, "time": i + 1, "coin": "#1", "side": "B",
-                 "px": "1", "sz": "1", "fee": "0", "closedPnl": "1"}
+                {"tid": i, "time": i + 1, "coin": "#1", "side": "B", "px": "1", "sz": "1", "fee": "0", "closedPnl": "1"}
                 for i in range(2500)
             ]
             self.calls = 0
+
         def user_fills_by_time(self, _addr, start_time=0, end_time=None):
             self.calls += 1
             return [f for f in self.fills if f["time"] >= start_time][:2000]
+
         def user_state(self, _a):
             return {"assetPositions": [], "marginSummary": {"accountValue": "0"}}
+
         def spot_user_state(self, _a):
             return {"balances": []}
 

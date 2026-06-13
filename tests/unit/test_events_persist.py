@@ -6,6 +6,7 @@ TDD spec: tests written before implementation, exercising:
 - _events_persist_loop: real EventBus publish → DB row via async task
 - publish does not block when the persist consumer is slow (drop path)
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -32,6 +33,7 @@ from hlanalysis.engine.state import StateDAL
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def dal(tmp_path):
     db_path = tmp_path / "state.db"
@@ -44,6 +46,7 @@ def dal(tmp_path):
 # Migration
 # ---------------------------------------------------------------------------
 
+
 def test_events_table_created_by_baseline(dal):
     # The events table (formerly migration 0006) is now part of the Alembic
     # baseline; confirm migrations ran (a head is recorded) and the table exists.
@@ -51,18 +54,16 @@ def test_events_table_created_by_baseline(dal):
     # with each new migration, so don't pin it to the baseline.
     assert dal.applied_versions()
     import sqlite3
+
     with sqlite3.connect(dal.db_path) as conn:
-        names = {
-            r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert "events" in names
 
 
 # ---------------------------------------------------------------------------
 # append_event basic round-trip
 # ---------------------------------------------------------------------------
+
 
 def test_append_event_minimal(dal):
     """Minimal insert: only kind + ts_ns required; nullable fields are None."""
@@ -106,6 +107,7 @@ def test_append_event_full(dal):
 # events_since (basic window filter)
 # ---------------------------------------------------------------------------
 
+
 def test_events_since_window(dal):
     dal.append_event(ts_ns=100, alias="v1", kind="entry", question_idx=1, reason=None, payload_json=None)
     dal.append_event(ts_ns=200, alias="v1", kind="exit", question_idx=1, reason="exit_edge", payload_json=None)
@@ -123,14 +125,26 @@ def test_events_since_window(dal):
 # reject_counts_since
 # ---------------------------------------------------------------------------
 
+
 def test_reject_counts_since_groups_by_kind_reason(dal):
     for i in range(3):
-        dal.append_event(ts_ns=100 + i, alias="v1", kind="order_rejected",
-                         question_idx=i, reason="bad token", payload_json=f'{{"cloid":"c{i}"}}')
-    dal.append_event(ts_ns=200, alias="v1", kind="order_rejected",
-                     question_idx=10, reason="min notional", payload_json='{"cloid":"cx"}')
-    dal.append_event(ts_ns=300, alias="v1", kind="risk_veto",
-                     question_idx=11, reason="cap", payload_json=None)
+        dal.append_event(
+            ts_ns=100 + i,
+            alias="v1",
+            kind="order_rejected",
+            question_idx=i,
+            reason="bad token",
+            payload_json=f'{{"cloid":"c{i}"}}',
+        )
+    dal.append_event(
+        ts_ns=200,
+        alias="v1",
+        kind="order_rejected",
+        question_idx=10,
+        reason="min notional",
+        payload_json='{"cloid":"cx"}',
+    )
+    dal.append_event(ts_ns=300, alias="v1", kind="risk_veto", question_idx=11, reason="cap", payload_json=None)
 
     counts = dal.reject_counts_since(since_ts_ns=0)
     # Two (kind, reason) groups for order_rejected; one for risk_veto
@@ -147,10 +161,8 @@ def test_reject_counts_since_groups_by_kind_reason(dal):
 
 
 def test_reject_counts_since_window_cutoff(dal):
-    dal.append_event(ts_ns=50, alias="v1", kind="order_rejected",
-                     question_idx=1, reason="old", payload_json=None)
-    dal.append_event(ts_ns=200, alias="v1", kind="order_rejected",
-                     question_idx=2, reason="new", payload_json=None)
+    dal.append_event(ts_ns=50, alias="v1", kind="order_rejected", question_idx=1, reason="old", payload_json=None)
+    dal.append_event(ts_ns=200, alias="v1", kind="order_rejected", question_idx=2, reason="new", payload_json=None)
 
     counts = dal.reject_counts_since(since_ts_ns=100)
     reasons = {r["reason"] for r in counts}
@@ -161,6 +173,7 @@ def test_reject_counts_since_window_cutoff(dal):
 # ---------------------------------------------------------------------------
 # events_for_question
 # ---------------------------------------------------------------------------
+
 
 def test_events_for_question(dal):
     dal.append_event(ts_ns=10, alias="v1", kind="entry", question_idx=42, reason=None, payload_json=None)
@@ -180,6 +193,7 @@ def test_events_for_question_empty(dal):
 # ---------------------------------------------------------------------------
 # last_event_by_kind
 # ---------------------------------------------------------------------------
+
 
 def test_last_event_by_kind(dal):
     dal.append_event(ts_ns=10, alias="v1", kind="risk_veto", question_idx=1, reason="cap", payload_json=None)
@@ -208,6 +222,7 @@ def test_last_event_by_kind_no_alias_filter(dal):
 # prune_events — age bound
 # ---------------------------------------------------------------------------
 
+
 def test_prune_age(dal):
     now = time.time_ns()
     old_ns = now - 20 * 24 * 3600 * 1_000_000_000  # 20 days ago
@@ -229,8 +244,7 @@ def test_prune_row_cap(dal):
     # prune (cutoff = now - max_age) does NOT delete them.
     now = time.time_ns()
     for i in range(10):
-        dal.append_event(ts_ns=now + i, alias="v1", kind="entry", question_idx=i,
-                         reason=None, payload_json=None)
+        dal.append_event(ts_ns=now + i, alias="v1", kind="entry", question_idx=i, reason=None, payload_json=None)
 
     # Prune to max 5 rows (max_age far in future so age prune doesn't fire)
     max_age_ns = 9999 * 24 * 3600 * 1_000_000_000
@@ -249,11 +263,9 @@ def test_prune_both_bounds(dal):
 
     # 5 old rows + 5 recent rows; recent rows use now+i so they survive age prune
     for i in range(5):
-        dal.append_event(ts_ns=old_ns + i, alias="v1", kind="entry", question_idx=i,
-                         reason=None, payload_json=None)
+        dal.append_event(ts_ns=old_ns + i, alias="v1", kind="entry", question_idx=i, reason=None, payload_json=None)
     for i in range(5):
-        dal.append_event(ts_ns=now + i, alias="v1", kind="exit", question_idx=i + 10,
-                         reason=None, payload_json=None)
+        dal.append_event(ts_ns=now + i, alias="v1", kind="exit", question_idx=i + 10, reason=None, payload_json=None)
 
     max_age_ns = 14 * 24 * 3600 * 1_000_000_000
     # row cap of 3 means after age-prune (removes 5 old), the 5 recent get
@@ -268,13 +280,16 @@ def test_prune_both_bounds(dal):
 # _events_persist_loop integration: publish → DB via real EventBus
 # ---------------------------------------------------------------------------
 
+
 def _make_persist_task(bus, dal, tmp_path=None, prune_every_n=1000):
     """Helper: subscribe and start a persist loop task. Returns (task, sub)."""
     from hlanalysis.engine.events_sink import events_persist_loop
+
     persist_sub = bus.subscribe()
     task = asyncio.create_task(
         events_persist_loop(
-            persist_sub, [dal],
+            persist_sub,
+            [dal],
             max_age_ns=14 * 24 * 3600 * 10**9,
             max_rows=1_000_000,
             prune_every_n=prune_every_n,
@@ -328,8 +343,14 @@ async def test_persist_loop_writes_order_rejected(tmp_path):
     task, _ = _make_persist_task(bus, dal)
 
     ev = OrderRejected(
-        ts_ns=5_000, account_alias="v31", cloid="hla-x",
-        question_idx=99, symbol="@30", side="buy", size=10.0, price=0.95,
+        ts_ns=5_000,
+        account_alias="v31",
+        cloid="hla-x",
+        question_idx=99,
+        symbol="@30",
+        side="buy",
+        size=10.0,
+        price=0.95,
         error="insufficient balance",
     )
     await bus.publish(ev)
@@ -354,10 +375,12 @@ async def test_persist_loop_writes_entry_and_exit(tmp_path):
     bus = EventBus(maxsize=64)
     task, _ = _make_persist_task(bus, dal)
 
-    entry = Entry(ts_ns=10, account_alias="v1", cloid="hla-1",
-                  question_idx=42, symbol="@30", side="buy", size=10.0, price=0.95)
-    exit_ev = Exit(ts_ns=20, account_alias="v1", question_idx=42, symbol="@30",
-                   qty=10.0, realized_pnl=0.5, reason="exit_safety_d")
+    entry = Entry(
+        ts_ns=10, account_alias="v1", cloid="hla-1", question_idx=42, symbol="@30", side="buy", size=10.0, price=0.95
+    )
+    exit_ev = Exit(
+        ts_ns=20, account_alias="v1", question_idx=42, symbol="@30", qty=10.0, realized_pnl=0.5, reason="exit_safety_d"
+    )
     await bus.publish(entry)
     await bus.publish(exit_ev)
     await asyncio.sleep(0.05)
@@ -404,14 +427,22 @@ async def test_persist_loop_multiple_event_types(tmp_path):
 
     events_to_publish = [
         RiskVeto(ts_ns=1, account_alias="v1", reason="cap"),
-        Entry(ts_ns=2, account_alias="v1", cloid="c1", question_idx=1,
-              symbol="@30", side="buy", size=10.0, price=0.95),
-        Exit(ts_ns=3, account_alias="v1", question_idx=1, symbol="@30",
-             qty=10.0, realized_pnl=0.5, reason="settlement"),
-        StopLossTriggered(ts_ns=4, account_alias="v1", question_idx=2,
-                          symbol="@30", qty=5.0, trigger_px=0.8),
-        OrderRejected(ts_ns=5, account_alias="v31", cloid="c2", question_idx=3,
-                      symbol="@31", side="sell", size=5.0, price=0.05, error="bad token"),
+        Entry(ts_ns=2, account_alias="v1", cloid="c1", question_idx=1, symbol="@30", side="buy", size=10.0, price=0.95),
+        Exit(
+            ts_ns=3, account_alias="v1", question_idx=1, symbol="@30", qty=10.0, realized_pnl=0.5, reason="settlement"
+        ),
+        StopLossTriggered(ts_ns=4, account_alias="v1", question_idx=2, symbol="@30", qty=5.0, trigger_px=0.8),
+        OrderRejected(
+            ts_ns=5,
+            account_alias="v31",
+            cloid="c2",
+            question_idx=3,
+            symbol="@31",
+            side="sell",
+            size=5.0,
+            price=0.05,
+            error="bad token",
+        ),
         EngineHeartbeat(ts_ns=6, account_alias="", events_ingested=100, d_events=10, n_questions=5),
         FeedStale(ts_ns=7, account_alias="", d_events=0, interval_seconds=30.0),
         FeedDown(ts_ns=8, account_alias="", consecutive_failures=1),
@@ -431,6 +462,7 @@ async def test_persist_loop_multiple_event_types(tmp_path):
 # ---------------------------------------------------------------------------
 # publish does NOT block when the persist consumer is slow (drop path)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_publish_does_not_block_on_slow_persist_consumer():
@@ -458,6 +490,7 @@ async def test_publish_does_not_block_on_slow_persist_consumer():
 # Persist loop periodic prune is wired (smoke test)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_persist_loop_prune_fires_via_n_counter(tmp_path):
     """With prune_every_n=3 and 5 events, the prune should fire once and
@@ -472,7 +505,8 @@ async def test_persist_loop_prune_fires_via_n_counter(tmp_path):
     persist_sub = bus.subscribe()
     task = asyncio.create_task(
         events_persist_loop(
-            persist_sub, [dal],
+            persist_sub,
+            [dal],
             max_age_ns=9999 * 24 * 3600 * 10**9,
             max_rows=3,
             prune_every_n=3,

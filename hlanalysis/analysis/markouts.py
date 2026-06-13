@@ -8,6 +8,7 @@ All functions are thin, stateless wrappers over DuckDB queries against
 hive-partitioned parquet written by the recorder.  The caller is responsible
 for managing the DuckDB connection lifecycle (use ``helpers.duck()``).
 """
+
 from __future__ import annotations
 
 import duckdb

@@ -8,6 +8,7 @@ the same hive-partition structure that the recorder uses:
 All timestamps are nanoseconds since epoch.  We use values in the range
 1_000_000_000_000_000_000–... (around 2001-09-09) so they're clearly synthetic.
 """
+
 from __future__ import annotations
 
 import math
@@ -95,9 +96,7 @@ def _write_bbo(root: Path, venue: str, product_type: str, symbol: str, rows: lis
     _write_parquet(part / "part0.parquet", table)
 
 
-def _write_trades(
-    root: Path, venue: str, product_type: str, symbol: str, rows: list[tuple]
-) -> None:
+def _write_trades(root: Path, venue: str, product_type: str, symbol: str, rows: list[tuple]) -> None:
     """rows: list of (local_recv_ts, price, size, side)"""
     table = pa.table(
         {
@@ -319,9 +318,9 @@ class TestSignConvention:
     def _setup(self, data_root: Path, trade_side: str) -> None:
         """Write BBO with mid going UP from 100 to 102 over 3 s, one trade at t=1s."""
         bbo_rows = [
-            (BASE_NS + 0 * NS_PER_S, 99.5, 100.5),   # mid = 100
-            (BASE_NS + 1 * NS_PER_S, 100.5, 101.5),   # mid = 101  (trade here)
-            (BASE_NS + 2 * NS_PER_S, 101.5, 102.5),   # mid = 102
+            (BASE_NS + 0 * NS_PER_S, 99.5, 100.5),  # mid = 100
+            (BASE_NS + 1 * NS_PER_S, 100.5, 101.5),  # mid = 101  (trade here)
+            (BASE_NS + 2 * NS_PER_S, 101.5, 102.5),  # mid = 102
         ]
         trade_rows = [(BASE_NS + NS_PER_S, 101.0, 1.0, trade_side)]
         _write_bbo(data_root, "hyperliquid", "perp", "BTC", bbo_rows)
@@ -345,9 +344,9 @@ class TestSignConvention:
         """Buy + mid goes DOWN → negative markout (uninformed buy)."""
         # Override BBO to make mid go down.
         bbo_rows = [
-            (BASE_NS + 0 * NS_PER_S, 101.5, 102.5),   # mid = 102
-            (BASE_NS + 1 * NS_PER_S, 100.5, 101.5),   # mid = 101 (trade here)
-            (BASE_NS + 2 * NS_PER_S, 99.5, 100.5),    # mid = 100
+            (BASE_NS + 0 * NS_PER_S, 101.5, 102.5),  # mid = 102
+            (BASE_NS + 1 * NS_PER_S, 100.5, 101.5),  # mid = 101 (trade here)
+            (BASE_NS + 2 * NS_PER_S, 99.5, 100.5),  # mid = 100
         ]
         trade_rows = [(BASE_NS + NS_PER_S, 101.0, 1.0, "buy")]
         _write_bbo(data_root, "hyperliquid", "perp", "BTC", bbo_rows)
@@ -368,8 +367,8 @@ class TestSignConvention:
         """Sell + mid goes down → positive markout (informed sell)."""
         bbo_rows = [
             (BASE_NS + 0 * NS_PER_S, 101.5, 102.5),
-            (BASE_NS + 1 * NS_PER_S, 100.5, 101.5),   # mid = 101 (trade here)
-            (BASE_NS + 2 * NS_PER_S, 99.5, 100.5),    # mid = 100
+            (BASE_NS + 1 * NS_PER_S, 100.5, 101.5),  # mid = 101 (trade here)
+            (BASE_NS + 2 * NS_PER_S, 99.5, 100.5),  # mid = 100
         ]
         trade_rows = [(BASE_NS + NS_PER_S, 101.0, 1.0, "sell")]
         _write_bbo(data_root, "hyperliquid", "perp", "BTC", bbo_rows)
@@ -511,8 +510,17 @@ class TestOutputSchema:
             horizons_s=(1, 5),
         )
 
-        required = {"ts_ns", "price", "size", "aggressor_side", "mid_at_trade",
-                    "mid_at_h_1s", "markout_h_1s", "mid_at_h_5s", "markout_h_5s"}
+        required = {
+            "ts_ns",
+            "price",
+            "size",
+            "aggressor_side",
+            "mid_at_trade",
+            "mid_at_h_1s",
+            "markout_h_1s",
+            "mid_at_h_5s",
+            "markout_h_5s",
+        }
         assert required.issubset(set(df.columns))
 
     def test_empty_window_returns_empty_df(self, con, data_root):

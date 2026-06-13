@@ -4,6 +4,7 @@ The tool is a read-only completeness / seq-gap reconciliation checker over the
 recorder's Hive-partitioned parquet. Tests cover the pure analysis primitives
 plus an end-to-end pass over synthetic parquet with injected gaps.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -109,7 +110,9 @@ def test_longest_time_gap_single_event_is_zero() -> None:
 
 def test_question_leg_coverage_all_legs_covered() -> None:
     q = QuestionSpec(
-        question_id="Q1", start_ts_ns=100 * NS, end_ts_ns=200 * NS,
+        question_id="Q1",
+        start_ts_ns=100 * NS,
+        end_ts_ns=200 * NS,
         leg_symbols=("@30", "@31"),
     )
     spans = {"@30": (90 * NS, 210 * NS), "@31": (100 * NS, 200 * NS)}
@@ -120,7 +123,9 @@ def test_question_leg_coverage_all_legs_covered() -> None:
 
 def test_question_leg_coverage_missing_leg() -> None:
     q = QuestionSpec(
-        question_id="Q1", start_ts_ns=100 * NS, end_ts_ns=200 * NS,
+        question_id="Q1",
+        start_ts_ns=100 * NS,
+        end_ts_ns=200 * NS,
         leg_symbols=("@30", "@31"),
     )
     spans = {"@30": (90 * NS, 210 * NS)}  # @31 absent entirely
@@ -133,7 +138,9 @@ def test_question_leg_coverage_missing_leg() -> None:
 
 def test_question_leg_coverage_partial_window() -> None:
     q = QuestionSpec(
-        question_id="Q1", start_ts_ns=100 * NS, end_ts_ns=200 * NS,
+        question_id="Q1",
+        start_ts_ns=100 * NS,
+        end_ts_ns=200 * NS,
         leg_symbols=("@30",),
     )
     # Data starts late (110s) and ends early (180s): not covering [100,200].
@@ -155,13 +162,18 @@ def _trade_table(rows: list[dict]) -> pa.Table:
 
 def test_analyze_table_clean_trade_stream() -> None:
     rows = [
-        {"symbol": "BTC", "exchange_ts": i * NS, "local_recv_ts": i * NS,
-         "seq": i, "event_type": "trade", "price": 100.0, "size": 1.0}
+        {
+            "symbol": "BTC",
+            "exchange_ts": i * NS,
+            "local_recv_ts": i * NS,
+            "seq": i,
+            "event_type": "trade",
+            "price": 100.0,
+            "size": 1.0,
+        }
         for i in range(1, 6)
     ]
-    seq_reps, time_reps, vol_reps = analyze_table(
-        _trade_table(rows), event="trade", min_events=1, min_notional=0.0
-    )
+    seq_reps, time_reps, vol_reps = analyze_table(_trade_table(rows), event="trade", min_events=1, min_notional=0.0)
     assert len(seq_reps) == 1
     assert seq_reps[0].symbol == "BTC"
     assert seq_reps[0].complete is True
@@ -172,14 +184,26 @@ def test_analyze_table_clean_trade_stream() -> None:
 
 def test_analyze_table_flags_seq_gap_and_quiet_window() -> None:
     rows = [
-        {"symbol": "BTC", "exchange_ts": NS, "local_recv_ts": NS,
-         "seq": 1, "event_type": "trade", "price": 100.0, "size": 1.0},
-        {"symbol": "BTC", "exchange_ts": 2 * NS, "local_recv_ts": 2 * NS,
-         "seq": 5, "event_type": "trade", "price": 100.0, "size": 1.0},
+        {
+            "symbol": "BTC",
+            "exchange_ts": NS,
+            "local_recv_ts": NS,
+            "seq": 1,
+            "event_type": "trade",
+            "price": 100.0,
+            "size": 1.0,
+        },
+        {
+            "symbol": "BTC",
+            "exchange_ts": 2 * NS,
+            "local_recv_ts": 2 * NS,
+            "seq": 5,
+            "event_type": "trade",
+            "price": 100.0,
+            "size": 1.0,
+        },
     ]
-    seq_reps, _time_reps, vol_reps = analyze_table(
-        _trade_table(rows), event="trade", min_events=10, min_notional=0.0
-    )
+    seq_reps, _time_reps, vol_reps = analyze_table(_trade_table(rows), event="trade", min_events=10, min_notional=0.0)
     assert seq_reps[0].complete is False
     assert seq_reps[0].n_missing == 3
     # Only 2 events in the hour, below min_events=10 -> quiet.
@@ -188,14 +212,26 @@ def test_analyze_table_flags_seq_gap_and_quiet_window() -> None:
 
 def test_analyze_table_groups_by_symbol() -> None:
     rows = [
-        {"symbol": "BTC", "exchange_ts": NS, "local_recv_ts": NS, "seq": 1,
-         "event_type": "trade", "price": 100.0, "size": 1.0},
-        {"symbol": "ETH", "exchange_ts": NS, "local_recv_ts": NS, "seq": 1,
-         "event_type": "trade", "price": 50.0, "size": 2.0},
+        {
+            "symbol": "BTC",
+            "exchange_ts": NS,
+            "local_recv_ts": NS,
+            "seq": 1,
+            "event_type": "trade",
+            "price": 100.0,
+            "size": 1.0,
+        },
+        {
+            "symbol": "ETH",
+            "exchange_ts": NS,
+            "local_recv_ts": NS,
+            "seq": 1,
+            "event_type": "trade",
+            "price": 50.0,
+            "size": 2.0,
+        },
     ]
-    seq_reps, _, vol_reps = analyze_table(
-        _trade_table(rows), event="trade", min_events=1, min_notional=0.0
-    )
+    seq_reps, _, vol_reps = analyze_table(_trade_table(rows), event="trade", min_events=1, min_notional=0.0)
     assert {r.symbol for r in seq_reps} == {"BTC", "ETH"}
 
 
@@ -203,13 +239,23 @@ def test_analyze_table_groups_by_symbol() -> None:
 
 
 def _write_partition(
-    root: Path, event: str, symbol: str, rows: list[dict],
-    *, date: str = "2026-06-08", hour: str = "00",
+    root: Path,
+    event: str,
+    symbol: str,
+    rows: list[dict],
+    *,
+    date: str = "2026-06-08",
+    hour: str = "00",
 ) -> None:
     part = (
-        root / "venue=hyperliquid" / "product_type=prediction_binary"
-        / "mechanism=clob" / f"event={event}" / f"symbol={symbol}"
-        / f"date={date}" / f"hour={hour}"
+        root
+        / "venue=hyperliquid"
+        / "product_type=prediction_binary"
+        / "mechanism=clob"
+        / f"event={event}"
+        / f"symbol={symbol}"
+        / f"date={date}"
+        / f"hour={hour}"
     )
     part.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist(rows), part / "data.parquet")
@@ -217,15 +263,20 @@ def _write_partition(
 
 def test_build_completeness_report_clean_corpus(tmp_path: Path) -> None:
     rows = [
-        {"venue": "hyperliquid", "symbol": "@30", "exchange_ts": i * NS,
-         "local_recv_ts": i * NS, "seq": i, "event_type": "trade",
-         "price": 100.0, "size": 1.0}
+        {
+            "venue": "hyperliquid",
+            "symbol": "@30",
+            "exchange_ts": i * NS,
+            "local_recv_ts": i * NS,
+            "seq": i,
+            "event_type": "trade",
+            "price": 100.0,
+            "size": 1.0,
+        }
         for i in range(1, 21)
     ]
     _write_partition(tmp_path, "trade", "@30", rows)
-    report = build_completeness_report(
-        tmp_path, events=("trade",), min_events=5, min_notional=0.0
-    )
+    report = build_completeness_report(tmp_path, events=("trade",), min_events=5, min_notional=0.0)
     assert report["summary"]["complete"] is True
     assert report["summary"]["n_seq_incomplete"] == 0
     assert report["summary"]["n_quiet_windows"] == 0
@@ -238,15 +289,20 @@ def test_build_completeness_report_detects_injected_gaps(tmp_path: Path) -> None
     seqs = [1, 2, 3, 4, 10, 11]
     times = [1, 2, 3, 4, 35, 36]  # 31s gap between event 4 and 5
     rows = [
-        {"venue": "hyperliquid", "symbol": "@30", "exchange_ts": t * NS,
-         "local_recv_ts": t * NS, "seq": s, "event_type": "trade",
-         "price": 100.0, "size": 1.0}
+        {
+            "venue": "hyperliquid",
+            "symbol": "@30",
+            "exchange_ts": t * NS,
+            "local_recv_ts": t * NS,
+            "seq": s,
+            "event_type": "trade",
+            "price": 100.0,
+            "size": 1.0,
+        }
         for s, t in zip(seqs, times)
     ]
     _write_partition(tmp_path, "trade", "@30", rows)
-    report = build_completeness_report(
-        tmp_path, events=("trade",), min_events=1, min_notional=0.0
-    )
+    report = build_completeness_report(tmp_path, events=("trade",), min_events=1, min_notional=0.0)
     assert report["summary"]["complete"] is False
     assert report["summary"]["n_seq_incomplete"] == 1
     # Largest time gap surfaced.

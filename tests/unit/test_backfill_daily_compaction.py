@@ -1,4 +1,5 @@
 """Unit tests for the pure planning logic of tools/backfill_daily_compaction.py."""
+
 from __future__ import annotations
 
 from tools.backfill_daily_compaction import plan_migration

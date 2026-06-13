@@ -25,6 +25,7 @@ window matches the old hardcoded 1-hour constant, so v31/v1 HL backtest outputs
 reproduce byte-for-byte (validated by the parity + speedup suites and the
 SHR-86 before/after fingerprint).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -56,9 +57,7 @@ class MarketState:
     # ---- L2 / trade ingest ----------------------------------------------
 
     def apply_l2(self, snap: BookSnapshot) -> None:
-        self._core.apply_book(
-            snap.symbol, ts_ns=snap.ts_ns, bids=snap.bids, asks=snap.asks
-        )
+        self._core.apply_book(snap.symbol, ts_ns=snap.ts_ns, bids=snap.bids, asks=snap.asks)
 
     def apply_trade(self, ev: TradeEvent) -> None:
         """Record a traded (price, size) pair for rolling-volume accounting.
@@ -66,13 +65,9 @@ class MarketState:
         Delegates to the shared core, which evicts entries older than the
         1-hour window on insert AND on read.
         """
-        self._core.apply_trade(
-            ev.symbol, ts_ns=ev.ts_ns, price=ev.price, size=ev.size
-        )
+        self._core.apply_trade(ev.symbol, ts_ns=ev.ts_ns, price=ev.price, size=ev.size)
 
-    def recent_volume_usd(
-        self, leg_symbols: tuple[str, ...] | list[str], *, now_ns: int
-    ) -> float:
+    def recent_volume_usd(self, leg_symbols: tuple[str, ...] | list[str], *, now_ns: int) -> float:
         """Total traded notional (Σ price·size) across ``leg_symbols`` within
         the last hour, as of ``now_ns``. Window-bounded per symbol (stale
         entries evicted on read), so recycled coins never leak old volume."""
@@ -97,16 +92,12 @@ class MarketState:
 
         Re-registering the same ``dt`` is a no-op (shared core semantics).
         """
-        self._core.set_reference_cadence(
-            _REFERENCE_KEY, sampling_dt_seconds=int(dt_seconds)
-        )
+        self._core.set_reference_cadence(_REFERENCE_KEY, sampling_dt_seconds=int(dt_seconds))
 
     # ---- reference HLC (kline-like) -------------------------------------
 
     def apply_reference(self, ev: ReferenceEvent) -> None:
-        self._core.apply_reference_bar(
-            _REFERENCE_KEY, ts_ns=ev.ts_ns, high=ev.high, low=ev.low, close=ev.close
-        )
+        self._core.apply_reference_bar(_REFERENCE_KEY, ts_ns=ev.ts_ns, high=ev.high, low=ev.low, close=ev.close)
 
     def apply_reference_tick(self, ev: ReferenceEvent) -> None:
         """Feed a raw reference tick (H=L=C=mid) into the shared core's tick path.
@@ -122,9 +113,7 @@ class MarketState:
         the runner calls this method instead of ``apply_reference``, matching the
         live engine path that also routes raw ticks through ``apply_reference_tick``.
         """
-        self._core.apply_reference_tick(
-            _REFERENCE_KEY, ts_ns=ev.ts_ns, price=ev.close
-        )
+        self._core.apply_reference_tick(_REFERENCE_KEY, ts_ns=ev.ts_ns, price=ev.close)
 
     def latest_btc_close(self) -> float | None:
         return self._core.last_mark(_REFERENCE_KEY)
@@ -147,9 +136,7 @@ class MarketState:
         )
         return hl
 
-    def recent_returns_and_hl(
-        self, *, now_ns: int, lookback_seconds: int
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def recent_returns_and_hl(self, *, now_ns: int, lookback_seconds: int) -> tuple[np.ndarray, np.ndarray]:
         return build_decision_inputs(
             self._core,
             ref_symbol=_REFERENCE_KEY,

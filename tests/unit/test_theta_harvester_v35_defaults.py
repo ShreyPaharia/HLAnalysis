@@ -6,6 +6,7 @@ momentum_mr_* keys), one with the new keys explicitly set to their disabled
 defaults. Both must produce identical Decisions on the same QuestionView/
 BookState sequence.
 """
+
 from __future__ import annotations
 
 from hlanalysis.strategy.theta_harvester import ThetaHarvesterConfig

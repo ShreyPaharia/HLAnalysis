@@ -2,6 +2,7 @@
 with the expected schema. No network access; uses a stubbed adapter that
 yields a known sequence of normalized events.
 """
+
 from __future__ import annotations
 
 import pyarrow.parquet as pq
@@ -19,9 +20,7 @@ from hlanalysis.events import (
 from hlanalysis.recorder.writer import ParquetWriter
 
 
-_PM_TOKEN_ID = (
-    "71321045679252212594626385532706912750332728571942532289631379312455583992563"
-)
+_PM_TOKEN_ID = "71321045679252212594626385532706912750332728571942532289631379312455583992563"
 
 
 class _StubAdapter(VenueAdapter):
@@ -85,7 +84,5 @@ async def test_recorder_writes_pm_book_and_trade(tmp_path):
         assert "symbol" in tbl.schema.names
         symbols = tbl.column("symbol").to_pylist()
         for s in symbols:
-            assert isinstance(s, str), (
-                f"symbol column must be string, got {type(s).__name__}={s!r}"
-            )
+            assert isinstance(s, str), f"symbol column must be string, got {type(s).__name__}={s!r}"
             assert s == _PM_TOKEN_ID

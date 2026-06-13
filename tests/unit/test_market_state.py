@@ -8,17 +8,29 @@ import pytest
 
 from hlanalysis.engine.market_state import MarketState
 from hlanalysis.events import (
-    BboEvent, BookSnapshotEvent, MarkEvent, Mechanism, ProductType,
-    QuestionMetaEvent, SettlementEvent, TradeEvent,
+    BboEvent,
+    BookSnapshotEvent,
+    MarkEvent,
+    Mechanism,
+    ProductType,
+    QuestionMetaEvent,
+    SettlementEvent,
+    TradeEvent,
 )
 
 
 def _bbo(symbol: str, bid: float, ask: float, ts: int = 1) -> BboEvent:
     return BboEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol=symbol,
-        exchange_ts=ts, local_recv_ts=ts,
-        bid_px=bid, bid_sz=10.0, ask_px=ask, ask_sz=10.0,
+        venue="hyperliquid",
+        product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB,
+        symbol=symbol,
+        exchange_ts=ts,
+        local_recv_ts=ts,
+        bid_px=bid,
+        bid_sz=10.0,
+        ask_px=ask,
+        ask_sz=10.0,
     )
 
 
@@ -34,10 +46,14 @@ def test_bbo_updates_book_state():
 def test_question_registry_built_from_question_meta():
     ms = MarketState()
     qm = QuestionMetaEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="qmeta",
-        exchange_ts=1, local_recv_ts=1,
-        question_idx=42, named_outcome_idxs=[3],
+        venue="hyperliquid",
+        product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB,
+        symbol="qmeta",
+        exchange_ts=1,
+        local_recv_ts=1,
+        question_idx=42,
+        named_outcome_idxs=[3],
         keys=["class", "underlying", "period", "expiry", "strike"],
         values=["priceBinary", "BTC", "1h", "20260508-1200", "80000"],
     )
@@ -55,14 +71,20 @@ def test_hl_question_records_venue():
     # QuestionView must carry the originating venue so strategy slots can be
     # scoped to one venue (HL slots must not match PM questions and vice versa).
     ms = MarketState()
-    ms.apply(QuestionMetaEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="qmeta",
-        exchange_ts=1, local_recv_ts=1,
-        question_idx=42, named_outcome_idxs=[3],
-        keys=["class", "underlying", "period", "expiry", "strike"],
-        values=["priceBinary", "BTC", "1h", "20260508-1200", "80000"],
-    ))
+    ms.apply(
+        QuestionMetaEvent(
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="qmeta",
+            exchange_ts=1,
+            local_recv_ts=1,
+            question_idx=42,
+            named_outcome_idxs=[3],
+            keys=["class", "underlying", "period", "expiry", "strike"],
+            values=["priceBinary", "BTC", "1h", "20260508-1200", "80000"],
+        )
+    )
     assert ms.question(42).venue == "hyperliquid"
 
 
@@ -75,16 +97,20 @@ def test_pm_question_uses_clob_token_ids_as_leg_symbols():
     yes_t = "71321045679252212594626385532706912750332728571942532289631379312455583992563"
     no_t = "52114319501245915516055106046884209969926127482827954674443846427813813222426"
     ms = MarketState()
-    ms.apply(QuestionMetaEvent(
-        venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol=yes_t,
-        exchange_ts=1, local_recv_ts=1,
-        question_idx=1000126, named_outcome_idxs=[0, 1],
-        keys=["class", "underlying", "yes_token_id", "no_token_id",
-              "expiry", "series_slug"],
-        values=["priceBinary", "BTC", yes_t, no_t,
-                "20260601-1200", "btc-up-or-down-daily"],
-    ))
+    ms.apply(
+        QuestionMetaEvent(
+            venue="polymarket",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol=yes_t,
+            exchange_ts=1,
+            local_recv_ts=1,
+            question_idx=1000126,
+            named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "yes_token_id", "no_token_id", "expiry", "series_slug"],
+            values=["priceBinary", "BTC", yes_t, no_t, "20260601-1200", "btc-up-or-down-daily"],
+        )
+    )
     q = ms.question(1000126)
     assert q is not None
     assert q.venue == "polymarket"
@@ -95,23 +121,30 @@ def test_pm_question_uses_clob_token_ids_as_leg_symbols():
 
 def _pm_updown_meta(qidx: int, strike_ref_ts_ns: int) -> QuestionMetaEvent:
     return QuestionMetaEvent(
-        venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
-        exchange_ts=1, local_recv_ts=1,
-        question_idx=qidx, named_outcome_idxs=[0, 1],
+        venue="polymarket",
+        product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB,
+        symbol="YES_TOKEN",
+        exchange_ts=1,
+        local_recv_ts=1,
+        question_idx=qidx,
+        named_outcome_idxs=[0, 1],
         # No "strike"/"targetPrice" — up/down markets resolve vs a reference
         # candle, carried as strike_ref_ts_ns.
-        keys=["class", "underlying", "yes_token_id", "no_token_id",
-              "series_slug", "strike_ref_ts_ns"],
-        values=["priceBinary", "BTC", "YES_TOKEN", "NO_TOKEN",
-                "btc-up-or-down-daily", str(strike_ref_ts_ns)],
+        keys=["class", "underlying", "yes_token_id", "no_token_id", "series_slug", "strike_ref_ts_ns"],
+        values=["priceBinary", "BTC", "YES_TOKEN", "NO_TOKEN", "btc-up-or-down-daily", str(strike_ref_ts_ns)],
     )
 
 
 def _mark(symbol: str, px: float, ts: int) -> MarkEvent:
     return MarkEvent(
-        venue="binance", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
-        symbol=symbol, exchange_ts=ts, local_recv_ts=ts, mark_px=px,
+        venue="binance",
+        product_type=ProductType.PERP,
+        mechanism=Mechanism.CLOB,
+        symbol=symbol,
+        exchange_ts=ts,
+        local_recv_ts=ts,
+        mark_px=px,
     )
 
 
@@ -156,10 +189,14 @@ def test_mark_question_settled_by_idx():
     # only on the first transition.
     ms = MarketState()
     qm = QuestionMetaEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="qmeta",
-        exchange_ts=1, local_recv_ts=1,
-        question_idx=42, named_outcome_idxs=[3],
+        venue="hyperliquid",
+        product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB,
+        symbol="qmeta",
+        exchange_ts=1,
+        local_recv_ts=1,
+        question_idx=42,
+        named_outcome_idxs=[3],
         keys=["class", "underlying", "period", "expiry", "strike"],
         values=["priceBinary", "BTC", "1h", "20260508-1200", "80000"],
     )
@@ -176,19 +213,28 @@ def test_mark_question_settled_by_idx():
 def test_settlement_marks_question_settled():
     ms = MarketState()
     qm = QuestionMetaEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="qmeta",
-        exchange_ts=1, local_recv_ts=1,
-        question_idx=42, named_outcome_idxs=[3],
+        venue="hyperliquid",
+        product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB,
+        symbol="qmeta",
+        exchange_ts=1,
+        local_recv_ts=1,
+        question_idx=42,
+        named_outcome_idxs=[3],
         keys=["class", "underlying", "period", "expiry", "strike"],
         values=["priceBinary", "BTC", "1h", "20260508-1200", "80000"],
     )
     ms.apply(qm)
     s = SettlementEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="#30",
-        exchange_ts=2, local_recv_ts=2,
-        settled_side_idx=30, settle_price=1.0, settle_ts=2,
+        venue="hyperliquid",
+        product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB,
+        symbol="#30",
+        exchange_ts=2,
+        local_recv_ts=2,
+        settled_side_idx=30,
+        settle_price=1.0,
+        settle_ts=2,
     )
     ms.apply(s)
     q = ms.question(42)
@@ -202,11 +248,17 @@ def test_recent_returns_for_btc_perp_uses_marks():
     # 60s apart so each MarkEvent lands in its own bucket.
     one_minute_ns = 60 * 1_000_000_000
     for i, px in enumerate([100.0, 100.1, 100.2, 100.05]):
-        ms.apply(MarkEvent(
-            venue="hyperliquid", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
-            symbol="BTC", exchange_ts=(i + 1) * one_minute_ns,
-            local_recv_ts=(i + 1) * one_minute_ns, mark_px=px,
-        ))
+        ms.apply(
+            MarkEvent(
+                venue="hyperliquid",
+                product_type=ProductType.PERP,
+                mechanism=Mechanism.CLOB,
+                symbol="BTC",
+                exchange_ts=(i + 1) * one_minute_ns,
+                local_recv_ts=(i + 1) * one_minute_ns,
+                mark_px=px,
+            )
+        )
     rets = ms.recent_returns("BTC", n=3)
     assert len(rets) == 3
     assert all(math.isfinite(r) for r in rets)
@@ -222,17 +274,29 @@ def test_marks_bucketed_to_1m_within_bucket_last_wins():
     one_minute_ns = 60 * 1_000_000_000
     # Bucket 1 (t = 1m + 0..3s): 4 ticks collapse to 1 entry, last wins.
     for i, px in enumerate([100.0, 100.1, 100.2, 100.5]):
-        ms.apply(MarkEvent(
-            venue="hyperliquid", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
-            symbol="BTC", exchange_ts=one_minute_ns + i, local_recv_ts=one_minute_ns + i,
-            mark_px=px,
-        ))
+        ms.apply(
+            MarkEvent(
+                venue="hyperliquid",
+                product_type=ProductType.PERP,
+                mechanism=Mechanism.CLOB,
+                symbol="BTC",
+                exchange_ts=one_minute_ns + i,
+                local_recv_ts=one_minute_ns + i,
+                mark_px=px,
+            )
+        )
     # Bucket 2 (t = 2m): 1 tick.
-    ms.apply(MarkEvent(
-        venue="hyperliquid", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
-        symbol="BTC", exchange_ts=2 * one_minute_ns, local_recv_ts=2 * one_minute_ns,
-        mark_px=101.0,
-    ))
+    ms.apply(
+        MarkEvent(
+            venue="hyperliquid",
+            product_type=ProductType.PERP,
+            mechanism=Mechanism.CLOB,
+            symbol="BTC",
+            exchange_ts=2 * one_minute_ns,
+            local_recv_ts=2 * one_minute_ns,
+            mark_px=101.0,
+        )
+    )
     rets = ms.recent_returns("BTC", n=10)
     # Only 2 entries in the buffer → 1 return (between the two buckets).
     assert len(rets) == 1
@@ -244,9 +308,13 @@ def test_marks_bucketed_to_1m_within_bucket_last_wins():
 
 def _mark(symbol: str, px: float, ts: int) -> MarkEvent:
     return MarkEvent(
-        venue="hyperliquid", product_type=ProductType.PERP,
-        mechanism=Mechanism.CLOB, symbol=symbol,
-        exchange_ts=ts, local_recv_ts=ts, mark_px=px,
+        venue="hyperliquid",
+        product_type=ProductType.PERP,
+        mechanism=Mechanism.CLOB,
+        symbol=symbol,
+        exchange_ts=ts,
+        local_recv_ts=ts,
+        mark_px=px,
     )
 
 
@@ -314,12 +382,19 @@ def test_recent_volume_usd_sums_recent_trades():
     ms = MarketState(volume_window_ns=10_000_000_000)  # 10s window
     now = 100_000_000_000
     for i, sz in enumerate([1.0, 2.0, 3.0]):
-        ms.apply(TradeEvent(
-            venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="#30",
-            exchange_ts=now + i, local_recv_ts=now + i,
-            price=0.95, size=sz, side="buy",
-        ))
+        ms.apply(
+            TradeEvent(
+                venue="hyperliquid",
+                product_type=ProductType.PREDICTION_BINARY,
+                mechanism=Mechanism.CLOB,
+                symbol="#30",
+                exchange_ts=now + i,
+                local_recv_ts=now + i,
+                price=0.95,
+                size=sz,
+                side="buy",
+            )
+        )
     # All inside the window
     assert math.isclose(ms.recent_volume_usd("#30", now=now + 5), (1 + 2 + 3) * 0.95)
     # Outside window → 0
@@ -354,13 +429,11 @@ def test_recent_hl_bars_one_bar_per_bucket():
     ms.set_reference_cadence("BTC", sampling_dt_seconds=5)
     s = 1_000_000_000
     # Three distinct 5s buckets, each with its own H/L range.
-    for b, (lo, hi, close) in enumerate(
-        [(99.0, 101.0, 100.0), (100.0, 103.0, 102.0), (101.0, 104.0, 103.0)]
-    ):
+    for b, (lo, hi, close) in enumerate([(99.0, 101.0, 100.0), (100.0, 103.0, 102.0), (101.0, 104.0, 103.0)]):
         base = (b + 1) * 5 * s
-        ms.apply(_mark("BTC", close, ts=base))      # open
-        ms.apply(_mark("BTC", hi, ts=base + 1))     # high
-        ms.apply(_mark("BTC", lo, ts=base + 2))     # low
+        ms.apply(_mark("BTC", close, ts=base))  # open
+        ms.apply(_mark("BTC", hi, ts=base + 1))  # high
+        ms.apply(_mark("BTC", lo, ts=base + 2))  # low
         ms.apply(_mark("BTC", close, ts=base + 3))  # close
     hl = ms.recent_hl_bars("BTC", n=10)
     assert hl == ((101.0, 99.0), (103.0, 100.0), (104.0, 101.0))
@@ -403,9 +476,7 @@ def test_set_reference_source_bbo_feeds_ohlc_from_mid():
     ms.set_reference_source("BTCUSDT", "bbo")
     base = 100 * 1_000_000_000
     # mids: 100, 102, 98, 101 within one 5s bucket.
-    for i, (bid, ask) in enumerate(
-        [(99.0, 101.0), (101.0, 103.0), (97.0, 99.0), (100.0, 102.0)]
-    ):
+    for i, (bid, ask) in enumerate([(99.0, 101.0), (101.0, 103.0), (97.0, 99.0), (100.0, 102.0)]):
         ms.apply(_bbo("BTCUSDT", bid, ask, ts=base + i))
     assert ms.recent_hl_bars("BTCUSDT", n=10) == ((102.0, 98.0),)
     assert ms.last_mark("BTCUSDT") == 101.0  # last mid
@@ -418,8 +489,8 @@ def test_bbo_sourced_symbol_ignores_mark_events():
     ms.set_reference_cadence("BTCUSDT", sampling_dt_seconds=5)
     ms.set_reference_source("BTCUSDT", "bbo")
     base = 100 * 1_000_000_000
-    ms.apply(_bbo("BTCUSDT", 99.0, 101.0, ts=base))      # mid 100
-    ms.apply(_mark("BTCUSDT", 500.0, ts=base + 1))        # must be ignored
+    ms.apply(_bbo("BTCUSDT", 99.0, 101.0, ts=base))  # mid 100
+    ms.apply(_mark("BTCUSDT", 500.0, ts=base + 1))  # must be ignored
     assert ms.last_mark("BTCUSDT") == 100.0
     assert ms.recent_hl_bars("BTCUSDT", n=10) == ((100.0, 100.0),)
 
@@ -475,16 +546,23 @@ def test_bbo_mid_ohlc_matches_load_binance_bbo_reference(tmp_path):
 
     date_str = datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).date().isoformat()
     part = (
-        tmp_path / "venue=binance" / "product_type=perp" / "mechanism=clob"
-        / "event=bbo" / "symbol=BTCUSDT" / f"date={date_str}"
+        tmp_path
+        / "venue=binance"
+        / "product_type=perp"
+        / "mechanism=clob"
+        / "event=bbo"
+        / "symbol=BTCUSDT"
+        / f"date={date_str}"
     )
     part.mkdir(parents=True, exist_ok=True)
     pq.write_table(
-        pa.table({
-            "exchange_ts": [t[0] for t in ticks],
-            "bid_px": [t[1] for t in ticks],
-            "ask_px": [t[2] for t in ticks],
-        }),
+        pa.table(
+            {
+                "exchange_ts": [t[0] for t in ticks],
+                "bid_px": [t[1] for t in ticks],
+                "ask_px": [t[2] for t in ticks],
+            }
+        ),
         part / "ticks.parquet",
     )
 
@@ -510,10 +588,7 @@ def test_bbo_mid_ohlc_matches_load_binance_bbo_reference(tmp_path):
     assert ms.recent_hl_bars("BTCUSDT", n=10_000) == expected_hl
     # Returns are derived from bucket closes — compare to backtest closes.
     live_rets = ms.recent_returns("BTCUSDT", n=10_000)
-    expected_rets = tuple(
-        math.log(expected_closes[i] / expected_closes[i - 1])
-        for i in range(1, len(expected_closes))
-    )
+    expected_rets = tuple(math.log(expected_closes[i] / expected_closes[i - 1]) for i in range(1, len(expected_closes)))
     assert len(live_rets) == len(expected_rets)
     for a, b in zip(live_rets, expected_rets, strict=True):
         assert math.isclose(a, b, rel_tol=1e-12, abs_tol=1e-15)

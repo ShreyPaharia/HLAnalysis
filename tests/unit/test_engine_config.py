@@ -44,9 +44,7 @@ def test_load_strategy_yaml_from_repo():
     assert cfg.defaults.size_cap_near_strike_pct == 1.0
     assert cfg.defaults.size_cap_max_dist_pct == 1.5
     assert cfg.defaults.size_cap_min_ask == 0.88
-    btc_binary = next(
-        e for e in cfg.allowlist if e.match.get("class") == "priceBinary"
-    )
+    btc_binary = next(e for e in cfg.allowlist if e.match.get("class") == "priceBinary")
     # 2026-05-19 edge-and-tuning memo P2: tightened 0.999 → 0.99 (no PnL
     # contribution after [0,1] fill clamp; defensive against stale-high asks).
     assert btc_binary.price_extreme_max == 0.99
@@ -60,9 +58,7 @@ def test_load_strategy_yaml_from_repo():
     assert btc_binary.size_cap_near_strike_pct == 1.0
     assert btc_binary.size_cap_max_dist_pct == 1.5
     assert btc_binary.size_cap_min_ask == 0.88
-    btc_bucket = next(
-        e for e in cfg.allowlist if e.match.get("class") == "priceBucket"
-    )
+    btc_bucket = next(e for e in cfg.allowlist if e.match.get("class") == "priceBucket")
     # 2026-05-21 post-σ-fix retune: bucket leg disables mid-hold (sweep showed
     # mid-hold churns buckets — d=0.0/tte=24h = $148 PnL vs d=1.0/tte=2h = $2).
     assert btc_bucket.exit_safety_d == 0.0
@@ -83,9 +79,13 @@ def test_allowlist_entry_safety_gate_defaults_when_omitted():
     preserve pre-gate behavior (max=1.0 is no cap, min_safety_d=0 is gate off)."""
     e = AllowlistEntry(
         match={"class": "priceBinary"},
-        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=0,
-        tte_max_seconds=3600, price_extreme_threshold=0.95,
-        distance_from_strike_usd_min=0, vol_max=100,
+        max_position_usd=100,
+        stop_loss_pct=10,
+        tte_min_seconds=0,
+        tte_max_seconds=3600,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
     )
     assert e.price_extreme_max == 1.0
     assert e.min_safety_d == 0.0
@@ -101,11 +101,18 @@ def test_allowlist_entry_safety_gate_defaults_when_omitted():
 def test_allowlist_entry_safety_gate_explicit_values():
     e = AllowlistEntry(
         match={"class": "priceBinary"},
-        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=0,
-        tte_max_seconds=7200, price_extreme_threshold=0.90,
-        distance_from_strike_usd_min=0, vol_max=100,
-        price_extreme_max=0.995, min_safety_d=1.5, vol_lookback_seconds=3600,
-        exit_safety_d=1.0, vol_ewma_lambda=0.85,
+        max_position_usd=100,
+        stop_loss_pct=10,
+        tte_min_seconds=0,
+        tte_max_seconds=7200,
+        price_extreme_threshold=0.90,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
+        price_extreme_max=0.995,
+        min_safety_d=1.5,
+        vol_lookback_seconds=3600,
+        exit_safety_d=1.0,
+        vol_ewma_lambda=0.85,
     )
     assert e.price_extreme_max == 0.995
     assert e.min_safety_d == 1.5
@@ -121,21 +128,35 @@ def test_allowlist_match_picks_first_matching_entry(tmp_path):
         allowlist=[
             AllowlistEntry(
                 match={"class": "priceBinary", "underlying": "BTC", "period": "1h"},
-                max_position_usd=100, stop_loss_pct=10, tte_min_seconds=60,
-                tte_max_seconds=1800, price_extreme_threshold=0.95,
-                distance_from_strike_usd_min=200, vol_max=0.5,
+                max_position_usd=100,
+                stop_loss_pct=10,
+                tte_min_seconds=60,
+                tte_max_seconds=1800,
+                price_extreme_threshold=0.95,
+                distance_from_strike_usd_min=200,
+                vol_max=0.5,
             ),
         ],
         blocklist_question_idxs=[],
         defaults=AllowlistEntry(
-            match={}, max_position_usd=50, stop_loss_pct=10, tte_min_seconds=60,
-            tte_max_seconds=1800, price_extreme_threshold=0.95,
-            distance_from_strike_usd_min=200, vol_max=0.5,
+            match={},
+            max_position_usd=50,
+            stop_loss_pct=10,
+            tte_min_seconds=60,
+            tte_max_seconds=1800,
+            price_extreme_threshold=0.95,
+            distance_from_strike_usd_min=200,
+            vol_max=0.5,
         ),
-        global_={"max_total_inventory_usd": 500, "max_concurrent_positions": 5,
-                 "daily_loss_cap_usd": 200, "max_strike_distance_pct": 10,
-                 "min_recent_volume_usd": 1000, "stale_data_halt_seconds": 5,
-                 "reconcile_interval_seconds": 60},
+        global_={
+            "max_total_inventory_usd": 500,
+            "max_concurrent_positions": 5,
+            "daily_loss_cap_usd": 200,
+            "max_strike_distance_pct": 10,
+            "min_recent_volume_usd": 1000,
+            "stale_data_halt_seconds": 5,
+            "reconcile_interval_seconds": 60,
+        },
     )
     # Match: priceBinary BTC 1h
     matched = match_question(cfg, question_idx=42, fields={"class": "priceBinary", "underlying": "BTC", "period": "1h"})
@@ -144,7 +165,10 @@ def test_allowlist_match_picks_first_matching_entry(tmp_path):
 
     # Blocklist override
     cfg2 = cfg.model_copy(update={"blocklist_question_idxs": [42]})
-    assert match_question(cfg2, question_idx=42, fields={"class": "priceBinary", "underlying": "BTC", "period": "1h"}) is None
+    assert (
+        match_question(cfg2, question_idx=42, fields={"class": "priceBinary", "underlying": "BTC", "period": "1h"})
+        is None
+    )
 
     # No match → None (defaults are not auto-applied for unmatched classes)
     assert match_question(cfg, question_idx=43, fields={"class": "priceBucket", "underlying": "ETH"}) is None
@@ -246,4 +270,4 @@ def test_pm_slots_reference_binance_spot():
     pm = {s.account_alias: s for s in strategies.strategies if s.account_alias.endswith("_pm")}
     assert pm["v31_pm"].reference_symbol == "BTCUSDT_SPOT"
     assert pm["v1_pm"].reference_symbol == "BTCUSDT_SPOT"
-    assert pm["v31_pm"].reference_sigma_source == "bbo"   # σ source stays bbo (now spot bbo)
+    assert pm["v31_pm"].reference_sigma_source == "bbo"  # σ source stays bbo (now spot bbo)

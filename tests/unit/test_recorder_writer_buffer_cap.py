@@ -7,8 +7,7 @@ from hlanalysis.recorder.writer import ParquetWriter
 
 
 def _row(sym="BTC", et="trade"):
-    return {"venue": "v", "product_type": "p", "mechanism": "m",
-            "event_type": et, "symbol": sym, "exchange_ts": 1}
+    return {"venue": "v", "product_type": "p", "mechanism": "m", "event_type": et, "symbol": sym, "exchange_ts": 1}
 
 
 def test_global_cap_drops_oldest_on_persistent_write_failure(tmp_path: Path, monkeypatch):
@@ -16,18 +15,18 @@ def test_global_cap_drops_oldest_on_persistent_write_failure(tmp_path: Path, mon
 
     # Force every flush to fail so rows re-buffer (the OOM path).
     import hlanalysis.recorder.writer as wr
-    monkeypatch.setattr(wr.pq, "write_table",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+
+    monkeypatch.setattr(wr.pq, "write_table", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
 
     # Write far more than the global cap across several keys.
     for i in range(200):
         w.write(_row(sym=f"S{i % 5}"))
 
     total = sum(len(rows) for rows in w._buffers.values())
-    assert total <= 25                        # global cap enforced
-    assert w.dropped_rows > 0                 # and it tracked the drop
+    assert total <= 25  # global cap enforced
+    assert w.dropped_rows > 0  # and it tracked the drop
     # 200 rows written, cap=25; exactly 175 rows must have been dropped
-    assert w.dropped_rows == 200 - total      # dropped == written - surviving
+    assert w.dropped_rows == 200 - total  # dropped == written - surviving
 
 
 # ---------------------------------------------------------------------------
@@ -35,9 +34,8 @@ def test_global_cap_drops_oldest_on_persistent_write_failure(tmp_path: Path, mon
 # increment dropped_rows_total so operations can detect data loss.
 # ---------------------------------------------------------------------------
 
-def test_drop_emits_error_log_and_increments_counter(
-    tmp_path: Path, monkeypatch, caplog
-):
+
+def test_drop_emits_error_log_and_increments_counter(tmp_path: Path, monkeypatch, caplog):
     """When the global cap is exceeded, the writer must:
     (a) emit a log.error (not just a warning),
     (b) increment the dropped_rows counter.
@@ -48,8 +46,7 @@ def test_drop_emits_error_log_and_increments_counter(
     import hlanalysis.recorder.writer as wr
     import logging
 
-    monkeypatch.setattr(wr.pq, "write_table",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(wr.pq, "write_table", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
 
     w = ParquetWriter(tmp_path, max_buffer_rows=10, max_total_buffer_rows=30)
 
@@ -59,15 +56,12 @@ def test_drop_emits_error_log_and_increments_counter(
 
     # (a) An ERROR-level log was emitted.
     error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert error_records, (
-        "expected at least one ERROR log on data drop; only got: "
-        + str([(r.levelno, r.message) for r in caplog.records])
+    assert error_records, "expected at least one ERROR log on data drop; only got: " + str(
+        [(r.levelno, r.message) for r in caplog.records]
     )
     # The message should mention data loss / dropped rows.
     combined = " ".join(r.message for r in error_records).lower()
-    assert "drop" in combined or "loss" in combined, (
-        f"ERROR log doesn't mention drop/loss: {combined!r}"
-    )
+    assert "drop" in combined or "loss" in combined, f"ERROR log doesn't mention drop/loss: {combined!r}"
 
     # (b) The counter was incremented.
     assert w.dropped_rows > 0, "dropped_rows counter was not incremented"
@@ -78,6 +72,7 @@ def test_drop_emits_error_log_and_increments_counter(
 # and then os.replace() to the final path (atomic on POSIX), so a mid-write
 # crash can't leave a truncated file that breaks the reader.
 # ---------------------------------------------------------------------------
+
 
 def test_flush_key_uses_atomic_write(tmp_path: Path, monkeypatch):
     """_flush_key must write to a temp path then rename atomically.
@@ -110,9 +105,7 @@ def test_flush_key_uses_atomic_write(tmp_path: Path, monkeypatch):
     assert replaces, "os.replace was never called — write is not atomic"
     src, dst = replaces[0]
     assert src.endswith(".parquet.tmp"), f"temp file should end .parquet.tmp, got {src}"
-    assert dst.endswith(".parquet") and not dst.endswith(".parquet.tmp"), (
-        f"dest should be .parquet, got {dst}"
-    )
+    assert dst.endswith(".parquet") and not dst.endswith(".parquet.tmp"), f"dest should be .parquet, got {dst}"
 
     # No leftover .tmp files.
     tmp_files = list(tmp_path.rglob("*.parquet.tmp"))

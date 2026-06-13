@@ -1,4 +1,5 @@
 """DataSource protocol + QuestionDescriptor (spec §3.2)."""
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -50,15 +51,11 @@ class DataSource(Protocol):
         """
         ...
 
-    def question_view(
-        self, q: QuestionDescriptor, *, now_ns: int, settled: bool
-    ) -> QuestionView:
+    def question_view(self, q: QuestionDescriptor, *, now_ns: int, settled: bool) -> QuestionView:
         """Snapshot the QuestionView the strategy sees at `now_ns`."""
         ...
 
-    def resolved_outcome(
-        self, q: QuestionDescriptor
-    ) -> Literal["yes", "no", "unknown"]:
+    def resolved_outcome(self, q: QuestionDescriptor) -> Literal["yes", "no", "unknown"]:
         """Final outcome; used for settlement P&L on positions still open at end_ts_ns."""
         ...
 

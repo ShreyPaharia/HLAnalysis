@@ -12,6 +12,7 @@ Two behaviours are pinned here:
      market cache. It is a no-op when already covered, and for non-Binance
      underlyings (WTI uses Pyth, not Binance).
 """
+
 from __future__ import annotations
 
 import json
@@ -36,8 +37,11 @@ def _write_klines(cache_root: Path, n_minutes: int) -> None:
     rows = [
         {
             "ts_ns": _T0 + i * _MIN_NS,
-            "open": 100.0 + i, "high": 100.0 + i,
-            "low": 100.0 + i, "close": 100.0 + i, "volume": 1.0,
+            "open": 100.0 + i,
+            "high": 100.0 + i,
+            "low": 100.0 + i,
+            "close": 100.0 + i,
+            "volume": 1.0,
         }
         for i in range(n_minutes)
     ]
@@ -46,9 +50,13 @@ def _write_klines(cache_root: Path, n_minutes: int) -> None:
 
 def _q(end_ts_ns: int) -> QuestionDescriptor:
     return QuestionDescriptor(
-        question_id="c1", question_idx=1,
-        start_ts_ns=_T0, end_ts_ns=end_ts_ns,
-        leg_symbols=("yes", "no"), klass="priceBinary", underlying="BTC",
+        question_id="c1",
+        question_idx=1,
+        start_ts_ns=_T0,
+        end_ts_ns=end_ts_ns,
+        leg_symbols=("yes", "no"),
+        klass="priceBinary",
+        underlying="BTC",
     )
 
 
@@ -70,7 +78,8 @@ def test_binary_strike_returns_close_for_interior_gap(tmp_path: Path) -> None:
 
 
 def test_ensure_kline_coverage_fetches_missing_forward_range(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write_klines(tmp_path, 101)  # covered up to _T0+100min
     src = PolymarketDataSource(cache_root=tmp_path)
@@ -81,8 +90,7 @@ def test_ensure_kline_coverage_fetches_missing_forward_range(
         out = []
         t_ms = start_ts_ms
         while t_ms < end_ts_ms:
-            out.append(Kline(ts_ns=t_ms * 1_000_000, open=1.0, high=1.0,
-                             low=1.0, close=1.0, volume=1.0))
+            out.append(Kline(ts_ns=t_ms * 1_000_000, open=1.0, high=1.0, low=1.0, close=1.0, volume=1.0))
             t_ms += 60_000
         return out
 
@@ -96,13 +104,15 @@ def test_ensure_kline_coverage_fetches_missing_forward_range(
 
 
 def test_ensure_kline_coverage_noop_when_already_covered(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write_klines(tmp_path, 101)
     src = PolymarketDataSource(cache_root=tmp_path)
     n = {"calls": 0}
     monkeypatch.setattr(
-        pmmod, "fetch_klines",
+        pmmod,
+        "fetch_klines",
         lambda *a, **k: n.__setitem__("calls", n["calls"] + 1) or [],
     )
     src._ensure_kline_coverage(_T0, _T0 + 50 * _MIN_NS)  # within coverage
@@ -110,14 +120,18 @@ def test_ensure_kline_coverage_noop_when_already_covered(
 
 
 def test_ensure_kline_coverage_noop_for_non_binance_symbol(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     src = PolymarketDataSource(
-        cache_root=tmp_path, reference_symbol="WTI", klines_subdir="wti_klines",
+        cache_root=tmp_path,
+        reference_symbol="WTI",
+        klines_subdir="wti_klines",
     )
     n = {"calls": 0}
     monkeypatch.setattr(
-        pmmod, "fetch_klines",
+        pmmod,
+        "fetch_klines",
         lambda *a, **k: n.__setitem__("calls", n["calls"] + 1) or [],
     )
     src._ensure_kline_coverage(_T0, _T0 + 200 * _MIN_NS)
@@ -128,14 +142,18 @@ def _binary_entry(cond_id: str, end_ts_ns: int) -> dict:
     return {
         "kind": "binary",
         "market": {
-            "start_ts_ns": _T0, "end_ts_ns": end_ts_ns,
-            "condition_id": cond_id, "yes_token_id": "y", "no_token_id": "n",
+            "start_ts_ns": _T0,
+            "end_ts_ns": end_ts_ns,
+            "condition_id": cond_id,
+            "yes_token_id": "y",
+            "no_token_id": "n",
         },
     }
 
 
 def test_fetch_and_cache_extends_kline_coverage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """fetch_and_cache must drag the kline series forward to cover the markets
     it just cached (coupled fetch) — not leave klines frozen behind the PM data."""
@@ -149,7 +167,8 @@ def test_fetch_and_cache_extends_kline_coverage(
     monkeypatch.setattr(src, "_fetch_and_cache_bucket", lambda manifest, **kw: None)
     seen: dict[str, tuple[int, int]] = {}
     monkeypatch.setattr(
-        src, "_ensure_kline_coverage",
+        src,
+        "_ensure_kline_coverage",
         lambda s, e: seen.__setitem__("win", (s, e)),
     )
     src.fetch_and_cache(start="2020-01-01", end="2099-01-01", kind="binary")
@@ -163,9 +182,7 @@ def test_question_view_raises_on_stale_cache(tmp_path: Path) -> None:
     _write_klines(tmp_path, 101)  # covers _T0 .. _T0+100min
     src = PolymarketDataSource(cache_root=tmp_path)
     end_ts = _T0 + 300 * _MIN_NS + _DAY_NS  # strike _T0+300min, past cache
-    (tmp_path / "manifest.json").write_text(
-        json.dumps({"c1": _binary_entry("c1", end_ts)})
-    )
+    (tmp_path / "manifest.json").write_text(json.dumps({"c1": _binary_entry("c1", end_ts)}))
     q = _q(end_ts)
     with pytest.raises(StrikeCoverageError):
         src.question_view(q, now_ns=_T0, settled=False)

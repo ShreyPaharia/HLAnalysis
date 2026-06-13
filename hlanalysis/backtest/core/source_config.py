@@ -10,6 +10,7 @@ worker can no longer silently revert ``book_source`` to ``synthetic`` or
 ``reference_resample_seconds`` to ``60`` while the parent used the configured
 values (the documented "worker factory config drop" regression).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
@@ -132,10 +133,7 @@ class SourceConfig:
             from ..data.polymarket import PolymarketDataSource
 
             if self.pm_flavor not in PM_FLAVORS:
-                raise SystemExit(
-                    f"Unknown --pm-flavor: {self.pm_flavor!r}. "
-                    f"Choices: {sorted(PM_FLAVORS)}"
-                )
+                raise SystemExit(f"Unknown --pm-flavor: {self.pm_flavor!r}. Choices: {sorted(PM_FLAVORS)}")
             return PolymarketDataSource(
                 cache_root=Path(self.cache_root or "data/sim"),
                 reference_source=self.pm_reference_source,  # type: ignore[arg-type]
@@ -159,9 +157,7 @@ class SourceConfig:
         if self.kind == "pm_nba":
             from ..data.pm_nba import PolymarketNBADataSource
 
-            return PolymarketNBADataSource(
-                cache_root=Path(self.cache_root or "data/sim/pm_nba")
-            )
+            return PolymarketNBADataSource(cache_root=Path(self.cache_root or "data/sim/pm_nba"))
         raise SystemExit(f"Unknown --data-source: {self.kind}")
 
 

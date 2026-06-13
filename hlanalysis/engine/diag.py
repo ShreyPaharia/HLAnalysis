@@ -21,6 +21,7 @@ Top-level:
   data_dir        — engine data root derived from deploy config
   slots           — dict[alias -> per-slot snapshot]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -33,6 +34,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _flag_info(path: Path) -> dict[str, Any]:
     """Return {present, mtime_ns} for a flag file path."""
@@ -49,12 +51,11 @@ def _open_dal(db_path: Path):
         return None
     # Import here to avoid top-level import cost (module is imported at test collection)
     from hlanalysis.engine.state import StateDAL
+
     return StateDAL(db_path)
 
 
-def _reject_counts_since_alias(
-    db_path: Path, *, alias: str, since_ts_ns: int
-) -> list[dict[str, Any]]:
+def _reject_counts_since_alias(db_path: Path, *, alias: str, since_ts_ns: int) -> list[dict[str, Any]]:
     """Return reject-like counts grouped by (kind, reason) for a specific alias.
 
     Filters by alias so cross-slot events in the same DB don't double-count.
@@ -82,9 +83,7 @@ def _reject_counts_since_alias(
         return []
 
 
-def _last_event_by_kinds(
-    db_path: Path, *, kinds: list[str], alias: str | None
-) -> dict[str, Any] | None:
+def _last_event_by_kinds(db_path: Path, *, kinds: list[str], alias: str | None) -> dict[str, Any] | None:
     """Return the most-recent event matching any of the given kinds.
 
     If alias is provided, filter to that alias. Returns None on any error.
@@ -114,9 +113,7 @@ def _last_event_by_kinds(
         return None
 
 
-def _last_event_by_kind(
-    db_path: Path, *, kind: str, alias: str | None
-) -> dict[str, Any] | None:
+def _last_event_by_kind(db_path: Path, *, kind: str, alias: str | None) -> dict[str, Any] | None:
     """Return the most-recent event matching kind (and alias if given)."""
     return _last_event_by_kinds(db_path, kinds=[kind], alias=alias)
 
@@ -140,6 +137,7 @@ def _get_last_session(db_path: Path) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 # Per-slot snapshot builder
 # ---------------------------------------------------------------------------
+
 
 def _build_slot_snapshot(
     alias: str,
@@ -193,13 +191,15 @@ def _build_slot_snapshot(
             fills_realized = total_realized - settlement
 
             for p in positions:
-                open_positions.append({
-                    "question_idx": p.question_idx,
-                    "symbol": p.symbol,
-                    "qty": p.qty,
-                    "avg_entry": p.avg_entry,
-                    "stop_loss_price": p.stop_loss_price,
-                })
+                open_positions.append(
+                    {
+                        "question_idx": p.question_idx,
+                        "symbol": p.symbol,
+                        "qty": p.qty,
+                        "avg_entry": p.avg_entry,
+                        "stop_loss_price": p.stop_loss_price,
+                    }
+                )
         except Exception:
             pass
 
@@ -218,18 +218,20 @@ def _build_slot_snapshot(
             orders = dal.live_orders()
             for o in orders:
                 age_seconds = (now_ns - o.placed_ts_ns) / 1e9
-                live_orders.append({
-                    "cloid": o.cloid,
-                    "venue_oid": o.venue_oid,
-                    "question_idx": o.question_idx,
-                    "symbol": o.symbol,
-                    "side": o.side,
-                    "price": o.price,
-                    "size": o.size,
-                    "status": o.status,
-                    "placed_ts_ns": o.placed_ts_ns,
-                    "age_seconds": age_seconds,
-                })
+                live_orders.append(
+                    {
+                        "cloid": o.cloid,
+                        "venue_oid": o.venue_oid,
+                        "question_idx": o.question_idx,
+                        "symbol": o.symbol,
+                        "side": o.side,
+                        "price": o.price,
+                        "size": o.size,
+                        "status": o.status,
+                        "placed_ts_ns": o.placed_ts_ns,
+                        "age_seconds": age_seconds,
+                    }
+                )
         except Exception:
             pass
 
@@ -268,8 +270,16 @@ def _build_slot_snapshot(
     rejects = _reject_counts_since_alias(db_path, alias=alias, since_ts_ns=since_ts_ns)
 
     # ---- last_decision: most recent entry/exit/risk_veto/risk_halt for this alias ----
-    decision_kinds = ["entry", "exit", "risk_veto", "risk_halt", "stop_loss_triggered",
-                      "daily_loss_halt", "stale_data_halt", "order_rejected"]
+    decision_kinds = [
+        "entry",
+        "exit",
+        "risk_veto",
+        "risk_halt",
+        "stop_loss_triggered",
+        "daily_loss_halt",
+        "stale_data_halt",
+        "order_rejected",
+    ]
     last_decision = _last_event_by_kinds(db_path, kinds=decision_kinds, alias=alias)
 
     # ---- config fingerprint ----
@@ -329,9 +339,10 @@ def _build_config_fingerprint(alias: str, strategy_cfg: Any) -> dict[str, Any]:
 # Main snapshot builder (public API, called by tests and by __main__)
 # ---------------------------------------------------------------------------
 
+
 def build_snapshot(
-    deploy_cfg: Any,            # DeployConfig
-    strategies_cfg: Any,        # StrategiesConfig
+    deploy_cfg: Any,  # DeployConfig
+    strategies_cfg: Any,  # StrategiesConfig
     *,
     reject_window_hours: float = 24.0,
     alias_filter: str | None = None,
@@ -390,6 +401,7 @@ def build_snapshot(
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description=(
@@ -398,23 +410,32 @@ def main() -> None:
         )
     )
     p.add_argument(
-        "--strategy-config", type=Path, default=Path("config/strategy.yaml"),
+        "--strategy-config",
+        type=Path,
+        default=Path("config/strategy.yaml"),
         help="Path to strategy.yaml (default: config/strategy.yaml)",
     )
     p.add_argument(
-        "--deploy-config", type=Path, default=Path("config/deploy.yaml"),
+        "--deploy-config",
+        type=Path,
+        default=Path("config/deploy.yaml"),
         help="Path to deploy.yaml (default: config/deploy.yaml)",
     )
     p.add_argument(
-        "--reject-window-hours", type=float, default=24.0,
+        "--reject-window-hours",
+        type=float,
+        default=24.0,
         help="Rolling window for reject counts in hours (default: 24)",
     )
     p.add_argument(
-        "--alias", type=str, default=None,
+        "--alias",
+        type=str,
+        default=None,
         help="Only include this alias in the snapshot (default: all slots)",
     )
     p.add_argument(
-        "--pretty", action="store_true",
+        "--pretty",
+        action="store_true",
         help="Pretty-print JSON output (default: compact)",
     )
     args = p.parse_args()

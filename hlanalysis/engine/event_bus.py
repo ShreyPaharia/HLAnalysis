@@ -59,9 +59,7 @@ class EventBus:
             logger.exception("event_bus: failed to log {}", ev.kind)
         for q in self._subs:
             if self._drop_when_full and q.full():
-                logger.warning(
-                    "event_bus: slow consumer; dropping {} (qsize={})", ev.kind, q.qsize()
-                )
+                logger.warning("event_bus: slow consumer; dropping {} (qsize={})", ev.kind, q.qsize())
                 continue
             await q.put(ev)
 

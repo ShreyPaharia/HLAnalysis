@@ -10,9 +10,7 @@ from .events import Mechanism, ProductType
 
 # Standard channel vocabulary. Each adapter translates these to native streams.
 # Adapters may silently drop channels that don't apply (e.g. funding for spot).
-STANDARD_CHANNELS = frozenset(
-    {"trades", "book", "bbo", "mark", "funding", "oracle", "liquidations"}
-)
+STANDARD_CHANNELS = frozenset({"trades", "book", "bbo", "mark", "funding", "oracle", "liquidations"})
 
 
 class Subscription(BaseModel):

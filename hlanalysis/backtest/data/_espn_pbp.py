@@ -10,6 +10,7 @@ row carries the absolute wall-clock ts (ns), period number, seconds remaining
 in the current period, signed score diff (home − away), and an `is_overtime`
 flag (period >= 5).
 """
+
 from __future__ import annotations
 
 import math
@@ -75,15 +76,17 @@ def pbp_to_rows(summary: dict) -> list[dict]:
             continue
         home_score = int(p.get("homeScore") or 0)
         away_score = int(p.get("awayScore") or 0)
-        out.append({
-            "ts_ns": ts_ns,
-            "period": period,
-            "seconds_remaining_in_period": secs,
-            "score_diff_home": home_score - away_score,
-            "home_score": home_score,
-            "away_score": away_score,
-            "is_overtime": period >= 5,
-        })
+        out.append(
+            {
+                "ts_ns": ts_ns,
+                "period": period,
+                "seconds_remaining_in_period": secs,
+                "score_diff_home": home_score - away_score,
+                "home_score": home_score,
+                "away_score": away_score,
+                "is_overtime": period >= 5,
+            }
+        )
     # Ensure monotone ts (ESPN occasionally interleaves).
     out.sort(key=lambda r: r["ts_ns"])
     return out
@@ -94,15 +97,17 @@ def write_pbp_parquet(path: Path, rows: Iterable[dict]) -> None:
     rows = list(rows)
     if not rows:
         return
-    table = pa.table({
-        "ts_ns": [int(r["ts_ns"]) for r in rows],
-        "period": [int(r["period"]) for r in rows],
-        "seconds_remaining_in_period": [int(r["seconds_remaining_in_period"]) for r in rows],
-        "score_diff_home": [int(r["score_diff_home"]) for r in rows],
-        "home_score": [int(r["home_score"]) for r in rows],
-        "away_score": [int(r["away_score"]) for r in rows],
-        "is_overtime": [bool(r["is_overtime"]) for r in rows],
-    })
+    table = pa.table(
+        {
+            "ts_ns": [int(r["ts_ns"]) for r in rows],
+            "period": [int(r["period"]) for r in rows],
+            "seconds_remaining_in_period": [int(r["seconds_remaining_in_period"]) for r in rows],
+            "score_diff_home": [int(r["score_diff_home"]) for r in rows],
+            "home_score": [int(r["home_score"]) for r in rows],
+            "away_score": [int(r["away_score"]) for r in rows],
+            "is_overtime": [bool(r["is_overtime"]) for r in rows],
+        }
+    )
     pq.write_table(table, path)
 
 
@@ -113,9 +118,7 @@ def read_pbp_parquet(path: Path) -> list[dict]:
 
 def fetch_scoreboard(date_yyyymmdd: str) -> list[dict]:
     """Return a list of game dicts with keys: id, away, home, status, start_iso."""
-    data = _http_get(
-        f"{_ESPN_BASE}/scoreboard", params={"dates": date_yyyymmdd}
-    )
+    data = _http_get(f"{_ESPN_BASE}/scoreboard", params={"dates": date_yyyymmdd})
     events = data.get("events") or []
     out: list[dict] = []
     for ev in events:
@@ -124,13 +127,15 @@ def fetch_scoreboard(date_yyyymmdd: str) -> list[dict]:
             comps = comp.get("competitors") or []
             home = next(c for c in comps if c.get("homeAway") == "home")
             away = next(c for c in comps if c.get("homeAway") == "away")
-            out.append({
-                "id": str(ev["id"]),
-                "away": (away.get("team") or {}).get("displayName") or "",
-                "home": (home.get("team") or {}).get("displayName") or "",
-                "status": ((ev.get("status") or {}).get("type") or {}).get("name") or "",
-                "start_iso": ev.get("date") or "",
-            })
+            out.append(
+                {
+                    "id": str(ev["id"]),
+                    "away": (away.get("team") or {}).get("displayName") or "",
+                    "home": (home.get("team") or {}).get("displayName") or "",
+                    "status": ((ev.get("status") or {}).get("type") or {}).get("name") or "",
+                    "start_iso": ev.get("date") or "",
+                }
+            )
         except (StopIteration, KeyError, TypeError):
             continue
     return out

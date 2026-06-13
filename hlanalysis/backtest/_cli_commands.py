@@ -4,6 +4,7 @@ Each ``cmd_*`` function is the ``func`` set on a subparser via
 ``set_defaults(func=...)``.  The handlers import heavy dependencies lazily so
 the CLI stays fast on ``--help``.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -77,9 +78,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     # backtest derives live-faithful defaults (mark + raw) instead of hard-coding
     # non-live defaults (bbo + bars). CLI flags remain as explicit A/B overrides.
     _cli_warmup = getattr(args, "reference_warmup_seconds", None)
-    _warmup = _resolve_reference_warmup_seconds(
-        params, data_source=args.data_source, cli_override=_cli_warmup
-    )
+    _warmup = _resolve_reference_warmup_seconds(params, data_source=args.data_source, cli_override=_cli_warmup)
     _resolved = from_backtest_params(params, track_default_source="mark")
     source_config = _source_config_from_args(
         args,
@@ -97,23 +96,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         if args.data_source == "polymarket":
             discover_kwargs["kind"] = kind
         elif args.data_source == "hl_hip4":
-            discover_kwargs["kinds"] = (
-                "priceBinary" if kind == "binary" else "priceBucket",
-            )
+            discover_kwargs["kinds"] = ("priceBinary" if kind == "binary" else "priceBucket",)
     descriptors = list(data_source.discover(start=start, end=end, **discover_kwargs))
     if args.max_markets is not None:
         descriptors = descriptors[args.skip_markets : args.skip_markets + args.max_markets]
     elif args.skip_markets:
         descriptors = descriptors[args.skip_markets :]
     if not descriptors:
-        logger.error(
-            f"Data source '{args.data_source}' returned no questions for [{start}, {end})"
-        )
+        logger.error(f"Data source '{args.data_source}' returned no questions for [{start}, {end})")
         return 2
-    logger.info(
-        f"Running '{args.strategy}' on {len(descriptors)} question(s) "
-        f"from data source '{args.data_source}'"
-    )
+    logger.info(f"Running '{args.strategy}' on {len(descriptors)} question(s) from data source '{args.data_source}'")
 
     run_cfg = _run_config_from_args(args, hedge_cfg)
 
@@ -207,8 +199,7 @@ def cmd_tune(args: argparse.Namespace) -> int:
     grid = tcfg.grids.get(args.strategy)
     if grid is None:
         raise SystemExit(
-            f"No grid defined for strategy {args.strategy!r} in {args.grid}. "
-            f"Known grid keys: {sorted(tcfg.grids)}"
+            f"No grid defined for strategy {args.strategy!r} in {args.grid}. Known grid keys: {sorted(tcfg.grids)}"
         )
 
     # Event-array cache is default-ON (same as cmd_run). --cache-event-arrays
@@ -250,18 +241,19 @@ def cmd_tune(args: argparse.Namespace) -> int:
     discover_kwargs: dict = {}
     if args.data_source == "polymarket" and args.kind != "both":
         discover_kwargs["kind"] = args.kind
-    descriptors = list(data_source.discover(
-        start=args.start or "", end=args.end or "", **discover_kwargs,
-    ))
+    descriptors = list(
+        data_source.discover(
+            start=args.start or "",
+            end=args.end or "",
+            **discover_kwargs,
+        )
+    )
     if args.max_markets is not None:
         descriptors = descriptors[args.skip_markets : args.skip_markets + args.max_markets]
     elif args.skip_markets:
         descriptors = descriptors[args.skip_markets :]
     if not descriptors:
-        raise SystemExit(
-            f"No questions discovered for data-source {args.data_source!r} "
-            f"in [{args.start}, {args.end})"
-        )
+        raise SystemExit(f"No questions discovered for data-source {args.data_source!r} in [{args.start}, {args.end})")
 
     # Extract hedge config from the grid's fixed_params section if present.
     # The grid YAML may carry hedge_* keys in a top-level ``fixed_params`` block
@@ -283,20 +275,22 @@ def cmd_tune(args: argparse.Namespace) -> int:
 
     out_dir = Path(args.out_dir) / args.run_id
     run_meta = tcfg.run if isinstance(tcfg.run, dict) else {}
-    rows = list(run_tuning_parallel(
-        strategy_id=args.strategy,
-        grid=grid,
-        source_config=source_config,
-        descriptors=descriptors,
-        run_cfg=run_cfg,
-        train=int(run_meta.get("train_markets", 60)),
-        test=int(run_meta.get("test_markets", 15)),
-        step=int(run_meta.get("step_markets", 15)),
-        out_dir=out_dir,
-        n_workers=args.workers,
-        hedge_data_path=args.hedge_data_path,
-        hedge_half_spread_bps=float(getattr(args, "hedge_half_spread_bps", 1.0)),
-    ))
+    rows = list(
+        run_tuning_parallel(
+            strategy_id=args.strategy,
+            grid=grid,
+            source_config=source_config,
+            descriptors=descriptors,
+            run_cfg=run_cfg,
+            train=int(run_meta.get("train_markets", 60)),
+            test=int(run_meta.get("test_markets", 15)),
+            step=int(run_meta.get("step_markets", 15)),
+            out_dir=out_dir,
+            n_workers=args.workers,
+            hedge_data_path=args.hedge_data_path,
+            hedge_half_spread_bps=float(getattr(args, "hedge_half_spread_bps", 1.0)),
+        )
+    )
     write_tuning_report(out_dir=out_dir, strategy_name=args.strategy, rows=rows, top_k=args.top_k)
     logger.info(f"Tuning report → {out_dir}/report.md ({len(rows)} cells)")
     return 0

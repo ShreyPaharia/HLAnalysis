@@ -5,6 +5,7 @@ completes while `run()` waits forever on the stop event — the process stays
 alive with that venue silently not recording and systemd never restarts it.
 `_supervise` must return (and latch stop) as soon as any adapter task ends.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -17,8 +18,8 @@ from hlanalysis.recorder.runner import _supervise
 @pytest.mark.asyncio
 async def test_supervise_exits_when_an_adapter_task_dies():
     stop = asyncio.Event()
-    dead = asyncio.create_task(asyncio.sleep(0))      # completes "immediately"
-    alive = asyncio.create_task(asyncio.sleep(10))    # would run forever
+    dead = asyncio.create_task(asyncio.sleep(0))  # completes "immediately"
+    alive = asyncio.create_task(asyncio.sleep(10))  # would run forever
 
     await asyncio.wait_for(_supervise(stop, [dead, alive]), timeout=1.0)
 

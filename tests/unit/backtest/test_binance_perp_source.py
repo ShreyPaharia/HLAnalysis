@@ -16,9 +16,12 @@ def test_emits_synthetic_bbo_between_start_and_end(tmp_path: Path) -> None:
     ]
     p.write_text(json.dumps(rows))
     src = BinancePerpKlinesSource(path=p, symbol="BTC-PERP", half_spread_bps=1.0)
-    events = list(src.book_events(
-        start_ts_ns=1_000_000_060_000_000_000, end_ts_ns=1_000_000_120_000_000_000,
-    ))
+    events = list(
+        src.book_events(
+            start_ts_ns=1_000_000_060_000_000_000,
+            end_ts_ns=1_000_000_120_000_000_000,
+        )
+    )
     assert len(events) == 1
     ev = events[0]
     assert isinstance(ev, BookSnapshot)

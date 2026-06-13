@@ -15,6 +15,7 @@ largest that is ``<= T``.
 
 ``current_position_at`` is the cheap O(log n) lookup helper for engine replays.
 """
+
 from __future__ import annotations
 
 import bisect
@@ -32,11 +33,13 @@ from hlanalysis.strategy.types import Position
 # Change-point timeline
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class PositionChange:
     """One position change-point on the sim's timeline for a single question."""
+
     ts_ns: int
-    position: Position | None   # None ⟹ no position held after this ts
+    position: Position | None  # None ⟹ no position held after this ts
 
 
 @dataclass
@@ -46,6 +49,7 @@ class PositionTimeline:
     Sorted ascending by ``ts_ns`` (guaranteed by the constructor).
     Empty list ⟹ the sim never held a position for this question.
     """
+
     question_idx: int
     changes: list[PositionChange]
 
@@ -64,13 +68,14 @@ class PositionTimeline:
         # The preceding entry (i - 1) is the most recent change at or before ts_ns.
         i = bisect.bisect_right(self._ts_list, ts_ns)
         if i == 0:
-            return None   # ts_ns is before the first change-point ⟹ flat
+            return None  # ts_ns is before the first change-point ⟹ flat
         return self.changes[i - 1].position
 
 
 # ---------------------------------------------------------------------------
 # Reconstruction from fills-parquet rows
 # ---------------------------------------------------------------------------
+
 
 def build_position_timeline(
     fill_rows: list[dict[str, Any]],
@@ -116,20 +121,23 @@ def build_position_timeline(
             pos_state = new_state
             pos_symbol = symbol
             stop_px = (
-                STOP_DISABLED_SENTINEL if stop_loss_pct is None
+                STOP_DISABLED_SENTINEL
+                if stop_loss_pct is None
                 else max(0.0, new_state.avg_entry * (1.0 - stop_loss_pct / 100.0))
             )
-            changes.append(PositionChange(
-                ts_ns=ts_ns,
-                position=Position(
-                    question_idx=question_idx,
-                    symbol=pos_symbol,
-                    qty=new_state.qty,
-                    avg_entry=new_state.avg_entry,
-                    stop_loss_price=stop_px,
-                    last_update_ts_ns=ts_ns,
-                ),
-            ))
+            changes.append(
+                PositionChange(
+                    ts_ns=ts_ns,
+                    position=Position(
+                        question_idx=question_idx,
+                        symbol=pos_symbol,
+                        qty=new_state.qty,
+                        avg_entry=new_state.avg_entry,
+                        stop_loss_price=stop_px,
+                        last_update_ts_ns=ts_ns,
+                    ),
+                )
+            )
 
     return PositionTimeline(question_idx=question_idx, changes=changes)
 
@@ -150,10 +158,13 @@ def build_timelines_from_fills_parquet(
     import duckdb
 
     path = str(parquet_path)
-    rows = duckdb.connect().execute(
-        f"SELECT ts_ns, side, price, size, symbol, cloid, question_idx "
-        f"FROM read_parquet('{path}') ORDER BY ts_ns"
-    ).fetchall()
+    rows = (
+        duckdb.connect()
+        .execute(
+            f"SELECT ts_ns, side, price, size, symbol, cloid, question_idx FROM read_parquet('{path}') ORDER BY ts_ns"
+        )
+        .fetchall()
+    )
     cols = ["ts_ns", "side", "price", "size", "symbol", "cloid", "question_idx"]
 
     # Group by question_idx; hedge fills (is_hedge=True) are skipped because
@@ -166,9 +177,7 @@ def build_timelines_from_fills_parquet(
 
     timelines: dict[int, PositionTimeline] = {}
     for qi, qi_rows in by_qi.items():
-        timelines[qi] = build_position_timeline(
-            qi_rows, question_idx=qi, stop_loss_pct=stop_loss_pct
-        )
+        timelines[qi] = build_position_timeline(qi_rows, question_idx=qi, stop_loss_pct=stop_loss_pct)
     return timelines
 
 

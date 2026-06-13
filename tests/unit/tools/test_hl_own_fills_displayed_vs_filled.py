@@ -6,6 +6,7 @@ strictly-before book join, and the displayed-depth metrics that the whole
 displayed-vs-filled ratio rests on. The duckdb I/O layer is a thin wrapper over
 these and is exercised by the real-corpus run in the research note.
 """
+
 from __future__ import annotations
 
 from tools.hl_own_fills_displayed_vs_filled import (

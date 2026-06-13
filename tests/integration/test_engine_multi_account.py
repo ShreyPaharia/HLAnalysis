@@ -6,6 +6,7 @@ Verifies the multi-account engine wiring:
   - Daily-loss / kill-switch on one account does not halt the other
   - Both strategies observe entries on the same paper question
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -17,14 +18,23 @@ import pytest
 
 from hlanalysis.adapters.base import VenueAdapter
 from hlanalysis.engine.config import (
-    AlertsConfig, AllowlistEntry, DeployConfig, GlobalRiskConfig, HLConfig,
-    StrategyConfig, TelegramConfig,
+    AlertsConfig,
+    AllowlistEntry,
+    DeployConfig,
+    GlobalRiskConfig,
+    HLConfig,
+    StrategyConfig,
+    TelegramConfig,
 )
 from hlanalysis.engine.hl_client import HLClient
 from hlanalysis.engine.runtime import EngineRuntime
 from hlanalysis.engine.state import StateDAL
 from hlanalysis.events import (
-    BboEvent, MarkEvent, Mechanism, ProductType, QuestionMetaEvent,
+    BboEvent,
+    MarkEvent,
+    Mechanism,
+    ProductType,
+    QuestionMetaEvent,
 )
 
 
@@ -37,14 +47,18 @@ class _FakeAdapter(VenueAdapter):
     async def stream(self, _subs):
         now = time.time_ns()
         # Expiry 30 minutes out — inside both strategies' TTE window.
-        expiry_str = datetime.fromtimestamp(
-            (now + 30 * 60 * 1_000_000_000) / 1e9, tz=timezone.utc
-        ).strftime("%Y%m%d-%H%M")
+        expiry_str = datetime.fromtimestamp((now + 30 * 60 * 1_000_000_000) / 1e9, tz=timezone.utc).strftime(
+            "%Y%m%d-%H%M"
+        )
         yield QuestionMetaEvent(
-            venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="qmeta",
-            exchange_ts=now - 60_000_000_000, local_recv_ts=now - 60_000_000_000,
-            question_idx=99, named_outcome_idxs=[3],
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="qmeta",
+            exchange_ts=now - 60_000_000_000,
+            local_recv_ts=now - 60_000_000_000,
+            question_idx=99,
+            named_outcome_idxs=[3],
             keys=["class", "underlying", "period", "expiry", "strike"],
             values=["priceBinary", "BTC", "1h", expiry_str, "80000"],
         )
@@ -55,22 +69,37 @@ class _FakeAdapter(VenueAdapter):
         for i in range(8):
             ts = now - (7 - i) * 60_000_000_000
             yield MarkEvent(
-                venue="hyperliquid", product_type=ProductType.PERP,
-                mechanism=Mechanism.CLOB, symbol="BTC",
-                exchange_ts=ts, local_recv_ts=ts,
+                venue="hyperliquid",
+                product_type=ProductType.PERP,
+                mechanism=Mechanism.CLOB,
+                symbol="BTC",
+                exchange_ts=ts,
+                local_recv_ts=ts,
                 mark_px=80_300.0 + i * 0.01,
             )
         yield BboEvent(
-            venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="#30",
-            exchange_ts=now, local_recv_ts=now,
-            bid_px=0.95, bid_sz=10.0, ask_px=0.96, ask_sz=10.0,
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="#30",
+            exchange_ts=now,
+            local_recv_ts=now,
+            bid_px=0.95,
+            bid_sz=10.0,
+            ask_px=0.96,
+            ask_sz=10.0,
         )
         yield BboEvent(
-            venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="#31",
-            exchange_ts=now, local_recv_ts=now,
-            bid_px=0.04, bid_sz=10.0, ask_px=0.05, ask_sz=10.0,
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="#31",
+            exchange_ts=now,
+            local_recv_ts=now,
+            bid_px=0.04,
+            bid_sz=10.0,
+            ask_px=0.05,
+            ask_sz=10.0,
         )
         # Hold a moment so both scanners tick at least twice.
         await asyncio.sleep(3.0)
@@ -88,20 +117,33 @@ class _FakeTelegram:
 def _v1_strategy() -> StrategyConfig:
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC", "period": "1h"},
-        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=60,
-        tte_max_seconds=3600, price_extreme_threshold=0.90,
-        distance_from_strike_usd_min=200, vol_max=0.5,
+        max_position_usd=100,
+        stop_loss_pct=10,
+        tte_min_seconds=60,
+        tte_max_seconds=3600,
+        price_extreme_threshold=0.90,
+        distance_from_strike_usd_min=200,
+        vol_max=0.5,
     )
     return StrategyConfig(
-        name="late_resolution", paper_mode=True,
-        account_alias="v1", strategy_type="late_resolution",
-        allowlist=[entry], blocklist_question_idxs=[], defaults=entry,
-        **{"global": GlobalRiskConfig(
-            max_total_inventory_usd=500, max_concurrent_positions=5,
-            daily_loss_cap_usd=200, max_strike_distance_pct=10,
-            min_recent_volume_usd=0, stale_data_halt_seconds=5,
-            reconcile_interval_seconds=60,
-        )},
+        name="late_resolution",
+        paper_mode=True,
+        account_alias="v1",
+        strategy_type="late_resolution",
+        allowlist=[entry],
+        blocklist_question_idxs=[],
+        defaults=entry,
+        **{
+            "global": GlobalRiskConfig(
+                max_total_inventory_usd=500,
+                max_concurrent_positions=5,
+                daily_loss_cap_usd=200,
+                max_strike_distance_pct=10,
+                min_recent_volume_usd=0,
+                stale_data_halt_seconds=5,
+                reconcile_interval_seconds=60,
+            )
+        },
     )
 
 
@@ -121,11 +163,13 @@ def deploy_cfg(tmp_path):
         env="dev",
         accounts={
             "v1": HLConfig(
-                account_address="0xv1", api_secret_key="0xv1",
+                account_address="0xv1",
+                api_secret_key="0xv1",
                 base_url="https://api.hyperliquid.xyz",
             ),
             "v31": HLConfig(
-                account_address="0xv31", api_secret_key="0xv31",
+                account_address="0xv31",
+                api_secret_key="0xv31",
                 base_url="https://api.hyperliquid.xyz",
             ),
         },
@@ -143,8 +187,10 @@ async def test_two_strategies_isolated_state(deploy_cfg, tmp_path):
 
     def _hl_factory(alias: str, _hl_cfg, paper: bool) -> HLClient:
         c = HLClient(
-            account_address=f"0x{alias}", api_secret_key=f"0x{alias}",
-            base_url="https://api.hyperliquid.xyz", paper_mode=True,
+            account_address=f"0x{alias}",
+            api_secret_key=f"0x{alias}",
+            base_url="https://api.hyperliquid.xyz",
+            paper_mode=True,
         )
         hl_clients[alias] = c
         return c
@@ -185,10 +231,12 @@ async def test_two_strategies_isolated_state(deploy_cfg, tmp_path):
     assert v31_paper_fills, "v31 should have placed at least one paper fill"
 
     # No cross-talk: each paper book's fills carry that account's cloid prefix.
-    assert all(f.cloid.startswith("hla-v1-") for f in v1_paper_fills), \
+    assert all(f.cloid.startswith("hla-v1-") for f in v1_paper_fills), (
         f"v1 fills must carry 'hla-v1-' prefix, got {[f.cloid for f in v1_paper_fills]}"
-    assert all(f.cloid.startswith("hla-v31-") for f in v31_paper_fills), \
+    )
+    assert all(f.cloid.startswith("hla-v31-") for f in v31_paper_fills), (
         f"v31 fills must carry 'hla-v31-' prefix, got {[f.cloid for f in v31_paper_fills]}"
+    )
 
     # Telegram alerts: ENTRY messages carry the originating account's alias as
     # a prefix tag (with the venue tag when configured), so a v1 entry and a
@@ -201,10 +249,7 @@ async def test_two_strategies_isolated_state(deploy_cfg, tmp_path):
     assert v1_entry_msgs, f"expected at least one v1 ENTRY alert; got {entry_msgs}"
     assert v31_entry_msgs, f"expected at least one v31 ENTRY alert; got {entry_msgs}"
     # Every entry alert MUST be prefixed — no untagged leakage.
-    untagged = [
-        m for m in entry_msgs
-        if not any(tag in m for tag in ("[v1]", "[v31]", ":v1]", ":v31]"))
-    ]
+    untagged = [m for m in entry_msgs if not any(tag in m for tag in ("[v1]", "[v31]", ":v1]", ":v31]"))]
     assert not untagged, f"untagged ENTRY alerts leaked through: {untagged}"
 
 
@@ -221,8 +266,10 @@ async def test_one_slot_halt_does_not_stop_other(deploy_cfg, tmp_path):
 
     def _hl_factory(alias: str, _hl_cfg, paper: bool) -> HLClient:
         return HLClient(
-            account_address=f"0x{alias}", api_secret_key=f"0x{alias}",
-            base_url="https://api.hyperliquid.xyz", paper_mode=True,
+            account_address=f"0x{alias}",
+            api_secret_key=f"0x{alias}",
+            base_url="https://api.hyperliquid.xyz",
+            paper_mode=True,
         )
 
     runtime = EngineRuntime(

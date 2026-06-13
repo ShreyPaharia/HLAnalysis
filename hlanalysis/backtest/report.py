@@ -6,6 +6,7 @@ previous ``hlanalysis/sim/report.py`` are left out of this v2 cut; they will
 be re-added once the PM source lands (Task C) and the plotting layer (Task
 A's plots/ directory) is fleshed out.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -34,9 +35,7 @@ def _ts_ns_to_utc(ts_ns: int) -> str:
 
 
 def _config_hash(config_summary: dict[str, Any]) -> str:
-    return hashlib.sha256(
-        json.dumps(config_summary, sort_keys=True).encode()
-    ).hexdigest()[:12]
+    return hashlib.sha256(json.dumps(config_summary, sort_keys=True).encode()).hexdigest()[:12]
 
 
 def _load_fills_for_question(fills_dir: Path, question_id: str) -> dict[str, list]:
@@ -92,20 +91,12 @@ def _compute_market_row(
 
 
 def _format_per_question_table(rows: list[dict]) -> str:
-    header = (
-        "| question_id | outcome | n_trades | first_entry_ts | last_exit_ts | realized_pnl_usd |"
-    )
-    sep = (
-        "| :---------- | :------ | -------: | :------------- | :----------- | ---------------: |"
-    )
+    header = "| question_id | outcome | n_trades | first_entry_ts | last_exit_ts | realized_pnl_usd |"
+    sep = "| :---------- | :------ | -------: | :------------- | :----------- | ---------------: |"
     lines = [header, sep]
     for r in rows:
-        first_ts = (
-            _ts_ns_to_utc(r["first_entry_ts"]) if r["first_entry_ts"] is not None else ""
-        )
-        last_ts = (
-            _ts_ns_to_utc(r["last_exit_ts"]) if r["last_exit_ts"] is not None else ""
-        )
+        first_ts = _ts_ns_to_utc(r["first_entry_ts"]) if r["first_entry_ts"] is not None else ""
+        last_ts = _ts_ns_to_utc(r["last_exit_ts"]) if r["last_exit_ts"] is not None else ""
         lines.append(
             f"| {r['question_id']} "
             f"| {r['outcome']} "
@@ -156,6 +147,7 @@ def write_single_run_report(
     slot_sig_line = ""
     if slot_strategy_cfg is not None:
         from hlanalysis.engine.config import strategy_config_sig
+
         slot_sig = strategy_config_sig(slot_strategy_cfg)
         slot_sig_line = f"- **slot config_sig:** `{slot_sig}`\n"
 
@@ -173,17 +165,14 @@ def write_single_run_report(
         f"- **questions:** {len(descriptors)}\n"
         f"- **fee_taker:** {fee_taker}\n"
         f"- **slippage_bps:** {slippage_bps}\n"
-        f"- **config SHA-256:** `{cfg_hash}`\n"
-        + slot_sig_line
-        + "\n"
+        f"- **config SHA-256:** `{cfg_hash}`\n" + slot_sig_line + "\n"
         "## Summary\n\n"
         f"- questions: {summary.n_markets}\n"
         f"- trades: {summary.n_trades}\n"
         f"- total PnL: ${summary.total_pnl_usd:,.2f}\n"
         f"- Sharpe (annualized 365): {summary.sharpe:.3f}\n"
         f"- hit rate: {summary.hit_rate:.2%}\n"
-        f"- max drawdown: ${summary.max_drawdown_usd:,.2f}\n\n"
-        + per_q_section
+        f"- max drawdown: ${summary.max_drawdown_usd:,.2f}\n\n" + per_q_section
     )
     return md
 
@@ -196,9 +185,7 @@ def write_tuning_report(
     top_k: int,
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows_sorted = sorted(
-        rows, key=lambda r: r["summary"]["sharpe"], reverse=True
-    )[:top_k]
+    rows_sorted = sorted(rows, key=lambda r: r["summary"]["sharpe"], reverse=True)[:top_k]
     md = out_dir / "report.md"
     lines = [f"# {strategy_name} — tuning top-{top_k} by Sharpe\n"]
     for i, r in enumerate(rows_sorted, 1):

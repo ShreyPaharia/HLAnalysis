@@ -1,4 +1,5 @@
 """Pure, zero-IO risk primitives shared by the live engine and the backtester."""
+
 from .caps import (
     concurrent_cap_exceeded,
     daily_loss_exceeded,

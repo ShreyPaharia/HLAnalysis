@@ -26,6 +26,7 @@ Usage:
     # Pandas
     df = read_recorded(...).to_pandas()
 """
+
 from __future__ import annotations
 
 import glob

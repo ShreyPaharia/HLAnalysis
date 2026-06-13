@@ -20,6 +20,7 @@ Internal concerns live in sub-modules (all verbatim extractions):
 - _pm_reference.py  — BBO/klines reference-feed loading + OHLC bucketing
 - _pm_books.py      — trade-row + book-level helpers (_RawTrade, _normalize_levels…)
 """
+
 from __future__ import annotations
 
 import heapq
@@ -154,25 +155,19 @@ class PolymarketDataSource:
         #   backward-compatibility with existing BBO cadence sweeps.
         if reference_source not in ("klines", "binance_bbo", "klines_1s"):
             raise ValueError(
-                "reference_source must be 'klines', 'binance_bbo', or 'klines_1s', "
-                f"got {reference_source!r}"
+                f"reference_source must be 'klines', 'binance_bbo', or 'klines_1s', got {reference_source!r}"
             )
         if reference_resample_seconds <= 0:
             raise ValueError(f"reference_resample_seconds must be positive, got {reference_resample_seconds}")
         if binance_bbo_product_type not in ("perp", "spot"):
-            raise ValueError(
-                f"binance_bbo_product_type must be 'perp' or 'spot', got {binance_bbo_product_type!r}"
-            )
+            raise ValueError(f"binance_bbo_product_type must be 'perp' or 'spot', got {binance_bbo_product_type!r}")
         self._reference_source = reference_source
         self._reference_resample_seconds = int(reference_resample_seconds)
         self._reference_resample_ns = int(reference_resample_seconds) * 1_000_000_000
         self._binance_bbo_product_type = binance_bbo_product_type
         # Binance tick partitions live next to PM cache root by default
         # (`data/venue=binance/...` while PM cache lives in `data/sim/`).
-        self._binance_data_root = (
-            Path(binance_data_root) if binance_data_root is not None
-            else self._cache_root.parent
-        )
+        self._binance_data_root = Path(binance_data_root) if binance_data_root is not None else self._cache_root.parent
         # Book-fill source.
         # - "synthetic" (default): one flat 1-level book per PM trade print at
         #   ±half_spread + within-pair `1−p` parity. Bit-identical to the
@@ -185,10 +180,7 @@ class PolymarketDataSource:
         self._book_source = book_source
         # PM book partitions live next to the binance ticks under the same repo
         # `data/` root by default (PM cache is `data/sim/`, so `.parent`).
-        self._pm_book_root = (
-            Path(pm_book_root) if pm_book_root is not None
-            else self._cache_root.parent
-        )
+        self._pm_book_root = Path(pm_book_root) if pm_book_root is not None else self._cache_root.parent
         # Optional per-bucket liquidity calibration for the synthetic book builder.
         # When set, trade_to_l2() uses the profile's half_spread/depth per price
         # bucket instead of the flat _StreamCfg constants.
@@ -197,6 +189,7 @@ class PolymarketDataSource:
             import json as _json
 
             from ._synthetic_l2 import LiquidityProfile as _LiquidityProfile
+
             with open(liquidity_profile_path) as _f:
                 _d = _json.load(_f)
             try:
@@ -308,6 +301,7 @@ class PolymarketDataSource:
             import numpy as np
 
             from ._fastpath_core import FastPathBundle, LegArrays, event_dtype
+
             empty = np.zeros(0, dtype=event_dtype)
             return FastPathBundle(
                 leg_arrays={sym: LegArrays(events=empty, book_ts=np.zeros(0, dtype=np.int64)) for sym in q.leg_symbols},
@@ -360,9 +354,12 @@ class PolymarketDataSource:
                 klines = self._load_klines_window(q.start_ts_ns, q.end_ts_ns)
                 ref_events = [
                     ReferenceEvent(
-                        ts_ns=int(k["ts_ns"]), symbol=self._reference_symbol,
-                        high=float(k["high"]), low=float(k["low"]),
-                        close=float(k["close"]), open=float(k["open"]),
+                        ts_ns=int(k["ts_ns"]),
+                        symbol=self._reference_symbol,
+                        high=float(k["high"]),
+                        low=float(k["low"]),
+                        close=float(k["close"]),
+                        open=float(k["open"]),
                     )
                     for k in sorted(klines, key=lambda k: int(k["ts_ns"]))
                 ]
@@ -427,8 +424,7 @@ class PolymarketDataSource:
         for sym in q.leg_symbols:
             files += _glob(self._recorded_book_glob(sym), recursive=True)
             files += _glob(
-                str(self._pm_book_root / _PM_SETTLEMENT_DATA_SUBPATH
-                    / f"symbol={sym}" / "**" / "*.parquet"),
+                str(self._pm_book_root / _PM_SETTLEMENT_DATA_SUBPATH / f"symbol={sym}" / "**" / "*.parquet"),
                 recursive=True,
             )
         entry = self._load_manifest().get(q.question_id) or {}
@@ -451,13 +447,14 @@ class PolymarketDataSource:
         Shared by ``_load_recorded_book`` and the fast path
         ``events_arrays``.
         """
-        return str(
-            self._pm_book_root / _PM_BOOK_DATA_SUBPATH
-            / f"symbol={token_id}" / "**" / "*.parquet"
-        )
+        return str(self._pm_book_root / _PM_BOOK_DATA_SUBPATH / f"symbol={token_id}" / "**" / "*.parquet")
 
     def question_view(
-        self, q: QuestionDescriptor, *, now_ns: int, settled: bool,
+        self,
+        q: QuestionDescriptor,
+        *,
+        now_ns: int,
+        settled: bool,
     ) -> QuestionView:
         manifest = self._load_manifest()
         entry = manifest.get(q.question_id) or {}
@@ -508,7 +505,9 @@ class PolymarketDataSource:
         return 0.0
 
     def _binary_outcome(
-        self, q: QuestionDescriptor, entry: dict,
+        self,
+        q: QuestionDescriptor,
+        entry: dict,
     ) -> Literal["yes", "no", "unknown"]:
         """Resolved winner for a binary market.
 
@@ -551,12 +550,19 @@ class PolymarketDataSource:
         manifest = self._load_manifest()
         if kind in ("binary", "both"):
             self._fetch_and_cache_binary(
-                manifest, start_iso=start, end_iso=end,
-                min_trades=min_trades, min_volume_usd=min_volume_usd, refresh=refresh,
+                manifest,
+                start_iso=start,
+                end_iso=end,
+                min_trades=min_trades,
+                min_volume_usd=min_volume_usd,
+                refresh=refresh,
             )
         if kind in ("bucket", "both"):
             self._fetch_and_cache_bucket(
-                manifest, start_iso=start, end_iso=end, refresh=refresh,
+                manifest,
+                start_iso=start,
+                end_iso=end,
+                refresh=refresh,
             )
         self._write_manifest(manifest)
         # SHR-54: keep the kline series advancing in lockstep with the PM market
@@ -601,9 +607,7 @@ class PolymarketDataSource:
         b = entry.get("bucket")
         if not b:
             return None
-        legs: tuple[str, ...] = tuple(
-            sym for pair in b["leg_tokens"] for sym in pair
-        )
+        legs: tuple[str, ...] = tuple(sym for pair in b["leg_tokens"] for sym in pair)
         return QuestionDescriptor(
             question_id=qid,
             question_idx=_question_idx(qid),
@@ -617,13 +621,16 @@ class PolymarketDataSource:
     # -- internals: question_view ------------------------------------------
 
     def _question_view_binary(
-        self, q: QuestionDescriptor, entry: dict, *, now_ns: int, settled: bool,
+        self,
+        q: QuestionDescriptor,
+        entry: dict,
+        *,
+        now_ns: int,
+        settled: bool,
     ) -> QuestionView:
         mk = entry.get("market") or {}
         is_settled = settled or (now_ns > q.end_ts_ns)
-        side: Literal["yes", "no", "unknown"] | None = (
-            mk.get("resolved_outcome", "unknown") if is_settled else None
-        )
+        side: Literal["yes", "no", "unknown"] | None = mk.get("resolved_outcome", "unknown") if is_settled else None
         return QuestionView(
             question_idx=q.question_idx,
             yes_symbol=q.leg_symbols[0],
@@ -662,6 +669,7 @@ class PolymarketDataSource:
                 f"cannot resolve strike at ts={strike_ts_ns}"
             )
         import bisect
+
         ts_list = [int(k["ts_ns"]) for k in klines]
         # Coverage guard (SHR-54): the strike ts must fall inside the cached
         # series. Past the last candle (+1 bar tolerance) bisect would silently
@@ -693,7 +701,12 @@ class PolymarketDataSource:
         return int(strike_ts_ns)
 
     def _question_view_bucket(
-        self, q: QuestionDescriptor, entry: dict, *, now_ns: int, settled: bool,
+        self,
+        q: QuestionDescriptor,
+        entry: dict,
+        *,
+        now_ns: int,
+        settled: bool,
     ) -> QuestionView:
         b = entry.get("bucket") or {}
         thresholds: list[float] = b.get("thresholds") or []
@@ -720,7 +733,9 @@ class PolymarketDataSource:
     # -- internals: events --------------------------------------------------
 
     def _events_binary(
-        self, q: QuestionDescriptor, entry: dict,
+        self,
+        q: QuestionDescriptor,
+        entry: dict,
     ) -> Iterator[MarketEvent]:
         cond_id = q.question_id
         yes_t, no_t = q.leg_symbols[0], q.leg_symbols[1]
@@ -743,15 +758,15 @@ class PolymarketDataSource:
         )
 
     def _events_bucket(
-        self, q: QuestionDescriptor, entry: dict,
+        self,
+        q: QuestionDescriptor,
+        entry: dict,
     ) -> Iterator[MarketEvent]:
         b = entry.get("bucket") or {}
         leg_tokens: list[list[str]] = b["leg_tokens"]
         leg_cond_ids: list[str] = b["leg_condition_ids"]
         leg_resolutions: list[str] = b["leg_resolutions"]
-        leg_pairs: tuple[tuple[str, str], ...] = tuple(
-            (str(p[0]), str(p[1])) for p in leg_tokens
-        )
+        leg_pairs: tuple[tuple[str, str], ...] = tuple((str(p[0]), str(p[1])) for p in leg_tokens)
         trades_by_pair: dict[tuple[str, str], list[_RawTrade]] = {}
         per_leg_outcomes: dict[str, Literal["yes", "no", "unknown"]] = {}
         for pair, cond_id, res in zip(leg_pairs, leg_cond_ids, leg_resolutions):
@@ -800,26 +815,35 @@ class PolymarketDataSource:
             for t in sorted(trades, key=lambda r: r.ts_ns):
                 if not recorded:
                     snap = trade_to_l2(
-                        ts_ns=t.ts_ns, token_id=t.token_id, price=t.price,
-                        half_spread=cfg.half_spread, depth=cfg.depth,
+                        ts_ns=t.ts_ns,
+                        token_id=t.token_id,
+                        price=t.price,
+                        half_spread=cfg.half_spread,
+                        depth=cfg.depth,
                         profile=self._liquidity_profile,
                     )
                     leg_events.append(_book_from_l2(snap))
-                leg_events.append(TradeEvent(
-                    ts_ns=t.ts_ns, symbol=t.token_id,
-                    side=t.side, price=t.price, size=t.size,
-                ))
+                leg_events.append(
+                    TradeEvent(
+                        ts_ns=t.ts_ns,
+                        symbol=t.token_id,
+                        side=t.side,
+                        price=t.price,
+                        size=t.size,
+                    )
+                )
                 if not recorded:
                     # Within-pair parity: emit complementary BookSnapshot at 1−p.
                     pair_yes, pair_no = pair
-                    other = pair_no if t.token_id == pair_yes else (
-                        pair_yes if t.token_id == pair_no else None
-                    )
+                    other = pair_no if t.token_id == pair_yes else (pair_yes if t.token_id == pair_no else None)
                     if other is not None:
                         comp_price = max(_P_CLIP_LO, min(_P_CLIP_HI, 1.0 - t.price))
                         comp_snap = trade_to_l2(
-                            ts_ns=t.ts_ns, token_id=other, price=comp_price,
-                            half_spread=cfg.half_spread, depth=cfg.depth,
+                            ts_ns=t.ts_ns,
+                            token_id=other,
+                            price=comp_price,
+                            half_spread=cfg.half_spread,
+                            depth=cfg.depth,
                             profile=self._liquidity_profile,
                         )
                         leg_events.append(_book_from_l2(comp_snap))
@@ -831,9 +855,7 @@ class PolymarketDataSource:
         if recorded:
             recorded_books: list[BookSnapshot] = []
             for sym in q.leg_symbols:
-                recorded_books.extend(
-                    self._load_recorded_book(sym, q.start_ts_ns, q.end_ts_ns)
-                )
+                recorded_books.extend(self._load_recorded_book(sym, q.start_ts_ns, q.end_ts_ns))
             recorded_books.sort(key=lambda b: b.ts_ns)
             leg_event_streams.append(iter(recorded_books))
 
@@ -855,9 +877,12 @@ class PolymarketDataSource:
             # convention.
             ref_events = [
                 ReferenceEvent(
-                    ts_ns=int(k["ts_ns"]), symbol=self._reference_symbol,
-                    high=float(k["high"]), low=float(k["low"]),
-                    close=float(k["close"]), open=float(k["open"]),
+                    ts_ns=int(k["ts_ns"]),
+                    symbol=self._reference_symbol,
+                    high=float(k["high"]),
+                    low=float(k["low"]),
+                    close=float(k["close"]),
+                    open=float(k["open"]),
                 )
                 for k in sorted(klines, key=lambda k: int(k["ts_ns"]))
             ]
@@ -866,12 +891,14 @@ class PolymarketDataSource:
         # Per-leg settlement at end_ts_ns.
         settle_events: list[SettlementEvent] = []
         for sym in q.leg_symbols:
-            settle_events.append(SettlementEvent(
-                ts_ns=q.end_ts_ns,
-                question_idx=q.question_idx,
-                outcome=per_leg_outcomes.get(sym, "unknown"),
-                symbol=sym,
-            ))
+            settle_events.append(
+                SettlementEvent(
+                    ts_ns=q.end_ts_ns,
+                    question_idx=q.question_idx,
+                    outcome=per_leg_outcomes.get(sym, "unknown"),
+                    symbol=sym,
+                )
+            )
         leg_event_streams.append(iter(settle_events))
 
         yield from heapq.merge(*leg_event_streams, key=lambda e: e.ts_ns)
@@ -975,8 +1002,7 @@ class PolymarketDataSource:
         klines_dir = self._cache_root / self._klines_subdir
         klines_dir.mkdir(parents=True, exist_ok=True)
         out = [
-            {"ts_ns": k.ts_ns, "open": k.open, "high": k.high,
-             "low": k.low, "close": k.close, "volume": k.volume}
+            {"ts_ns": k.ts_ns, "open": k.open, "high": k.high, "low": k.low, "close": k.close, "volume": k.volume}
             for k in rows
         ]
         # Name by covered range. Fetch starts one bar past the cache end, so the
@@ -1007,7 +1033,9 @@ class PolymarketDataSource:
         return rows
 
     def _load_klines_1s_reference(
-        self, start_ns: int, end_ns: int,
+        self,
+        start_ns: int,
+        end_ns: int,
     ) -> list[ReferenceEvent]:
         """Genuine Binance 1s klines for [start_ns, end_ns), bucketed to
         ``reference_resample_seconds`` OHLC ReferenceEvents.
@@ -1030,13 +1058,15 @@ class PolymarketDataSource:
             ts = int(k["ts_ns"])
             if ts < start_ns or ts >= end_ns:
                 continue
-            samples.append((
-                ts,
-                float(k["high"]),
-                float(k["low"]),
-                float(k["close"]),
-                float(k["open"]),
-            ))
+            samples.append(
+                (
+                    ts,
+                    float(k["high"]),
+                    float(k["low"]),
+                    float(k["close"]),
+                    float(k["open"]),
+                )
+            )
         return _bucket_to_ref_events(
             samples,
             symbol=self._reference_symbol,
@@ -1044,7 +1074,9 @@ class PolymarketDataSource:
         )
 
     def _load_binance_bbo_reference(
-        self, start_ns: int, end_ns: int,
+        self,
+        start_ns: int,
+        end_ns: int,
     ) -> list[ReferenceEvent]:
         """Read recorded Binance BBO ticks for [start_ns, end_ns) and
         bucket to ``reference_resample_seconds`` OHLC ReferenceEvents.
@@ -1067,11 +1099,10 @@ class PolymarketDataSource:
         no partitions match the window — strategy gates degrade gracefully.
         """
         import duckdb
+
         sym = _BINANCE_PERP_REF_SYMBOL.get(self._reference_symbol)
         if sym is None:
-            logger.warning(
-                f"binance_bbo reference unsupported for symbol {self._reference_symbol!r}"
-            )
+            logger.warning(f"binance_bbo reference unsupported for symbol {self._reference_symbol!r}")
             return []
         # Hive partitions are `date=YYYY-MM-DD`. Cover the question window
         # with one-day padding on each side to catch tick-boundary spills.
@@ -1080,19 +1111,14 @@ class PolymarketDataSource:
         date_list: list[str] = []
         d = start_d
         from datetime import timedelta
+
         while d <= end_d + timedelta(days=1):
             date_list.append(d.isoformat())
             d += timedelta(days=1)
-        product_subpath = (
-            f"venue=binance/product_type={self._binance_bbo_product_type}/mechanism=clob"
-        )
-        glob = str(
-            self._binance_data_root
-            / product_subpath
-            / "event=bbo" / f"symbol={sym}"
-            / "**" / "*.parquet"
-        )
+        product_subpath = f"venue=binance/product_type={self._binance_bbo_product_type}/mechanism=clob"
+        glob = str(self._binance_data_root / product_subpath / "event=bbo" / f"symbol={sym}" / "**" / "*.parquet")
         from glob import glob as _glob
+
         if not _glob(glob, recursive=True):
             logger.warning(f"binance_bbo: no parquet at {glob}")
             return []
@@ -1106,7 +1132,7 @@ class PolymarketDataSource:
                 f"""
                 SELECT {ts_col} AS ts, bid_px, ask_px
                 FROM read_parquet('{glob}', hive_partitioning=1)
-                WHERE date IN ({','.join(repr(d) for d in date_list)})
+                WHERE date IN ({",".join(repr(d) for d in date_list)})
                   AND {ts_col} >= {start_ns} AND {ts_col} < {end_ns}
                 ORDER BY {ts_col}
                 """
@@ -1129,7 +1155,10 @@ class PolymarketDataSource:
         )
 
     def _load_recorded_book(
-        self, token_id: str, start_ns: int, end_ns: int,
+        self,
+        token_id: str,
+        start_ns: int,
+        end_ns: int,
     ) -> list[BookSnapshot]:
         """Read the recorded multi-level L2 `book_snapshot` parquet for one PM
         token leg over ``[start_ns, end_ns)`` and emit ``BookSnapshot`` events.
@@ -1144,8 +1173,10 @@ class PolymarketDataSource:
         Mirrors the ``_load_binance_bbo_reference`` duckdb reader pattern.
         """
         import duckdb
+
         glob = self._recorded_book_glob(token_id)
         from glob import glob as _glob
+
         if not _glob(glob, recursive=True):
             logger.info(f"recorded PM book: no coverage for token {token_id}")
             return []
@@ -1165,13 +1196,19 @@ class PolymarketDataSource:
         for ts, bid_px, bid_sz, ask_px, ask_sz in rows:
             bids = _normalize_levels(bid_px, bid_sz, descending=True)
             asks = _normalize_levels(ask_px, ask_sz, descending=False)
-            out.append(BookSnapshot(
-                ts_ns=int(ts), symbol=token_id, bids=bids, asks=asks,
-            ))
+            out.append(
+                BookSnapshot(
+                    ts_ns=int(ts),
+                    symbol=token_id,
+                    bids=bids,
+                    asks=asks,
+                )
+            )
         return out
 
     def _recorded_outcome(
-        self, q: QuestionDescriptor,
+        self,
+        q: QuestionDescriptor,
     ) -> Literal["yes", "no", "unknown"]:
         """Resolve a binary market's winner from the recorder `settlement`
         event. The winning leg token redeems at ``settle_price≈1.0`` and only
@@ -1200,11 +1237,10 @@ class PolymarketDataSource:
         market leg, so no time window filter is needed.
         """
         import duckdb
-        glob = str(
-            self._pm_book_root / _PM_SETTLEMENT_DATA_SUBPATH
-            / f"symbol={token_id}" / "**" / "*.parquet"
-        )
+
+        glob = str(self._pm_book_root / _PM_SETTLEMENT_DATA_SUBPATH / f"symbol={token_id}" / "**" / "*.parquet")
         from glob import glob as _glob
+
         if not _glob(glob, recursive=True):
             return None
         con = duckdb.connect()
@@ -1225,8 +1261,14 @@ class PolymarketDataSource:
     # -- internals: live fetch (used by fetch_and_cache only) --------------
 
     def _fetch_and_cache_binary(
-        self, manifest: dict, *, start_iso: str, end_iso: str,
-        min_trades: int, min_volume_usd: float, refresh: bool,
+        self,
+        manifest: dict,
+        *,
+        start_iso: str,
+        end_iso: str,
+        min_trades: int,
+        min_volume_usd: float,
+        refresh: bool,
     ) -> None:
         raw = _fetch_series_events(self._series_slug)
         in_window = [ev for ev in raw if _event_in_window(ev, start_iso, end_iso)]
@@ -1238,9 +1280,7 @@ class PolymarketDataSource:
             if cond_id in manifest and not refresh:
                 continue
             trades = _fetch_trades_raw(cond_id)
-            vol_below_floor = (mkt["total_volume_usd"] > 0) and (
-                mkt["total_volume_usd"] < min_volume_usd
-            )
+            vol_below_floor = (mkt["total_volume_usd"] > 0) and (mkt["total_volume_usd"] < min_volume_usd)
             if len(trades) < min_trades or vol_below_floor:
                 continue
             self._write_trades_parquet(cond_id, trades)
@@ -1258,7 +1298,12 @@ class PolymarketDataSource:
             self._write_manifest(manifest)
 
     def _fetch_and_cache_bucket(
-        self, manifest: dict, *, start_iso: str, end_iso: str, refresh: bool,
+        self,
+        manifest: dict,
+        *,
+        start_iso: str,
+        end_iso: str,
+        refresh: bool,
     ) -> None:
         raw = _fetch_series_events(self._bucket_series_slug)
         in_window = [ev for ev in raw if _event_in_window(ev, start_iso, end_iso)]
@@ -1284,6 +1329,7 @@ class PolymarketDataSource:
 
     def _write_trades_parquet(self, condition_id: str, raw_trades: list[dict]) -> None:
         import pyarrow as pa  # local to keep top-level import surface small
+
         path = self._cache_root / "pm_trades" / f"{condition_id}.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
         ts: list[int] = []
@@ -1303,10 +1349,15 @@ class PolymarketDataSource:
             sides.append(t.side)
             prices.append(t.price)
             sizes.append(t.size)
-        table = pa.table({
-            "ts_ns": ts, "token_id": toks, "side": sides,
-            "price": prices, "size": sizes,
-        })
+        table = pa.table(
+            {
+                "ts_ns": ts,
+                "token_id": toks,
+                "side": sides,
+                "price": prices,
+                "size": sizes,
+            }
+        )
         pq.write_table(table, path)
 
 

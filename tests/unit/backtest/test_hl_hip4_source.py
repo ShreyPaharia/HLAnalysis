@@ -4,6 +4,7 @@ Exercises the §3 contract against the committed
 ``tests/fixtures/hl_hip4/`` slice — see ``tests/fixtures/hl_hip4/README.md`` for
 its provenance and capture command.
 """
+
 from __future__ import annotations
 
 import random
@@ -117,9 +118,7 @@ def test_discover_filter_excludes_wrong_window(source: HLHip4DataSource) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_events_monotonic_ts_ns(
-    source: HLHip4DataSource, discovered: QuestionDescriptor
-) -> None:
+def test_events_monotonic_ts_ns(source: HLHip4DataSource, discovered: QuestionDescriptor) -> None:
     prev = -1
     n = 0
     for ev in source.events(discovered):
@@ -130,9 +129,7 @@ def test_events_monotonic_ts_ns(
     assert n >= 10_000, n
 
 
-def test_events_contain_all_kinds(
-    source: HLHip4DataSource, discovered: QuestionDescriptor
-) -> None:
+def test_events_contain_all_kinds(source: HLHip4DataSource, discovered: QuestionDescriptor) -> None:
     kinds: set[str] = set()
     for ev in source.events(discovered):
         kinds.add(type(ev).__name__)
@@ -143,9 +140,7 @@ def test_events_contain_all_kinds(
     assert "ReferenceEvent" in kinds
 
 
-def test_events_book_snapshots_per_leg(
-    source: HLHip4DataSource, discovered: QuestionDescriptor
-) -> None:
+def test_events_book_snapshots_per_leg(source: HLHip4DataSource, discovered: QuestionDescriptor) -> None:
     counts = {s: 0 for s in discovered.leg_symbols}
     for ev in source.events(discovered):
         if isinstance(ev, BookSnapshot):
@@ -155,9 +150,7 @@ def test_events_book_snapshots_per_leg(
         assert n >= 1_000, (leg, n)
 
 
-def test_events_trade_sides_normalised(
-    source: HLHip4DataSource, discovered: QuestionDescriptor
-) -> None:
+def test_events_trade_sides_normalised(source: HLHip4DataSource, discovered: QuestionDescriptor) -> None:
     sides: set[str] = set()
     for ev in source.events(discovered):
         if isinstance(ev, TradeEvent):
@@ -165,9 +158,7 @@ def test_events_trade_sides_normalised(
     assert sides.issubset({"buy", "sell"})
 
 
-def test_events_reference_mid_in_range(
-    source: HLHip4DataSource, discovered: QuestionDescriptor
-) -> None:
+def test_events_reference_mid_in_range(source: HLHip4DataSource, discovered: QuestionDescriptor) -> None:
     for ev in source.events(discovered):
         if isinstance(ev, ReferenceEvent):
             # BTC trades in the high-$70k–$80k band over the fixture window.
@@ -177,30 +168,27 @@ def test_events_reference_mid_in_range(
             assert ev.low <= ev.close <= ev.high
 
 
-def test_events_no_settlement_in_fixture(
-    source: HLHip4DataSource, discovered: QuestionDescriptor
-) -> None:
+def test_events_no_settlement_in_fixture(source: HLHip4DataSource, discovered: QuestionDescriptor) -> None:
     # The fixture's window doesn't include the question's settle moment.
     for ev in source.events(discovered):
         assert not isinstance(ev, SettlementEvent)
 
 
-def test_l2_reconstruction_matches_raw_parquet(
-    source: HLHip4DataSource, discovered: QuestionDescriptor
-) -> None:
+def test_l2_reconstruction_matches_raw_parquet(source: HLHip4DataSource, discovered: QuestionDescriptor) -> None:
     """Spec acceptance: L2 reconstruction matches recorded `book_snapshot` rows
     on at least one sampled tick."""
     leg = "#150"
     glob = str(
         FIXTURE_ROOT
         / "venue=hyperliquid/product_type=prediction_binary/mechanism=clob"
-        / "event=book_snapshot" / f"symbol={leg}" / "**" / "*.parquet"
+        / "event=book_snapshot"
+        / f"symbol={leg}"
+        / "**"
+        / "*.parquet"
     )
     con = duckdb.connect()
     # Sample 5 random ticks from the raw parquet.
-    total = con.sql(
-        f"SELECT COUNT(*) FROM read_parquet('{glob}', hive_partitioning=1)"
-    ).fetchone()[0]
+    total = con.sql(f"SELECT COUNT(*) FROM read_parquet('{glob}', hive_partitioning=1)").fetchone()[0]
     assert total > 100, total
     random.seed(0)
     offsets = sorted(random.sample(range(total), k=5))
@@ -225,7 +213,7 @@ def test_l2_reconstruction_matches_raw_parquet(
         if len(hits) == len(raw_rows):
             break
 
-    assert set(hits) == set(raw_rows), (set(raw_rows) - set(hits))
+    assert set(hits) == set(raw_rows), set(raw_rows) - set(hits)
     for ts, (bids, asks) in raw_rows.items():
         assert hits[ts].bids == bids, ts
         assert hits[ts].asks == asks, ts
@@ -236,12 +224,8 @@ def test_l2_reconstruction_matches_raw_parquet(
 # ---------------------------------------------------------------------------
 
 
-def test_question_view_binary(
-    source: HLHip4DataSource, discovered: QuestionDescriptor
-) -> None:
-    qv = source.question_view(
-        discovered, now_ns=discovered.start_ts_ns, settled=False
-    )
+def test_question_view_binary(source: HLHip4DataSource, discovered: QuestionDescriptor) -> None:
+    qv = source.question_view(discovered, now_ns=discovered.start_ts_ns, settled=False)
     assert qv.klass == "priceBinary"
     assert qv.yes_symbol == "#150"
     assert qv.no_symbol == "#151"
@@ -383,6 +367,7 @@ def test_question_view_bucket_synthetic(source: HLHip4DataSource) -> None:
     )
     # Inject meta into the cache so the test doesn't depend on real parquet rows.
     from hlanalysis.backtest.data.hl_hip4 import _QuestionMeta
+
     src._meta_cache[q.question_id] = _QuestionMeta(
         name="Recurring",
         kv={

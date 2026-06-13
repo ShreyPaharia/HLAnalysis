@@ -3,6 +3,7 @@ gains the per-frame staleness watchdog it previously lacked (SHR-60 was
 binance-only). A silent/half-open HL socket must emit `feed_stale` and
 reconnect instead of blocking forever on a bare `recv()`.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -46,8 +47,11 @@ async def test_hl_silent_socket_trips_watchdog_and_reconnects(monkeypatch):
 
     # A concrete (non-wildcard) PERP sub: no outcomeMeta REST in the loop.
     sub = Subscription(
-        venue="hyperliquid", product_type=ProductType.PERP,
-        mechanism=Mechanism.CLOB, symbol="BTC", channels=("bbo",),
+        venue="hyperliquid",
+        product_type=ProductType.PERP,
+        mechanism=Mechanism.CLOB,
+        symbol="BTC",
+        channels=("bbo",),
     )
 
     seen: list[HealthEvent] = []
@@ -77,16 +81,21 @@ async def test_hl_wildcard_run_labels_health_prediction_binary(monkeypatch):
 
     ws = _SilentWS()
     monkeypatch.setattr(adapter, "_connect", lambda url: ws)
+
     # Wildcard sync hits the HL info REST; stub the (now async, offloaded)
     # network helper to return nothing so the loop proceeds to connect with no
     # network. _expand_wildcard / _sync_wildcards then early-return.
     async def _no_meta():
         return None
+
     monkeypatch.setattr(adapter, "_fetch_outcome_meta", _no_meta)
 
     sub = Subscription(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="*", channels=("bbo",),
+        venue="hyperliquid",
+        product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB,
+        symbol="*",
+        channels=("bbo",),
         match={"underlying": "BTC"},
     )
 

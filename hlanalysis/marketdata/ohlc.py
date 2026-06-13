@@ -17,6 +17,7 @@ Semantics (preserved exactly from the prior three copies):
   * Each emitted bar carries the timestamp of the bucket's LAST tick, so a
     resampled stream stays monotone in ``ts``.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
@@ -27,9 +28,7 @@ def bucket_index(ts_ns: int, bucket_ns: int) -> int:
     return ts_ns // bucket_ns
 
 
-def update_bar(
-    bar: tuple[float, float, float], high: float, low: float, close: float
-) -> tuple[float, float, float]:
+def update_bar(bar: tuple[float, float, float], high: float, low: float, close: float) -> tuple[float, float, float]:
     """Merge a ``(high, low, close)`` sample into an in-progress ``(h, l, c)`` bar.
 
     ``high`` becomes ``max`` (ties keep the existing high), ``low`` becomes

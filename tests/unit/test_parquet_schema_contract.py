@@ -19,6 +19,7 @@ Together these guarantee: if recorder renames a column that a loader reads,
 at least one of these tests fails loudly before any parquet file is written
 or queried.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -55,6 +56,7 @@ from hlanalysis.backtest.data._parquet_schema import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _base_kwargs() -> dict:
     """Minimal base fields shared by every event constructor."""
     return dict(
@@ -71,14 +73,17 @@ def _base_kwargs() -> dict:
 # Full-schema round-trip: to_record() must contain every constant column
 # ---------------------------------------------------------------------------
 
+
 class TestFullSchemaRoundTrip:
     """Every column listed in *_COLS must appear in to_record() output."""
 
     def test_book_snapshot_cols_in_record(self):
         ev = BookSnapshotEvent(
             **_base_kwargs(),
-            bid_px=[0.49], bid_sz=[100.0],
-            ask_px=[0.51], ask_sz=[100.0],
+            bid_px=[0.49],
+            bid_sz=[100.0],
+            ask_px=[0.51],
+            ask_sz=[100.0],
         )
         record_keys = set(to_record(ev).keys())
         missing = set(BOOK_SNAPSHOT_COLS) - record_keys
@@ -90,7 +95,9 @@ class TestFullSchemaRoundTrip:
     def test_trade_cols_in_record(self):
         ev = TradeEvent(
             **_base_kwargs(),
-            price=0.50, size=10.0, side="buy",
+            price=0.50,
+            size=10.0,
+            side="buy",
         )
         record_keys = set(to_record(ev).keys())
         missing = set(TRADE_COLS) - record_keys
@@ -102,7 +109,10 @@ class TestFullSchemaRoundTrip:
     def test_bbo_cols_in_record(self):
         ev = BboEvent(
             **_base_kwargs(),
-            bid_px=0.49, bid_sz=50.0, ask_px=0.51, ask_sz=50.0,
+            bid_px=0.49,
+            bid_sz=50.0,
+            ask_px=0.51,
+            ask_sz=50.0,
         )
         record_keys = set(to_record(ev).keys())
         missing = set(BBO_COLS) - record_keys
@@ -123,7 +133,9 @@ class TestFullSchemaRoundTrip:
     def test_settlement_cols_in_record(self):
         ev = SettlementEvent(
             **_base_kwargs(),
-            settled_side_idx=0, settle_price=1.0, settle_ts=1_100_000_000,
+            settled_side_idx=0,
+            settle_price=1.0,
+            settle_ts=1_100_000_000,
         )
         record_keys = set(to_record(ev).keys())
         missing = set(SETTLEMENT_COLS) - record_keys
@@ -159,14 +171,14 @@ class TestFullSchemaRoundTrip:
             record_keys = set(to_record(ev).keys())
             missing = set(BASE_COLS) - record_keys
             assert not missing, (
-                f"{type(ev).__name__}: BASE_COLS {missing!r} absent from to_record(). "
-                "Update _parquet_schema.BASE_COLS."
+                f"{type(ev).__name__}: BASE_COLS {missing!r} absent from to_record(). Update _parquet_schema.BASE_COLS."
             )
 
 
 # ---------------------------------------------------------------------------
 # Loader-subset contract: loader columns must be a subset of the full schema
 # ---------------------------------------------------------------------------
+
 
 class TestLoaderSubsetContract:
     """Every column a loader SELECTs must exist in the full event schema."""
@@ -218,6 +230,7 @@ class TestLoaderSubsetContract:
 # Exact value verification: ensure loader constants match the actual SQL used
 # ---------------------------------------------------------------------------
 
+
 class TestLoaderColsMatchActualSQL:
     """Cross-check _parquet_schema constants against the literal column names
     used in the loaders' SQL SELECT statements. This catches the case where
@@ -232,6 +245,7 @@ class TestLoaderColsMatchActualSQL:
     def test_hl_hip4_book_loader_uses_book_snapshot_loader_cols(self):
         import inspect
         from hlanalysis.backtest.data import hl_hip4
+
         src = inspect.getsource(hl_hip4)
         for col in BOOK_SNAPSHOT_LOADER_COLS:
             assert col in src, (
@@ -243,79 +257,72 @@ class TestLoaderColsMatchActualSQL:
     def test_hl_hip4_trade_loader_uses_trade_loader_cols(self):
         import inspect
         from hlanalysis.backtest.data import hl_hip4
+
         src = inspect.getsource(hl_hip4)
         for col in TRADE_LOADER_COLS:
-            assert col in src, (
-                f"Column {col!r} from TRADE_LOADER_COLS not found in hl_hip4.py source."
-            )
+            assert col in src, f"Column {col!r} from TRADE_LOADER_COLS not found in hl_hip4.py source."
 
     def test_hl_hip4_bbo_reference_loader_uses_bbo_reference_cols(self):
         import inspect
         from hlanalysis.backtest.data import hl_hip4
+
         src = inspect.getsource(hl_hip4)
         for col in BBO_REFERENCE_LOADER_COLS:
-            assert col in src, (
-                f"Column {col!r} from BBO_REFERENCE_LOADER_COLS not found in hl_hip4.py source."
-            )
+            assert col in src, f"Column {col!r} from BBO_REFERENCE_LOADER_COLS not found in hl_hip4.py source."
 
     def test_hl_hip4_mark_reference_loader_uses_mark_reference_cols(self):
         import inspect
         from hlanalysis.backtest.data import hl_hip4
+
         src = inspect.getsource(hl_hip4)
         for col in MARK_REFERENCE_LOADER_COLS:
-            assert col in src, (
-                f"Column {col!r} from MARK_REFERENCE_LOADER_COLS not found in hl_hip4.py source."
-            )
+            assert col in src, f"Column {col!r} from MARK_REFERENCE_LOADER_COLS not found in hl_hip4.py source."
 
     def test_hl_hip4_settlement_loader_uses_settlement_loader_cols(self):
         import inspect
         from hlanalysis.backtest.data import hl_hip4
+
         src = inspect.getsource(hl_hip4)
         for col in SETTLEMENT_LOADER_COLS:
-            assert col in src, (
-                f"Column {col!r} from SETTLEMENT_LOADER_COLS not found in hl_hip4.py source."
-            )
+            assert col in src, f"Column {col!r} from SETTLEMENT_LOADER_COLS not found in hl_hip4.py source."
 
     def test_fastpath_book_loader_uses_book_snapshot_loader_cols(self):
         import inspect
         from hlanalysis.backtest.data import _hl_hip4_fastpath
+
         src = inspect.getsource(_hl_hip4_fastpath)
         for col in BOOK_SNAPSHOT_LOADER_COLS:
-            assert col in src, (
-                f"Column {col!r} from BOOK_SNAPSHOT_LOADER_COLS not found in _hl_hip4_fastpath.py."
-            )
+            assert col in src, f"Column {col!r} from BOOK_SNAPSHOT_LOADER_COLS not found in _hl_hip4_fastpath.py."
 
     def test_fastpath_trade_loader_uses_trade_loader_cols(self):
         import inspect
         from hlanalysis.backtest.data import _hl_hip4_fastpath
+
         src = inspect.getsource(_hl_hip4_fastpath)
         for col in TRADE_LOADER_COLS:
-            assert col in src, (
-                f"Column {col!r} from TRADE_LOADER_COLS not found in _hl_hip4_fastpath.py."
-            )
+            assert col in src, f"Column {col!r} from TRADE_LOADER_COLS not found in _hl_hip4_fastpath.py."
 
     def test_fastpath_settlement_loader_uses_settlement_loader_cols(self):
         import inspect
         from hlanalysis.backtest.data import _hl_hip4_fastpath
+
         src = inspect.getsource(_hl_hip4_fastpath)
         for col in SETTLEMENT_LOADER_COLS:
-            assert col in src, (
-                f"Column {col!r} from SETTLEMENT_LOADER_COLS not found in _hl_hip4_fastpath.py."
-            )
+            assert col in src, f"Column {col!r} from SETTLEMENT_LOADER_COLS not found in _hl_hip4_fastpath.py."
 
     def test_pm_fastpath_book_loader_uses_book_snapshot_loader_cols(self):
         import inspect
         from hlanalysis.backtest.data import _pm_fastpath
+
         src = inspect.getsource(_pm_fastpath)
         for col in BOOK_SNAPSHOT_LOADER_COLS:
-            assert col in src, (
-                f"Column {col!r} from BOOK_SNAPSHOT_LOADER_COLS not found in _pm_fastpath.py."
-            )
+            assert col in src, f"Column {col!r} from BOOK_SNAPSHOT_LOADER_COLS not found in _pm_fastpath.py."
 
 
 # ---------------------------------------------------------------------------
 # Drift detection: to_record column ORDER must be stable
 # ---------------------------------------------------------------------------
+
 
 class TestColumnOrderStability:
     """The exact column order emitted by to_record() is part of the parquet
@@ -331,14 +338,17 @@ class TestColumnOrderStability:
     def test_trade_record_column_order(self):
         ev = TradeEvent(
             **_base_kwargs(),
-            price=0.5, size=10.0, side="buy", trade_id="t1",
+            price=0.5,
+            size=10.0,
+            side="buy",
+            trade_id="t1",
         )
         keys = list(to_record(ev).keys())
         # BASE_COLS already includes event_type as the last base column
         expected_prefix = list(BASE_COLS)
-        assert keys[:len(expected_prefix)] == expected_prefix, (
+        assert keys[: len(expected_prefix)] == expected_prefix, (
             f"to_record(TradeEvent) base column order changed. "
-            f"Got prefix: {keys[:len(expected_prefix)]!r}, "
+            f"Got prefix: {keys[: len(expected_prefix)]!r}, "
             f"expected: {expected_prefix!r}"
         )
         # event-specific fields start immediately after the base prefix
@@ -349,11 +359,13 @@ class TestColumnOrderStability:
     def test_settlement_record_column_order(self):
         ev = SettlementEvent(
             **_base_kwargs(),
-            settled_side_idx=0, settle_price=1.0, settle_ts=1_100_000_000,
+            settled_side_idx=0,
+            settle_price=1.0,
+            settle_ts=1_100_000_000,
         )
         keys = list(to_record(ev).keys())
         expected_prefix = list(BASE_COLS)
-        assert keys[:len(expected_prefix)] == expected_prefix, (
+        assert keys[: len(expected_prefix)] == expected_prefix, (
             f"to_record(SettlementEvent) base column order changed: {keys!r}"
         )
         assert keys[len(expected_prefix)] == "settled_side_idx", (
@@ -363,11 +375,14 @@ class TestColumnOrderStability:
     def test_book_snapshot_record_column_order(self):
         ev = BookSnapshotEvent(
             **_base_kwargs(),
-            bid_px=[0.49], bid_sz=[1.0], ask_px=[0.51], ask_sz=[1.0],
+            bid_px=[0.49],
+            bid_sz=[1.0],
+            ask_px=[0.51],
+            ask_sz=[1.0],
         )
         keys = list(to_record(ev).keys())
         expected_prefix = list(BASE_COLS)
-        assert keys[:len(expected_prefix)] == expected_prefix, (
+        assert keys[: len(expected_prefix)] == expected_prefix, (
             f"to_record(BookSnapshotEvent) base column order changed: {keys!r}"
         )
         assert keys[len(expected_prefix)] == "bid_px", (

@@ -16,6 +16,7 @@ The test uses reject_breaker_threshold=3 to keep the sequence short.
 Note: the counter is shared across ALL error strings for a given (question, side)
 — there is intentionally no per-error-class bucketing.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -24,7 +25,9 @@ from dataclasses import replace
 import pytest
 
 from hlanalysis.engine.config import (
-    AllowlistEntry, GlobalRiskConfig, StrategyConfig,
+    AllowlistEntry,
+    GlobalRiskConfig,
+    StrategyConfig,
 )
 from hlanalysis.engine.event_bus import EventBus
 from hlanalysis.engine.exec_types import ClearinghouseState, OrderAck, PlaceRequest
@@ -32,7 +35,11 @@ from hlanalysis.engine.risk import RiskGate, RiskInputs
 from hlanalysis.engine.router import Router
 from hlanalysis.engine.state import Position, StateDAL
 from hlanalysis.strategy.types import (
-    Action, BookState, Decision, OrderIntent, QuestionView,
+    Action,
+    BookState,
+    Decision,
+    OrderIntent,
+    QuestionView,
 )
 
 # ---------------------------------------------------------------------------
@@ -46,28 +53,44 @@ _THRESHOLD = 3
 def _strategy_cfg() -> StrategyConfig:
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC", "period": "1h"},
-        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=60,
-        tte_max_seconds=1800, price_extreme_threshold=0.95,
-        distance_from_strike_usd_min=200, vol_max=0.5,
+        max_position_usd=100,
+        stop_loss_pct=10,
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200,
+        vol_max=0.5,
     )
     return StrategyConfig(
-        name="late_resolution", paper_mode=True,
-        allowlist=[entry], blocklist_question_idxs=[],
+        name="late_resolution",
+        paper_mode=True,
+        allowlist=[entry],
+        blocklist_question_idxs=[],
         defaults=entry,
-        **{"global": GlobalRiskConfig(
-            max_total_inventory_usd=500, max_concurrent_positions=5,
-            daily_loss_cap_usd=200, max_strike_distance_pct=10,
-            min_recent_volume_usd=1000, stale_data_halt_seconds=5,
-            reconcile_interval_seconds=60,
-        )},
+        **{
+            "global": GlobalRiskConfig(
+                max_total_inventory_usd=500,
+                max_concurrent_positions=5,
+                daily_loss_cap_usd=200,
+                max_strike_distance_pct=10,
+                min_recent_volume_usd=1000,
+                stale_data_halt_seconds=5,
+                reconcile_interval_seconds=60,
+            )
+        },
     )
 
 
 def _q() -> QuestionView:
     return QuestionView(
-        question_idx=42, yes_symbol="@30", no_symbol="@31",
-        strike=80_000.0, expiry_ns=10_000_000_000_000_001 + 600_000_000_000,
-        underlying="BTC", klass="priceBinary", period="1h",
+        question_idx=42,
+        yes_symbol="@30",
+        no_symbol="@31",
+        strike=80_000.0,
+        expiry_ns=10_000_000_000_000_001 + 600_000_000_000,
+        underlying="BTC",
+        klass="priceBinary",
+        period="1h",
     )
 
 
@@ -77,7 +100,11 @@ def _approval_inputs() -> RiskInputs:
         question_fields={"class": "priceBinary", "underlying": "BTC", "period": "1h"},
         reference_price=80_300.0,
         book=BookState(
-            symbol="@30", bid_px=0.94, bid_sz=10.0, ask_px=0.95, ask_sz=10.0,
+            symbol="@30",
+            bid_px=0.94,
+            bid_sz=10.0,
+            ask_px=0.95,
+            ask_sz=10.0,
             last_trade_ts_ns=10_000_000_000_000_000,
             last_l2_ts_ns=10_000_000_000_000_000,
         ),
@@ -92,30 +119,49 @@ def _approval_inputs() -> RiskInputs:
 
 
 def _held(dal: StateDAL, question_idx: int, symbol: str, qty: float) -> None:
-    dal.upsert_position(Position(
-        question_idx=question_idx, symbol=symbol, qty=qty, avg_entry=0.9,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
-    ))
+    dal.upsert_position(
+        Position(
+            question_idx=question_idx,
+            symbol=symbol,
+            qty=qty,
+            avg_entry=0.9,
+            realized_pnl=0.0,
+            last_update_ts_ns=1,
+            stop_loss_price=-1.0,
+        )
+    )
 
 
 def _exit_intent(cloid: str, question_idx: int = 42, symbol: str = "@30") -> OrderIntent:
     return OrderIntent(
-        question_idx=question_idx, symbol=symbol, side="sell", size=10.0,
-        limit_price=0.99, cloid=cloid, time_in_force="ioc", reduce_only=True,
+        question_idx=question_idx,
+        symbol=symbol,
+        side="sell",
+        size=10.0,
+        limit_price=0.99,
+        cloid=cloid,
+        time_in_force="ioc",
+        reduce_only=True,
         exit_reason="exit_safety_d",
     )
 
 
 def _enter_intent(cloid: str, question_idx: int = 42, symbol: str = "@30") -> OrderIntent:
     return OrderIntent(
-        question_idx=question_idx, symbol=symbol, side="buy", size=10.0,
-        limit_price=0.95, cloid=cloid, time_in_force="ioc",
+        question_idx=question_idx,
+        symbol=symbol,
+        side="buy",
+        size=10.0,
+        limit_price=0.95,
+        cloid=cloid,
+        time_in_force="ioc",
     )
 
 
 # ---------------------------------------------------------------------------
 # Fake exec_client implementations.
 # ---------------------------------------------------------------------------
+
 
 class _RejectingExec:
     """Always returns a rejected ack — models a permanently-unfillable order."""
@@ -127,8 +173,7 @@ class _RejectingExec:
 
     def place(self, req: PlaceRequest) -> OrderAck:
         self.placed.append(req)
-        return OrderAck(cloid=req.cloid, venue_oid="", status="rejected",
-                        error="insufficient margin")
+        return OrderAck(cloid=req.cloid, venue_oid="", status="rejected", error="insufficient margin")
 
     def cancel(self, *, cloid: str, symbol: str) -> bool:
         return True
@@ -153,10 +198,14 @@ class _BalanceShortfallExec(_RejectingExec):
     def place(self, req: PlaceRequest) -> OrderAck:
         self.placed.append(req)
         return OrderAck(
-            cloid=req.cloid, venue_oid="", status="rejected",
-            error=("PolyApiException[status_code=400, 'not enough balance / "
-                   "allowance: the balance is not enough -> balance: 7900, "
-                   "order amount: 58120000']"),
+            cloid=req.cloid,
+            venue_oid="",
+            status="rejected",
+            error=(
+                "PolyApiException[status_code=400, 'not enough balance / "
+                "allowance: the balance is not enough -> balance: 7900, "
+                "order amount: 58120000']"
+            ),
         )
 
 
@@ -167,10 +216,14 @@ class _AllowanceShortfallExec(_RejectingExec):
     def place(self, req: PlaceRequest) -> OrderAck:
         self.placed.append(req)
         return OrderAck(
-            cloid=req.cloid, venue_oid="", status="rejected",
-            error=("PolyApiException[status_code=400, 'not enough balance / "
-                   "allowance: the allowance is not enough -> allowance: 0, "
-                   "order amount: 58120000']"),
+            cloid=req.cloid,
+            venue_oid="",
+            status="rejected",
+            error=(
+                "PolyApiException[status_code=400, 'not enough balance / "
+                "allowance: the allowance is not enough -> allowance: 0, "
+                "order amount: 58120000']"
+            ),
         )
 
 
@@ -189,15 +242,14 @@ class _ScriptedExec(_RejectingExec):
         self.placed.append(req)
         status = self._statuses.pop(0) if self._statuses else "rejected"
         if status == "filled":
-            return OrderAck(cloid=req.cloid, venue_oid="v", status="filled",
-                            fill_price=req.price, fill_size=req.size)
-        return OrderAck(cloid=req.cloid, venue_oid="", status="rejected",
-                        error="rej")
+            return OrderAck(cloid=req.cloid, venue_oid="v", status="filled", fill_price=req.price, fill_size=req.size)
+        return OrderAck(cloid=req.cloid, venue_oid="", status="rejected", error="rej")
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_suppress_after_threshold_consecutive_rejects(tmp_path):
@@ -214,8 +266,11 @@ async def test_suppress_after_threshold_consecutive_rejects(tmp_path):
     client = _RejectingExec()
     cfg = _strategy_cfg()
     router = Router(
-        dal=dal, gate=RiskGate(cfg), bus=EventBus(),
-        exec_client=client, strategy_cfg=cfg,
+        dal=dal,
+        gate=RiskGate(cfg),
+        bus=EventBus(),
+        exec_client=client,
+        strategy_cfg=cfg,
         reject_breaker_threshold=_THRESHOLD,
     )
 
@@ -224,7 +279,8 @@ async def test_suppress_after_threshold_consecutive_rejects(tmp_path):
     for i in range(total_attempts):
         await router.handle(
             Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-sb{i}"),)),
-            inputs=_approval_inputs(), now_ns=10 + i,
+            inputs=_approval_inputs(),
+            now_ns=10 + i,
         )
 
     assert len(client.placed) == _THRESHOLD, (
@@ -256,19 +312,22 @@ async def test_reset_on_fill_restores_full_budget(tmp_path):
     _held(dal, 42, "@30", 100.0)
 
     # rej, rej, fill, rej, rej, rej, (7th suppressed)
-    client = _ScriptedExec(["rejected", "rejected", "filled",
-                            "rejected", "rejected", "rejected", "rejected"])
+    client = _ScriptedExec(["rejected", "rejected", "filled", "rejected", "rejected", "rejected", "rejected"])
     cfg = _strategy_cfg()
     router = Router(
-        dal=dal, gate=RiskGate(cfg), bus=EventBus(),
-        exec_client=client, strategy_cfg=cfg,
+        dal=dal,
+        gate=RiskGate(cfg),
+        bus=EventBus(),
+        exec_client=client,
+        strategy_cfg=cfg,
         reject_breaker_threshold=_THRESHOLD,
     )
 
     for i in range(7):
         await router.handle(
             Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-rf{i}"),)),
-            inputs=_approval_inputs(), now_ns=10 + i,
+            inputs=_approval_inputs(),
+            now_ns=10 + i,
         )
 
     assert len(client.placed) == 6, (
@@ -294,8 +353,11 @@ async def test_breaker_scoped_per_question_side_does_not_gag_other_questions(tmp
     client = _RejectingExec()
     cfg = _strategy_cfg()
     router = Router(
-        dal=dal, gate=RiskGate(cfg), bus=EventBus(),
-        exec_client=client, strategy_cfg=cfg,
+        dal=dal,
+        gate=RiskGate(cfg),
+        bus=EventBus(),
+        exec_client=client,
+        strategy_cfg=cfg,
         reject_breaker_threshold=2,
     )
 
@@ -303,7 +365,8 @@ async def test_breaker_scoped_per_question_side_does_not_gag_other_questions(tmp
     for i in range(3):
         await router.handle(
             Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-q42-{i}", 42, "@30"),)),
-            inputs=_approval_inputs(), now_ns=10 + i,
+            inputs=_approval_inputs(),
+            now_ns=10 + i,
         )
     placed_after_q42 = len(client.placed)
     assert placed_after_q42 == 2, f"Expected 2 placed for q=42 at threshold=2; got {placed_after_q42}"
@@ -315,7 +378,8 @@ async def test_breaker_scoped_per_question_side_does_not_gag_other_questions(tmp
     )
     await router.handle(
         Decision(action=Action.EXIT, intents=(_exit_intent("hla-q99-0", 99, "@40"),)),
-        inputs=q99_inputs, now_ns=20,
+        inputs=q99_inputs,
+        now_ns=20,
     )
     assert len(client.placed) == placed_after_q42 + 1, (
         "Exit on q=99 was wrongly suppressed by q=42's tripped breaker. "
@@ -351,8 +415,11 @@ async def test_breaker_auto_resets_after_window(tmp_path):
     client = _RejectingExec()  # generic reject (not a balance shortfall)
     cfg = _strategy_cfg()
     router = Router(
-        dal=dal, gate=RiskGate(cfg), bus=EventBus(),
-        exec_client=client, strategy_cfg=cfg,
+        dal=dal,
+        gate=RiskGate(cfg),
+        bus=EventBus(),
+        exec_client=client,
+        strategy_cfg=cfg,
         reject_breaker_threshold=_THRESHOLD,
         reject_breaker_reset_seconds=_RESET_S,
     )
@@ -362,7 +429,8 @@ async def test_breaker_auto_resets_after_window(tmp_path):
     for i in range(4):
         await router.handle(
             Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-ar{i}"),)),
-            inputs=_approval_inputs(), now_ns=base + i,
+            inputs=_approval_inputs(),
+            now_ns=base + i,
         )
     assert len(client.placed) == _THRESHOLD, "breaker should suppress 4th attempt"
 
@@ -370,16 +438,16 @@ async def test_breaker_auto_resets_after_window(tmp_path):
     after = base + 2 + int(_RESET_S * _SEC_NS) + 1
     await router.handle(
         Decision(action=Action.EXIT, intents=(_exit_intent("hla-ar-probe"),)),
-        inputs=_approval_inputs(), now_ns=after,
+        inputs=_approval_inputs(),
+        now_ns=after,
     )
-    assert len(client.placed) == _THRESHOLD + 1, (
-        "auto-reset must let one re-probe through once the window elapses"
-    )
+    assert len(client.placed) == _THRESHOLD + 1, "auto-reset must let one re-probe through once the window elapses"
 
     # Immediately after the re-probe (within a fresh window) → suppressed again.
     await router.handle(
         Decision(action=Action.EXIT, intents=(_exit_intent("hla-ar-probe2"),)),
-        inputs=_approval_inputs(), now_ns=after + 5,
+        inputs=_approval_inputs(),
+        now_ns=after + 5,
     )
     assert len(client.placed) == _THRESHOLD + 1, (
         "a second probe within the same window must be suppressed (≤1 per window)"
@@ -397,8 +465,11 @@ async def test_reset_seconds_zero_keeps_permanent_until_fill(tmp_path):
     client = _RejectingExec()
     cfg = _strategy_cfg()
     router = Router(
-        dal=dal, gate=RiskGate(cfg), bus=EventBus(),
-        exec_client=client, strategy_cfg=cfg,
+        dal=dal,
+        gate=RiskGate(cfg),
+        bus=EventBus(),
+        exec_client=client,
+        strategy_cfg=cfg,
         reject_breaker_threshold=_THRESHOLD,
         reject_breaker_reset_seconds=0.0,
     )
@@ -406,12 +477,14 @@ async def test_reset_seconds_zero_keeps_permanent_until_fill(tmp_path):
     for i in range(_THRESHOLD):
         await router.handle(
             Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-z{i}"),)),
-            inputs=_approval_inputs(), now_ns=base + i,
+            inputs=_approval_inputs(),
+            now_ns=base + i,
         )
     # An hour later, still suppressed.
     await router.handle(
         Decision(action=Action.EXIT, intents=(_exit_intent("hla-z-late"),)),
-        inputs=_approval_inputs(), now_ns=base + 3600 * _SEC_NS,
+        inputs=_approval_inputs(),
+        now_ns=base + 3600 * _SEC_NS,
     )
     assert len(client.placed) == _THRESHOLD
 
@@ -431,8 +504,11 @@ async def test_unsellable_orphan_quarantined_on_balance_shortfall(tmp_path):
     client = _BalanceShortfallExec()
     cfg = _strategy_cfg()
     router = Router(
-        dal=dal, gate=RiskGate(cfg), bus=bus,
-        exec_client=client, strategy_cfg=cfg,
+        dal=dal,
+        gate=RiskGate(cfg),
+        bus=bus,
+        exec_client=client,
+        strategy_cfg=cfg,
         reject_breaker_threshold=_THRESHOLD,
     )
 
@@ -443,33 +519,28 @@ async def test_unsellable_orphan_quarantined_on_balance_shortfall(tmp_path):
     # Threshold consecutive rejects → trip → quarantine deletes the position.
     for i in range(_THRESHOLD):
         await router.handle(
-            Decision(action=Action.EXIT, intents=(
-                _exit_intent(f"hla-orph{i}", 700064348, "437614505505316"),)),
-            inputs=inputs, now_ns=10 + i,
+            Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-orph{i}", 700064348, "437614505505316"),)),
+            inputs=inputs,
+            now_ns=10 + i,
         )
     assert dal.get_position(700064348) is None, (
-        "un-sellable orphan must be detracked once the breaker trips on a "
-        "balance shortfall"
+        "un-sellable orphan must be detracked once the breaker trips on a balance shortfall"
     )
 
     # A drift event records the quarantine for the operator.
-    drifts = [e for e in _drain(drift_q)
-              if getattr(e, "kind", "") == "reconcile_drift"]
-    assert any(
-        e.detail.get("resolution") == "quarantined_unsellable_orphan"
-        for e in drifts
-    ), "expected a quarantined_unsellable_orphan drift event"
+    drifts = [e for e in _drain(drift_q) if getattr(e, "kind", "") == "reconcile_drift"]
+    assert any(e.detail.get("resolution") == "quarantined_unsellable_orphan" for e in drifts), (
+        "expected a quarantined_unsellable_orphan drift event"
+    )
 
     # Further exits no longer hit the venue (position gone → reduce_only suppressed).
     placed_before = len(client.placed)
     await router.handle(
-        Decision(action=Action.EXIT, intents=(
-            _exit_intent("hla-orph-after", 700064348, "437614505505316"),)),
-        inputs=inputs, now_ns=999,
+        Decision(action=Action.EXIT, intents=(_exit_intent("hla-orph-after", 700064348, "437614505505316"),)),
+        inputs=inputs,
+        now_ns=999,
     )
-    assert len(client.placed) == placed_before, (
-        "after quarantine the strategy must stop re-sending the dead exit"
-    )
+    assert len(client.placed) == placed_before, "after quarantine the strategy must stop re-sending the dead exit"
 
 
 @pytest.mark.asyncio
@@ -484,18 +555,20 @@ async def test_allowance_shortfall_does_not_detrack(tmp_path):
     client = _AllowanceShortfallExec()
     cfg = _strategy_cfg()
     router = Router(
-        dal=dal, gate=RiskGate(cfg), bus=EventBus(),
-        exec_client=client, strategy_cfg=cfg,
+        dal=dal,
+        gate=RiskGate(cfg),
+        bus=EventBus(),
+        exec_client=client,
+        strategy_cfg=cfg,
         reject_breaker_threshold=_THRESHOLD,
     )
     for i in range(_THRESHOLD + 2):
         await router.handle(
             Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-al{i}"),)),
-            inputs=_approval_inputs(), now_ns=10 + i,
+            inputs=_approval_inputs(),
+            now_ns=10 + i,
         )
-    assert dal.get_position(42) is not None, (
-        "allowance shortfall must NOT detrack — we still hold the shares"
-    )
+    assert dal.get_position(42) is not None, "allowance shortfall must NOT detrack — we still hold the shares"
     # Breaker still bounds the flood at threshold.
     assert len(client.placed) == _THRESHOLD
 
@@ -506,17 +579,13 @@ def test_pm_balance_shortfall_parser():
     from hlanalysis.engine.router import _pm_balance_shortfall
 
     assert _pm_balance_shortfall(
-        "not enough balance / allowance: the balance is not enough -> "
-        "balance: 7900, order amount: 58120000"
+        "not enough balance / allowance: the balance is not enough -> balance: 7900, order amount: 58120000"
     )
     assert not _pm_balance_shortfall(
-        "not enough balance / allowance: the allowance is not enough -> "
-        "allowance: 0, order amount: 58120000"
+        "not enough balance / allowance: the allowance is not enough -> allowance: 0, order amount: 58120000"
     )
     assert not _pm_balance_shortfall("insufficient margin")
     assert not _pm_balance_shortfall(None)
     assert not _pm_balance_shortfall("")
     # Balance present but sufficient (defensive: balance >= order amount).
-    assert not _pm_balance_shortfall(
-        "the balance is not enough -> balance: 99999999, order amount: 100"
-    )
+    assert not _pm_balance_shortfall("the balance is not enough -> balance: 99999999, order amount: 100")

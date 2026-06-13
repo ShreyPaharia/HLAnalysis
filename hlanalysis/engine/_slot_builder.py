@@ -14,6 +14,7 @@ to work without modification.
 Do NOT import ``runtime.py`` from this module — that would create a cycle.
 Use ``TYPE_CHECKING`` for annotation-only imports.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -104,12 +105,14 @@ def build_slot(
     # that wedges the position open (2026-06-06 v31_pm). PM slots treat a
     # reduce landing within that dust of flat as a full close (and suppress
     # un-sellable dust sells). HL fills the exact size, so it stays ~exact.
-    reduce_close_atol = (
-        DUST_QTY_ABS_TOL if acct.venue == "polymarket" else 1e-9
-    )
+    reduce_close_atol = DUST_QTY_ABS_TOL if acct.venue == "polymarket" else 1e-9
     router = Router(
-        dal=dal, gate=risk, bus=bus, exec_client=exec_client,
-        strategy_cfg=s_cfg, strategy_id=s_cfg.name,
+        dal=dal,
+        gate=risk,
+        bus=bus,
+        exec_client=exec_client,
+        strategy_cfg=s_cfg,
+        strategy_id=s_cfg.name,
         cloid_prefix=cloid_prefix,
         reduce_close_atol=reduce_close_atol,
         journal=journal,
@@ -121,8 +124,10 @@ def build_slot(
     # stays small (one line per question per transition).
     gate_log_path = state_db_path.parent / "gate_decisions.jsonl"
     scanner = Scanner(
-        strategy=strategy, cfg=s_cfg,
-        market_state=market_state, dal=dal,
+        strategy=strategy,
+        cfg=s_cfg,
+        market_state=market_state,
+        dal=dal,
         kill_switch_path=kill_switch_path,
         reference_symbol=s_cfg.reference_symbol,
         last_reconcile_ns=0,
@@ -133,16 +138,25 @@ def build_slot(
         # operator's NON-strategy manual perp/spot trades on the same account
         # can't false-halt (or mask losses in) the strategy (no-op for PM).
         pnl_provider=lambda ts: exec_client.realized_pnl_since(
-            ts, outcome_only=True,
+            ts,
+            outcome_only=True,
         ),
         gate_log_path=gate_log_path,
     )
     return AccountSlot(
-        cfg=s_cfg, account_cfg=acct, venue=acct.venue,
-        state_db_path=state_db_path, kill_switch_path=kill_switch_path,
+        cfg=s_cfg,
+        account_cfg=acct,
+        venue=acct.venue,
+        state_db_path=state_db_path,
+        kill_switch_path=kill_switch_path,
         cloid_prefix=cloid_prefix,
-        dal=dal, exec_client=exec_client, risk=risk, router=router,
-        strategy=strategy, scanner=scanner, journal=journal,
+        dal=dal,
+        exec_client=exec_client,
+        risk=risk,
+        router=router,
+        strategy=strategy,
+        scanner=scanner,
+        journal=journal,
         pm=PmSlotState() if acct.venue == "polymarket" else None,
     )
 
@@ -188,5 +202,6 @@ def register_reference_cadences(
         # fail-fast: slots sharing a symbol must agree on one σ source.
         # Default "mark" preserves HL behaviour bit-identically.
         market_state.set_reference_source(
-            sym, dic.reference_source,
+            sym,
+            dic.reference_source,
         )

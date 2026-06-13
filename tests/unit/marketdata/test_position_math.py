@@ -13,6 +13,7 @@ SHR-88):
     computes) — which *replaces* the computed realized so the SHR-72 settlement
     double-count is impossible by construction (one code path, one number).
 """
+
 from __future__ import annotations
 
 import math
@@ -130,7 +131,11 @@ def test_apply_fill_venue_override_equals_compute_parity() -> None:
     pos = PositionState(qty=100.0, avg_entry=0.89, realized_pnl=0.0)
     computed_new, computed_realized = apply_fill(pos, "sell", 40.0, 0.72)
     override_new, override_realized = apply_fill(
-        pos, "sell", 40.0, 0.72, venue_closed_pnl=computed_realized,
+        pos,
+        "sell",
+        40.0,
+        0.72,
+        venue_closed_pnl=computed_realized,
     )
     assert override_realized == computed_realized
     assert override_new == computed_new
@@ -142,6 +147,9 @@ def test_settle_venue_override_replaces_computed() -> None:
     fill's closedPnl directly."""
     pos = PositionState(qty=100.0, avg_entry=0.80, realized_pnl=0.0)
     _, realized = settle(
-        pos, position_side_idx=1, settled_side_idx=1, venue_closed_pnl=18.75,
+        pos,
+        position_side_idx=1,
+        settled_side_idx=1,
+        venue_closed_pnl=18.75,
     )
     assert realized == 18.75  # venue truth, not the computed (1.0-0.80)*100=20

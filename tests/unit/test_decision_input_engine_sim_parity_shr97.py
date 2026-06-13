@@ -14,6 +14,7 @@ Two acceptance tests per the spec §4:
      - `sigma` for each estimator (stdev, bipower, parkinson)
    Covers dt ∈ {5, 60} × source ∈ {mark, bbo}.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -54,11 +55,7 @@ def _load_hl_reference_ticks(
     ticks: list[tuple[int, float]] = []
 
     # Find the event directory using Python rglob (duckdb multi-** glob broken).
-    event_dirs = {
-        d.name.split("=", 1)[1]: d
-        for d in base.rglob("event=*")
-        if d.is_dir()
-    }
+    event_dirs = {d.name.split("=", 1)[1]: d for d in base.rglob("event=*") if d.is_dir()}
 
     if source == "mark":
         event_dir = event_dirs.get("mark")
@@ -106,6 +103,7 @@ def _load_hl_reference_ticks(
 # DecisionInputConfig, feed them the identical tick sequence, assert parity.
 # ---------------------------------------------------------------------------
 
+
 def _run_parity_check(*, source: str, dt: int, lookback: int = 3600) -> None:
     """Feed the same recorded tick stream to both adapters, configured from one
     DecisionInputConfig, and assert bit-identical outputs at sampled now_ns."""
@@ -122,7 +120,11 @@ def _run_parity_check(*, source: str, dt: int, lookback: int = 3600) -> None:
     # --- Engine path ---
     from hlanalysis.engine.market_state import MarketState as EngineMS
     from hlanalysis.events import (
-        BboEvent, MarkEvent, Mechanism, NormalizedEvent, ProductType,
+        BboEvent,
+        MarkEvent,
+        Mechanism,
+        NormalizedEvent,
+        ProductType,
     )
 
     engine_ms = EngineMS()
@@ -145,10 +147,7 @@ def _run_parity_check(*, source: str, dt: int, lookback: int = 3600) -> None:
 
     # Load ticks.
     ticks = _load_hl_reference_ticks(source=source)
-    assert len(ticks) > 100, (
-        f"Too few {source!r} ticks in HL fixture ({len(ticks)}); "
-        "is the fixture corpus present?"
-    )
+    assert len(ticks) > 100, f"Too few {source!r} ticks in HL fixture ({len(ticks)}); is the fixture corpus present?"
 
     # Feed all ticks to both adapters, sample at every 250th tick.
     sym = "BTC"
@@ -183,9 +182,7 @@ def _run_parity_check(*, source: str, dt: int, lookback: int = 3600) -> None:
         engine_ms.apply(ev)
 
         # Backtest ingest: raw ReferenceEvent (H=L=C=price).
-        ref_ev = ReferenceEvent(
-            ts_ns=ts_ns, symbol=sym, high=price, low=price, close=price
-        )
+        ref_ev = ReferenceEvent(ts_ns=ts_ns, symbol=sym, high=price, low=price, close=price)
         bt_ms.apply_reference_tick(ref_ev)
 
         if i % sample_every != 0:
@@ -197,26 +194,18 @@ def _run_parity_check(*, source: str, dt: int, lookback: int = 3600) -> None:
         # --- last_mark ---
         eng_mark = engine_ms.last_mark(sym)
         bt_mark = bt_ms.latest_btc_close()
-        assert eng_mark == bt_mark, (
-            f"last_mark mismatch @ {ctx}: engine={eng_mark} bt={bt_mark}"
-        )
+        assert eng_mark == bt_mark, f"last_mark mismatch @ {ctx}: engine={eng_mark} bt={bt_mark}"
 
         # --- recent_returns and recent_hl_bars ---
-        eng_rets = engine_ms._core.recent_returns(
-            sym, now_ns=now_ns, lookback_seconds=lookback, dt=dt
-        )
+        eng_rets = engine_ms._core.recent_returns(sym, now_ns=now_ns, lookback_seconds=lookback, dt=dt)
         bt_rets = bt_ms.recent_returns(now_ns=now_ns, lookback_seconds=lookback)
         assert np.array_equal(eng_rets, bt_rets), (
             f"recent_returns mismatch @ {ctx}: engine {eng_rets.shape} bt {bt_rets.shape}"
         )
 
-        eng_hl = engine_ms._core.recent_hl_bars(
-            sym, now_ns=now_ns, lookback_seconds=lookback, dt=dt
-        )
+        eng_hl = engine_ms._core.recent_hl_bars(sym, now_ns=now_ns, lookback_seconds=lookback, dt=dt)
         bt_hl = bt_ms.recent_hl_bars(now_ns=now_ns, lookback_seconds=lookback)
-        assert np.array_equal(eng_hl, bt_hl), (
-            f"recent_hl_bars mismatch @ {ctx}: engine {eng_hl.shape} bt {bt_hl.shape}"
-        )
+        assert np.array_equal(eng_hl, bt_hl), f"recent_hl_bars mismatch @ {ctx}: engine {eng_hl.shape} bt {bt_hl.shape}"
 
         # --- sigma (all three estimators) ---
         # Engine reads its core keyed by the real symbol; the backtest adapter
@@ -225,28 +214,19 @@ def _run_parity_check(*, source: str, dt: int, lookback: int = 3600) -> None:
         # above). These are two DISTINCT cores fed independently — the comparison
         # is meaningful only because each side reads its own core.
         for estimator in ("stdev", "bipower", "parkinson"):
-            eng_sig = engine_ms._core.sigma(
-                sym, estimator=estimator, now_ns=now_ns,
-                lookback_seconds=lookback, dt=dt
-            )
-            bt_sig = bt_ms._core.sigma(
-                _REFERENCE_KEY, estimator=estimator, now_ns=now_ns,
-                lookback_seconds=lookback
-            )
-            assert eng_sig == bt_sig, (
-                f"sigma[{estimator}] mismatch @ {ctx}: engine={eng_sig} bt={bt_sig}"
-            )
+            eng_sig = engine_ms._core.sigma(sym, estimator=estimator, now_ns=now_ns, lookback_seconds=lookback, dt=dt)
+            bt_sig = bt_ms._core.sigma(_REFERENCE_KEY, estimator=estimator, now_ns=now_ns, lookback_seconds=lookback)
+            assert eng_sig == bt_sig, f"sigma[{estimator}] mismatch @ {ctx}: engine={eng_sig} bt={bt_sig}"
 
         comparison_points += 1
 
-    assert comparison_points >= 5, (
-        f"Too few comparison points for source={source!r} dt={dt}: {comparison_points}"
-    )
+    assert comparison_points >= 5, f"Too few comparison points for source={source!r} dt={dt}: {comparison_points}"
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 def test_unit_from_engine_and_from_backtest_params_agree():
     """from_engine(cfg) and from_backtest_params(params) must agree on all four
@@ -265,16 +245,23 @@ def test_unit_from_engine_and_from_backtest_params_agree():
 
     # Build a representative HL v31 (theta) slot config at dt=5.
     _global = GlobalRiskConfig(
-        max_total_inventory_usd=500, max_concurrent_positions=5,
-        daily_loss_cap_usd=200, max_strike_distance_pct=50,
-        min_recent_volume_usd=100, stale_data_halt_seconds=30,
+        max_total_inventory_usd=500,
+        max_concurrent_positions=5,
+        daily_loss_cap_usd=200,
+        max_strike_distance_pct=50,
+        min_recent_volume_usd=100,
+        stale_data_halt_seconds=30,
         reconcile_interval_seconds=60,
     )
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC"},
-        max_position_usd=100, stop_loss_pct=None, tte_min_seconds=0,
-        tte_max_seconds=43200, price_extreme_threshold=0.0,
-        distance_from_strike_usd_min=0, vol_max=100,
+        max_position_usd=100,
+        stop_loss_pct=None,
+        tte_min_seconds=0,
+        tte_max_seconds=43200,
+        price_extreme_threshold=0.0,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
         vol_lookback_seconds=3600,
     )
     theta = ThetaParams(vol_sampling_dt_seconds=5, vol_lookback_seconds=3600)
@@ -303,28 +290,28 @@ def test_unit_from_engine_and_from_backtest_params_agree():
     bt_resolved = from_backtest_params(params, track_default_source="mark")
 
     assert engine_resolved.reference_source == bt_resolved.reference_source, (
-        f"source mismatch: engine={engine_resolved.reference_source!r} "
-        f"bt={bt_resolved.reference_source!r}"
+        f"source mismatch: engine={engine_resolved.reference_source!r} bt={bt_resolved.reference_source!r}"
     )
     assert engine_resolved.sampling_dt_seconds == bt_resolved.sampling_dt_seconds, (
-        f"dt mismatch: engine={engine_resolved.sampling_dt_seconds} "
-        f"bt={bt_resolved.sampling_dt_seconds}"
+        f"dt mismatch: engine={engine_resolved.sampling_dt_seconds} bt={bt_resolved.sampling_dt_seconds}"
     )
     assert engine_resolved.vol_lookback_seconds == bt_resolved.vol_lookback_seconds, (
-        f"lookback mismatch: engine={engine_resolved.vol_lookback_seconds} "
-        f"bt={bt_resolved.vol_lookback_seconds}"
+        f"lookback mismatch: engine={engine_resolved.vol_lookback_seconds} bt={bt_resolved.vol_lookback_seconds}"
     )
     assert engine_resolved.reference_ticks == bt_resolved.reference_ticks == "raw", (
         f"ticks: engine={engine_resolved.reference_ticks!r} bt={bt_resolved.reference_ticks!r}"
     )
 
 
-@pytest.mark.parametrize("source,dt", [
-    ("mark", 5),
-    ("mark", 60),
-    ("bbo",  5),
-    ("bbo",  60),
-])
+@pytest.mark.parametrize(
+    "source,dt",
+    [
+        ("mark", 5),
+        ("mark", 60),
+        ("bbo", 5),
+        ("bbo", 60),
+    ],
+)
 def test_engine_backtest_bit_identical_on_recorded_hl_ticks(source: str, dt: int) -> None:
     """Engine MarketState and backtest runner MarketState, both configured from
     the same DecisionInputConfig, produce bit-identical sigma/returns/hl/last_mark
@@ -344,16 +331,23 @@ def test_from_engine_returns_live_faithful_values():
     )
 
     _global = GlobalRiskConfig(
-        max_total_inventory_usd=500, max_concurrent_positions=5,
-        daily_loss_cap_usd=200, max_strike_distance_pct=50,
-        min_recent_volume_usd=100, stale_data_halt_seconds=30,
+        max_total_inventory_usd=500,
+        max_concurrent_positions=5,
+        daily_loss_cap_usd=200,
+        max_strike_distance_pct=50,
+        min_recent_volume_usd=100,
+        stale_data_halt_seconds=30,
         reconcile_interval_seconds=60,
     )
     entry = AllowlistEntry(
         match={"class": "priceBinary"},
-        max_position_usd=100, stop_loss_pct=None, tte_min_seconds=0,
-        tte_max_seconds=43200, price_extreme_threshold=0.0,
-        distance_from_strike_usd_min=0, vol_max=100,
+        max_position_usd=100,
+        stop_loss_pct=None,
+        tte_min_seconds=0,
+        tte_max_seconds=43200,
+        price_extreme_threshold=0.0,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
         vol_lookback_seconds=3600,
     )
     cfg = StrategyConfig(

@@ -6,6 +6,7 @@ placement uses `OrderType.FAK` for `time_in_force="ioc"` and
 `OrderType.GTC` for `"gtc"`. The SDK is imported and constructed lazily
 on first live call so paper-only tests don't need the dep installed.
 """
+
 from __future__ import annotations
 
 import math
@@ -205,17 +206,11 @@ class PMClient:
         fills = self.user_fills(since_ts_ns=since_ts_ns)
         return sum(f.closed_pnl - f.fee for f in fills)
 
-    def realized_pnl_for_symbol(
-        self, symbol: str, *, since_ts_ns: int = 0
-    ) -> float:
+    def realized_pnl_for_symbol(self, symbol: str, *, since_ts_ns: int = 0) -> float:
         """Σ(closedPnl − fee) over this account's CLOB fills on `symbol`.
         Excludes the redeem payout (not a fill); the settlement path does not
         rely on this for PM."""
-        return sum(
-            f.closed_pnl - f.fee
-            for f in self.user_fills(since_ts_ns=since_ts_ns)
-            if f.symbol == symbol
-        )
+        return sum(f.closed_pnl - f.fee for f in self.user_fills(since_ts_ns=since_ts_ns) if f.symbol == symbol)
 
     # ---- paper internals ----
 
@@ -225,14 +220,19 @@ class PMClient:
             return self._paper_acks[req.cloid]
         if req.price <= 0:
             ack = OrderAck(
-                cloid=req.cloid, venue_oid=f"paper-{req.cloid}",
-                status="rejected", error="non_marketable_price",
+                cloid=req.cloid,
+                venue_oid=f"paper-{req.cloid}",
+                status="rejected",
+                error="non_marketable_price",
             )
             self._paper_acks[req.cloid] = ack
             return ack
         ack = OrderAck(
-            cloid=req.cloid, venue_oid=f"paper-{uuid.uuid4().hex[:16]}",
-            status="filled", fill_price=req.price, fill_size=req.size,
+            cloid=req.cloid,
+            venue_oid=f"paper-{uuid.uuid4().hex[:16]}",
+            status="filled",
+            fill_price=req.price,
+            fill_size=req.size,
         )
         self._paper_acks[req.cloid] = ack
         # Position bookkeeping — same shape as HLClient._paper_place.
@@ -240,7 +240,9 @@ class PMClient:
         existing = self._paper_positions.get(req.symbol)
         if existing is None:
             self._paper_positions[req.symbol] = VenuePosition(
-                symbol=req.symbol, qty=signed, avg_entry=req.price,
+                symbol=req.symbol,
+                qty=signed,
+                avg_entry=req.price,
                 unrealized_pnl=0.0,
             )
         else:
@@ -248,17 +250,26 @@ class PMClient:
             if abs(tot) < 1e-9:
                 self._paper_positions.pop(req.symbol, None)
             else:
-                avg = (
-                    (existing.qty * existing.avg_entry + signed * req.price) / tot
-                )
+                avg = (existing.qty * existing.avg_entry + signed * req.price) / tot
                 self._paper_positions[req.symbol] = VenuePosition(
-                    symbol=req.symbol, qty=tot, avg_entry=avg, unrealized_pnl=0.0,
+                    symbol=req.symbol,
+                    qty=tot,
+                    avg_entry=avg,
+                    unrealized_pnl=0.0,
                 )
         ts = time.time_ns()
-        self._paper_fills.append(UserFillRow(
-            fill_id=f"f-{req.cloid}-{ts}", cloid=req.cloid, symbol=req.symbol,
-            side=req.side, price=req.price, size=req.size, fee=0.0, ts_ns=ts,
-        ))
+        self._paper_fills.append(
+            UserFillRow(
+                fill_id=f"f-{req.cloid}-{ts}",
+                cloid=req.cloid,
+                symbol=req.symbol,
+                side=req.side,
+                price=req.price,
+                size=req.size,
+                fee=0.0,
+                ts_ns=ts,
+            )
+        )
         return ack
 
     # ---- live internals ----
@@ -267,6 +278,7 @@ class PMClient:
         if self._sdk is not None:
             return self._sdk
         from py_clob_client_v2 import ApiCreds, ClobClient, SignatureTypeV2
+
         kwargs: dict = dict(
             host=self._cfg["clob_host"],
             chain_id=self._cfg["chain_id"],
@@ -302,6 +314,7 @@ class PMClient:
             PartialCreateOrderOptions,
             Side,
         )
+
         side = Side.BUY if req.side == "buy" else Side.SELL
         opts = PartialCreateOrderOptions(tick_size="0.01")
         sdk = self._ensure_sdk()
@@ -315,11 +328,7 @@ class PMClient:
             # of 2 decimals". For a BUY the market `amount` is the USDC to
             # spend (price·size); for a SELL it is the share count. Round
             # down to 2 dp so the maker amount is always within PM's cap.
-            amount = (
-                _round_down_2(price * req.size)
-                if req.side == "buy"
-                else _round_down_2(req.size)
-            )
+            amount = _round_down_2(price * req.size) if req.side == "buy" else _round_down_2(req.size)
             return sdk.create_and_post_market_order(
                 order_args=MarketOrderArgs(
                     token_id=req.symbol,
@@ -352,7 +361,9 @@ class PMClient:
             resp = self._post_order_raw(req, price)
         except Exception as e:
             return OrderAck(
-                cloid=req.cloid, venue_oid="", status="rejected",
+                cloid=req.cloid,
+                venue_oid="",
+                status="rejected",
                 error=str(e)[:200],
             )
         if not resp.get("success"):
@@ -390,14 +401,18 @@ class PMClient:
         else:
             status = "open"  # GTC limit resting on the book
         return OrderAck(
-            cloid=req.cloid, venue_oid=oid,
-            status=status, fill_price=fill_price, fill_size=fill_size,
+            cloid=req.cloid,
+            venue_oid=oid,
+            status=status,
+            fill_price=fill_price,
+            fill_size=fill_size,
         )
 
     @_PM_WRITE_RETRY
     def _cancel_raw(self, oid: str):
         """Cancel by orderID via the SDK, retrying transient blips."""
         from py_clob_client_v2 import OrderPayload
+
         sdk = self._ensure_sdk()
         return sdk.cancel_order(OrderPayload(orderID=oid))
 
@@ -456,16 +471,23 @@ class PMClient:
             except (TypeError, ValueError):
                 placed_ts_ns = 0
             cloid = oid_to_cloid.get(oid, oid)
-            out.append(OpenOrderRow(
-                cloid=cloid, venue_oid=oid, symbol=symbol,
-                side=side, price=price, size=remaining,
-                placed_ts_ns=placed_ts_ns,
-            ))
+            out.append(
+                OpenOrderRow(
+                    cloid=cloid,
+                    venue_oid=oid,
+                    symbol=symbol,
+                    side=side,
+                    price=price,
+                    size=remaining,
+                    placed_ts_ns=placed_ts_ns,
+                )
+            )
         return out
 
     @_PM_READ_RETRY
     def _balance_allowance_raw(self):
         from py_clob_client_v2 import AssetType, BalanceAllowanceParams
+
         sdk = self._ensure_sdk()
         return sdk.get_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL),
@@ -474,10 +496,12 @@ class PMClient:
     @_PM_READ_RETRY
     def _conditional_balance_raw(self, token_id: str):
         from py_clob_client_v2 import AssetType, BalanceAllowanceParams
+
         sdk = self._ensure_sdk()
         return sdk.get_balance_allowance(
             BalanceAllowanceParams(
-                asset_type=AssetType.CONDITIONAL, token_id=token_id,
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token_id,
             ),
         )
 
@@ -547,10 +571,7 @@ class PMClient:
             # establish venue truth, so report "unknown" to keep the reconciler
             # from vanishing positions. (Our PM slots all set a funder.)
             return (), False
-        url = (
-            f"{_PM_DATA_API}/positions?user={funder}"
-            "&sizeThreshold=0.01&limit=500"
-        )
+        url = f"{_PM_DATA_API}/positions?user={funder}&sizeThreshold=0.01&limit=500"
         try:
             rows = self._data_api_get_retrying(url)
         except Exception:
@@ -584,15 +605,20 @@ class PMClient:
                 upnl = float(p.get("cashPnl") or 0.0)
             except (TypeError, ValueError):
                 upnl = 0.0
-            out.append(VenuePosition(
-                symbol=symbol, qty=qty,
-                avg_entry=avg, unrealized_pnl=upnl,
-            ))
+            out.append(
+                VenuePosition(
+                    symbol=symbol,
+                    qty=qty,
+                    avg_entry=avg,
+                    unrealized_pnl=upnl,
+                )
+            )
         return tuple(out), True
 
     @_PM_READ_RETRY
     def _trades_raw(self, after_s: int):
         from py_clob_client_v2 import TradeParams
+
         sdk = self._ensure_sdk()
         params = TradeParams(after=after_s) if after_s else None
         return sdk.get_trades(params=params)
@@ -630,9 +656,17 @@ class PMClient:
             except (TypeError, ValueError):
                 ts_ns = 0
             cloid = oid_to_cloid.get(taker_oid, taker_oid or fill_id)
-            out.append(UserFillRow(
-                fill_id=fill_id, cloid=cloid, symbol=symbol,
-                side=side, price=price, size=size, fee=fee, ts_ns=ts_ns,
-                closed_pnl=0.0,
-            ))
+            out.append(
+                UserFillRow(
+                    fill_id=fill_id,
+                    cloid=cloid,
+                    symbol=symbol,
+                    side=side,
+                    price=price,
+                    size=size,
+                    fee=fee,
+                    ts_ns=ts_ns,
+                    closed_pnl=0.0,
+                )
+            )
         return [f for f in out if f.ts_ns >= since_ts_ns]

@@ -12,6 +12,7 @@ which is enough to flip the favourite near a coin-flip strike, so we never use
 the perp (fapi) value. If spot can't be fetched we return None and the slot
 skips the market rather than trade on a basis-biased strike.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable

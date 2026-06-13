@@ -6,6 +6,7 @@ YES/NO mid-price series with entry/exit fill markers and a settlement
 annotation. Returns `out_path` on success or `None` when the diagnostics
 parquet is missing.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -29,6 +30,7 @@ def _load_parquet_as_dict(path: Path) -> dict[str, list] | None:
 
 def _ns_to_dt_str(ts_ns: int) -> str:
     import datetime
+
     ts_us = ts_ns // 1_000
     dt = datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC) + datetime.timedelta(microseconds=ts_us)
     return dt.isoformat()
@@ -118,46 +120,79 @@ def plot_market_trace(
 
     traces: list = []
     if yes_times:
-        traces.append(go.Scatter(
-            x=yes_times, y=yes_mids, mode="lines", name="YES mid",
-            line=dict(color="#2196f3", width=2),
-            hovertemplate="YES mid=%{y:.4f}<br>%{x}<extra></extra>",
-        ))
+        traces.append(
+            go.Scatter(
+                x=yes_times,
+                y=yes_mids,
+                mode="lines",
+                name="YES mid",
+                line=dict(color="#2196f3", width=2),
+                hovertemplate="YES mid=%{y:.4f}<br>%{x}<extra></extra>",
+            )
+        )
     if no_times:
-        traces.append(go.Scatter(
-            x=no_times, y=no_mids, mode="lines", name="NO mid",
-            line=dict(color="#ff9800", width=2),
-            hovertemplate="NO mid=%{y:.4f}<br>%{x}<extra></extra>",
-        ))
+        traces.append(
+            go.Scatter(
+                x=no_times,
+                y=no_mids,
+                mode="lines",
+                name="NO mid",
+                line=dict(color="#ff9800", width=2),
+                hovertemplate="NO mid=%{y:.4f}<br>%{x}<extra></extra>",
+            )
+        )
     if buy_times:
-        traces.append(go.Scatter(
-            x=buy_times, y=buy_prices, mode="markers", name="buy fill",
-            marker=dict(color="#4caf50", size=10, symbol="triangle-up"),
-            hovertemplate="buy fill @ %{y:.4f}<br>%{x}<extra></extra>",
-        ))
+        traces.append(
+            go.Scatter(
+                x=buy_times,
+                y=buy_prices,
+                mode="markers",
+                name="buy fill",
+                marker=dict(color="#4caf50", size=10, symbol="triangle-up"),
+                hovertemplate="buy fill @ %{y:.4f}<br>%{x}<extra></extra>",
+            )
+        )
     if sell_times:
-        traces.append(go.Scatter(
-            x=sell_times, y=sell_prices, mode="markers", name="sell fill",
-            marker=dict(color="#f44336", size=10, symbol="triangle-down"),
-            hovertemplate="sell fill @ %{y:.4f}<br>%{x}<extra></extra>",
-        ))
+        traces.append(
+            go.Scatter(
+                x=sell_times,
+                y=sell_prices,
+                mode="markers",
+                name="sell fill",
+                marker=dict(color="#f44336", size=10, symbol="triangle-down"),
+                hovertemplate="sell fill @ %{y:.4f}<br>%{x}<extra></extra>",
+            )
+        )
 
     fig = go.Figure(traces)
 
     shapes: list[dict] = []
     annotations: list[dict] = []
     if settle_time is not None:
-        shapes.append(dict(
-            type="line",
-            x0=settle_time, x1=settle_time, y0=0, y1=1, yref="paper",
-            line=dict(color="#9c27b0", width=2, dash="dot"),
-        ))
+        shapes.append(
+            dict(
+                type="line",
+                x0=settle_time,
+                x1=settle_time,
+                y0=0,
+                y1=1,
+                yref="paper",
+                line=dict(color="#9c27b0", width=2, dash="dot"),
+            )
+        )
         label = f"settled {settle_outcome}" if settle_outcome else "settled"
-        annotations.append(dict(
-            x=settle_time, y=1.0, yref="paper", text=label,
-            showarrow=False, font=dict(color="#9c27b0", size=12),
-            xanchor="left", yanchor="top",
-        ))
+        annotations.append(
+            dict(
+                x=settle_time,
+                y=1.0,
+                yref="paper",
+                text=label,
+                showarrow=False,
+                font=dict(color="#9c27b0", size=12),
+                xanchor="left",
+                yanchor="top",
+            )
+        )
 
     fig.update_layout(
         title=f"Market trace — {question_id}",

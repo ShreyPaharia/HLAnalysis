@@ -7,6 +7,7 @@ recording which alerts have already fired on the slot (so the continuous-checks
 loop doesn't re-spam every tick). EngineRuntime calls these from
 ``_continuous_checks_loop`` and publishes whatever they return.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -32,7 +33,9 @@ PM_REDEMPTION_TIMEOUT_S: float = 6 * 3600.0
 
 
 def _pm_check_unconfirmed_orders(
-    slot: AccountSlot, now_ns: int, *,
+    slot: AccountSlot,
+    now_ns: int,
+    *,
     threshold_s: float = PM_UNCONFIRMED_THRESHOLD_S,
 ) -> list[OrderUnconfirmed]:
     """Pure detector: scan slot.dal.live_orders() and return one
@@ -55,18 +58,27 @@ def _pm_check_unconfirmed_orders(
             continue
         if o.cloid in slot.pm.alerted_unconfirmed_cloids:
             continue
-        out.append(OrderUnconfirmed(
-            ts_ns=now_ns, account_alias=slot.alias,
-            cloid=o.cloid, symbol=o.symbol, side=o.side,  # type: ignore[arg-type]
-            size=o.size, limit_price=o.price, age_seconds=age_s,
-            venue_oid=o.venue_oid or "",
-        ))
+        out.append(
+            OrderUnconfirmed(
+                ts_ns=now_ns,
+                account_alias=slot.alias,
+                cloid=o.cloid,
+                symbol=o.symbol,
+                side=o.side,  # type: ignore[arg-type]
+                size=o.size,
+                limit_price=o.price,
+                age_seconds=age_s,
+                venue_oid=o.venue_oid or "",
+            )
+        )
         slot.pm.alerted_unconfirmed_cloids.add(o.cloid)
     return out
 
 
 def _pm_check_redemption_timeouts(
-    slot: AccountSlot, now_ns: int, *,
+    slot: AccountSlot,
+    now_ns: int,
+    *,
     threshold_s: float = PM_REDEMPTION_TIMEOUT_S,
 ) -> list[RedemptionTimeout]:
     """Pure detector: walk slot.pm.settlements and return one
@@ -85,11 +97,17 @@ def _pm_check_redemption_timeouts(
         # Winner heuristic: realized_pnl > 0 (PM binary payouts make this
         # equivalent under positive entry prices, which is always the case).
         expected_payout = qty if realized_pnl > 0 else 0.0
-        out.append(RedemptionTimeout(
-            ts_ns=now_ns, account_alias=slot.alias,
-            question_idx=qidx, symbol=symbol, qty=qty,
-            settled_ts_ns=settled_ts_ns, age_seconds=age_s,
-            expected_payout_usd=expected_payout,
-        ))
+        out.append(
+            RedemptionTimeout(
+                ts_ns=now_ns,
+                account_alias=slot.alias,
+                question_idx=qidx,
+                symbol=symbol,
+                qty=qty,
+                settled_ts_ns=settled_ts_ns,
+                age_seconds=age_s,
+                expected_payout_usd=expected_payout,
+            )
+        )
         slot.pm.alerted_redemption_qidxs.add(qidx)
     return out

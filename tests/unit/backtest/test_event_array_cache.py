@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 import hlanalysis.backtest.data._event_array_cache as _cache_mod
 from hlanalysis.backtest.data._event_array_cache import (
-    cached_bundle, cache_key, caching_enabled,
+    cached_bundle,
+    cache_key,
+    caching_enabled,
 )
 from hlanalysis.backtest.data._fastpath_core import FastPathBundle, LegArrays, event_dtype
 from hlanalysis.backtest.core.events import ReferenceEvent, SettlementEvent, TradeEvent
@@ -41,7 +43,8 @@ def _bundle():
     arr = np.zeros(2, dtype=event_dtype)
     return FastPathBundle(
         leg_arrays={"#0": LegArrays(events=arr, book_ts=np.array([1, 2], dtype=np.int64))},
-        reference_events=[], settlement_events=[],
+        reference_events=[],
+        settlement_events=[],
     )
 
 
@@ -61,8 +64,7 @@ def _realistic_bundle(n: int = 40_000) -> FastPathBundle:
     return FastPathBundle(
         leg_arrays={"#0": LegArrays(events=ev, book_ts=bts)},
         reference_events=[
-            ReferenceEvent(ts_ns=ts0 + i, symbol="BTC", high=1.0, low=0.5, close=0.7, open=0.6)
-            for i in range(5)
+            ReferenceEvent(ts_ns=ts0 + i, symbol="BTC", high=1.0, low=0.5, close=0.7, open=0.6) for i in range(5)
         ],
         settlement_events=[
             SettlementEvent(ts_ns=ts0 + 9, question_idx=0, outcome="up", symbol="@30"),
@@ -71,11 +73,14 @@ def _realistic_bundle(n: int = 40_000) -> FastPathBundle:
 
 
 def test_miss_then_hit(tmp_path):
-    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    src = tmp_path / "a.parquet"
+    src.write_bytes(b"x" * 10)
     calls = {"n": 0}
+
     def build():
         calls["n"] += 1
         return _bundle()
+
     b1 = cached_bundle(tmp_path / "cache", "q1", [src], build)
     b2 = cached_bundle(tmp_path / "cache", "q1", [src], build)
     assert calls["n"] == 1  # second call is a hit
@@ -94,21 +99,28 @@ def test_config_sig_differentiates_key():
 def test_config_sig_change_forces_rebuild(tmp_path):
     """Two requests for the same question + files but different config_sig must
     NOT share a cached bundle (the dt=60-bundle-for-dt=5-request footgun)."""
-    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    src = tmp_path / "a.parquet"
+    src.write_bytes(b"x" * 10)
     calls = {"n": 0}
+
     def build():
         calls["n"] += 1
         return _bundle()
+
     cached_bundle(tmp_path / "cache", "q1", [src], build, config_sig="rrs=60000000000")
     cached_bundle(tmp_path / "cache", "q1", [src], build, config_sig="rrs=5000000000")
     assert calls["n"] == 2  # different dt -> rebuilt, not aliased
 
 
 def test_mtime_change_invalidates(tmp_path):
-    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    src = tmp_path / "a.parquet"
+    src.write_bytes(b"x" * 10)
     calls = {"n": 0}
+
     def build():
-        calls["n"] += 1; return _bundle()
+        calls["n"] += 1
+        return _bundle()
+
     cached_bundle(tmp_path / "cache", "q1", [src], build)
     src.write_bytes(b"y" * 20)  # size + mtime change
     cached_bundle(tmp_path / "cache", "q1", [src], build)
@@ -125,10 +137,14 @@ def test_inproc_bundle_memo_skips_rebuild_when_enabled(tmp_path, monkeypatch):
     path where one question is replayed across many param cells."""
     monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO", "1")
     qid = f"q-{tmp_path.name}"
-    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    src = tmp_path / "a.parquet"
+    src.write_bytes(b"x" * 10)
     calls = {"n": 0}
+
     def build():
-        calls["n"] += 1; return _bundle()
+        calls["n"] += 1
+        return _bundle()
+
     cdir = tmp_path / "cache"
     b1 = cached_bundle(cdir, qid, [src], build, config_sig="c")
     b2 = cached_bundle(cdir, qid, [src], build, config_sig="c")
@@ -140,7 +156,8 @@ def test_inproc_bundle_memo_off_by_default_loads_fresh(tmp_path):
     """Default-off: behaviour is unchanged — each call returns a freshly loaded
     bundle (distinct objects), preserving the mtime-invalidation contract."""
     qid = f"q-{tmp_path.name}"
-    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    src = tmp_path / "a.parquet"
+    src.write_bytes(b"x" * 10)
     cdir = tmp_path / "cache"
     b1 = cached_bundle(cdir, qid, [src], _bundle, config_sig="c")
     b2 = cached_bundle(cdir, qid, [src], _bundle, config_sig="c")
@@ -151,7 +168,8 @@ def test_inproc_bundle_memo_keys_on_config_sig(tmp_path, monkeypatch):
     """Different config_sig (e.g. dt=5 vs dt=60) must NOT share a memo entry."""
     monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO", "1")
     qid = f"q-{tmp_path.name}"
-    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    src = tmp_path / "a.parquet"
+    src.write_bytes(b"x" * 10)
     cdir = tmp_path / "cache"
     b1 = cached_bundle(cdir, qid, [src], _bundle, config_sig="dt5")
     b2 = cached_bundle(cdir, qid, [src], _bundle, config_sig="dt60")
@@ -159,8 +177,10 @@ def test_inproc_bundle_memo_keys_on_config_sig(tmp_path, monkeypatch):
 
 
 def test_build_version_in_key(tmp_path, monkeypatch):
-    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    src = tmp_path / "a.parquet"
+    src.write_bytes(b"x" * 10)
     import hlanalysis.backtest.data._event_array_cache as m
+
     k1 = cache_key("q1", [src])
     monkeypatch.setattr(m, "_BUILD_VERSION", 999)
     k2 = cache_key("q1", [src])
@@ -168,11 +188,15 @@ def test_build_version_in_key(tmp_path, monkeypatch):
 
 
 def test_corrupt_cache_file_rebuilds(tmp_path):
-    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    src = tmp_path / "a.parquet"
+    src.write_bytes(b"x" * 10)
     cdir = tmp_path / "cache"
     calls = {"n": 0}
+
     def build():
-        calls["n"] += 1; return _bundle()
+        calls["n"] += 1
+        return _bundle()
+
     cached_bundle(cdir, "q1", [src], build)
     # Corrupt every stored value file.
     for f in _val_files(cdir):
@@ -188,9 +212,11 @@ def test_saved_bundle_is_compressed(tmp_path):
     big = np.zeros(n, dtype=event_dtype)
     bundle = FastPathBundle(
         leg_arrays={"#0": LegArrays(events=big, book_ts=np.zeros(n, dtype=np.int64))},
-        reference_events=[], settlement_events=[],
+        reference_events=[],
+        settlement_events=[],
     )
-    src = tmp_path / "a.parquet"; src.write_bytes(b"x")
+    src = tmp_path / "a.parquet"
+    src.write_bytes(b"x")
     cdir = tmp_path / "cache"
     cached_bundle(cdir, "q1", [src], lambda: bundle)
     npz = next(iter(_val_files(cdir)))
@@ -204,8 +230,10 @@ def test_stale_build_version_entries_evicted(tmp_path, monkeypatch):
     version lives in its own ``v{N}`` shard; opening a new version prunes the
     stale shard wholesale."""
     import hlanalysis.backtest.data._event_array_cache as m
+
     cdir = tmp_path / "cache"
-    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    src = tmp_path / "a.parquet"
+    src.write_bytes(b"x" * 10)
     monkeypatch.setattr(m, "_BUILD_VERSION", 1)
     cached_bundle(cdir, "q1", [src], _bundle)
     assert (cdir / "v1").is_dir() and _val_files(cdir / "v1")  # written under v1
@@ -219,7 +247,8 @@ def test_config_variants_under_same_version_kept(tmp_path):
     """Different config_sig (e.g. dt=5 vs dt=60) under the SAME BUILD_VERSION are
     both valid — eviction must NOT touch them."""
     cdir = tmp_path / "cache"
-    src = tmp_path / "a.parquet"; src.write_bytes(b"x" * 10)
+    src = tmp_path / "a.parquet"
+    src.write_bytes(b"x" * 10)
     cached_bundle(cdir, "q1", [src], _bundle, config_sig="rrs=5")
     cached_bundle(cdir, "q1", [src], _bundle, config_sig="rrs=60")
     assert len(_val_files(cdir)) == 2  # both kept
@@ -229,19 +258,25 @@ def test_roundtrip_preserves_realistic_data(tmp_path):
     """Column-split + delta-encoded storage must reconstruct the bundle exactly:
     every struct field, book_ts, and the ref/settle events."""
     b = _realistic_bundle()
-    cdir = tmp_path / "cache"; src = tmp_path / "a"; src.write_bytes(b"x")
+    cdir = tmp_path / "cache"
+    src = tmp_path / "a"
+    src.write_bytes(b"x")
     cached_bundle(cdir, "q", [src], lambda: b)  # cold: writes
+
     def _no_build():
         raise AssertionError("should have hit the cache, not rebuilt")
+
     got = cached_bundle(cdir, "q", [src], _no_build)  # warm: loads from disk
     la0, la1 = b.leg_arrays["#0"], got.leg_arrays["#0"]
     assert la1.events.dtype == event_dtype
     assert la0.events.tobytes() == la1.events.tobytes()  # every field exact
     assert np.array_equal(la0.book_ts, la1.book_ts)
-    assert [(r.ts_ns, r.symbol, r.high, r.low, r.close, r.open) for r in got.reference_events] \
-        == [(r.ts_ns, r.symbol, r.high, r.low, r.close, r.open) for r in b.reference_events]
-    assert [(s.ts_ns, s.question_idx, s.outcome, s.symbol) for s in got.settlement_events] \
-        == [(s.ts_ns, s.question_idx, s.outcome, s.symbol) for s in b.settlement_events]
+    assert [(r.ts_ns, r.symbol, r.high, r.low, r.close, r.open) for r in got.reference_events] == [
+        (r.ts_ns, r.symbol, r.high, r.low, r.close, r.open) for r in b.reference_events
+    ]
+    assert [(s.ts_ns, s.question_idx, s.outcome, s.symbol) for s in got.settlement_events] == [
+        (s.ts_ns, s.question_idx, s.outcome, s.symbol) for s in b.settlement_events
+    ]
 
 
 def test_npz_disk_serializer_roundtrip(tmp_path):
@@ -259,10 +294,12 @@ def test_npz_disk_serializer_roundtrip(tmp_path):
     assert la1.events.dtype == event_dtype
     assert la0.events.tobytes() == la1.events.tobytes()  # every field exact
     assert np.array_equal(la0.book_ts, la1.book_ts)
-    assert [(r.ts_ns, r.symbol, r.high, r.low, r.close, r.open) for r in got.reference_events] \
-        == [(r.ts_ns, r.symbol, r.high, r.low, r.close, r.open) for r in b.reference_events]
-    assert [(s.ts_ns, s.question_idx, s.outcome, s.symbol) for s in got.settlement_events] \
-        == [(s.ts_ns, s.question_idx, s.outcome, s.symbol) for s in b.settlement_events]
+    assert [(r.ts_ns, r.symbol, r.high, r.low, r.close, r.open) for r in got.reference_events] == [
+        (r.ts_ns, r.symbol, r.high, r.low, r.close, r.open) for r in b.reference_events
+    ]
+    assert [(s.ts_ns, s.question_idx, s.outcome, s.symbol) for s in got.settlement_events] == [
+        (s.ts_ns, s.question_idx, s.outcome, s.symbol) for s in b.settlement_events
+    ]
 
 
 def _bundle_with_trades():
@@ -298,7 +335,9 @@ def test_roundtrip_preserves_trade_events(tmp_path):
     npz dropped trades → cached runs read 0 volume → 0 trades for any strategy
     with min_recent_volume_usd > 0."""
     b = _bundle_with_trades()
-    cdir = tmp_path / "cache"; src = tmp_path / "a"; src.write_bytes(b"x")
+    cdir = tmp_path / "cache"
+    src = tmp_path / "a"
+    src.write_bytes(b"x")
     cached_bundle(cdir, "q", [src], lambda: b)  # cold: writes
 
     def _no_build():
@@ -325,12 +364,15 @@ def test_column_split_smaller_than_struct_layout(tmp_path):
     interleaved struct), so deflate compresses each homogeneous column far
     better than the row-major record layout."""
     import io
+
     b = _realistic_bundle()
     la = b.leg_arrays["#0"]
     buf = io.BytesIO()
     np.savez_compressed(buf, ev=la.events, bts=la.book_ts)  # old struct layout
     struct_size = buf.getbuffer().nbytes
-    cdir = tmp_path / "cache"; src = tmp_path / "a"; src.write_bytes(b"x")
+    cdir = tmp_path / "cache"
+    src = tmp_path / "a"
+    src.write_bytes(b"x")
     cached_bundle(cdir, "q", [src], lambda: b)
     got = next(iter(_val_files(cdir))).stat().st_size
     assert got < struct_size * 0.92  # meaningfully smaller than struct layout
@@ -365,6 +407,7 @@ def test_concurrent_saves_same_key_dont_corrupt(tmp_path, monkeypatch):
     (SHR-71 rebuild storm)."""
     import threading
     import time
+
     b = _realistic_bundle()
     path = tmp_path / "v3_samekey.npz"
 
@@ -414,14 +457,17 @@ def test_inproc_memo_evicts_by_bytes(tmp_path, monkeypatch):
     one = _cache_mod._bundle_nbytes(_realistic_bundle())
     monkeypatch.setenv("HLBT_INPROC_BUNDLE_MEMO_MAX_BYTES", str(int(one * 1.5)))
     cdir = tmp_path / "cache"
-    src = tmp_path / "a.parquet"; src.write_bytes(b"x")
+    src = tmp_path / "a.parquet"
+    src.write_bytes(b"x")
     for i in range(3):
         cached_bundle(cdir, f"q{i}", [src], _realistic_bundle, config_sig="c")
     retained = sum(_cache_mod._bundle_nbytes(b) for b in _cache_mod._INPROC_MEMO.values())
     assert retained <= int(one * 1.5)  # byte budget held via LRU eviction
+
     # The most-recently inserted key is still memoized -> hit without rebuild.
     def _no_build():
         raise AssertionError("just-inserted key should hit the memo, not rebuild")
+
     got = cached_bundle(cdir, "q2", [src], _no_build, config_sig="c")
     assert got is not None
 
@@ -452,7 +498,9 @@ def test_size_cap_evicts_oldest(tmp_path, monkeypatch):
     least-recently-stored entry first, so it cannot grow without bound under
     default-on. (Exact retained count is left to diskcache's soft cap + batch
     culling; the contract is bounded growth + oldest-first eviction.)"""
-    cdir = tmp_path / "cache"; src = tmp_path / "a"; src.write_bytes(b"x")
+    cdir = tmp_path / "cache"
+    src = tmp_path / "a"
+    src.write_bytes(b"x")
     cached_bundle(cdir, "q0", [src], _realistic_bundle, config_sig="s0")
     one = next(iter(_val_files(cdir))).stat().st_size
     monkeypatch.setenv("HLBT_CACHE_MAX_BYTES", str(int(one * 2)))  # ~2 entries
@@ -461,9 +509,11 @@ def test_size_cap_evicts_oldest(tmp_path, monkeypatch):
     assert len(_val_files(cdir)) < 8  # bounded — not all 8 retained
     # The oldest entry (q0) was evicted first → re-requesting it rebuilds.
     calls = {"n": 0}
+
     def _rebuild():
         calls["n"] += 1
         return _realistic_bundle()
+
     cached_bundle(cdir, "q0", [src], _rebuild, config_sig="s0")
     assert calls["n"] == 1
 
@@ -483,8 +533,7 @@ def _bundle_raw_ticks() -> FastPathBundle:
     return FastPathBundle(
         leg_arrays={"#0": LegArrays(events=arr, book_ts=np.array([ts0], dtype=np.int64))},
         reference_events=[
-            ReferenceEvent(ts_ns=ts0 + i * 5_000_000_000, symbol="BTC",
-                           high=100.0, low=100.0, close=100.0)
+            ReferenceEvent(ts_ns=ts0 + i * 5_000_000_000, symbol="BTC", high=100.0, low=100.0, close=100.0)
             for i in range(3)
         ],
         settlement_events=[],

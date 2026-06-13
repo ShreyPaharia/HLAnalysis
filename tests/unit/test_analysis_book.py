@@ -9,6 +9,7 @@ All timestamps are nanoseconds since epoch.  We use values in the range
 1_000_000_000_000_000_000–1_000_000_001_000_000_000 (around 2001-09-09) so
 they're clearly synthetic.
 """
+
 from __future__ import annotations
 
 import math
@@ -68,6 +69,7 @@ def data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 # BBO fixture
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def bbo_root(data_root: Path) -> Path:
     """Write 3 BBO rows for hyperliquid/perp/BTC to tmp parquet."""
@@ -102,6 +104,7 @@ def bbo_root(data_root: Path) -> Path:
 # Book-snapshot fixture
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def book_root(data_root: Path) -> Path:
     """Write 1 book_snapshot row for hyperliquid/perp/BTC."""
@@ -135,6 +138,7 @@ def book_root(data_root: Path) -> Path:
 # ---------------------------------------------------------------------------
 # Trade fixture
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def trade_root(data_root: Path) -> Path:
@@ -175,6 +179,7 @@ def trade_root(data_root: Path) -> Path:
 # DuckDB connection fixture
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def con() -> duckdb.DuckDBPyConnection:
     c = duckdb.connect()
@@ -200,9 +205,7 @@ class TestBestQuotesAt:
         """At ts_ns exactly equal to the second row's local_recv_ts, the
         second row's bid/ask should be returned."""
         ts = BASE_NS + 200_000_000
-        bid, ask = best_quotes_at(
-            con, venue="hyperliquid", product_type="perp", symbol="BTC", ts_ns=ts
-        )
+        bid, ask = best_quotes_at(con, venue="hyperliquid", product_type="perp", symbol="BTC", ts_ns=ts)
         assert bid == pytest.approx(50_100.0)
         assert ask == pytest.approx(50_110.0)
 
@@ -210,18 +213,14 @@ class TestBestQuotesAt:
         """At ts_ns between row 2 and row 3, the second row should be
         returned (last seen)."""
         ts = BASE_NS + 250_000_000  # between 200ms and 300ms marks
-        bid, ask = best_quotes_at(
-            con, venue="hyperliquid", product_type="perp", symbol="BTC", ts_ns=ts
-        )
+        bid, ask = best_quotes_at(con, venue="hyperliquid", product_type="perp", symbol="BTC", ts_ns=ts)
         assert bid == pytest.approx(50_100.0)
         assert ask == pytest.approx(50_110.0)
 
     def test_returns_first_row_exactly(self, con, bbo_root):
         """Requesting ts_ns == first row's local_recv_ts returns first row."""
         ts = BASE_NS + 100_000_000
-        bid, ask = best_quotes_at(
-            con, venue="hyperliquid", product_type="perp", symbol="BTC", ts_ns=ts
-        )
+        bid, ask = best_quotes_at(con, venue="hyperliquid", product_type="perp", symbol="BTC", ts_ns=ts)
         assert bid == pytest.approx(50_000.0)
         assert ask == pytest.approx(50_010.0)
 
@@ -229,14 +228,13 @@ class TestBestQuotesAt:
         """ts_ns before any recorded BBO should raise ValueError."""
         ts = BASE_NS + 50_000_000  # before all rows (first is at +100ms)
         with pytest.raises(ValueError, match="No BBO row found"):
-            best_quotes_at(
-                con, venue="hyperliquid", product_type="perp", symbol="BTC", ts_ns=ts
-            )
+            best_quotes_at(con, venue="hyperliquid", product_type="perp", symbol="BTC", ts_ns=ts)
 
 
 # ---------------------------------------------------------------------------
 # Tests: mid_path
 # ---------------------------------------------------------------------------
+
 
 class TestMidPath:
     def test_shape_and_resample(self, con, bbo_root):
@@ -329,6 +327,7 @@ class TestMidPath:
 # Tests: trades_in_window
 # ---------------------------------------------------------------------------
 
+
 class TestTradesInWindow:
     def test_returns_all_aggressed_trades(self, con, trade_root):
         """only_aggressed=True (default) should exclude 'unknown' side rows."""
@@ -407,6 +406,7 @@ class TestTradesInWindow:
 # ---------------------------------------------------------------------------
 # Tests: depth_at_offset_bps
 # ---------------------------------------------------------------------------
+
 
 class TestDepthAtOffsetBps:
     def test_bid_depth_within_offset(self, con, book_root):

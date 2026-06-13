@@ -9,8 +9,7 @@ _MIN_MS = 1_780_156_800_000
 
 def _kline(open_ms: int, close: str) -> list:
     # Binance kline: [openTime, open, high, low, close, volume, closeTime, ...]
-    return [open_ms, "73888.00", "73895.30", "73861.20", close, "66.2",
-            open_ms + 59_999, "0", 974, "0", "0", "0"]
+    return [open_ms, "73888.00", "73895.30", "73861.20", close, "66.2", open_ms + 59_999, "0", 974, "0", "0", "0"]
 
 
 def test_uses_spot_close_only():

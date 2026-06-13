@@ -49,6 +49,7 @@ def test_duplicate_registration_raises():
         return _StubStrategy(p)
 
     with pytest.raises(ValueError, match="already registered"):
+
         @registry.register("dup")
         def _f2(p):  # pragma: no cover - error path
             return _StubStrategy(p)

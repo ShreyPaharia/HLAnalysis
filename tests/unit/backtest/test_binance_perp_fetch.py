@@ -16,11 +16,24 @@ def test_fetch_perp_klines_hits_fapi_endpoint() -> None:
             def json(self):
                 # Return one row, then empty to end the loop
                 if len(captured) == 1:
-                    return [[
-                        1746057600000, "94172.0", "94177.96", "94130.43",
-                        "94147.3", "6.47436", 1746057659999, "", 0, "", "", "",
-                    ]]
+                    return [
+                        [
+                            1746057600000,
+                            "94172.0",
+                            "94177.96",
+                            "94130.43",
+                            "94147.3",
+                            "6.47436",
+                            1746057659999,
+                            "",
+                            0,
+                            "",
+                            "",
+                            "",
+                        ]
+                    ]
                 return []
+
         return R()
 
     with patch("hlanalysis.backtest.data.binance_klines.requests.get", side_effect=fake_get):

@@ -15,6 +15,7 @@ Spec:
   - SourceConfig with hl_ref_ticks="raw" is picklable and build() propagates it.
   - Default stays "bars" → byte-identical existing behaviour.
 """
+
 from __future__ import annotations
 
 import pickle
@@ -30,10 +31,10 @@ from hlanalysis.backtest.data.hl_hip4 import HLHip4DataSource
 FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "fixtures" / "hl_hip4"
 
 # BBO fixture covers 2026-05-10 04:00:00.039 to 05:59:59.776 UTC.
-_BBO_FIXTURE_START_NS = 1_778_385_600_039_000_000   # 2026-05-10 04:00:00.039 UTC
+_BBO_FIXTURE_START_NS = 1_778_385_600_039_000_000  # 2026-05-10 04:00:00.039 UTC
 _WARMUP_WINDOW_S = 1_800  # 30 min of pre-start BBO data available in fixture
 _SYNTHETIC_START_NS = _BBO_FIXTURE_START_NS + _WARMUP_WINDOW_S * 1_000_000_000
-_SYNTHETIC_END_NS = 1_778_392_800_000_000_000       # 2026-05-10 06:00:00 UTC
+_SYNTHETIC_END_NS = 1_778_392_800_000_000_000  # 2026-05-10 06:00:00 UTC
 
 
 def _synthetic_q() -> QuestionDescriptor:
@@ -109,10 +110,7 @@ def test_raw_mode_last_mark_is_latest_tick():
 
     # Collect all raw tick ReferenceEvents up to some midpoint ts.
     midpoint = _SYNTHETIC_START_NS + (_SYNTHETIC_END_NS - _SYNTHETIC_START_NS) // 2
-    raw_evs = [
-        ev for ev in src_raw.events(q)
-        if isinstance(ev, ReferenceEvent) and ev.ts_ns <= midpoint
-    ]
+    raw_evs = [ev for ev in src_raw.events(q) if isinstance(ev, ReferenceEvent) and ev.ts_ns <= midpoint]
     assert raw_evs, "No raw ReferenceEvents found before midpoint"
 
     state_raw = MarketState()
@@ -124,8 +122,7 @@ def test_raw_mode_last_mark_is_latest_tick():
     mark = state_raw.latest_btc_close()
     assert mark is not None, "last_mark should be set after ingesting ticks"
     assert abs(mark - last_tick_price) < 1e-6, (
-        f"Expected last_mark={last_tick_price} (last raw tick), "
-        f"but got last_mark={mark}"
+        f"Expected last_mark={last_tick_price} (last raw tick), but got last_mark={mark}"
     )
 
 
@@ -142,10 +139,7 @@ def test_bar_mode_last_mark_is_bar_close():
     )
 
     midpoint = _SYNTHETIC_START_NS + (_SYNTHETIC_END_NS - _SYNTHETIC_START_NS) // 2
-    bar_evs = [
-        ev for ev in src_bars.events(q)
-        if isinstance(ev, ReferenceEvent) and ev.ts_ns <= midpoint
-    ]
+    bar_evs = [ev for ev in src_bars.events(q) if isinstance(ev, ReferenceEvent) and ev.ts_ns <= midpoint]
     assert bar_evs, "No bar ReferenceEvents found before midpoint"
 
     state_bars = MarketState()
@@ -155,9 +149,7 @@ def test_bar_mode_last_mark_is_bar_close():
     last_bar_close = bar_evs[-1].close
     mark = state_bars.latest_btc_close()
     assert mark is not None
-    assert abs(mark - last_bar_close) < 1e-6, (
-        f"Expected last_mark={last_bar_close} (last bar close), got {mark}"
-    )
+    assert abs(mark - last_bar_close) < 1e-6, f"Expected last_mark={last_bar_close} (last bar close), got {mark}"
 
 
 # ---------------------------------------------------------------------------
@@ -288,9 +280,7 @@ def test_source_config_build_propagates_ref_ticks_raw(tmp_path):
         hl_ref_ticks="raw",
     )
     src = cfg.build()
-    assert src.reference_ticks == "raw", (
-        f"Expected reference_ticks='raw' on built source, got {src.reference_ticks!r}"
-    )
+    assert src.reference_ticks == "raw", f"Expected reference_ticks='raw' on built source, got {src.reference_ticks!r}"
 
 
 def test_source_config_build_propagates_ref_ticks_bars(tmp_path):
@@ -316,8 +306,7 @@ def test_bars_mode_reference_events_are_ohlc():
     for ev in src.events(q):
         if isinstance(ev, ReferenceEvent):
             assert ev.low <= ev.close <= ev.high, (
-                f"Bar-mode ReferenceEvent at {ev.ts_ns} fails L<=C<=H: "
-                f"H={ev.high}, L={ev.low}, C={ev.close}"
+                f"Bar-mode ReferenceEvent at {ev.ts_ns} fails L<=C<=H: H={ev.high}, L={ev.low}, C={ev.close}"
             )
             checked += 1
     assert checked > 0, "No ReferenceEvents emitted in bars mode"
@@ -353,14 +342,12 @@ def test_market_state_apply_reference_tick_sets_last_mark():
     assert state.latest_btc_close() is None
 
     # Feed a raw tick at BTC=80000.
-    fake_ev = ReferenceEvent(ts_ns=1_000_000_000, symbol="BTC", high=80_000.0,
-                             low=80_000.0, close=80_000.0)
+    fake_ev = ReferenceEvent(ts_ns=1_000_000_000, symbol="BTC", high=80_000.0, low=80_000.0, close=80_000.0)
     state.apply_reference_tick(fake_ev)
     assert state.latest_btc_close() == pytest.approx(80_000.0)
 
     # A subsequent tick at a different price updates last_mark.
-    fake_ev2 = ReferenceEvent(ts_ns=2_000_000_000, symbol="BTC", high=80_100.0,
-                              low=80_100.0, close=80_100.0)
+    fake_ev2 = ReferenceEvent(ts_ns=2_000_000_000, symbol="BTC", high=80_100.0, low=80_100.0, close=80_100.0)
     state.apply_reference_tick(fake_ev2)
     assert state.latest_btc_close() == pytest.approx(80_100.0)
 
@@ -378,8 +365,7 @@ def test_market_state_apply_reference_tick_vs_apply_reference_diverges_at_subbar
 
     state_tick = MarketState()
     # Feed one tick at t=30s (still in bucket [0,60s)).
-    t1_ev = ReferenceEvent(ts_ns=30_000_000_000, symbol="BTC", high=80_000.0,
-                           low=80_000.0, close=80_000.0)
+    t1_ev = ReferenceEvent(ts_ns=30_000_000_000, symbol="BTC", high=80_000.0, low=80_000.0, close=80_000.0)
     state_tick.apply_reference_tick(t1_ev)
     # tick path: last_mark == 80_000 immediately
     assert state_tick.latest_btc_close() == pytest.approx(80_000.0)
@@ -400,13 +386,12 @@ def test_market_state_apply_reference_tick_vs_apply_reference_diverges_at_subbar
 def test_events_arrays_raw_more_ref_events():
     """events_arrays() in raw mode must carry more reference_events than bars mode."""
     import os
+
     os.environ.pop("HLBT_DISABLE_FASTPATH", None)
 
     q = _synthetic_q()
-    src_bars = HLHip4DataSource(data_root=FIXTURE_ROOT, reference_ticks="bars",
-                                 reference_resample_seconds=60)
-    src_raw = HLHip4DataSource(data_root=FIXTURE_ROOT, reference_ticks="raw",
-                                reference_resample_seconds=60)
+    src_bars = HLHip4DataSource(data_root=FIXTURE_ROOT, reference_ticks="bars", reference_resample_seconds=60)
+    src_raw = HLHip4DataSource(data_root=FIXTURE_ROOT, reference_ticks="raw", reference_resample_seconds=60)
 
     bundle_bars = src_bars.events_arrays(q)
     bundle_raw = src_raw.events_arrays(q)
@@ -415,14 +400,14 @@ def test_events_arrays_raw_more_ref_events():
     n_raw = len(bundle_raw.reference_events)
 
     assert n_raw > n_bars, (
-        f"events_arrays raw mode should yield more reference_events than bars: "
-        f"raw={n_raw}, bars={n_bars}"
+        f"events_arrays raw mode should yield more reference_events than bars: raw={n_raw}, bars={n_bars}"
     )
 
 
 def test_events_arrays_raw_ref_events_are_ticks():
     """events_arrays() reference_events in raw mode must be tick-style (H==L==C)."""
     import os
+
     os.environ.pop("HLBT_DISABLE_FASTPATH", None)
 
     q = _synthetic_q()
@@ -431,6 +416,5 @@ def test_events_arrays_raw_ref_events_are_ticks():
 
     for ev in bundle.reference_events[:20]:  # check first 20
         assert ev.high == ev.low == ev.close, (
-            f"Raw fast-path ReferenceEvent should be tick-style but got "
-            f"H={ev.high}, L={ev.low}, C={ev.close}"
+            f"Raw fast-path ReferenceEvent should be tick-style but got H={ev.high}, L={ev.low}, C={ev.close}"
         )

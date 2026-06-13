@@ -6,6 +6,7 @@ fails to merge the path-derived partition dict type with the in-file
 string type. read_recorded uses ParquetFile (no partition inference) so
 this is bypassed.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,8 +18,7 @@ import pytest
 from hlanalysis.recorder.read import read_recorded
 
 
-def _write_partition(root: Path, venue: str, event: str, symbol: str,
-                     rows: list[dict]) -> Path:
+def _write_partition(root: Path, venue: str, event: str, symbol: str, rows: list[dict]) -> Path:
     """Mirror the recorder's partitioning shape."""
     partition = (
         root
@@ -69,20 +69,21 @@ def test_read_recorded_does_not_trip_partition_type_mismatch(tmp_path):
 
 
 def test_read_recorded_glob_concatenates(tmp_path):
-    _write_partition(tmp_path, "polymarket", "trade", "tok-yes",
-                     [{"venue": "polymarket", "price": 0.5, "size": 1.0}])
-    _write_partition(tmp_path, "polymarket", "trade", "tok-no",
-                     [{"venue": "polymarket", "price": 0.5, "size": 2.0},
-                      {"venue": "polymarket", "price": 0.5, "size": 3.0}])
+    _write_partition(tmp_path, "polymarket", "trade", "tok-yes", [{"venue": "polymarket", "price": 0.5, "size": 1.0}])
+    _write_partition(
+        tmp_path,
+        "polymarket",
+        "trade",
+        "tok-no",
+        [{"venue": "polymarket", "price": 0.5, "size": 2.0}, {"venue": "polymarket", "price": 0.5, "size": 3.0}],
+    )
     table = read_recorded(str(tmp_path) + "/venue=polymarket/**/event=trade/**/*.parquet")
     assert table.num_rows == 3
 
 
 def test_read_recorded_directory_walks_recursively(tmp_path):
-    _write_partition(tmp_path, "polymarket", "trade", "tok-a",
-                     [{"venue": "polymarket", "price": 0.5}])
-    _write_partition(tmp_path, "binance", "trade", "BTCUSDT",
-                     [{"venue": "binance", "price": 60000.0}])
+    _write_partition(tmp_path, "polymarket", "trade", "tok-a", [{"venue": "polymarket", "price": 0.5}])
+    _write_partition(tmp_path, "binance", "trade", "BTCUSDT", [{"venue": "binance", "price": 60000.0}])
     # promote_options="default" lets the missing column become null.
     table = read_recorded(tmp_path)
     assert table.num_rows == 2
@@ -94,10 +95,8 @@ def test_read_recorded_raises_on_no_matches(tmp_path):
 
 
 def test_read_recorded_iterable_of_paths(tmp_path):
-    f1 = _write_partition(tmp_path, "polymarket", "trade", "a",
-                          [{"venue": "polymarket", "v": 1}])
-    f2 = _write_partition(tmp_path, "polymarket", "trade", "b",
-                          [{"venue": "polymarket", "v": 2}])
+    f1 = _write_partition(tmp_path, "polymarket", "trade", "a", [{"venue": "polymarket", "v": 1}])
+    f2 = _write_partition(tmp_path, "polymarket", "trade", "b", [{"venue": "polymarket", "v": 2}])
     table = read_recorded([f1, f2])
     assert table.num_rows == 2
     assert sorted(table.column("v").to_pylist()) == [1, 2]

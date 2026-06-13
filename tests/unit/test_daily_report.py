@@ -4,6 +4,7 @@
    both sources doubles PnL. live_cell filters source='venue'.
 2. sim_cell must parse total PnL + trades from an hl-bt report.md.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -45,9 +46,7 @@ def test_live_cell_dedups_router_venue(tmp_path):
 def test_sim_cell_parses_report(tmp_path):
     run = tmp_path / "run"
     run.mkdir()
-    (run / "report.md").write_text(
-        "# v3 run\n\n## Summary\n- questions: 1\n- trades: 74\n- total PnL: $5.18\n"
-    )
+    (run / "report.md").write_text("# v3 run\n\n## Summary\n- questions: 1\n- trades: 74\n- total PnL: $5.18\n")
     n, _buy, pnl = sim_cell(run)
     assert n == 74
     assert pnl == 5.18
@@ -60,8 +59,7 @@ def test_sim_cell_missing_report_is_zero(tmp_path):
 
 
 def test_latest_settled_day_needs_consecutive_partitions(tmp_path):
-    base = (tmp_path / "venue=hyperliquid/product_type=prediction_binary/mechanism=clob/"
-            "event=bbo/symbol=#1")
+    base = tmp_path / "venue=hyperliquid/product_type=prediction_binary/mechanism=clob/event=bbo/symbol=#1"
     for d in ("2026-06-09", "2026-06-10"):  # consecutive → 06-10 settles cleanly
         (base / f"date={d}" / "hour=all").mkdir(parents=True)
     assert latest_settled_day(tmp_path) == "2026-06-10"

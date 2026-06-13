@@ -2,6 +2,7 @@
 least one ENTER decision, all without network. Validates that the
 ExecutionClient seam is properly threaded through Router and Scanner for
 a Polymarket-typed account."""
+
 from __future__ import annotations
 
 import asyncio
@@ -47,21 +48,23 @@ class _PMStubAdapter(VenueAdapter):
         now = time.time_ns()
         # ~12h ahead, formatted as YYYYMMDD-HHMM (the engine's parser).
         expiry_str = datetime.fromtimestamp(
-            (now + 12 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+            (now + 12 * 3600 * 1_000_000_000) / 1e9,
+            tz=timezone.utc,
         ).strftime("%Y%m%d-%H%M")
 
         # Real PM question: legs are the CLOB token ids (yes_token_id /
         # no_token_id), which the PM book frames are keyed by too.
         yield QuestionMetaEvent(
-            venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
+            venue="polymarket",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="YES_TOKEN",
             exchange_ts=now - 90 * 60 * 1_000_000_000,
             local_recv_ts=now - 90 * 60 * 1_000_000_000,
-            question_idx=909001, named_outcome_idxs=[0, 1],
-            keys=["class", "underlying", "period", "expiry", "strike",
-                  "yes_token_id", "no_token_id", "series_slug"],
-            values=["priceBinary", "BTC", "1d", expiry_str, "70000",
-                    "YES_TOKEN", "NO_TOKEN", "btc-up-or-down-daily"],
+            question_idx=909001,
+            named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "period", "expiry", "strike", "yes_token_id", "no_token_id", "series_slug"],
+            values=["priceBinary", "BTC", "1d", expiry_str, "70000", "YES_TOKEN", "NO_TOKEN", "btc-up-or-down-daily"],
         )
 
         # 90 BTC marks at 60s cadence so theta_harvester's σ has enough data
@@ -71,9 +74,12 @@ class _PMStubAdapter(VenueAdapter):
         for i in range(90):
             ts = now - (90 - i) * 60_000_000_000
             yield MarkEvent(
-                venue="binance", product_type=ProductType.SPOT,
-                mechanism=Mechanism.CLOB, symbol="BTC",
-                exchange_ts=ts, local_recv_ts=ts,
+                venue="binance",
+                product_type=ProductType.SPOT,
+                mechanism=Mechanism.CLOB,
+                symbol="BTC",
+                exchange_ts=ts,
+                local_recv_ts=ts,
                 mark_px=80_000.0 + (i % 5) * 0.5,
             )
 
@@ -81,16 +87,28 @@ class _PMStubAdapter(VenueAdapter):
         # the 10 USD floor. BTC at 80k vs strike 70k → p_yes ≈ 1.0, so
         # edge ≈ 1 - 0.93 - 0.005 = 0.065 > edge_buffer 0.03 → ENTER.
         yield BboEvent(
-            venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
-            exchange_ts=now, local_recv_ts=now,
-            bid_px=0.92, bid_sz=200.0, ask_px=0.93, ask_sz=200.0,
+            venue="polymarket",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="YES_TOKEN",
+            exchange_ts=now,
+            local_recv_ts=now,
+            bid_px=0.92,
+            bid_sz=200.0,
+            ask_px=0.93,
+            ask_sz=200.0,
         )
         yield BboEvent(
-            venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="NO_TOKEN",
-            exchange_ts=now, local_recv_ts=now,
-            bid_px=0.06, bid_sz=200.0, ask_px=0.07, ask_sz=200.0,
+            venue="polymarket",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="NO_TOKEN",
+            exchange_ts=now,
+            local_recv_ts=now,
+            bid_px=0.06,
+            bid_sz=200.0,
+            ask_px=0.07,
+            ask_sz=200.0,
         )
         # Keep the adapter alive so the runtime's scan loop ticks at least once.
         await asyncio.sleep(2.5)
@@ -110,26 +128,41 @@ class _PMUpDownStubAdapter(VenueAdapter):
     async def stream(self, _subs) -> AsyncIterator:
         now = time.time_ns()
         expiry_str = datetime.fromtimestamp(
-            (now + 12 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+            (now + 12 * 3600 * 1_000_000_000) / 1e9,
+            tz=timezone.utc,
         ).strftime("%Y%m%d-%H%M")
         # Live reference mark at 73_500 — this is the value the engine must
         # NOT capture (the new path uses the spot 1m close, not the live mark).
         yield MarkEvent(
-            venue="binance", product_type=ProductType.SPOT,
-            mechanism=Mechanism.CLOB, symbol="BTC",
-            exchange_ts=now, local_recv_ts=now, mark_px=73_500.0,
+            venue="binance",
+            product_type=ProductType.SPOT,
+            mechanism=Mechanism.CLOB,
+            symbol="BTC",
+            exchange_ts=now,
+            local_recv_ts=now,
+            mark_px=73_500.0,
         )
         # strike_ref_ts_ns is 90s in the past → the reference candle has
         # already closed (>60s), so the runtime's capture path should fire.
         yield QuestionMetaEvent(
-            venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
-            exchange_ts=now, local_recv_ts=now,
-            question_idx=909002, named_outcome_idxs=[0, 1],
-            keys=["class", "underlying", "expiry", "series_slug",
-                  "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
-            values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
-                    "YES_TOKEN", "NO_TOKEN", str(now - 90 * 1_000_000_000)],
+            venue="polymarket",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="YES_TOKEN",
+            exchange_ts=now,
+            local_recv_ts=now,
+            question_idx=909002,
+            named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "expiry", "series_slug", "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+            values=[
+                "priceBinary",
+                "BTC",
+                expiry_str,
+                "btc-up-or-down-daily",
+                "YES_TOKEN",
+                "NO_TOKEN",
+                str(now - 90 * 1_000_000_000),
+            ],
         )
         await asyncio.sleep(2.5)
 
@@ -149,27 +182,42 @@ class _PMUpDownSpotMarkStubAdapter(VenueAdapter):
     async def stream(self, _subs) -> AsyncIterator:
         now = time.time_ns()
         expiry_str = datetime.fromtimestamp(
-            (now + 12 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+            (now + 12 * 3600 * 1_000_000_000) / 1e9,
+            tz=timezone.utc,
         ).strftime("%Y%m%d-%H%M")
         # Emit a spot BBO mark under symbol="BTCUSDT" — _remap_reference_symbol
         # in _ingest_loop renames this to BTCUSDT_SPOT so last_mark("BTCUSDT_SPOT")
         # returns 73_500.  (symbol="BTC" would not be remapped; "BTCUSDT" is the
         # canonical Binance SPOT symbol the remap function expects.)
         yield MarkEvent(
-            venue="binance", product_type=ProductType.SPOT,
-            mechanism=Mechanism.CLOB, symbol="BTCUSDT",
-            exchange_ts=now, local_recv_ts=now, mark_px=73_500.0,
+            venue="binance",
+            product_type=ProductType.SPOT,
+            mechanism=Mechanism.CLOB,
+            symbol="BTCUSDT",
+            exchange_ts=now,
+            local_recv_ts=now,
+            mark_px=73_500.0,
         )
         # strike_ref_ts_ns is 90s in the past → candle already closed.
         yield QuestionMetaEvent(
-            venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
-            exchange_ts=now, local_recv_ts=now,
-            question_idx=909005, named_outcome_idxs=[0, 1],
-            keys=["class", "underlying", "expiry", "series_slug",
-                  "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
-            values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
-                    "YES_TOKEN", "NO_TOKEN", str(now - 90 * 1_000_000_000)],
+            venue="polymarket",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="YES_TOKEN",
+            exchange_ts=now,
+            local_recv_ts=now,
+            question_idx=909005,
+            named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "expiry", "series_slug", "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+            values=[
+                "priceBinary",
+                "BTC",
+                expiry_str,
+                "btc-up-or-down-daily",
+                "YES_TOKEN",
+                "NO_TOKEN",
+                str(now - 90 * 1_000_000_000),
+            ],
         )
         await asyncio.sleep(2.5)
 
@@ -188,22 +236,29 @@ class _PMUpDownRestartStubAdapter(VenueAdapter):
         now = time.time_ns()
         past_open = now - 6 * 3600 * 1_000_000_000  # 6h ago → well past the 60s candle-close gate
         expiry_str = datetime.fromtimestamp(
-            (now + 6 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+            (now + 6 * 3600 * 1_000_000_000) / 1e9,
+            tz=timezone.utc,
         ).strftime("%Y%m%d-%H%M")
         yield MarkEvent(
-            venue="binance", product_type=ProductType.SPOT,
-            mechanism=Mechanism.CLOB, symbol="BTC",
-            exchange_ts=now, local_recv_ts=now, mark_px=80_000.0,
+            venue="binance",
+            product_type=ProductType.SPOT,
+            mechanism=Mechanism.CLOB,
+            symbol="BTC",
+            exchange_ts=now,
+            local_recv_ts=now,
+            mark_px=80_000.0,
         )
         yield QuestionMetaEvent(
-            venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
-            exchange_ts=now, local_recv_ts=now,
-            question_idx=909003, named_outcome_idxs=[0, 1],
-            keys=["class", "underlying", "expiry", "series_slug",
-                  "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
-            values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
-                    "YES_TOKEN", "NO_TOKEN", str(past_open)],
+            venue="polymarket",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="YES_TOKEN",
+            exchange_ts=now,
+            local_recv_ts=now,
+            question_idx=909003,
+            named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "expiry", "series_slug", "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+            values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily", "YES_TOKEN", "NO_TOKEN", str(past_open)],
         )
         await asyncio.sleep(2.5)
 
@@ -224,10 +279,14 @@ def cfgs(tmp_path):
     # integration test (no trades, so recent_volume is 0).
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC"},
-        max_position_usd=200, stop_loss_pct=None,
-        tte_min_seconds=0, tte_max_seconds=86400,
-        price_extreme_threshold=0.0, price_extreme_max=1.0,
-        distance_from_strike_usd_min=0, vol_max=100,
+        max_position_usd=200,
+        stop_loss_pct=None,
+        tte_min_seconds=0,
+        tte_max_seconds=86400,
+        price_extreme_threshold=0.0,
+        price_extreme_max=1.0,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
         entry_cooldown_seconds=60,
     )
     strategy = StrategyConfig(
@@ -239,35 +298,51 @@ def cfgs(tmp_path):
         blocklist_question_idxs=[],
         defaults=entry,
         theta=ThetaParams(
-            vol_lookback_seconds=3600, vol_sampling_dt_seconds=60,
-            vol_clip_min=0.0, vol_clip_max=5.0,
-            edge_buffer=0.03, fee_taker=0.0, half_spread_assumption=0.005,
-            drift_lookback_seconds=3600, drift_blend=0.0,
-            favorite_threshold=0.90, edge_max=None,
-            exit_edge_threshold=0.0, time_stop_seconds=0,
-            exit_take_profit_mode=True, exit_fee=0.0007,
-            min_distance_pct=None, min_bid_notional_usd=10.0,
+            vol_lookback_seconds=3600,
+            vol_sampling_dt_seconds=60,
+            vol_clip_min=0.0,
+            vol_clip_max=5.0,
+            edge_buffer=0.03,
+            fee_taker=0.0,
+            half_spread_assumption=0.005,
+            drift_lookback_seconds=3600,
+            drift_blend=0.0,
+            favorite_threshold=0.90,
+            edge_max=None,
+            exit_edge_threshold=0.0,
+            time_stop_seconds=0,
+            exit_take_profit_mode=True,
+            exit_fee=0.0007,
+            min_distance_pct=None,
+            min_bid_notional_usd=10.0,
             topup_enabled=False,
-            fee_model="pm_binary", fee_rate=0.07,
+            fee_model="pm_binary",
+            fee_rate=0.07,
         ),
-        **{"global": GlobalRiskConfig(
-            max_total_inventory_usd=1000, max_concurrent_positions=5,
-            daily_loss_cap_usd=100, max_strike_distance_pct=50,
-            # Relaxed from 100 → 0: stub emits no TradeEvents, so the
-            # last-hour-notional gauge is 0. We want to verify the scanner
-            # produces a decision; the recent-volume risk gate is exercised
-            # separately by the unit tests for RiskGate.
-            min_recent_volume_usd=0,
-            stale_data_halt_seconds=30, reconcile_interval_seconds=60,
-            daily_window_start_hour_utc=6,
-        )},
+        **{
+            "global": GlobalRiskConfig(
+                max_total_inventory_usd=1000,
+                max_concurrent_positions=5,
+                daily_loss_cap_usd=100,
+                max_strike_distance_pct=50,
+                # Relaxed from 100 → 0: stub emits no TradeEvents, so the
+                # last-hour-notional gauge is 0. We want to verify the scanner
+                # produces a decision; the recent-volume risk gate is exercised
+                # separately by the unit tests for RiskGate.
+                min_recent_volume_usd=0,
+                stale_data_halt_seconds=30,
+                reconcile_interval_seconds=60,
+                daily_window_start_hour_utc=6,
+            )
+        },
     )
 
     pm_account: AccountConfig = PolymarketAccount(
         clob_host="https://clob.polymarket.com",
         chain_id=137,
         private_key="0xstub",
-        clob_api_key="stub", clob_api_secret="stub",
+        clob_api_key="stub",
+        clob_api_secret="stub",
         clob_api_passphrase="stub",
     )
     deploy = DeployConfig(
@@ -286,7 +361,9 @@ async def test_pm_paper_slot_emits_decision(cfgs):
     fake_tg = _FakeTelegram()
 
     def _exec_factory(
-        _alias: str, _acct: AccountConfig, paper: bool,
+        _alias: str,
+        _acct: AccountConfig,
+        paper: bool,
     ) -> ExecutionClient:
         # Always paper for the test; the slot's paper_mode flows through here.
         return PMClient(paper_mode=paper)
@@ -313,12 +390,8 @@ async def test_pm_paper_slot_emits_decision(cfgs):
     assert slot.exec_client.paper_mode is True
     # The scanner must have ticked and the strategy must have produced at
     # least one ENTER decision under the favourite-leg setup.
-    assert slot.scans_completed >= 1, (
-        f"scanner never ticked: {slot.scans_completed=}"
-    )
-    assert slot.decisions_emitted >= 1, (
-        f"strategy emitted no non-HOLD decisions: {slot.decisions_emitted=}"
-    )
+    assert slot.scans_completed >= 1, f"scanner never ticked: {slot.scans_completed=}"
+    assert slot.decisions_emitted >= 1, f"strategy emitted no non-HOLD decisions: {slot.decisions_emitted=}"
 
 
 @pytest.mark.asyncio
@@ -346,7 +419,7 @@ async def test_pm_updown_strike_captured_from_spot_close(cfgs):
 
     q = runtime.market_state.question(909002)
     assert q is not None
-    assert q.strike == 73_644.92          # spot 1m CLOSE, NOT the live mark 73_500
+    assert q.strike == 73_644.92  # spot 1m CLOSE, NOT the live mark 73_500
     [slot] = runtime.slots
     assert slot.dal.get_pm_strike(909002) == 73_644.92
 
@@ -444,9 +517,7 @@ async def test_pm_strike_capture_loop_registered_and_captures(cfgs):
     await asyncio.wait_for(runtime_task, timeout=5.0)
 
     q = runtime.market_state.question(909003)
-    assert q is not None and q.strike == 70_500.0, (
-        f"strike not captured: {q.strike if q else 'question missing'}"
-    )
+    assert q is not None and q.strike == 70_500.0, f"strike not captured: {q.strike if q else 'question missing'}"
     [slot] = runtime.slots
     assert slot.dal.get_pm_strike(909003) == 70_500.0
 
@@ -479,7 +550,8 @@ async def test_pm_strike_capture_loop_direct(cfgs):
     now_ns = time.time_ns()
     past_ref_ns = now_ns - 6 * 3600 * 1_000_000_000  # 6h ago → candle long closed
     expiry_str = datetime.fromtimestamp(
-        (now_ns + 6 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+        (now_ns + 6 * 3600 * 1_000_000_000) / 1e9,
+        tz=timezone.utc,
     ).strftime("%Y%m%d-%H%M")
 
     # Seed the question directly into market_state (no ingest loop).
@@ -492,10 +564,8 @@ async def test_pm_strike_capture_loop_direct(cfgs):
         local_recv_ts=now_ns,
         question_idx=909004,
         named_outcome_idxs=[0, 1],
-        keys=["class", "underlying", "expiry", "series_slug",
-              "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
-        values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
-                "YES_TOKEN", "NO_TOKEN", str(past_ref_ns)],
+        keys=["class", "underlying", "expiry", "series_slug", "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+        values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily", "YES_TOKEN", "NO_TOKEN", str(past_ref_ns)],
     )
     runtime.market_state.apply(meta_ev)
     qv = runtime.market_state.question(909004)
@@ -531,22 +601,37 @@ class _PMUpDownFutureRefStubAdapter(VenueAdapter):
         now = time.time_ns()
         future_ref_ts = now + 3600 * 1_000_000_000  # 1h from now — candle not closed
         expiry_str = datetime.fromtimestamp(
-            (now + 12 * 3600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+            (now + 12 * 3600 * 1_000_000_000) / 1e9,
+            tz=timezone.utc,
         ).strftime("%Y%m%d-%H%M")
         yield MarkEvent(
-            venue="binance", product_type=ProductType.SPOT,
-            mechanism=Mechanism.CLOB, symbol="BTC",
-            exchange_ts=now, local_recv_ts=now, mark_px=80_000.0,
+            venue="binance",
+            product_type=ProductType.SPOT,
+            mechanism=Mechanism.CLOB,
+            symbol="BTC",
+            exchange_ts=now,
+            local_recv_ts=now,
+            mark_px=80_000.0,
         )
         yield QuestionMetaEvent(
-            venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
-            exchange_ts=now, local_recv_ts=now,
-            question_idx=909006, named_outcome_idxs=[0, 1],
-            keys=["class", "underlying", "expiry", "series_slug",
-                  "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
-            values=["priceBinary", "BTC", expiry_str, "btc-up-or-down-daily",
-                    "YES_TOKEN", "NO_TOKEN", str(future_ref_ts)],
+            venue="polymarket",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="YES_TOKEN",
+            exchange_ts=now,
+            local_recv_ts=now,
+            question_idx=909006,
+            named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "expiry", "series_slug", "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+            values=[
+                "priceBinary",
+                "BTC",
+                expiry_str,
+                "btc-up-or-down-daily",
+                "YES_TOKEN",
+                "NO_TOKEN",
+                str(future_ref_ts),
+            ],
         )
         await asyncio.sleep(2.5)
 
@@ -557,15 +642,17 @@ async def test_pm_strike_capture_failure_leaves_nan_and_skips(cfgs):
     remain NaN and nothing must be persisted to the DAL. The market is
     effectively skipped (Fix 1 guard) rather than evaluated with a NaN strike."""
     import math
+
     strategy_cfg, deploy_cfg = cfgs
 
     runtime = EngineRuntime(
-        strategies=[strategy_cfg], deploy_cfg=deploy_cfg,
+        strategies=[strategy_cfg],
+        deploy_cfg=deploy_cfg,
         adapter_factory=_PMUpDownRestartStubAdapter,  # qidx 909003, ref_ts 6h ago
         subscriptions=[],
         exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
         telegram_factory=lambda _http: _FakeTelegram(),
-        klines_fetcher=lambda _ts_ns: None,   # fetch fails
+        klines_fetcher=lambda _ts_ns: None,  # fetch fails
     )
     runtime_task = asyncio.create_task(runtime.run())
     await asyncio.sleep(3.0)
@@ -577,9 +664,7 @@ async def test_pm_strike_capture_failure_leaves_nan_and_skips(cfgs):
         f"strike should still be NaN after failed fetch, got {q.strike if q else 'missing'}"
     )
     [slot] = runtime.slots
-    assert slot.dal.get_pm_strike(909003) is None, (
-        "nothing should be persisted when klines_fetcher returns None"
-    )
+    assert slot.dal.get_pm_strike(909003) is None, "nothing should be persisted when klines_fetcher returns None"
 
 
 @pytest.mark.asyncio
@@ -588,6 +673,7 @@ async def test_pm_strike_not_captured_before_candle_closes(cfgs):
     the candle-close gate must block the fetch entirely. klines_fetcher must
     NOT be called and the strike must remain NaN."""
     import math
+
     strategy_cfg, deploy_cfg = cfgs
 
     calls = {"n": 0}
@@ -597,7 +683,8 @@ async def test_pm_strike_not_captured_before_candle_closes(cfgs):
         return 70_000.0
 
     runtime = EngineRuntime(
-        strategies=[strategy_cfg], deploy_cfg=deploy_cfg,
+        strategies=[strategy_cfg],
+        deploy_cfg=deploy_cfg,
         adapter_factory=_PMUpDownFutureRefStubAdapter,  # qidx 909006, ref_ts 1h future
         subscriptions=[],
         exec_client_factory=lambda _a, _c, paper: PMClient(paper_mode=paper),
@@ -613,9 +700,7 @@ async def test_pm_strike_not_captured_before_candle_closes(cfgs):
     assert q is not None and math.isnan(q.strike), (
         f"strike should be NaN (candle not closed), got {q.strike if q else 'missing'}"
     )
-    assert calls["n"] == 0, (
-        f"klines_fetcher should not be called before candle closes, called {calls['n']} times"
-    )
+    assert calls["n"] == 0, f"klines_fetcher should not be called before candle closes, called {calls['n']} times"
 
 
 @pytest.mark.asyncio
@@ -648,13 +733,9 @@ async def test_pm_strike_divergence_alerts_but_still_trades(cfgs):
     # Strike must still be captured (alert-only — no skip).
     q = runtime.market_state.question(909005)
     assert q is not None, "question 909005 not found in market_state"
-    assert q.strike == 73_644.92, (
-        f"strike should be 73644.92 (klines value), got {q.strike}"
-    )
+    assert q.strike == 73_644.92, f"strike should be 73644.92 (klines value), got {q.strike}"
     [slot] = runtime.slots
     assert slot.dal.get_pm_strike(909005) == 73_644.92
 
     # A PMStrikeMismatch Telegram alert must have fired.
-    assert any("divergence" in m.lower() for m in tg.messages), (
-        f"no divergence alert in tg.messages: {tg.messages}"
-    )
+    assert any("divergence" in m.lower() for m in tg.messages), f"no divergence alert in tg.messages: {tg.messages}"

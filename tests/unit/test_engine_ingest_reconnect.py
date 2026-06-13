@@ -7,6 +7,7 @@ real adverse move after the feed died never tripped a stop). The loop must now
 reconnect with bounded backoff, alert FeedDown/FeedRecovered, and latch all slots
 halted on a prolonged outage.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +15,9 @@ import asyncio
 import pytest
 
 from hlanalysis.events import (
-    Mechanism, MarkEvent, ProductType,
+    Mechanism,
+    MarkEvent,
+    ProductType,
 )
 from tests.unit.test_async_offload import _build_runtime_with_recording
 
@@ -44,9 +47,13 @@ class _RaiseThenYieldAdapter:
             raise RuntimeError("ws dead")
             yield  # unreachable
         yield MarkEvent(
-            venue="hyperliquid", product_type=ProductType.PERP,
-            mechanism=Mechanism.CLOB, symbol="BTC",
-            exchange_ts=1, local_recv_ts=1, mark_px=80_000.0,
+            venue="hyperliquid",
+            product_type=ProductType.PERP,
+            mechanism=Mechanism.CLOB,
+            symbol="BTC",
+            exchange_ts=1,
+            local_recv_ts=1,
+            mark_px=80_000.0,
         )
 
 

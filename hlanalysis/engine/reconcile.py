@@ -171,20 +171,31 @@ class Reconciler:
             if fills:
                 # Mark filled, replay fills into DB
                 for f in fills:
-                    self.dal.append_fill(Fill(
-                        fill_id=f.fill_id, cloid=cloid, question_idx=db_o.question_idx,
-                        symbol=db_o.symbol, side=f.side, price=f.price, size=f.size,
-                        fee=f.fee, ts_ns=f.ts_ns, closed_pnl=f.closed_pnl,
-                        source=self.venue_fill_source,
-                    ))
+                    self.dal.append_fill(
+                        Fill(
+                            fill_id=f.fill_id,
+                            cloid=cloid,
+                            question_idx=db_o.question_idx,
+                            symbol=db_o.symbol,
+                            side=f.side,
+                            price=f.price,
+                            size=f.size,
+                            fee=f.fee,
+                            ts_ns=f.ts_ns,
+                            closed_pnl=f.closed_pnl,
+                            source=self.venue_fill_source,
+                        )
+                    )
                 self.dal.update_order_status(cloid, status="filled", now_ns=now_ns)
                 # SHR-83: record the late-discovered fill on the journal row the
                 # router opened at decision time (latest fill = the resolving one).
                 if self.journal is not None:
                     last = fills[-1]
                     self.journal.record_fill(
-                        cloid=cloid, fill_ts_ns=last.ts_ns,
-                        fill_px=last.price, fill_sz=last.size,
+                        cloid=cloid,
+                        fill_ts_ns=last.ts_ns,
+                        fill_px=last.price,
+                        fill_sz=last.size,
                     )
                 # Diagnostic (incident 2026-06-04, #1 root-cause suspect): this
                 # path replays the Fill rows + marks the order filled but does
@@ -192,13 +203,14 @@ class Reconciler:
                 # booked this fill (PM ack returned no fill info), the position
                 # stays open by `net_delta` forever → endless re-exit loop. Log
                 # the unapplied delta so the next occurrence is unambiguous.
-                net_delta = sum(
-                    (f.size if f.side == "buy" else -f.size) for f in fills
-                )
+                net_delta = sum((f.size if f.side == "buy" else -f.size) for f in fills)
                 logger.info(
-                    "reconcile_fill_discovered cloid={} qidx={} symbol={} "
-                    "n_fills={} net_delta={:g}",
-                    cloid, db_o.question_idx, db_o.symbol, len(fills), net_delta,
+                    "reconcile_fill_discovered cloid={} qidx={} symbol={} n_fills={} net_delta={:g}",
+                    cloid,
+                    db_o.question_idx,
+                    db_o.symbol,
+                    len(fills),
+                    net_delta,
                 )
                 # SHR-46: apply the venue-confirmed position so the re-exit loop
                 # can't re-fire. Use the venue's reported qty/avg_entry
@@ -220,28 +232,37 @@ class Reconciler:
                         # close and stripping stop protection from a still-open
                         # position. Mirrors the adopt-on-mismatch path below.
                         existing = self.dal.get_position(db_o.question_idx)
-                        self.dal.upsert_position(Position(
-                            question_idx=db_o.question_idx,
-                            symbol=db_o.symbol,
-                            qty=vp.qty,
-                            avg_entry=vp.avg_entry,
-                            realized_pnl=existing.realized_pnl if existing else 0.0,
-                            last_update_ts_ns=now_ns,
-                            stop_loss_price=(
-                                existing.stop_loss_price if existing
-                                else STOP_DISABLED_SENTINEL
-                            ),
-                        ))
-                drift.append(ReconcileDrift(
-                    ts_ns=now_ns, account_alias=self.account_alias, case="state_mismatch", cloid=cloid,
-                    question_idx=db_o.question_idx,
-                    detail={"resolution": "filled_via_user_fills"},
-                ))
+                        self.dal.upsert_position(
+                            Position(
+                                question_idx=db_o.question_idx,
+                                symbol=db_o.symbol,
+                                qty=vp.qty,
+                                avg_entry=vp.avg_entry,
+                                realized_pnl=existing.realized_pnl if existing else 0.0,
+                                last_update_ts_ns=now_ns,
+                                stop_loss_price=(existing.stop_loss_price if existing else STOP_DISABLED_SENTINEL),
+                            )
+                        )
+                drift.append(
+                    ReconcileDrift(
+                        ts_ns=now_ns,
+                        account_alias=self.account_alias,
+                        case="state_mismatch",
+                        cloid=cloid,
+                        question_idx=db_o.question_idx,
+                        detail={"resolution": "filled_via_user_fills"},
+                    )
+                )
             else:
                 self.dal.update_order_status(cloid, status="cancelled", now_ns=now_ns)
-                drift.append(ReconcileDrift(
-                    ts_ns=now_ns, account_alias=self.account_alias, case="local_ghost", cloid=cloid,
-                ))
+                drift.append(
+                    ReconcileDrift(
+                        ts_ns=now_ns,
+                        account_alias=self.account_alias,
+                        case="local_ghost",
+                        cloid=cloid,
+                    )
+                )
 
         # venue-orphan: on venue, not in DB live. Orphan cloid is reported in
         # the venue's form (HL hex) — that's what cancel() needs to address it.
@@ -249,10 +270,15 @@ class Reconciler:
             if cloid_hex in local_by_hex:
                 continue
             orphans.append((vo.cloid, vo.symbol))
-            drift.append(ReconcileDrift(
-                ts_ns=now_ns, account_alias=self.account_alias, case="venue_orphan", cloid=vo.cloid,
-                detail={"symbol": vo.symbol},
-            ))
+            drift.append(
+                ReconcileDrift(
+                    ts_ns=now_ns,
+                    account_alias=self.account_alias,
+                    case="venue_orphan",
+                    cloid=vo.cloid,
+                    detail={"symbol": vo.symbol},
+                )
+            )
 
         # state-mismatch: both, fields differ — HL wins. Keyed by hex tail; we
         # carry the local cloid through to upsert_order so the DB row keeps its
@@ -267,16 +293,30 @@ class Reconciler:
                 or db_o.symbol != vo.symbol
                 or db_o.venue_oid != vo.venue_oid
             ):
-                self.dal.upsert_order(OpenOrder(
-                    cloid=db_o.cloid, venue_oid=vo.venue_oid, question_idx=db_o.question_idx,
-                    symbol=vo.symbol, side=db_o.side, price=vo.price, size=vo.size,
-                    status="open", placed_ts_ns=db_o.placed_ts_ns,
-                    last_update_ts_ns=now_ns, strategy_id=db_o.strategy_id,
-                ))
-                drift.append(ReconcileDrift(
-                    ts_ns=now_ns, account_alias=self.account_alias, case="state_mismatch", cloid=db_o.cloid,
-                    detail={"hl_price": f"{vo.price}", "db_price": f"{db_o.price}"},
-                ))
+                self.dal.upsert_order(
+                    OpenOrder(
+                        cloid=db_o.cloid,
+                        venue_oid=vo.venue_oid,
+                        question_idx=db_o.question_idx,
+                        symbol=vo.symbol,
+                        side=db_o.side,
+                        price=vo.price,
+                        size=vo.size,
+                        status="open",
+                        placed_ts_ns=db_o.placed_ts_ns,
+                        last_update_ts_ns=now_ns,
+                        strategy_id=db_o.strategy_id,
+                    )
+                )
+                drift.append(
+                    ReconcileDrift(
+                        ts_ns=now_ns,
+                        account_alias=self.account_alias,
+                        case="state_mismatch",
+                        cloid=db_o.cloid,
+                        detail={"hl_price": f"{vo.price}", "db_price": f"{db_o.price}"},
+                    )
+                )
 
         # --- positions ---
         # When the venue position set couldn't be fetched (PM data-api error),
@@ -308,12 +348,15 @@ class Reconciler:
             # falls through to the vanish/adopt paths below.
             if not apply and abs(lp.qty) <= _DUST_QTY_ABS_TOL:
                 self.dal.delete_position(qidx)
-                drift.append(ReconcileDrift(
-                    ts_ns=now_ns, account_alias=self.account_alias,
-                    case="position_mismatch", question_idx=qidx,
-                    detail={"resolution": "dust_cleared",
-                            "symbol": lp.symbol, "db_qty": f"{lp.qty}"},
-                ))
+                drift.append(
+                    ReconcileDrift(
+                        ts_ns=now_ns,
+                        account_alias=self.account_alias,
+                        case="position_mismatch",
+                        question_idx=qidx,
+                        detail={"resolution": "dust_cleared", "symbol": lp.symbol, "db_qty": f"{lp.qty}"},
+                    )
+                )
                 continue
             if vp is None or abs(vp.qty) < 1e-9:
                 # Position absent on venue (or present at qty=0). On HL this is
@@ -329,16 +372,25 @@ class Reconciler:
                     vanished.append((qidx, lp.symbol, lp))
                     self.dal.delete_position(qidx)
                 elif qidx not in self._settled_qidxs:
-                    drift.append(ReconcileDrift(
-                        ts_ns=now_ns, account_alias=self.account_alias,
-                        case="position_mismatch", question_idx=qidx,
-                        detail={"resolution": "venue_absent_alert_only",
-                                "symbol": lp.symbol, "db_qty": f"{lp.qty}"},
-                    ))
+                    drift.append(
+                        ReconcileDrift(
+                            ts_ns=now_ns,
+                            account_alias=self.account_alias,
+                            case="position_mismatch",
+                            question_idx=qidx,
+                            detail={
+                                "resolution": "venue_absent_alert_only",
+                                "symbol": lp.symbol,
+                                "db_qty": f"{lp.qty}",
+                            },
+                        )
+                    )
                 continue
             qty_diff = not math.isclose(
-                vp.qty, lp.qty,
-                rel_tol=_QTY_MISMATCH_REL_TOL, abs_tol=_QTY_MISMATCH_ABS_TOL,
+                vp.qty,
+                lp.qty,
+                rel_tol=_QTY_MISMATCH_REL_TOL,
+                abs_tol=_QTY_MISMATCH_ABS_TOL,
             )
             avg_diff = abs(vp.avg_entry - lp.avg_entry) > 1e-9
             if qty_diff or avg_diff:
@@ -350,20 +402,30 @@ class Reconciler:
                     # avg_entry is display-only (the daily-loss gate reads PnL
                     # from HL directly); qty is load-bearing (risk caps +
                     # have_position), so qty drift surfaces as an alert.
-                    self.dal.upsert_position(Position(
-                        question_idx=qidx, symbol=lp.symbol, qty=vp.qty,
-                        avg_entry=vp.avg_entry, realized_pnl=lp.realized_pnl,
-                        last_update_ts_ns=now_ns, stop_loss_price=lp.stop_loss_price,
-                    ))
+                    self.dal.upsert_position(
+                        Position(
+                            question_idx=qidx,
+                            symbol=lp.symbol,
+                            qty=vp.qty,
+                            avg_entry=vp.avg_entry,
+                            realized_pnl=lp.realized_pnl,
+                            last_update_ts_ns=now_ns,
+                            stop_loss_price=lp.stop_loss_price,
+                        )
+                    )
                 if qty_diff:
                     detail = {"hl_qty": f"{vp.qty}", "db_qty": f"{lp.qty}"}
                     if not apply:
                         detail["resolution"] = "qty_mismatch_alert_only"
-                    drift.append(ReconcileDrift(
-                        ts_ns=now_ns, account_alias=self.account_alias,
-                        case="position_mismatch", question_idx=qidx,
-                        detail=detail,
-                    ))
+                    drift.append(
+                        ReconcileDrift(
+                            ts_ns=now_ns,
+                            account_alias=self.account_alias,
+                            case="position_mismatch",
+                            question_idx=qidx,
+                            detail=detail,
+                        )
+                    )
 
         # Position on venue we don't track locally. In apply mode (restart / HL)
         # adopt it into the DB so risk caps + the strategy's have_position HOLD
@@ -378,11 +440,15 @@ class Reconciler:
                 # cannot invent a question_idx — it's the position table's
                 # primary key, and collisions would corrupt accounting. Emit
                 # an unattributed drift event so the orphan is visible.
-                drift.append(ReconcileDrift(
-                    ts_ns=now_ns, account_alias=self.account_alias, case="position_mismatch", question_idx=0,
-                    detail={"resolution": "venue_orphan_unattributed",
-                            "symbol": sym, "qty": f"{vp.qty}"},
-                ))
+                drift.append(
+                    ReconcileDrift(
+                        ts_ns=now_ns,
+                        account_alias=self.account_alias,
+                        case="position_mismatch",
+                        question_idx=0,
+                        detail={"resolution": "venue_orphan_unattributed", "symbol": sym, "qty": f"{vp.qty}"},
+                    )
+                )
                 continue
             if qidx in local_by_qidx:
                 continue
@@ -394,18 +460,31 @@ class Reconciler:
                 # un-sellable phantom). See _settled_qidxs note.
                 continue
             if apply:
-                self.dal.upsert_position(Position(
-                    question_idx=qidx, symbol=sym, qty=vp.qty,
-                    avg_entry=vp.avg_entry, realized_pnl=0.0,
-                    last_update_ts_ns=now_ns,
-                    stop_loss_price=STOP_DISABLED_SENTINEL,
-                ))
-            drift.append(ReconcileDrift(
-                ts_ns=now_ns, account_alias=self.account_alias, case="position_mismatch", question_idx=qidx,
-                detail={"resolution": "adopted_venue_orphan" if apply
-                        else "venue_orphan_alert_only", "symbol": sym,
-                        "qty": f"{vp.qty}", "avg_entry": f"{vp.avg_entry}"},
-            ))
+                self.dal.upsert_position(
+                    Position(
+                        question_idx=qidx,
+                        symbol=sym,
+                        qty=vp.qty,
+                        avg_entry=vp.avg_entry,
+                        realized_pnl=0.0,
+                        last_update_ts_ns=now_ns,
+                        stop_loss_price=STOP_DISABLED_SENTINEL,
+                    )
+                )
+            drift.append(
+                ReconcileDrift(
+                    ts_ns=now_ns,
+                    account_alias=self.account_alias,
+                    case="position_mismatch",
+                    question_idx=qidx,
+                    detail={
+                        "resolution": "adopted_venue_orphan" if apply else "venue_orphan_alert_only",
+                        "symbol": sym,
+                        "qty": f"{vp.qty}",
+                        "avg_entry": f"{vp.avg_entry}",
+                    },
+                )
+            )
 
         return ReconcileResult(
             drift_events=drift,

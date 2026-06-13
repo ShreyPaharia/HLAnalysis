@@ -88,6 +88,7 @@ class Exit(_Base):
 class NewQuestion(_Base):
     """Fired the first time the engine sees a question_idx in a QuestionMetaEvent.
     Used for rollover/new-market alerts on Telegram."""
+
     kind: Literal["new_question"] = "new_question"
     question_idx: int
     klass: str = ""
@@ -101,6 +102,7 @@ class OrderRejected(_Base):
     gate's hard veto is already covered by RiskVeto; this captures venue-side
     rejections (min notional, invalid size, insufficient balance, etc.) that
     bypass the gate."""
+
     kind: Literal["order_rejected"] = "order_rejected"
     cloid: str
     question_idx: int
@@ -117,6 +119,7 @@ class OrderUnconfirmed(_Base):
     change. Polymarket CLOB orders can stall under chain load; this gives
     operators an early warning so they can investigate before the position
     sizing assumption breaks down."""
+
     kind: Literal["order_unconfirmed"] = "order_unconfirmed"
     cloid: str
     symbol: str
@@ -134,6 +137,7 @@ class RedemptionTimeout(_Base):
     is a TIME-BASED watchdog only — operator verifies on PM UI and manually
     redeems if needed. expected_payout_usd is qty when realized_pnl > 0
     (winner) or 0 otherwise (loser)."""
+
     kind: Literal["redemption_timeout"] = "redemption_timeout"
     question_idx: int
     symbol: str
@@ -148,6 +152,7 @@ class PMStrikeMismatch(_Base):
     1m close diverges materially from the live BTCUSDT_SPOT BBO mark. This is
     a cross-check between two independent data paths (REST klines vs. live feed).
     Alert-only — the strike is still persisted and the market still trades."""
+
     kind: Literal["pm_strike_mismatch"] = "pm_strike_mismatch"
     question_idx: int
     captured_strike: float
@@ -160,6 +165,7 @@ class EngineHeartbeat(_Base):
     design (no Telegram) — its purpose is to give in-process sinks and any
     external uptime monitor a positive signal so the ABSENCE of heartbeats can
     be alerted on (SHR-43)."""
+
     kind: Literal["engine_heartbeat"] = "engine_heartbeat"
     events_ingested: int
     d_events: int
@@ -170,6 +176,7 @@ class FeedStale(_Base):
     """Published when zero market-data events were ingested over a full
     heartbeat interval while subscriptions are active — the feed/ingest is dead,
     not a calm market. Drives a Telegram alert (SHR-43)."""
+
     kind: Literal["feed_stale"] = "feed_stale"
     d_events: int
     interval_seconds: float
@@ -178,6 +185,7 @@ class FeedStale(_Base):
 class FeedDown(_Base):
     """The market-data stream disconnected (raised or ended); the ingest loop is
     reconnecting with backoff (SHR-42). Published once per outage."""
+
     kind: Literal["feed_down"] = "feed_down"
     consecutive_failures: int
 
@@ -185,6 +193,7 @@ class FeedDown(_Base):
 class FeedRecovered(_Base):
     """The market-data stream reconnected and delivered an event after a
     FeedDown (SHR-42)."""
+
     kind: Literal["feed_recovered"] = "feed_recovered"
 
 
@@ -195,12 +204,31 @@ class MemoryHalt(_Base):
     Telegram alert.  The halt latches all slots and writes their kill-switch
     flag files — only operator flag-removal and an engine restart can resume
     trading.  Stop-loss loops remain running to protect open positions."""
+
     kind: Literal["memory_halt"] = "memory_halt"
     rss_kb: int
     ceiling_kb: int
 
 
 BusEvent = Annotated[
-    RiskVeto | RiskHalt | StopLossTriggered | DailyLossHalt | StaleDataHalt | KillSwitchActivated | ReconcileDrift | Entry | Exit | NewQuestion | OrderRejected | OrderUnconfirmed | RedemptionTimeout | PMStrikeMismatch | EngineHeartbeat | FeedStale | FeedDown | FeedRecovered | MemoryHalt,
+    RiskVeto
+    | RiskHalt
+    | StopLossTriggered
+    | DailyLossHalt
+    | StaleDataHalt
+    | KillSwitchActivated
+    | ReconcileDrift
+    | Entry
+    | Exit
+    | NewQuestion
+    | OrderRejected
+    | OrderUnconfirmed
+    | RedemptionTimeout
+    | PMStrikeMismatch
+    | EngineHeartbeat
+    | FeedStale
+    | FeedDown
+    | FeedRecovered
+    | MemoryHalt,
     Field(discriminator="kind"),
 ]

@@ -24,7 +24,8 @@ from .state import StateDAL
 
 
 def _binary_favorite_sym(
-    question: QuestionView, books: dict[str, BookState],
+    question: QuestionView,
+    books: dict[str, BookState],
 ) -> str | None:
     """Return the higher-mid leg of a binary question, or None if not binary
     or no leg has a usable quote. Used by the gate-log snapshot to identify
@@ -268,14 +269,18 @@ class Scanner:
             return q
         persisted = self.dal.get_pm_strike(q.question_idx)
         if persisted is not None and self.ms.set_question_strike(
-            q.question_idx, persisted,
+            q.question_idx,
+            persisted,
         ):
             self._pm_strike_seen.add(q.question_idx)
             return self.ms.question(q.question_idx) or q
         return q
 
     def scan(
-        self, *, now_ns: int, realized_pnl_today: float | None = None,
+        self,
+        *,
+        now_ns: int,
+        realized_pnl_today: float | None = None,
     ) -> list[ScannedDecision]:
         out: list[ScannedDecision] = []
         ref = self.ms.last_mark(self.ref_symbol)
@@ -287,9 +292,7 @@ class Scanner:
         reference_age_ns = (now_ns - ref_ts) if ref_ts is not None else 0
         positions_db = self.dal.all_positions()
         positions_by_q = {p.question_idx: p for p in positions_db}
-        all_positions_strategy = [
-            self._db_pos_to_strategy(p) for p in positions_db
-        ]
+        all_positions_strategy = [self._db_pos_to_strategy(p) for p in positions_db]
         live_orders = self.dal.live_orders()
         live_notional = sum(o.price * o.size for o in live_orders)
         # Daily loss: realized PnL since the configured daily window start
@@ -297,7 +300,8 @@ class Scanner:
         # binary settlement). Prefer the injected provider (HL truth) over
         # the local DB; see _pnl_provider doc.
         midnight_ns = self._daily_window_start_ns(
-            now_ns, hour=self.cfg.global_.daily_window_start_hour_utc,
+            now_ns,
+            hour=self.cfg.global_.daily_window_start_hour_utc,
         )
         if realized_pnl_today is not None:
             # SHR-41: the live runtime pre-fetches realized PnL off the event
@@ -332,14 +336,22 @@ class Scanner:
             # PM token ids — rejected by the CLOB as "Invalid token id").
             series_slug = dict(q.kv).get("series_slug", "")
             fields = {
-                "class": q.klass, "underlying": q.underlying, "period": q.period,
-                "venue": q.venue, "series_slug": series_slug,
+                "class": q.klass,
+                "underlying": q.underlying,
+                "period": q.period,
+                "venue": q.venue,
+                "series_slug": series_slug,
             }
             if cached is None:
                 # First sight of this qidx — compute and memoize the verdict.
-                cached = match_question(
-                    self.cfg, question_idx=qidx, fields=fields,
-                ) is not None
+                cached = (
+                    match_question(
+                        self.cfg,
+                        question_idx=qidx,
+                        fields=fields,
+                    )
+                    is not None
+                )
                 self._tradeable_cache[qidx] = cached
                 if not cached:
                     continue
@@ -361,17 +373,13 @@ class Scanner:
             # silently swallow every bucket leg and the bucket-only slot would
             # emit zero decisions (v31_pm_eth_ms incident 2026-06-12).
             if (
-                q.venue == "polymarket"
-                and q.klass == "priceBinary"
-                and q.strike != q.strike  # NaN check
+                q.venue == "polymarket" and q.klass == "priceBinary" and q.strike != q.strike  # NaN check
             ):
                 continue
             # Multi-outcome support: feed every leg of the question to the
             # strategy so it can decide across all sides (priceBucket has 6 legs;
             # priceBinary has 2). Skip the question if no leg has a book yet.
-            leg_syms = q.leg_symbols or (
-                (q.yes_symbol, q.no_symbol) if q.yes_symbol else ()
-            )
+            leg_syms = q.leg_symbols or ((q.yes_symbol, q.no_symbol) if q.yes_symbol else ())
             books: dict[str, BookState] = {}
             for sym in leg_syms:
                 b = self.ms.book(sym)
@@ -382,9 +390,7 @@ class Scanner:
 
             db_pos = positions_by_q.get(q.question_idx)
             strat_pos = self._db_pos_to_strategy(db_pos) if db_pos else None
-            volume_total = sum(
-                self.ms.recent_volume_usd(sym, now=now_ns) for sym in leg_syms
-            )
+            volume_total = sum(self.ms.recent_volume_usd(sym, now=now_ns) for sym in leg_syms)
             # Resolve the (dt, n) for σ/OHLC history reads per question class.
             # Classes with a theta_override that sets vol_sampling_dt_seconds read
             # the matching (symbol, dt) bar series; all others use the default
@@ -430,9 +436,7 @@ class Scanner:
             # call to strategy.evaluate is byte-identical. The backtest historically
             # passed numpy arrays (duck-typed silence); new code follows the contract.
             recent_returns: tuple[float, ...] = tuple(_rets_arr.tolist())
-            recent_hl_bars: tuple[tuple[float, float], ...] = tuple(
-                (float(h), float(lo)) for h, lo in _hl_arr
-            )
+            recent_hl_bars: tuple[tuple[float, float], ...] = tuple((float(h), float(lo)) for h, lo in _hl_arr)
             decision = self.strategy.evaluate(
                 question=q,
                 books=books,
@@ -444,7 +448,10 @@ class Scanner:
                 now_ns=now_ns,
             )
             self._maybe_log_gate_transition(
-                question=q, decision=decision, books=books, now_ns=now_ns,
+                question=q,
+                decision=decision,
+                books=books,
+                now_ns=now_ns,
                 position=db_pos,
             )
             if decision.action is Action.HOLD:
@@ -467,28 +474,37 @@ class Scanner:
                     now_ns=now_ns,
                     reference_age_ns=reference_age_ns,
                 )
-                out.append(ScannedDecision(
-                    decision=Decision(action=decision.action, intents=(intent,),
-                                       diagnostics=decision.diagnostics),
-                    inputs=inputs,
-                    recent_returns=tuple(recent_returns),
-                ))
+                out.append(
+                    ScannedDecision(
+                        decision=Decision(action=decision.action, intents=(intent,), diagnostics=decision.diagnostics),
+                        inputs=inputs,
+                        recent_returns=tuple(recent_returns),
+                    )
+                )
             # EXIT with no intents (settlement) — pass through with a synthetic input
             if decision.action is Action.EXIT and not decision.intents:
                 # Build a stub inputs (book is required; pick any leg we have)
                 stub_book = next(iter(books.values()))
                 inputs = RiskInputs(
-                    question=q, question_fields=fields, reference_price=ref,
-                    book=stub_book, recent_volume_usd=0.0,
+                    question=q,
+                    question_fields=fields,
+                    reference_price=ref,
+                    book=stub_book,
+                    recent_volume_usd=0.0,
                     positions=all_positions_strategy,
                     live_orders_total_notional=live_notional,
-                    realized_pnl_today=realized_today, kill_switch_active=kill,
-                    last_reconcile_ns=self.last_reconcile_ns, now_ns=now_ns,
+                    realized_pnl_today=realized_today,
+                    kill_switch_active=kill,
+                    last_reconcile_ns=self.last_reconcile_ns,
+                    now_ns=now_ns,
                 )
-                out.append(ScannedDecision(
-                    decision=decision, inputs=inputs,
-                    recent_returns=tuple(recent_returns),
-                ))
+                out.append(
+                    ScannedDecision(
+                        decision=decision,
+                        inputs=inputs,
+                        recent_returns=tuple(recent_returns),
+                    )
+                )
         return out
 
     def prune(self, active_question_idxs: set[int]) -> None:
@@ -510,8 +526,12 @@ class Scanner:
             self._last_logged_state.pop(idx, None)
 
     def _maybe_log_gate_transition(
-        self, *, question: QuestionView, decision: Decision,
-        books: dict[str, BookState], now_ns: int,
+        self,
+        *,
+        question: QuestionView,
+        decision: Decision,
+        books: dict[str, BookState],
+        now_ns: int,
         position: Position | None = None,
     ) -> None:
         """Append a JSONL line when the (action, primary_diag) tuple changes
@@ -527,9 +547,7 @@ class Scanner:
         # Reduce diagnostics to a stable identifier. Strategies emit one or
         # more Diagnostic objects per decision; the first one is the
         # human-readable label of why this scan tick ended where it did.
-        diag_name = (
-            decision.diagnostics[0].message if decision.diagnostics else ""
-        )
+        diag_name = decision.diagnostics[0].message if decision.diagnostics else ""
         key = (decision.action.value, diag_name)
         prev = self._last_logged_state.get(question.question_idx)
         if prev == key:
@@ -569,9 +587,9 @@ class Scanner:
             # quotes 0.06–0.10 while the strategy was failing checks against
             # the NO leg at 0.90+).
             chosen_sym = _binary_favorite_sym(question, books)
-        sample_book: BookState | None = (
-            books.get(chosen_sym) if chosen_sym else None
-        ) or next(iter(books.values()), None)
+        sample_book: BookState | None = (books.get(chosen_sym) if chosen_sym else None) or next(
+            iter(books.values()), None
+        )
         bid = sample_book.bid_px if sample_book else None
         ask = sample_book.ask_px if sample_book else None
         mid = (bid + ask) / 2.0 if (bid is not None and ask is not None) else None
@@ -587,11 +605,7 @@ class Scanner:
             "bid_sz": sample_book.bid_sz if sample_book else None,
             "ask_sz": sample_book.ask_sz if sample_book else None,
             "strike": question.strike if question.strike == question.strike else None,
-            "diag_fields": [
-                {"k": k, "v": v}
-                for d in decision.diagnostics
-                for (k, v) in d.fields
-            ] or None,
+            "diag_fields": [{"k": k, "v": v} for d in decision.diagnostics for (k, v) in d.fields] or None,
         }
         try:
             self.gate_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -606,8 +620,11 @@ class Scanner:
         if p is None:
             return None
         return Position(
-            question_idx=p.question_idx, symbol=p.symbol, qty=p.qty,
-            avg_entry=p.avg_entry, stop_loss_price=p.stop_loss_price,
+            question_idx=p.question_idx,
+            symbol=p.symbol,
+            qty=p.qty,
+            avg_entry=p.avg_entry,
+            stop_loss_price=p.stop_loss_price,
             last_update_ts_ns=p.last_update_ts_ns,
         )
 
@@ -626,4 +643,5 @@ class Scanner:
         so the engine, the sim, and the risk gate all share one copy.
         """
         from hlanalysis.risk.caps import daily_window_start_ns
+
         return daily_window_start_ns(now_ns, hour=hour)

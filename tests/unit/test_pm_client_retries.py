@@ -3,6 +3,7 @@ paths must RETRY (so a momentary data-api hiccup is not silently treated as an
 empty book / rejected order), while genuine business rejections fail fast with
 no retry. Mirrors hl_client's read/write retry discipline.
 """
+
 from __future__ import annotations
 
 import requests
@@ -14,8 +15,12 @@ from hlanalysis.engine.pm_client import PMClient
 
 def _client() -> PMClient:
     return PMClient(
-        paper_mode=False, clob_host="x", chain_id=137,
-        private_key="0x0", clob_api_key="k", clob_api_secret="s",
+        paper_mode=False,
+        clob_host="x",
+        chain_id=137,
+        private_key="0x0",
+        clob_api_key="k",
+        clob_api_secret="s",
         clob_api_passphrase="p",
     )
 
@@ -33,16 +38,23 @@ class _FlakyReadClob:
         self.calls += 1
         if self.calls <= self._fail_times:
             raise self._exc
-        return [{
-            "id": "oid-1", "asset_id": "tok-1", "side": "BUY",
-            "price": "0.40", "original_size": "10", "size_matched": "0",
-            "created_at": 1,
-        }]
+        return [
+            {
+                "id": "oid-1",
+                "asset_id": "tok-1",
+                "side": "BUY",
+                "price": "0.40",
+                "original_size": "10",
+                "size_matched": "0",
+                "created_at": 1,
+            }
+        ]
 
 
 def test_live_read_retries_transient_then_succeeds():
     fake = _FlakyReadClob(
-        exc=requests.exceptions.ConnectionError("data-api blip"), fail_times=2,
+        exc=requests.exceptions.ConnectionError("data-api blip"),
+        fail_times=2,
     )
     c = _client()
     c._sdk = fake
@@ -72,27 +84,35 @@ class _FlakyWriteClob:
         self._fail_times = fail_times
         self.calls = 0
 
-    def create_and_post_market_order(self, *, order_args, options, order_type,
-                                     defer_exec=False):
+    def create_and_post_market_order(self, *, order_args, options, order_type, defer_exec=False):
         self.calls += 1
         if self.calls <= self._fail_times:
             raise self._exc
         return {
-            "success": True, "orderID": "0xfakeid", "status": "matched",
-            "makingAmount": "4.0", "takingAmount": "10.0",
+            "success": True,
+            "orderID": "0xfakeid",
+            "status": "matched",
+            "makingAmount": "4.0",
+            "takingAmount": "10.0",
         }
 
 
 def _buy_req() -> PlaceRequest:
     return PlaceRequest(
-        cloid="hla-v31_pm-abc", symbol="tok-1", side="buy",
-        size=10.0, price=0.40, reduce_only=False, time_in_force="ioc",
+        cloid="hla-v31_pm-abc",
+        symbol="tok-1",
+        side="buy",
+        size=10.0,
+        price=0.40,
+        reduce_only=False,
+        time_in_force="ioc",
     )
 
 
 def test_live_write_retries_transient_then_succeeds():
     fake = _FlakyWriteClob(
-        exc=requests.exceptions.Timeout("clob 504"), fail_times=2,
+        exc=requests.exceptions.Timeout("clob 504"),
+        fail_times=2,
     )
     c = _client()
     c._sdk = fake
@@ -118,6 +138,7 @@ def test_live_write_does_not_retry_business_error():
 # scalar, so a stalled TLS handshake can't hang indefinitely.
 # ---------------------------------------------------------------------------
 
+
 def test_data_api_get_passes_tuple_timeout(monkeypatch):
     """_real_data_api_get must call requests.get with a (connect, read) tuple.
 
@@ -129,8 +150,10 @@ def test_data_api_get_passes_tuple_timeout(monkeypatch):
 
     class _FakeResponse:
         status_code = 200
+
         def raise_for_status(self):
             pass
+
         def json(self):
             return []
 

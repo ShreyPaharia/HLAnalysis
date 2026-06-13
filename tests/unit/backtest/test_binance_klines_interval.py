@@ -5,6 +5,7 @@
 it would skip 59 of every 60 seconds. These tests pin the interval-aware cursor
 advance and assert the 1m path stays bit-identical (+60_000).
 """
+
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -16,8 +17,7 @@ from hlanalysis.backtest.data.binance_klines import _LIMIT, fetch_klines
 
 def _row(open_ms: int, close: str = "81000.0") -> list:
     # [openTime, open, high, low, close, volume, closeTime, ...]
-    return [open_ms, "81000.0", "81005.0", "80995.0", close, "1.0",
-            open_ms + 999, "", 1, "", "", ""]
+    return [open_ms, "81000.0", "81005.0", "80995.0", close, "1.0", open_ms + 999, "", 1, "", "", ""]
 
 
 def _paging_fetch(interval: str):
@@ -38,6 +38,7 @@ def _paging_fetch(interval: str):
             def raise_for_status(self): ...
             def json(self):
                 return page
+
         return R()
 
     with patch("hlanalysis.backtest.data.binance_klines.requests.get", side_effect=fake_get):
@@ -75,6 +76,7 @@ def test_1s_interval_passed_to_api() -> None:
             def raise_for_status(self): ...
             def json(self):
                 return []
+
         return R()
 
     with patch("hlanalysis.backtest.data.binance_klines.requests.get", side_effect=fake_get):

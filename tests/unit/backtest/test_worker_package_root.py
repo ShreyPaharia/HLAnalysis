@@ -6,6 +6,7 @@ the parent's checkout (e.g. a git worktree), silently running stale sim code. Th
 fix pins the parent's package root at `sys.path[0]` in every worker via a
 ProcessPoolExecutor `initializer`.
 """
+
 from __future__ import annotations
 
 import multiprocessing as mp

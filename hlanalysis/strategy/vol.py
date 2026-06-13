@@ -21,6 +21,7 @@ It composes ``sample_std_returns`` directly and is intentionally *not* routed
 through ``annualized_sigma``. Do not unify the two conventions; the tuned
 params do not transfer between them.
 """
+
 from __future__ import annotations
 
 import math

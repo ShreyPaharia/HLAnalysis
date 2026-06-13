@@ -5,6 +5,7 @@ PM API hits. Bucket-path tests cover leg ordering, threshold parsing,
 within-pair parity, no cross-pair parity, and per-leg settlement (§4 Task C
 acceptance).
 """
+
 from __future__ import annotations
 
 import json
@@ -33,13 +34,15 @@ def _write_trades(cache_root: Path, condition_id: str, rows: list[dict]) -> None
     """
     pm_trades = cache_root / "pm_trades"
     pm_trades.mkdir(parents=True, exist_ok=True)
-    table = pa.table({
-        "ts_ns":    [int(r["ts_ns"]) for r in rows],
-        "token_id": [str(r["token_id"]) for r in rows],
-        "side":     [str(r["side"]) for r in rows],
-        "price":    [float(r["price"]) for r in rows],
-        "size":     [float(r["size"]) for r in rows],
-    })
+    table = pa.table(
+        {
+            "ts_ns": [int(r["ts_ns"]) for r in rows],
+            "token_id": [str(r["token_id"]) for r in rows],
+            "side": [str(r["side"]) for r in rows],
+            "price": [float(r["price"]) for r in rows],
+            "size": [float(r["size"]) for r in rows],
+        }
+    )
     pq.write_table(table, pm_trades / f"{condition_id}.parquet")
 
 
@@ -119,25 +122,46 @@ def binary_cache(tmp_path: Path) -> Path:
     no_t = "tok_no"
     start = 1_000_000_000_000_000_000
     end = 2_000_000_000_000_000_000
-    _write_manifest(cache, {
-        cond: _binary_manifest_entry(
-            condition_id=cond, yes_token=yes_t, no_token=no_t,
-            start_ts_ns=start, end_ts_ns=end, resolved_outcome="yes", n_rows=2,
-        ),
-    })
-    _write_trades(cache, cond, [
-        {"ts_ns": start + 100, "token_id": yes_t, "side": "buy", "price": 0.6, "size": 10.0},
-        {"ts_ns": start + 200, "token_id": no_t,  "side": "sell", "price": 0.45, "size": 20.0},
-    ])
-    _write_klines(cache, [
-        {"ts_ns": start + 50,  "open": 80000.0, "high": 80100.0, "low": 79900.0, "close": 80050.0, "volume": 1.0},
-        {"ts_ns": start + 150, "open": 80050.0, "high": 80200.0, "low": 79950.0, "close": 80100.0, "volume": 1.2},
-        # Cover the strike ts (end - 24h) so _binary_strike resolves instead of
-        # raising StrikeCoverageError (SHR-54). A realistic PM market always has
-        # klines spanning its strike.
-        {"ts_ns": end - 24 * 3600 * 1_000_000_000, "open": 80100.0, "high": 80200.0,
-         "low": 80000.0, "close": 80075.0, "volume": 1.1},
-    ])
+    _write_manifest(
+        cache,
+        {
+            cond: _binary_manifest_entry(
+                condition_id=cond,
+                yes_token=yes_t,
+                no_token=no_t,
+                start_ts_ns=start,
+                end_ts_ns=end,
+                resolved_outcome="yes",
+                n_rows=2,
+            ),
+        },
+    )
+    _write_trades(
+        cache,
+        cond,
+        [
+            {"ts_ns": start + 100, "token_id": yes_t, "side": "buy", "price": 0.6, "size": 10.0},
+            {"ts_ns": start + 200, "token_id": no_t, "side": "sell", "price": 0.45, "size": 20.0},
+        ],
+    )
+    _write_klines(
+        cache,
+        [
+            {"ts_ns": start + 50, "open": 80000.0, "high": 80100.0, "low": 79900.0, "close": 80050.0, "volume": 1.0},
+            {"ts_ns": start + 150, "open": 80050.0, "high": 80200.0, "low": 79950.0, "close": 80100.0, "volume": 1.2},
+            # Cover the strike ts (end - 24h) so _binary_strike resolves instead of
+            # raising StrikeCoverageError (SHR-54). A realistic PM market always has
+            # klines spanning its strike.
+            {
+                "ts_ns": end - 24 * 3600 * 1_000_000_000,
+                "open": 80100.0,
+                "high": 80200.0,
+                "low": 80000.0,
+                "close": 80075.0,
+                "volume": 1.1,
+            },
+        ],
+    )
     return cache
 
 
@@ -181,10 +205,10 @@ def test_binary_within_pair_parity(binary_cache: Path) -> None:
     evs = list(src.events(d))
     # First synthetic book pair (from yes trade at price 0.6).
     yes_trade_ts = d.start_ts_ns + 100
-    yes_books = [e for e in evs
-                 if isinstance(e, BookSnapshot) and e.ts_ns == yes_trade_ts and e.symbol == "tok_yes"]
-    no_books_synthetic = [e for e in evs
-                          if isinstance(e, BookSnapshot) and e.ts_ns == yes_trade_ts and e.symbol == "tok_no"]
+    yes_books = [e for e in evs if isinstance(e, BookSnapshot) and e.ts_ns == yes_trade_ts and e.symbol == "tok_yes"]
+    no_books_synthetic = [
+        e for e in evs if isinstance(e, BookSnapshot) and e.ts_ns == yes_trade_ts and e.symbol == "tok_no"
+    ]
     assert len(yes_books) == 1
     assert len(no_books_synthetic) == 1
     # NO leg synthetic price ≈ 1 - 0.6 = 0.4 (mid).
@@ -215,34 +239,49 @@ def bucket_cache(tmp_path: Path) -> Path:
     start = 1_000_000_000_000_000_000
     end = 2_000_000_000_000_000_000
     leg_tokens = [
-        ("tok_y0", "tok_n0"),   # strike 80k
-        ("tok_y1", "tok_n1"),   # strike 81k
-        ("tok_y2", "tok_n2"),   # strike 82k
+        ("tok_y0", "tok_n0"),  # strike 80k
+        ("tok_y1", "tok_n1"),  # strike 81k
+        ("tok_y2", "tok_n2"),  # strike 82k
     ]
     leg_condition_ids = ["cond_o0", "cond_o1", "cond_o2"]
     leg_resolutions = ["yes", "yes", "no"]
-    _write_manifest(cache, {
-        event_slug: _bucket_manifest_entry(
-            event_slug=event_slug,
-            start_ts_ns=start, end_ts_ns=end,
-            thresholds=[80000.0, 81000.0, 82000.0],
-            leg_tokens=leg_tokens,
-            leg_condition_ids=leg_condition_ids,
-            leg_resolutions=leg_resolutions,
-            n_rows=2,
-        ),
-    })
+    _write_manifest(
+        cache,
+        {
+            event_slug: _bucket_manifest_entry(
+                event_slug=event_slug,
+                start_ts_ns=start,
+                end_ts_ns=end,
+                thresholds=[80000.0, 81000.0, 82000.0],
+                leg_tokens=leg_tokens,
+                leg_condition_ids=leg_condition_ids,
+                leg_resolutions=leg_resolutions,
+                n_rows=2,
+            ),
+        },
+    )
     # One trade each on tok_y0 (above-80k YES) and tok_y2 (above-82k YES).
-    _write_trades(cache, "cond_o0", [
-        {"ts_ns": start + 100, "token_id": "tok_y0", "side": "buy", "price": 0.7, "size": 5.0},
-    ])
+    _write_trades(
+        cache,
+        "cond_o0",
+        [
+            {"ts_ns": start + 100, "token_id": "tok_y0", "side": "buy", "price": 0.7, "size": 5.0},
+        ],
+    )
     _write_trades(cache, "cond_o1", [])
-    _write_trades(cache, "cond_o2", [
-        {"ts_ns": start + 150, "token_id": "tok_y2", "side": "sell", "price": 0.2, "size": 8.0},
-    ])
-    _write_klines(cache, [
-        {"ts_ns": start + 50, "open": 80000.0, "high": 81600.0, "low": 80000.0, "close": 81500.0, "volume": 1.0},
-    ])
+    _write_trades(
+        cache,
+        "cond_o2",
+        [
+            {"ts_ns": start + 150, "token_id": "tok_y2", "side": "sell", "price": 0.2, "size": 8.0},
+        ],
+    )
+    _write_klines(
+        cache,
+        [
+            {"ts_ns": start + 50, "open": 80000.0, "high": 81600.0, "low": 80000.0, "close": 81500.0, "volume": 1.0},
+        ],
+    )
     return cache
 
 
@@ -254,9 +293,12 @@ def test_descriptor_bucket_ordering(bucket_cache: Path) -> None:
     assert d.klass == "priceBucket"
     assert d.underlying == "BTC"
     assert d.leg_symbols == (
-        "tok_y0", "tok_n0",
-        "tok_y1", "tok_n1",
-        "tok_y2", "tok_n2",
+        "tok_y0",
+        "tok_n0",
+        "tok_y1",
+        "tok_n1",
+        "tok_y2",
+        "tok_n2",
     )
 
 
@@ -374,40 +416,56 @@ def test_wti_reference_events_carry_wti_symbol(tmp_path):
     QuestionDescriptor.underlying tag is 'WTI'.
     """
     # Timestamps land in 2026-05 so the discover window "2026-01-01".."2026-12-31" includes them.
-    _kline_ts_ns = 1779796800_000_000_000   # 2026-05-26 12:00 UTC
+    _kline_ts_ns = 1779796800_000_000_000  # 2026-05-26 12:00 UTC
     _start_ts_ns = 1779796800_000_000_000 - 24 * 3600 * 1_000_000_000  # 24h before
-    _end_ts_ns   = 1779796800_000_000_000 + 3600 * 1_000_000_000        # 1h after
+    _end_ts_ns = 1779796800_000_000_000 + 3600 * 1_000_000_000  # 1h after
     cache = tmp_path
     (cache / "wti_klines").mkdir()
-    (cache / "wti_klines" / "2026-05.json").write_text(json.dumps([
-        {"ts_ns": _kline_ts_ns, "open": 60.0, "high": 60.5,
-         "low": 59.8, "close": 60.2},
-    ]))
+    (cache / "wti_klines" / "2026-05.json").write_text(
+        json.dumps(
+            [
+                {"ts_ns": _kline_ts_ns, "open": 60.0, "high": 60.5, "low": 59.8, "close": 60.2},
+            ]
+        )
+    )
     (cache / "pm_trades").mkdir()
     cond_id = "0xdead"
     yes_t, no_t = "tok_yes", "tok_no"
-    table = pa.table({
-        "ts_ns": [_kline_ts_ns], "token_id": [yes_t],
-        "side": ["buy"], "price": [0.55], "size": [10.0],
-    })
-    pq.write_table(table, cache / "pm_trades" / f"{cond_id}.parquet")
-    (cache / "manifest.json").write_text(json.dumps({
-        cond_id: {
-            "kind": "binary",
-            "market": {
-                "condition_id": cond_id,
-                "yes_token_id": yes_t, "no_token_id": no_t,
-                "start_ts_ns": _start_ts_ns,
-                "end_ts_ns": _end_ts_ns,
-                "resolved_outcome": "yes",
-                "total_volume_usd": 100.0, "n_trades": 1,
-            },
+    table = pa.table(
+        {
+            "ts_ns": [_kline_ts_ns],
+            "token_id": [yes_t],
+            "side": ["buy"],
+            "price": [0.55],
+            "size": [10.0],
         }
-    }))
+    )
+    pq.write_table(table, cache / "pm_trades" / f"{cond_id}.parquet")
+    (cache / "manifest.json").write_text(
+        json.dumps(
+            {
+                cond_id: {
+                    "kind": "binary",
+                    "market": {
+                        "condition_id": cond_id,
+                        "yes_token_id": yes_t,
+                        "no_token_id": no_t,
+                        "start_ts_ns": _start_ts_ns,
+                        "end_ts_ns": _end_ts_ns,
+                        "resolved_outcome": "yes",
+                        "total_volume_usd": 100.0,
+                        "n_trades": 1,
+                    },
+                }
+            }
+        )
+    )
 
     ds = PolymarketDataSource(
-        cache_root=cache, reference_symbol="WTI",
-        series_slug="oil-daily-up-or-down", klines_subdir="wti_klines",
+        cache_root=cache,
+        reference_symbol="WTI",
+        series_slug="oil-daily-up-or-down",
+        klines_subdir="wti_klines",
     )
     descs = ds.discover(start="2026-01-01", end="2026-12-31", kind="binary")
     assert len(descs) == 1
@@ -432,16 +490,23 @@ def _write_bbo_parquet(
     Returns the directory containing the written parquet.
     """
     part = (
-        root / f"venue=binance" / f"product_type={product_type}" / "mechanism=clob"
-        / "event=bbo" / f"symbol={symbol}" / f"date={date_str}"
+        root
+        / f"venue=binance"
+        / f"product_type={product_type}"
+        / "mechanism=clob"
+        / "event=bbo"
+        / f"symbol={symbol}"
+        / f"date={date_str}"
     )
     part.mkdir(parents=True, exist_ok=True)
-    table = pa.table({
-        "exchange_ts":   [t[0] for t in ticks],
-        "local_recv_ts": [t[1] for t in ticks],
-        "bid_px":        [t[2] for t in ticks],
-        "ask_px":        [t[3] for t in ticks],
-    })
+    table = pa.table(
+        {
+            "exchange_ts": [t[0] for t in ticks],
+            "local_recv_ts": [t[1] for t in ticks],
+            "bid_px": [t[2] for t in ticks],
+            "ask_px": [t[3] for t in ticks],
+        }
+    )
     pq.write_table(table, part / "ticks.parquet")
     return part
 
@@ -490,10 +555,7 @@ def test_binance_bbo_perp_path_reads_perp_partition(tmp_path):
     date_str = datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).date().isoformat()
 
     # Perp ticks: exchange_ts is valid (non-zero).
-    ticks = [
-        (start_ns + i * s, start_ns + i * s + 1_000_000, 80000.0 + i, 80001.0 + i)
-        for i in range(5)
-    ]
+    ticks = [(start_ns + i * s, start_ns + i * s + 1_000_000, 80000.0 + i, 80001.0 + i) for i in range(5)]
     _write_bbo_parquet(tmp_path, "perp", "BTCUSDT", date_str, ticks)
 
     ds = PolymarketDataSource(
@@ -524,10 +586,7 @@ def test_binance_bbo_spot_path_reads_spot_partition(tmp_path):
     date_str = datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc).date().isoformat()
 
     # Spot ticks: exchange_ts=0 (Binance spot doesn't provide it); local_recv_ts valid.
-    ticks = [
-        (0, start_ns + i * s, 80000.0 + i, 80001.0 + i)
-        for i in range(5)
-    ]
+    ticks = [(0, start_ns + i * s, 80000.0 + i, 80001.0 + i) for i in range(5)]
     _write_bbo_parquet(tmp_path, "spot", "BTCUSDT", date_str, ticks)
 
     ds = PolymarketDataSource(
@@ -635,6 +694,7 @@ def _make_binary_q(
     no_sym: str,
 ) -> "QuestionDescriptor":
     from hlanalysis.backtest.core.data_source import QuestionDescriptor
+
     return QuestionDescriptor(
         question_id=question_id,
         question_idx=0,
@@ -652,6 +712,7 @@ def _make_bucket_q(
     leg_syms: tuple[str, ...],
 ) -> "QuestionDescriptor":
     from hlanalysis.backtest.core.data_source import QuestionDescriptor
+
     return QuestionDescriptor(
         question_id=question_id,
         question_idx=0,

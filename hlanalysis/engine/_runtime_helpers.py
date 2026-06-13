@@ -7,6 +7,7 @@ continue to work without modification.
 
 Do NOT import ``runtime.py`` from this module — that would create a cycle.
 """
+
 from __future__ import annotations
 
 import msgspec
@@ -32,6 +33,7 @@ def _is_transient_venue_error(exc: BaseException) -> bool:
     transient classifier (requests/builtin conn+timeout, HTTP 5xx and 429)."""
     from .hl_client import RateLimitError
     from .pm_client import _pm_is_transient
+
     if isinstance(exc, (RateLimitError, ConnectionError, TimeoutError)):
         return True
     return _pm_is_transient(exc)
@@ -50,7 +52,14 @@ def _remap_reference_symbol(ev: NormalizedEvent) -> NormalizedEvent:
 
 def _stub_question(p):
     from ..strategy.types import QuestionView
+
     return QuestionView(
-        question_idx=p.question_idx, yes_symbol=p.symbol, no_symbol="",
-        strike=0.0, expiry_ns=0, underlying="", klass="", period="",
+        question_idx=p.question_idx,
+        yes_symbol=p.symbol,
+        no_symbol="",
+        strike=0.0,
+        expiry_ns=0,
+        underlying="",
+        klass="",
+        period="",
     )

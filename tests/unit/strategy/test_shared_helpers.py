@@ -3,6 +3,7 @@
 These assert the consolidated helpers reproduce the behavior that was
 previously inlined/duplicated across the strategy modules.
 """
+
 from __future__ import annotations
 
 import math
@@ -40,8 +41,14 @@ from hlanalysis.strategy.vol import (
 # --------------------------------------------------------------------------
 def _binary_qv() -> QuestionView:
     return QuestionView(
-        question_idx=0, yes_symbol="@Y", no_symbol="@N", strike=80_000.0,
-        expiry_ns=0, underlying="BTC", klass="priceBinary", period="1d",
+        question_idx=0,
+        yes_symbol="@Y",
+        no_symbol="@N",
+        strike=80_000.0,
+        expiry_ns=0,
+        underlying="BTC",
+        klass="priceBinary",
+        period="1d",
         leg_symbols=("@Y", "@N"),
     )
 
@@ -49,8 +56,14 @@ def _binary_qv() -> QuestionView:
 def _bucket_qv() -> QuestionView:
     # 2 thresholds → 3 outcomes → 6 legs (YES/NO interleaved).
     return QuestionView(
-        question_idx=0, yes_symbol="", no_symbol="", strike=float("nan"),
-        expiry_ns=0, underlying="BTC", klass="priceBucket", period="1d",
+        question_idx=0,
+        yes_symbol="",
+        no_symbol="",
+        strike=float("nan"),
+        expiry_ns=0,
+        underlying="BTC",
+        klass="priceBucket",
+        period="1d",
         leg_symbols=("y0", "n0", "y1", "n1", "y2", "n2"),
         kv=(("priceThresholds", "77000,81000"),),
     )
@@ -72,12 +85,12 @@ def test_winning_region_binary():
 
 def test_winning_region_bucket_edges_and_middle():
     qv = _bucket_qv()
-    assert winning_region(qv, "y0") == (None, 77000.0)       # lowest YES
-    assert winning_region(qv, "y1") == (77000.0, 81000.0)    # middle YES
-    assert winning_region(qv, "y2") == (81000.0, None)       # highest YES
-    assert winning_region(qv, "n0") == (77000.0, None)       # NO of lowest → half-line
-    assert winning_region(qv, "n2") == (None, 81000.0)       # NO of highest → half-line
-    assert winning_region(qv, "n1") == (None, None)          # NO of middle → non-contiguous
+    assert winning_region(qv, "y0") == (None, 77000.0)  # lowest YES
+    assert winning_region(qv, "y1") == (77000.0, 81000.0)  # middle YES
+    assert winning_region(qv, "y2") == (81000.0, None)  # highest YES
+    assert winning_region(qv, "n0") == (77000.0, None)  # NO of lowest → half-line
+    assert winning_region(qv, "n2") == (None, 81000.0)  # NO of highest → half-line
+    assert winning_region(qv, "n1") == (None, None)  # NO of middle → non-contiguous
 
 
 def _above_ladder_qv() -> QuestionView:
@@ -86,8 +99,14 @@ def _above_ladder_qv() -> QuestionView:
     for t in [78000, 80000, 82000]:
         legs += [f"y{t}", f"n{t}"]
     return QuestionView(
-        question_idx=0, yes_symbol="", no_symbol="", strike=float("nan"),
-        expiry_ns=0, underlying="BTC", klass="priceBucket", period="1d",
+        question_idx=0,
+        yes_symbol="",
+        no_symbol="",
+        strike=float("nan"),
+        expiry_ns=0,
+        underlying="BTC",
+        klass="priceBucket",
+        period="1d",
         leg_symbols=tuple(legs),
         kv=(("priceThresholds", "78000,80000,82000"), ("bucketLayout", "above_ladder")),
     )
@@ -114,8 +133,14 @@ def test_contiguous_bucket_unchanged_without_flag():
     for t in [78000, 80000, 82000]:
         legs += [f"y{t}", f"n{t}"]
     qv = QuestionView(
-        question_idx=0, yes_symbol="", no_symbol="", strike=float("nan"),
-        expiry_ns=0, underlying="BTC", klass="priceBucket", period="1d",
+        question_idx=0,
+        yes_symbol="",
+        no_symbol="",
+        strike=float("nan"),
+        expiry_ns=0,
+        underlying="BTC",
+        klass="priceBucket",
+        period="1d",
         leg_symbols=tuple(legs),
         kv=(("priceThresholds", "78000,80000,82000"),),  # no bucketLayout
     )
@@ -168,21 +193,18 @@ def test_annualized_sigma_matches_manual_pipeline():
     dt = 60
     raw = sample_std_returns(arr)
     expected = max(0.05, min(3.0, raw * math.sqrt(ANNUAL_SECONDS / dt)))
-    got = annualized_sigma(arr, dt_seconds=dt, estimator="sample_std",
-                           clip_min=0.05, clip_max=3.0)
+    got = annualized_sigma(arr, dt_seconds=dt, estimator="sample_std", clip_min=0.05, clip_max=3.0)
     assert math.isclose(got, expected, rel_tol=1e-12)
     # bipower path
     raw_bp = bipower_variation_sigma(arr)
     exp_bp = max(0.05, min(3.0, raw_bp * math.sqrt(ANNUAL_SECONDS / dt)))
-    got_bp = annualized_sigma(arr, dt_seconds=dt, estimator="bipower",
-                              clip_min=0.05, clip_max=3.0)
+    got_bp = annualized_sigma(arr, dt_seconds=dt, estimator="bipower", clip_min=0.05, clip_max=3.0)
     assert math.isclose(got_bp, exp_bp, rel_tol=1e-12)
 
 
 def test_annualized_sigma_unknown_estimator_raises():
     with pytest.raises(ValueError):
-        annualized_sigma(np.array([0.0, 0.1]), dt_seconds=60, estimator="bogus",
-                         clip_min=0.0, clip_max=1.0)
+        annualized_sigma(np.array([0.0, 0.1]), dt_seconds=60, estimator="bogus", clip_min=0.0, clip_max=1.0)
 
 
 # --------------------------------------------------------------------------
@@ -206,10 +228,10 @@ def test_make_entry_intent_shape():
 
 def test_make_exit_intent_flips_side_and_flags():
     qv = _binary_qv()
-    long_pos = Position(question_idx=0, symbol="@Y", qty=10.0, avg_entry=0.9,
-                        stop_loss_price=0.5, last_update_ts_ns=0)
-    short_pos = Position(question_idx=0, symbol="@Y", qty=-10.0, avg_entry=0.9,
-                         stop_loss_price=0.5, last_update_ts_ns=0)
+    long_pos = Position(question_idx=0, symbol="@Y", qty=10.0, avg_entry=0.9, stop_loss_price=0.5, last_update_ts_ns=0)
+    short_pos = Position(
+        question_idx=0, symbol="@Y", qty=-10.0, avg_entry=0.9, stop_loss_price=0.5, last_update_ts_ns=0
+    )
     it = make_exit_intent(qv, long_pos, limit_price=0.88, exit_reason="exit_stop_loss")
     assert it.side == "sell"
     assert it.size == 10.0
@@ -224,8 +246,7 @@ def test_make_exit_intent_flips_side_and_flags():
 # fee
 # --------------------------------------------------------------------------
 def _fee_cfg(**kw):
-    base = dict(fee_model="flat", fee_rate=0.0, fee_taker=0.0,
-                exit_take_profit_mode=False, exit_fee=0.0007)
+    base = dict(fee_model="flat", fee_rate=0.0, fee_taker=0.0, exit_take_profit_mode=False, exit_fee=0.0007)
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -257,27 +278,30 @@ def test_fee_flat_entry_vs_exit_take_profit():
 # topup
 # --------------------------------------------------------------------------
 def _book(ask):
-    return BookState(symbol="@Y", bid_px=ask - 0.01, bid_sz=100.0,
-                     ask_px=ask, ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=0)
+    return BookState(
+        symbol="@Y", bid_px=ask - 0.01, bid_sz=100.0, ask_px=ask, ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=0
+    )
 
 
 def _pos(qty):
-    return Position(question_idx=0, symbol="@Y", qty=qty, avg_entry=0.5,
-                    stop_loss_price=0.0, last_update_ts_ns=0)
+    return Position(question_idx=0, symbol="@Y", qty=qty, avg_entry=0.5, stop_loss_price=0.0, last_update_ts_ns=0)
 
 
 def _enter_decision():
     qv = _binary_qv()
-    return Decision(action=Action.ENTER,
-                    intents=(make_entry_intent(qv, symbol="@Y", size=1.0, limit_price=0.5),))
+    return Decision(action=Action.ENTER, intents=(make_entry_intent(qv, symbol="@Y", size=1.0, limit_price=0.5),))
 
 
 def test_topup_no_book_uses_callback():
     qv = _binary_qv()
     sentinel = object()
     out = run_topup(
-        question=qv, books={}, position=_pos(10.0),
-        max_position_usd=100.0, topup_threshold_pct=0.2, topup_min_notional_usd=11.0,
+        question=qv,
+        books={},
+        position=_pos(10.0),
+        max_position_usd=100.0,
+        topup_threshold_pct=0.2,
+        topup_min_notional_usd=11.0,
         run_entry=_enter_decision,
         on_no_book=lambda: sentinel,
         on_not_needed=lambda c, t: None,
@@ -289,12 +313,18 @@ def test_topup_not_needed_uses_callback():
     qv = _binary_qv()
     # qty 200 @ ask 0.5 → current_ntl 100 == target → shortfall 0 < threshold.
     seen = {}
+
     def _not_needed(c, t):
         seen["c"], seen["t"] = c, t
         return None
+
     out = run_topup(
-        question=qv, books={"@Y": _book(0.5)}, position=_pos(200.0),
-        max_position_usd=100.0, topup_threshold_pct=0.2, topup_min_notional_usd=11.0,
+        question=qv,
+        books={"@Y": _book(0.5)},
+        position=_pos(200.0),
+        max_position_usd=100.0,
+        topup_threshold_pct=0.2,
+        topup_min_notional_usd=11.0,
         run_entry=_enter_decision,
         on_no_book=lambda: None,
         on_not_needed=_not_needed,
@@ -307,8 +337,12 @@ def test_topup_emits_when_undersized_and_leg_unchanged():
     qv = _binary_qv()
     # qty 50 @ ask 0.5 → current 25, shortfall 75 (>20). topup_size = floor(75/0.5*100)/100=150
     out = run_topup(
-        question=qv, books={"@Y": _book(0.5)}, position=_pos(50.0),
-        max_position_usd=100.0, topup_threshold_pct=0.2, topup_min_notional_usd=11.0,
+        question=qv,
+        books={"@Y": _book(0.5)},
+        position=_pos(50.0),
+        max_position_usd=100.0,
+        topup_threshold_pct=0.2,
+        topup_min_notional_usd=11.0,
         run_entry=_enter_decision,
         on_no_book=lambda: None,
         on_not_needed=lambda c, t: None,
@@ -322,8 +356,12 @@ def test_topup_gate_failed_returns_skip():
     qv = _binary_qv()
     hold = Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_favorite"),))
     out = run_topup(
-        question=qv, books={"@Y": _book(0.5)}, position=_pos(50.0),
-        max_position_usd=100.0, topup_threshold_pct=0.2, topup_min_notional_usd=11.0,
+        question=qv,
+        books={"@Y": _book(0.5)},
+        position=_pos(50.0),
+        max_position_usd=100.0,
+        topup_threshold_pct=0.2,
+        topup_min_notional_usd=11.0,
         run_entry=lambda: hold,
         on_no_book=lambda: None,
         on_not_needed=lambda c, t: None,
@@ -335,11 +373,14 @@ def test_topup_gate_failed_returns_skip():
 
 def test_topup_leg_changed_returns_skip():
     qv = _binary_qv()
-    other = Decision(action=Action.ENTER,
-                     intents=(make_entry_intent(qv, symbol="@N", size=1.0, limit_price=0.5),))
+    other = Decision(action=Action.ENTER, intents=(make_entry_intent(qv, symbol="@N", size=1.0, limit_price=0.5),))
     out = run_topup(
-        question=qv, books={"@Y": _book(0.5)}, position=_pos(50.0),
-        max_position_usd=100.0, topup_threshold_pct=0.2, topup_min_notional_usd=11.0,
+        question=qv,
+        books={"@Y": _book(0.5)},
+        position=_pos(50.0),
+        max_position_usd=100.0,
+        topup_threshold_pct=0.2,
+        topup_min_notional_usd=11.0,
         run_entry=lambda: other,
         on_no_book=lambda: None,
         on_not_needed=lambda c, t: None,
@@ -352,8 +393,12 @@ def test_topup_below_min_notional_returns_skip():
     # shortfall just above threshold but topup_ntl below min: target 100, qty 178@0.5
     # current=89, shortfall=11 (>=20? no). Use threshold 0.1 so 11>=10 passes, min=20.
     out = run_topup(
-        question=qv, books={"@Y": _book(0.5)}, position=_pos(178.0),
-        max_position_usd=100.0, topup_threshold_pct=0.1, topup_min_notional_usd=20.0,
+        question=qv,
+        books={"@Y": _book(0.5)},
+        position=_pos(178.0),
+        max_position_usd=100.0,
+        topup_threshold_pct=0.1,
+        topup_min_notional_usd=20.0,
         run_entry=_enter_decision,
         on_no_book=lambda: None,
         on_not_needed=lambda c, t: None,

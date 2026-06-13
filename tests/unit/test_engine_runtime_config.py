@@ -1,6 +1,7 @@
 # tests/unit/test_engine_runtime_config.py
 """Smoke test that the runtime path threads safety-gate fields from a loaded
 strategy YAML into the LateResolutionConfig handed to the strategy."""
+
 from __future__ import annotations
 
 from pathlib import Path

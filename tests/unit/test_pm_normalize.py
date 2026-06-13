@@ -25,7 +25,9 @@ def _qid_in_subprocess(condition_id: str, *, hashseed: str) -> int:
     )
     out = subprocess.run(
         [sys.executable, "-c", code],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
         env={**os.environ, "PYTHONHASHSEED": hashseed},
     )
     return int(out.stdout.strip())
@@ -249,7 +251,7 @@ def test_parse_gamma_market_emits_target_price_when_group_item_title_numeric():
 
 
 # endDate of _SAMPLE_GAMMA_MARKET ("2026-05-25T00:00:00Z") == 1779667200e9 ns.
-_AFTER_ENDDATE_NS = 1779667260_000_000_000   # endDate + 60s (resolved, polled just after)
+_AFTER_ENDDATE_NS = 1779667260_000_000_000  # endDate + 60s (resolved, polled just after)
 _BEFORE_ENDDATE_NS = 1779494400_000_000_000  # endDate − 2d (still open)
 
 
@@ -308,7 +310,9 @@ def test_parse_gamma_market_to_settlement_falls_back_to_price_when_enddate_missi
     resolved = dict(_SAMPLE_GAMMA_MARKET, outcomePrices='["1.0","0.0"]')
     del resolved["endDate"]
     ev = parse_gamma_market_to_settlement(
-        resolved, series_slug="btc-up-or-down-daily", local_recv_ts=0,
+        resolved,
+        series_slug="btc-up-or-down-daily",
+        local_recv_ts=0,
     )
     assert ev is not None
     assert ev.settled_side_idx == 0

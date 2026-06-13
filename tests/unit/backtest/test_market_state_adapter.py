@@ -11,6 +11,7 @@ guards the spec folds into this ticket:
     instances fed the identical stream yield byte-identical query outputs (no
     process-salted hashing on the HL path).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -64,10 +65,14 @@ def _feed(ms: MarketState) -> None:
         ms.apply_reference(ReferenceEvent(ts, "BTC", close + 5.0, close - 4.0, close, close))
         ms.apply_trade(_trade(("#30", "#31")[i % 2], ts, 0.40 + 0.001 * (i % 9), 1.0 + (i % 5)))
         if i % 4 == 0:
-            ms.apply_l2(BookSnapshot(
-                ts_ns=ts, symbol="#30",
-                bids=((0.40, 10.0),), asks=((0.41, 12.0),),
-            ))
+            ms.apply_l2(
+                BookSnapshot(
+                    ts_ns=ts,
+                    symbol="#30",
+                    bids=((0.40, 10.0),),
+                    asks=((0.41, 12.0),),
+                )
+            )
 
 
 def test_identical_event_stream_yields_identical_outputs() -> None:
@@ -82,8 +87,7 @@ def test_identical_event_stream_yields_identical_outputs() -> None:
         rb, hb = b.recent_returns_and_hl(now_ns=now_ns, lookback_seconds=lb)
         assert np.array_equal(ra, rb)
         assert np.array_equal(ha, hb)
-        assert a.recent_volume_usd(("#30", "#31"), now_ns=now_ns) == \
-            b.recent_volume_usd(("#30", "#31"), now_ns=now_ns)
+        assert a.recent_volume_usd(("#30", "#31"), now_ns=now_ns) == b.recent_volume_usd(("#30", "#31"), now_ns=now_ns)
     assert a.latest_btc_close() == b.latest_btc_close()
 
 

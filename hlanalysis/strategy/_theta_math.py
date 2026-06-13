@@ -5,6 +5,7 @@ nothing that touches ``self`` or strategy configuration. All symbols are
 re-exported from ``theta_harvester.py`` so any internal or external code that
 imports from that module continues to work unchanged.
 """
+
 from __future__ import annotations
 
 import math
@@ -122,8 +123,12 @@ def _p_leg_win_prob(
     that only need the probability (tests, binary diagnostic edge_yes/edge_no).
     """
     res = _p_leg_win_prob_and_phi(
-        reference_price=reference_price, lo=lo, hi=hi,
-        sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+        reference_price=reference_price,
+        lo=lo,
+        hi=hi,
+        sigma=sigma,
+        mu_eff=mu_eff,
+        tau_yr=tau_yr,
     )
     if res is None:
         return None

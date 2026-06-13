@@ -23,7 +23,7 @@ async def test_fanout_to_two_subscribers():
 async def test_slow_consumer_does_not_block_fast_one():
     bus = EventBus(maxsize=2, drop_when_full=True)
     fast = bus.subscribe(maxsize=0)  # unlimited — never considered slow
-    slow = bus.subscribe()           # maxsize=2 — will fill up and drop
+    slow = bus.subscribe()  # maxsize=2 — will fill up and drop
     # Fill slow's queue
     for i in range(5):
         await bus.publish(RiskVeto(ts_ns=i, reason=str(i)))

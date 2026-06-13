@@ -8,10 +8,21 @@ import pytest
 from hlanalysis.alerts.rules import AlertRules
 from hlanalysis.engine.event_bus import EventBus
 from hlanalysis.engine.risk_events import (
-    DailyLossHalt, EngineHeartbeat, Entry, Exit, FeedDown, FeedRecovered,
-    FeedStale, KillSwitchActivated, MemoryHalt,
-    OrderRejected, OrderUnconfirmed, PMStrikeMismatch, ReconcileDrift,
-    RedemptionTimeout, RiskVeto,
+    DailyLossHalt,
+    EngineHeartbeat,
+    Entry,
+    Exit,
+    FeedDown,
+    FeedRecovered,
+    FeedStale,
+    KillSwitchActivated,
+    MemoryHalt,
+    OrderRejected,
+    OrderUnconfirmed,
+    PMStrikeMismatch,
+    ReconcileDrift,
+    RedemptionTimeout,
+    RiskVeto,
 )
 
 
@@ -50,8 +61,7 @@ async def test_feed_stale_alerts_and_heartbeat_is_silent():
     rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
     sub = bus.subscribe()
     task = asyncio.create_task(rules.run(sub))
-    await bus.publish(EngineHeartbeat(ts_ns=1, events_ingested=10,
-                                      d_events=0, n_questions=2))
+    await bus.publish(EngineHeartbeat(ts_ns=1, events_ingested=10, d_events=0, n_questions=2))
     await bus.publish(FeedStale(ts_ns=2, d_events=0, interval_seconds=30.0))
     await asyncio.sleep(0.05)
     task.cancel()
@@ -117,19 +127,32 @@ async def test_benign_market_condition_vetoes_are_suppressed():
     sub = bus.subscribe()
     task = asyncio.create_task(rules.run(sub))
     # The exact flood reported in the v31_pm_eth_ms incident 2026-06-12.
-    await bus.publish(RiskVeto(
-        ts_ns=1, account_alias="v31_pm_eth_ms", reason="low_volume",
-        question_idx=1992648867, detail={"usd": "93"},
-    ))
-    await bus.publish(RiskVeto(
-        ts_ns=2, account_alias="v31_pm_eth_ms", reason="stale_data",
-        question_idx=488649311,
-    ))
+    await bus.publish(
+        RiskVeto(
+            ts_ns=1,
+            account_alias="v31_pm_eth_ms",
+            reason="low_volume",
+            question_idx=1992648867,
+            detail={"usd": "93"},
+        )
+    )
+    await bus.publish(
+        RiskVeto(
+            ts_ns=2,
+            account_alias="v31_pm_eth_ms",
+            reason="stale_data",
+            question_idx=488649311,
+        )
+    )
     # An actionable risk-state veto on the same slot must still page.
-    await bus.publish(RiskVeto(
-        ts_ns=3, account_alias="v31_pm_eth_ms", reason="daily_loss_cap",
-        question_idx=743427003,
-    ))
+    await bus.publish(
+        RiskVeto(
+            ts_ns=3,
+            account_alias="v31_pm_eth_ms",
+            reason="daily_loss_cap",
+            question_idx=743427003,
+        )
+    )
     await asyncio.sleep(0.05)
     task.cancel()
     try:
@@ -148,14 +171,27 @@ async def test_entry_and_exit_format_pnl():
     rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
     sub = bus.subscribe()
     task = asyncio.create_task(rules.run(sub))
-    await bus.publish(Entry(
-        ts_ns=1, cloid="hla-1", question_idx=42, symbol="@30",
-        side="buy", size=10.0, price=0.95,
-    ))
-    await bus.publish(Exit(
-        ts_ns=2, question_idx=42, symbol="@30", qty=10.0,
-        realized_pnl=5.0, reason="settlement",
-    ))
+    await bus.publish(
+        Entry(
+            ts_ns=1,
+            cloid="hla-1",
+            question_idx=42,
+            symbol="@30",
+            side="buy",
+            size=10.0,
+            price=0.95,
+        )
+    )
+    await bus.publish(
+        Exit(
+            ts_ns=2,
+            question_idx=42,
+            symbol="@30",
+            qty=10.0,
+            realized_pnl=5.0,
+            reason="settlement",
+        )
+    )
     await asyncio.sleep(0.05)
     task.cancel()
     try:
@@ -173,23 +209,44 @@ async def test_order_rejected_alerts_with_error_text():
     rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
     sub = bus.subscribe()
     task = asyncio.create_task(rules.run(sub))
-    await bus.publish(OrderRejected(
-        ts_ns=1, cloid="hla-1", question_idx=10, symbol="#551",
-        side="buy", size=100.10, price=0.999,
-        error="Order has invalid size.",
-    ))
+    await bus.publish(
+        OrderRejected(
+            ts_ns=1,
+            cloid="hla-1",
+            question_idx=10,
+            symbol="#551",
+            side="buy",
+            size=100.10,
+            price=0.999,
+            error="Order has invalid size.",
+        )
+    )
     # Different error string → not deduped
-    await bus.publish(OrderRejected(
-        ts_ns=2, cloid="hla-2", question_idx=10, symbol="#551",
-        side="buy", size=100.0, price=0.999,
-        error="Insufficient margin",
-    ))
+    await bus.publish(
+        OrderRejected(
+            ts_ns=2,
+            cloid="hla-2",
+            question_idx=10,
+            symbol="#551",
+            side="buy",
+            size=100.0,
+            price=0.999,
+            error="Insufficient margin",
+        )
+    )
     # Same (symbol, error) — deduped
-    await bus.publish(OrderRejected(
-        ts_ns=3, cloid="hla-3", question_idx=10, symbol="#551",
-        side="buy", size=100.0, price=0.999,
-        error="Insufficient margin",
-    ))
+    await bus.publish(
+        OrderRejected(
+            ts_ns=3,
+            cloid="hla-3",
+            question_idx=10,
+            symbol="#551",
+            side="buy",
+            size=100.0,
+            price=0.999,
+            error="Insufficient margin",
+        )
+    )
     await asyncio.sleep(0.05)
     task.cancel()
     try:
@@ -213,17 +270,33 @@ async def test_order_rejected_fak_no_match_is_suppressed():
     rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
     sub = bus.subscribe()
     task = asyncio.create_task(rules.run(sub))
-    await bus.publish(OrderRejected(
-        ts_ns=1, cloid="hla-1", question_idx=10, symbol="#551",
-        side="buy", size=15.0, price=0.87,
-        error=("no orders found to match with FAK order. FAK orders are "
-               "partially filled or killed if no match is found."),
-    ))
-    await bus.publish(OrderRejected(
-        ts_ns=2, cloid="hla-2", question_idx=10, symbol="#551",
-        side="buy", size=15.0, price=0.87,
-        error="Insufficient margin",
-    ))
+    await bus.publish(
+        OrderRejected(
+            ts_ns=1,
+            cloid="hla-1",
+            question_idx=10,
+            symbol="#551",
+            side="buy",
+            size=15.0,
+            price=0.87,
+            error=(
+                "no orders found to match with FAK order. FAK orders are "
+                "partially filled or killed if no match is found."
+            ),
+        )
+    )
+    await bus.publish(
+        OrderRejected(
+            ts_ns=2,
+            cloid="hla-2",
+            question_idx=10,
+            symbol="#551",
+            side="buy",
+            size=15.0,
+            price=0.87,
+            error="Insufficient margin",
+        )
+    )
     await asyncio.sleep(0.05)
     task.cancel()
     try:
@@ -231,7 +304,7 @@ async def test_order_rejected_fak_no_match_is_suppressed():
     except asyncio.CancelledError:
         pass
     rej_msgs = [m for m in tg.messages if "REJECTED" in m]
-    assert len(rej_msgs) == 1                       # FAK no-match suppressed
+    assert len(rej_msgs) == 1  # FAK no-match suppressed
     assert "Insufficient margin" in rej_msgs[0]
     assert not any("no orders found to match" in m for m in tg.messages)
 
@@ -264,23 +337,46 @@ async def test_order_unconfirmed_formats_with_age_and_cloid():
     rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
     sub = bus.subscribe()
     task = asyncio.create_task(rules.run(sub))
-    await bus.publish(OrderUnconfirmed(
-        ts_ns=1, account_alias="v31_pm", cloid="hla-v31-abc",
-        symbol="0xdeadbeef", side="buy", size=10.0, limit_price=0.55,
-        age_seconds=45.0, venue_oid="ven-1",
-    ))
+    await bus.publish(
+        OrderUnconfirmed(
+            ts_ns=1,
+            account_alias="v31_pm",
+            cloid="hla-v31-abc",
+            symbol="0xdeadbeef",
+            side="buy",
+            size=10.0,
+            limit_price=0.55,
+            age_seconds=45.0,
+            venue_oid="ven-1",
+        )
+    )
     # Same cloid → deduped within window
-    await bus.publish(OrderUnconfirmed(
-        ts_ns=2, account_alias="v31_pm", cloid="hla-v31-abc",
-        symbol="0xdeadbeef", side="buy", size=10.0, limit_price=0.55,
-        age_seconds=46.0, venue_oid="ven-1",
-    ))
+    await bus.publish(
+        OrderUnconfirmed(
+            ts_ns=2,
+            account_alias="v31_pm",
+            cloid="hla-v31-abc",
+            symbol="0xdeadbeef",
+            side="buy",
+            size=10.0,
+            limit_price=0.55,
+            age_seconds=46.0,
+            venue_oid="ven-1",
+        )
+    )
     # Different cloid → fires
-    await bus.publish(OrderUnconfirmed(
-        ts_ns=3, account_alias="v31_pm", cloid="hla-v31-xyz",
-        symbol="0xdeadbeef", side="sell", size=5.0, limit_price=0.42,
-        age_seconds=33.0,
-    ))
+    await bus.publish(
+        OrderUnconfirmed(
+            ts_ns=3,
+            account_alias="v31_pm",
+            cloid="hla-v31-xyz",
+            symbol="0xdeadbeef",
+            side="sell",
+            size=5.0,
+            limit_price=0.42,
+            age_seconds=33.0,
+        )
+    )
     await asyncio.sleep(0.05)
     task.cancel()
     try:
@@ -301,17 +397,29 @@ async def test_venue_prefix_renders_when_configured():
     tg = _FakeTelegram()
     bus = EventBus()
     rules = AlertRules(
-        bus=bus, telegram=tg, dedupe_window_s=60,
+        bus=bus,
+        telegram=tg,
+        dedupe_window_s=60,
         venue_by_alias={"v31": "HL", "v31_pm": "PM"},
     )
     sub = bus.subscribe()
     task = asyncio.create_task(rules.run(sub))
-    await bus.publish(RiskVeto(
-        ts_ns=1, account_alias="v31", reason="max_position_usd", question_idx=7,
-    ))
-    await bus.publish(RiskVeto(
-        ts_ns=2, account_alias="v31_pm", reason="max_position_usd", question_idx=7,
-    ))
+    await bus.publish(
+        RiskVeto(
+            ts_ns=1,
+            account_alias="v31",
+            reason="max_position_usd",
+            question_idx=7,
+        )
+    )
+    await bus.publish(
+        RiskVeto(
+            ts_ns=2,
+            account_alias="v31_pm",
+            reason="max_position_usd",
+            question_idx=7,
+        )
+    )
     await asyncio.sleep(0.05)
     task.cancel()
     try:
@@ -329,14 +437,21 @@ async def test_venue_prefix_omitted_when_alias_not_in_map():
     tg = _FakeTelegram()
     bus = EventBus()
     rules = AlertRules(
-        bus=bus, telegram=tg, dedupe_window_s=60,
+        bus=bus,
+        telegram=tg,
+        dedupe_window_s=60,
         venue_by_alias={"v31_pm": "PM"},
     )
     sub = bus.subscribe()
     task = asyncio.create_task(rules.run(sub))
-    await bus.publish(RiskVeto(
-        ts_ns=1, account_alias="v1", reason="max_position_usd", question_idx=7,
-    ))
+    await bus.publish(
+        RiskVeto(
+            ts_ns=1,
+            account_alias="v1",
+            reason="max_position_usd",
+            question_idx=7,
+        )
+    )
     await asyncio.sleep(0.05)
     task.cancel()
     try:
@@ -355,19 +470,31 @@ async def test_redemption_timeout_formats_with_age_hours():
     task = asyncio.create_task(rules.run(sub))
     settled_ts = 1_700_000_000_000_000_000
     # Winner with expected $100 payout
-    await bus.publish(RedemptionTimeout(
-        ts_ns=settled_ts + 6 * 3600 * 10**9, account_alias="v31_pm",
-        question_idx=42, symbol="0xabcdef0123456789", qty=100.0,
-        settled_ts_ns=settled_ts, age_seconds=6.5 * 3600.0,
-        expected_payout_usd=100.0,
-    ))
+    await bus.publish(
+        RedemptionTimeout(
+            ts_ns=settled_ts + 6 * 3600 * 10**9,
+            account_alias="v31_pm",
+            question_idx=42,
+            symbol="0xabcdef0123456789",
+            qty=100.0,
+            settled_ts_ns=settled_ts,
+            age_seconds=6.5 * 3600.0,
+            expected_payout_usd=100.0,
+        )
+    )
     # Loser: $0 expected
-    await bus.publish(RedemptionTimeout(
-        ts_ns=settled_ts + 7 * 3600 * 10**9, account_alias="v31_pm",
-        question_idx=43, symbol="0x1234567890abcdef", qty=50.0,
-        settled_ts_ns=settled_ts, age_seconds=7.0 * 3600.0,
-        expected_payout_usd=0.0,
-    ))
+    await bus.publish(
+        RedemptionTimeout(
+            ts_ns=settled_ts + 7 * 3600 * 10**9,
+            account_alias="v31_pm",
+            question_idx=43,
+            symbol="0x1234567890abcdef",
+            qty=50.0,
+            settled_ts_ns=settled_ts,
+            age_seconds=7.0 * 3600.0,
+            expected_payout_usd=0.0,
+        )
+    )
     await asyncio.sleep(0.05)
     task.cancel()
     try:
@@ -377,10 +504,7 @@ async def test_redemption_timeout_formats_with_age_hours():
     redempt_msgs = [m for m in tg.messages if "REDEMPTION TIMEOUT" in m]
     assert len(redempt_msgs) == 2
     # Winner: $100.00 expected, 6.5h age, symbol truncated
-    assert any(
-        "q=42" in m and "100.00" in m and "6.5h" in m and "0xabcdef" in m
-        for m in redempt_msgs
-    )
+    assert any("q=42" in m and "100.00" in m and "6.5h" in m and "0xabcdef" in m for m in redempt_msgs)
     # Loser: $0.00 expected
     assert any("q=43" in m and "0.00" in m and "7.0h" in m for m in redempt_msgs)
 
@@ -396,10 +520,14 @@ async def test_reconcile_drift_dedupes_repeated_identical_events():
     sub = bus.subscribe()
     task = asyncio.create_task(rules.run(sub))
     for i in range(5):
-        await bus.publish(ReconcileDrift(
-            ts_ns=i, case="position_mismatch", question_idx=680,
-            detail={"hl_qty": "15.0", "db_qty": "15.0"},
-        ))
+        await bus.publish(
+            ReconcileDrift(
+                ts_ns=i,
+                case="position_mismatch",
+                question_idx=680,
+                detail={"hl_qty": "15.0", "db_qty": "15.0"},
+            )
+        )
     await asyncio.sleep(0.05)
     task.cancel()
     try:
@@ -424,20 +552,28 @@ async def test_persistent_pm_alert_only_drift_uses_long_window():
     tg = _FakeTelegram()
     bus = EventBus()
     rules = AlertRules(
-        bus=bus, telegram=tg, dedupe_window_s=0,
+        bus=bus,
+        telegram=tg,
+        dedupe_window_s=0,
         persistent_dedupe_window_s=3600,
     )
     sub = bus.subscribe()
     task = asyncio.create_task(rules.run(sub))
     for i in range(5):
-        await bus.publish(ReconcileDrift(
-            ts_ns=i, account_alias="v1_pm", case="position_mismatch",
-            question_idx=700064348,
-            detail={"resolution": "venue_orphan_alert_only",
-                    "symbol": "43761417231391599644293018968888110210404891"
-                              "057977651038733001703497855505316",
-                    "qty": "51.0102", "avg_entry": "0.98"},
-        ))
+        await bus.publish(
+            ReconcileDrift(
+                ts_ns=i,
+                account_alias="v1_pm",
+                case="position_mismatch",
+                question_idx=700064348,
+                detail={
+                    "resolution": "venue_orphan_alert_only",
+                    "symbol": "43761417231391599644293018968888110210404891057977651038733001703497855505316",
+                    "qty": "51.0102",
+                    "avg_entry": "0.98",
+                },
+            )
+        )
     await asyncio.sleep(0.05)
     task.cancel()
     try:
@@ -457,16 +593,23 @@ async def test_loud_drift_still_uses_default_window():
     tg = _FakeTelegram()
     bus = EventBus()
     rules = AlertRules(
-        bus=bus, telegram=tg, dedupe_window_s=0,
+        bus=bus,
+        telegram=tg,
+        dedupe_window_s=0,
         persistent_dedupe_window_s=3600,
     )
     sub = bus.subscribe()
     task = asyncio.create_task(rules.run(sub))
     for i in range(5):
-        await bus.publish(ReconcileDrift(
-            ts_ns=i, account_alias="v1", case="local_ghost",
-            cloid="hla-v1-deadbeef", question_idx=42,
-        ))
+        await bus.publish(
+            ReconcileDrift(
+                ts_ns=i,
+                account_alias="v1",
+                case="local_ghost",
+                cloid="hla-v1-deadbeef",
+                question_idx=42,
+            )
+        )
     await asyncio.sleep(0.05)
     task.cancel()
     try:
@@ -487,9 +630,13 @@ async def test_memory_halt_formats_with_rss_and_ceiling():
     sub = bus.subscribe()
     task = asyncio.create_task(rules.run(sub))
     # 900 MB RSS, 850 MB ceiling (typical 1 GB box configuration)
-    await bus.publish(MemoryHalt(
-        ts_ns=1, rss_kb=921_600, ceiling_kb=870_400,
-    ))
+    await bus.publish(
+        MemoryHalt(
+            ts_ns=1,
+            rss_kb=921_600,
+            ceiling_kb=870_400,
+        )
+    )
     await asyncio.sleep(0.05)
     task.cancel()
     try:
@@ -500,8 +647,7 @@ async def test_memory_halt_formats_with_rss_and_ceiling():
     msg = tg.messages[0]
     # Must mention the halt condition clearly
     assert "MEMORY" in msg or "HALT" in msg, (
-        "message must mention MEMORY or HALT so operators recognise it as a "
-        "self-halt event"
+        "message must mention MEMORY or HALT so operators recognise it as a self-halt event"
     )
     # MB values: 921600 KB → 900 MB, 870400 KB → 850 MB
     assert "900" in msg, "message must include current RSS in MB"
@@ -516,8 +662,12 @@ async def test_pm_strike_mismatch_renders_to_telegram():
     sub = bus.subscribe()
     task = asyncio.create_task(rules.run(sub))
     ev = PMStrikeMismatch(
-        ts_ns=1, account_alias="v31_pm", question_idx=909002,
-        captured_strike=73644.92, reference_mark=73501.0, divergence_bps=19.5,
+        ts_ns=1,
+        account_alias="v31_pm",
+        question_idx=909002,
+        captured_strike=73644.92,
+        reference_mark=73501.0,
+        divergence_bps=19.5,
     )
     rendered = rules._format(ev)
     task.cancel()

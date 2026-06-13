@@ -53,7 +53,8 @@ class RestartDriftGate:
         # Restart is exactly when venue truth SHOULD win — the engine may have
         # missed fills while down. apply_position_changes defaults True.
         rec = Reconciler(
-            self.dal, fills_lookup=fills_lookup,
+            self.dal,
+            fills_lookup=fills_lookup,
             account_alias=self.account_alias,
         )
         res = rec.run(venue_open=venue_open, venue_state=venue_state, now_ns=now_ns)
@@ -87,10 +88,7 @@ class RestartDriftGate:
         existing_block = self.block_path.exists()
         if loud:
             self.block_path.parent.mkdir(parents=True, exist_ok=True)
-            summary = "\n".join(
-                f"- {d.case} cloid={d.cloid} q={d.question_idx} {d.detail}"
-                for d in loud
-            )
+            summary = "\n".join(f"- {d.case} cloid={d.cloid} q={d.question_idx} {d.detail}" for d in loud)
             self.block_path.write_text(f"restart_blocked at ns={now_ns}\n{summary}\n")
             return RestartDriftResult(blocked=True, drift_events=res.drift_events, summary=summary)
 
@@ -98,11 +96,13 @@ class RestartDriftGate:
             if self.auto_clear:
                 self.block_path.unlink(missing_ok=True)
                 return RestartDriftResult(
-                    blocked=False, drift_events=res.drift_events,
+                    blocked=False,
+                    drift_events=res.drift_events,
                     summary="block file auto-cleared on clean restart",
                 )
             return RestartDriftResult(
-                blocked=True, drift_events=res.drift_events,
+                blocked=True,
+                drift_events=res.drift_events,
                 summary="block file present (operator hold)",
             )
 

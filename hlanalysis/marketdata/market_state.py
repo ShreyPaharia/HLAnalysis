@@ -46,6 +46,7 @@ streaming tick path reproduces the engine's bars (``KlineRingBuffer`` is
 append-only and lives behind the ``strategy._numba`` boundary; Wave 2 can merge
 the in-place update upstream).
 """
+
 from __future__ import annotations
 
 import math
@@ -76,6 +77,7 @@ _EMPTY_HL = np.empty((0, 2), dtype=np.float64)
 # Minimal shared event structs — callers normalize their native events onto
 # these at the edge. Frozen so the core stays a pure function of the sequence.
 # --------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class BookEvent:
@@ -121,6 +123,7 @@ class ReferenceBarEvent:
 # Per-(symbol, dt) OHLC bar store.
 # --------------------------------------------------------------------------
 
+
 class _OhlcBuffer:
     """Append-only OHLC bars with O(1) updates and SHR-66 windowed slices.
 
@@ -134,8 +137,15 @@ class _OhlcBuffer:
     """
 
     __slots__ = (
-        "_ts", "_high", "_low", "_close", "_ret", "_len", "_cap",
-        "_bucket_ns", "_last_bucket",
+        "_ts",
+        "_high",
+        "_low",
+        "_close",
+        "_ret",
+        "_len",
+        "_cap",
+        "_bucket_ns",
+        "_last_bucket",
     )
 
     def __init__(self, bucket_ns: int, *, initial_capacity: int = 256) -> None:
@@ -201,9 +211,7 @@ class _OhlcBuffer:
             self._last_bucket = bucket
             return
         i = self._len - 1
-        h, l, c = update_bar(
-            (self._high[i], self._low[i], self._close[i]), price, price, price
-        )
+        h, l, c = update_bar((self._high[i], self._low[i], self._close[i]), price, price, price)
         self._ts[i] = ts_ns
         self._high[i] = h
         self._low[i] = l
@@ -215,9 +223,7 @@ class _OhlcBuffer:
             return None
         return float(self._close[self._len - 1])
 
-    def slice_window(
-        self, *, now_ns: int, lookback_seconds: int
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def slice_window(self, *, now_ns: int, lookback_seconds: int) -> tuple[np.ndarray, np.ndarray]:
         """``(returns_1d, hl_2d)`` over the SHR-66 window — see module docstring.
 
         Verbatim port of ``KlineRingBuffer.slice_window``; keep in lockstep.
@@ -255,6 +261,7 @@ class _OhlcBuffer:
 # --------------------------------------------------------------------------
 # The shared MarketState.
 # --------------------------------------------------------------------------
+
 
 @dataclass(slots=True)
 class _MutableBook:
@@ -310,9 +317,7 @@ class MarketState:
         ring to pre-size.
         """
         if sampling_dt_seconds <= 0:
-            raise ValueError(
-                f"sampling_dt_seconds must be positive, got {sampling_dt_seconds!r}"
-            )
+            raise ValueError(f"sampling_dt_seconds must be positive, got {sampling_dt_seconds!r}")
         ns = int(sampling_dt_seconds) * 1_000_000_000
         cadences = self._cadences.setdefault(symbol, [])
         if ns not in cadences:
@@ -340,22 +345,24 @@ class MarketState:
     # ---- ingest --------------------------------------------------------
 
     def apply(
-        self, ev: BookEvent | TradeEvent | ReferenceTickEvent | ReferenceBarEvent,
+        self,
+        ev: BookEvent | TradeEvent | ReferenceTickEvent | ReferenceBarEvent,
     ) -> None:
         """Dispatch one shared event onto the appropriate ingest path."""
         match ev:
             case BookEvent():
                 self.apply_book(ev.symbol, ts_ns=ev.ts_ns, bids=ev.bids, asks=ev.asks)
             case TradeEvent():
-                self.apply_trade(
-                    ev.symbol, ts_ns=ev.ts_ns, price=ev.price, size=ev.size
-                )
+                self.apply_trade(ev.symbol, ts_ns=ev.ts_ns, price=ev.price, size=ev.size)
             case ReferenceTickEvent():
                 self.apply_reference_tick(ev.symbol, ts_ns=ev.ts_ns, price=ev.price)
             case ReferenceBarEvent():
                 self.apply_reference_bar(
-                    ev.symbol, ts_ns=ev.ts_ns,
-                    high=ev.high, low=ev.low, close=ev.close,
+                    ev.symbol,
+                    ts_ns=ev.ts_ns,
+                    high=ev.high,
+                    low=ev.low,
+                    close=ev.close,
                 )
             case _:  # pragma: no cover - defensive
                 raise TypeError(f"unknown event type: {type(ev).__name__}")
@@ -377,9 +384,7 @@ class MarketState:
             b.ask_levels = tuple(asks)
         b.last_l2_ts_ns = max(b.last_l2_ts_ns, ts_ns)
 
-    def apply_trade(
-        self, symbol: str, *, ts_ns: int, price: float, size: float
-    ) -> None:
+    def apply_trade(self, symbol: str, *, ts_ns: int, price: float, size: float) -> None:
         dq = self._trades.setdefault(symbol, deque())
         dq.append((ts_ns, price, size))
         self._evict(dq, now_ns=ts_ns)
@@ -392,9 +397,7 @@ class MarketState:
         for bucket_ns in self._cadences_for(symbol):
             self._buffer(symbol, bucket_ns).ingest_tick(ts_ns, price)
 
-    def apply_reference_bar(
-        self, symbol: str, *, ts_ns: int, high: float, low: float, close: float
-    ) -> None:
+    def apply_reference_bar(self, symbol: str, *, ts_ns: int, high: float, low: float, close: float) -> None:
         self._last_mark[symbol] = close
         self._last_mark_ts[symbol] = ts_ns
         # A pre-bucketed bar is appended to the symbol's default cadence buffer
@@ -431,9 +434,7 @@ class MarketState:
     def last_mark_ts(self, symbol: str) -> int | None:
         return self._last_mark_ts.get(symbol)
 
-    def _slice(
-        self, symbol: str, dt: int | None, now_ns: int, lookback_seconds: int
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def _slice(self, symbol: str, dt: int | None, now_ns: int, lookback_seconds: int) -> tuple[np.ndarray, np.ndarray]:
         buf = self._buffers.get((symbol, self._resolve_dt_ns(symbol, dt)))
         if buf is None:
             return _EMPTY_F64, _EMPTY_HL
@@ -469,9 +470,7 @@ class MarketState:
     ) -> tuple[np.ndarray, np.ndarray]:
         return self._slice(symbol, dt, now_ns, lookback_seconds)
 
-    def recent_volume_usd(
-        self, symbols: str | Iterable[str], *, now_ns: int
-    ) -> float:
+    def recent_volume_usd(self, symbols: str | Iterable[str], *, now_ns: int) -> float:
         """Total traded notional (Σ price·size) over the last hour as of
         ``now_ns``, summed across ``symbols`` (a single symbol or an iterable of
         leg symbols). Evicts stale entries per-symbol on read — the live engine

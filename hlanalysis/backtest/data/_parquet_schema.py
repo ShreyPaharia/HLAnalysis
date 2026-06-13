@@ -28,6 +28,7 @@ columns (e.g. ``local_recv_ts``, ``seq``, ``trade_id``, …) that the sim does
 not need. Listing the loader subset keeps the contract tight — it fails the
 moment a needed column is missing, not when an unused one is renamed.
 """
+
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
@@ -79,9 +80,7 @@ BBO_COLS: tuple[str, ...] = BASE_COLS + (
 )
 
 #: All columns written by MarkEvent → to_record.
-MARK_COLS: tuple[str, ...] = BASE_COLS + (
-    "mark_px",
-)
+MARK_COLS: tuple[str, ...] = BASE_COLS + ("mark_px",)
 
 #: All columns written by SettlementEvent → to_record.
 SETTLEMENT_COLS: tuple[str, ...] = BASE_COLS + (

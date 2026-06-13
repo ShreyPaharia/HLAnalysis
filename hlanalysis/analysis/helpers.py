@@ -8,6 +8,7 @@ Goals:
 
 Notebooks should depend only on this module + duckdb/pandas/matplotlib.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -111,9 +112,7 @@ def load_df(sql: str, *, params: Iterable | None = None) -> pd.DataFrame:
 
 def fmt_ts(ns: int | float) -> str:
     """ns since epoch -> 'YYYY-MM-DD HH:MM:SS' UTC string."""
-    return dt.datetime.fromtimestamp(int(ns) / 1e9, tz=dt.UTC).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    return dt.datetime.fromtimestamp(int(ns) / 1e9, tz=dt.UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def set_mpl_defaults() -> None:

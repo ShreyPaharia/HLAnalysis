@@ -50,19 +50,23 @@ class _FakeWS:
 
 class _StubGamma:
     def fetch_events(self, **kw):
-        return [{
-            "markets": [{
-                "conditionId": "0xfixturecond",
-                "clobTokenIds": '["tok-yes","tok-no"]',
-                "endDate": "2026-05-25T00:00:00Z",
-                "description": (
-                    "Will BTC go up or down? Resolves based on the "
-                    "Binance 1 minute candle for BTC/USDT May 24 '26 "
-                    "20:00 in the ET timezone..."
-                ),
-                "outcomePrices": '["0.5","0.5"]',
-            }]
-        }]
+        return [
+            {
+                "markets": [
+                    {
+                        "conditionId": "0xfixturecond",
+                        "clobTokenIds": '["tok-yes","tok-no"]',
+                        "endDate": "2026-05-25T00:00:00Z",
+                        "description": (
+                            "Will BTC go up or down? Resolves based on the "
+                            "Binance 1 minute candle for BTC/USDT May 24 '26 "
+                            "20:00 in the ET timezone..."
+                        ),
+                        "outcomePrices": '["0.5","0.5"]',
+                    }
+                ]
+            }
+        ]
 
     @staticmethod
     def iter_binary_markets(events):
@@ -106,10 +110,9 @@ async def test_adapter_emits_book_and_trade_events_from_fixture():
 @pytest.mark.asyncio
 async def test_adapter_reconnects_on_ws_close():
     closing_ws = _FakeWS([])
-    fresh_ws = _FakeWS([
-        '{"event_type":"book","asset_id":"tok-yes","timestamp":"1","bids":[],'
-        '"asks":[{"price":"0.5","size":"10"}]}'
-    ])
+    fresh_ws = _FakeWS(
+        ['{"event_type":"book","asset_id":"tok-yes","timestamp":"1","bids":[],"asks":[{"price":"0.5","size":"10"}]}']
+    )
 
     calls = {"n": 0}
 

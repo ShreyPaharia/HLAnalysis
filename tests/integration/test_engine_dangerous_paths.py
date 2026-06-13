@@ -18,6 +18,7 @@ Paths covered
 5. Feed disconnect/reconnect — ingest reconnects (SHR-42); PM PmBook state is
    reset on reconnect (SHR-62).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -33,12 +34,21 @@ from hlanalysis.adapters.base import VenueAdapter
 from hlanalysis.alerts.telegram import TelegramClient
 from hlanalysis.config import Subscription
 from hlanalysis.engine.config import (
-    AlertsConfig, AllowlistEntry, DeployConfig, GlobalRiskConfig, HLConfig,
-    StrategyConfig, TelegramConfig,
+    AlertsConfig,
+    AllowlistEntry,
+    DeployConfig,
+    GlobalRiskConfig,
+    HLConfig,
+    StrategyConfig,
+    TelegramConfig,
 )
 from hlanalysis.engine.event_bus import EventBus
 from hlanalysis.engine.exec_types import (
-    ClearinghouseState, OpenOrderRow, OrderAck, PlaceRequest, UserFillRow,
+    ClearinghouseState,
+    OpenOrderRow,
+    OrderAck,
+    PlaceRequest,
+    UserFillRow,
     VenuePosition,
 )
 from hlanalysis.engine.hl_client import HLClient
@@ -49,17 +59,26 @@ from hlanalysis.engine.router import Router
 from hlanalysis.engine.runtime import EngineRuntime
 from hlanalysis.engine.state import OpenOrder, Position, StateDAL
 from hlanalysis.events import (
-    BboEvent, MarkEvent, Mechanism, ProductType,
-    QuestionMetaEvent, SettlementEvent,
+    BboEvent,
+    MarkEvent,
+    Mechanism,
+    ProductType,
+    QuestionMetaEvent,
+    SettlementEvent,
 )
 from hlanalysis.strategy.types import (
-    Action, BookState, Decision, OrderIntent, QuestionView,
+    Action,
+    BookState,
+    Decision,
+    OrderIntent,
+    QuestionView,
 )
 
 
 # ---------------------------------------------------------------------------
 # Shared test helpers
 # ---------------------------------------------------------------------------
+
 
 def _strategy_cfg(
     *,
@@ -69,32 +88,45 @@ def _strategy_cfg(
 ) -> StrategyConfig:
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC", "period": "1h"},
-        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=60,
-        tte_max_seconds=1800, price_extreme_threshold=0.95,
-        distance_from_strike_usd_min=200, vol_max=0.5,
+        max_position_usd=100,
+        stop_loss_pct=10,
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200,
+        vol_max=0.5,
     )
     return StrategyConfig(
-        name="late_resolution", paper_mode=True,
-        allowlist=[entry], blocklist_question_idxs=[],
+        name="late_resolution",
+        paper_mode=True,
+        allowlist=[entry],
+        blocklist_question_idxs=[],
         defaults=entry,
-        **{"global": GlobalRiskConfig(
-            max_total_inventory_usd=500, max_concurrent_positions=5,
-            daily_loss_cap_usd=200, max_strike_distance_pct=10,
-            min_recent_volume_usd=min_recent_volume_usd,
-            stale_data_halt_seconds=stale_data_halt_seconds,
-            reconcile_interval_seconds=60,
-            max_slippage_pct=max_slippage_pct,
-        )},
+        **{
+            "global": GlobalRiskConfig(
+                max_total_inventory_usd=500,
+                max_concurrent_positions=5,
+                daily_loss_cap_usd=200,
+                max_strike_distance_pct=10,
+                min_recent_volume_usd=min_recent_volume_usd,
+                stale_data_halt_seconds=stale_data_halt_seconds,
+                reconcile_interval_seconds=60,
+                max_slippage_pct=max_slippage_pct,
+            )
+        },
     )
 
 
 def _deploy_cfg(tmp_path: Path) -> DeployConfig:
     return DeployConfig(
         env="dev",
-        accounts={"default": HLConfig(
-            account_address="0x", api_secret_key="0x",
-            base_url="https://api.hyperliquid.xyz",
-        )},
+        accounts={
+            "default": HLConfig(
+                account_address="0x",
+                api_secret_key="0x",
+                base_url="https://api.hyperliquid.xyz",
+            )
+        },
         alerts=AlertsConfig(telegram=TelegramConfig(bot_token="x", chat_id="y")),
         state_db_path=str(tmp_path / "state.db"),
         kill_switch_path=str(tmp_path / "halt"),
@@ -107,18 +139,23 @@ def _now_plus_ns(offset_ns: int = 0) -> int:
 
 def _expiry_str(future_ns: int) -> str:
     return datetime.fromtimestamp(
-        future_ns / 1e9, tz=timezone.utc,
-    ).strftime('%Y%m%d-%H%M')
+        future_ns / 1e9,
+        tz=timezone.utc,
+    ).strftime("%Y%m%d-%H%M")
 
 
 def _meta_event(question_idx: int = 42) -> QuestionMetaEvent:
     now = time.time_ns()
     expiry = now + 10 * 60 * 1_000_000_000  # 10 min in future
     return QuestionMetaEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="qmeta",
-        exchange_ts=now - 60_000_000_000, local_recv_ts=now - 60_000_000_000,
-        question_idx=question_idx, named_outcome_idxs=[3],
+        venue="hyperliquid",
+        product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB,
+        symbol="qmeta",
+        exchange_ts=now - 60_000_000_000,
+        local_recv_ts=now - 60_000_000_000,
+        question_idx=question_idx,
+        named_outcome_idxs=[3],
         keys=["class", "underlying", "period", "expiry", "strike"],
         values=["priceBinary", "BTC", "1h", _expiry_str(expiry), "80000"],
     )
@@ -128,8 +165,10 @@ def _mark_stream(n: int = 8) -> list[MarkEvent]:
     now = time.time_ns()
     return [
         MarkEvent(
-            venue="hyperliquid", product_type=ProductType.PERP,
-            mechanism=Mechanism.CLOB, symbol="BTC",
+            venue="hyperliquid",
+            product_type=ProductType.PERP,
+            mechanism=Mechanism.CLOB,
+            symbol="BTC",
             exchange_ts=now - (n - i) * 60_000_000_000,
             local_recv_ts=now - (n - i) * 60_000_000_000,
             mark_px=80_300.0 + i * 0.01,
@@ -160,6 +199,7 @@ class _FakeTelegram:
 # little additional coverage — the runtime path just calls router.handle().
 # ---------------------------------------------------------------------------
 
+
 class _AlwaysRejectExec:
     paper_mode = False
 
@@ -168,8 +208,7 @@ class _AlwaysRejectExec:
 
     def place(self, req: PlaceRequest) -> OrderAck:
         self.placed.append(req)
-        return OrderAck(cloid=req.cloid, venue_oid="", status="rejected",
-                        error="insufficient margin")
+        return OrderAck(cloid=req.cloid, venue_oid="", status="rejected", error="insufficient margin")
 
     def cancel(self, *, cloid: str, symbol: str) -> bool:
         return True
@@ -198,16 +237,20 @@ class _ScriptedExec(_AlwaysRejectExec):
         self.placed.append(req)
         status = self._statuses.pop(0) if self._statuses else "rejected"
         if status == "filled":
-            return OrderAck(cloid=req.cloid, venue_oid="v", status="filled",
-                            fill_price=req.price, fill_size=req.size)
+            return OrderAck(cloid=req.cloid, venue_oid="v", status="filled", fill_price=req.price, fill_size=req.size)
         return OrderAck(cloid=req.cloid, venue_oid="", status="rejected", error="rej")
 
 
 def _q() -> QuestionView:
     return QuestionView(
-        question_idx=42, yes_symbol="@30", no_symbol="@31",
-        strike=80_000.0, expiry_ns=_now_plus_ns(600_000_000_000),
-        underlying="BTC", klass="priceBinary", period="1h",
+        question_idx=42,
+        yes_symbol="@30",
+        no_symbol="@31",
+        strike=80_000.0,
+        expiry_ns=_now_plus_ns(600_000_000_000),
+        underlying="BTC",
+        klass="priceBinary",
+        period="1h",
     )
 
 
@@ -218,7 +261,11 @@ def _risk_inputs() -> RiskInputs:
         question_fields={"class": "priceBinary", "underlying": "BTC", "period": "1h"},
         reference_price=80_300.0,
         book=BookState(
-            symbol="@30", bid_px=0.94, bid_sz=10.0, ask_px=0.95, ask_sz=10.0,
+            symbol="@30",
+            bid_px=0.94,
+            bid_sz=10.0,
+            ask_px=0.95,
+            ask_sz=10.0,
             last_trade_ts_ns=now - 1,
             last_l2_ts_ns=now - 1,
         ),
@@ -234,8 +281,14 @@ def _risk_inputs() -> RiskInputs:
 
 def _exit_intent(cloid: str, question_idx: int = 42, symbol: str = "@30") -> OrderIntent:
     return OrderIntent(
-        question_idx=question_idx, symbol=symbol, side="sell", size=10.0,
-        limit_price=0.99, cloid=cloid, time_in_force="ioc", reduce_only=True,
+        question_idx=question_idx,
+        symbol=symbol,
+        side="sell",
+        size=10.0,
+        limit_price=0.99,
+        cloid=cloid,
+        time_in_force="ioc",
+        reduce_only=True,
         exit_reason="exit_safety_d",
     )
 
@@ -255,15 +308,25 @@ async def test_reject_storm_circuit_breaker_plateaus(tmp_path):
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     # Seed a held position so reduce_only clamp doesn't fire.
-    dal.upsert_position(Position(
-        question_idx=42, symbol="@30", qty=10.0, avg_entry=0.9,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
-    ))
+    dal.upsert_position(
+        Position(
+            question_idx=42,
+            symbol="@30",
+            qty=10.0,
+            avg_entry=0.9,
+            realized_pnl=0.0,
+            last_update_ts_ns=1,
+            stop_loss_price=-1.0,
+        )
+    )
     cfg = _strategy_cfg()
     client = _AlwaysRejectExec()
     router = Router(
-        dal=dal, gate=RiskGate(cfg), bus=EventBus(),
-        exec_client=client, strategy_cfg=cfg,
+        dal=dal,
+        gate=RiskGate(cfg),
+        bus=EventBus(),
+        exec_client=client,
+        strategy_cfg=cfg,
         reject_breaker_threshold=threshold,
     )
 
@@ -271,7 +334,8 @@ async def test_reject_storm_circuit_breaker_plateaus(tmp_path):
     for i in range(total_attempts):
         await router.handle(
             Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-dp1-{i}"),)),
-            inputs=_risk_inputs(), now_ns=_now_plus_ns(i),
+            inputs=_risk_inputs(),
+            now_ns=_now_plus_ns(i),
         )
 
     assert len(client.placed) == threshold, (
@@ -293,24 +357,34 @@ async def test_reject_storm_resets_on_fill(tmp_path):
     threshold = 3
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
-    dal.upsert_position(Position(
-        question_idx=42, symbol="@30", qty=100.0, avg_entry=0.9,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
-    ))
+    dal.upsert_position(
+        Position(
+            question_idx=42,
+            symbol="@30",
+            qty=100.0,
+            avg_entry=0.9,
+            realized_pnl=0.0,
+            last_update_ts_ns=1,
+            stop_loss_price=-1.0,
+        )
+    )
     cfg = _strategy_cfg()
     # rej, rej, fill, rej, rej, rej, (7th suppressed)
-    client = _ScriptedExec(["rejected", "rejected", "filled",
-                             "rejected", "rejected", "rejected", "rejected"])
+    client = _ScriptedExec(["rejected", "rejected", "filled", "rejected", "rejected", "rejected", "rejected"])
     router = Router(
-        dal=dal, gate=RiskGate(cfg), bus=EventBus(),
-        exec_client=client, strategy_cfg=cfg,
+        dal=dal,
+        gate=RiskGate(cfg),
+        bus=EventBus(),
+        exec_client=client,
+        strategy_cfg=cfg,
         reject_breaker_threshold=threshold,
     )
 
     for i in range(7):
         await router.handle(
             Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-dp1r-{i}"),)),
-            inputs=_risk_inputs(), now_ns=_now_plus_ns(i),
+            inputs=_risk_inputs(),
+            now_ns=_now_plus_ns(i),
         )
 
     assert len(client.placed) == 6, (
@@ -330,6 +404,7 @@ async def test_reject_storm_resets_on_fill(tmp_path):
 #       size is clamped to at-limit depth rather than walking the whole book.
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_stop_loss_in_flight_guard_no_double_ioc(tmp_path):
     """Path 2a: in-flight exit guard (SHR-48).
@@ -346,19 +421,33 @@ async def test_stop_loss_in_flight_guard_no_double_ioc(tmp_path):
     dal.run_migrations()
 
     # Seed a position below its stop price (stop = 0.90, current bid = 0.85).
-    dal.upsert_position(Position(
-        question_idx=42, symbol="@30", qty=10.0, avg_entry=0.92,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=0.90,
-    ))
+    dal.upsert_position(
+        Position(
+            question_idx=42,
+            symbol="@30",
+            qty=10.0,
+            avg_entry=0.92,
+            realized_pnl=0.0,
+            last_update_ts_ns=1,
+            stop_loss_price=0.90,
+        )
+    )
     # Seed a live exit order for the same question_idx (simulates prior IOC).
-    dal.upsert_order(OpenOrder(
-        cloid="hla-v1-inflight", venue_oid="v1",
-        question_idx=42, symbol="@30",
-        side="sell", price=0.85, size=10.0,
-        status="open",
-        placed_ts_ns=1, last_update_ts_ns=1,
-        strategy_id="late_resolution",
-    ))
+    dal.upsert_order(
+        OpenOrder(
+            cloid="hla-v1-inflight",
+            venue_oid="v1",
+            question_idx=42,
+            symbol="@30",
+            side="sell",
+            price=0.85,
+            size=10.0,
+            status="open",
+            placed_ts_ns=1,
+            last_update_ts_ns=1,
+            strategy_id="late_resolution",
+        )
+    )
 
     client = _AlwaysRejectExec()
     deploy = _deploy_cfg(tmp_path)
@@ -376,12 +465,20 @@ async def test_stop_loss_in_flight_guard_no_double_ioc(tmp_path):
 
     # Inject the BBO into MarketState so the stop-loss enforcer can read bid_px.
     now = _now_plus_ns()
-    runtime.market_state.apply(BboEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="@30",
-        exchange_ts=now, local_recv_ts=now,
-        bid_px=0.85, bid_sz=5.0, ask_px=0.86, ask_sz=5.0,
-    ))
+    runtime.market_state.apply(
+        BboEvent(
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="@30",
+            exchange_ts=now,
+            local_recv_ts=now,
+            bid_px=0.85,
+            bid_sz=5.0,
+            ask_px=0.86,
+            ask_sz=5.0,
+        )
+    )
     # Register question in MarketState so question() lookup works.
     runtime.market_state.apply(_meta_event(42))
 
@@ -417,8 +514,10 @@ async def test_stop_loss_slippage_clamped_on_thin_book(tmp_path):
     # BookState with bid_levels: thin book (3 units at 0.85, 50 at 0.70)
     book = BookState(
         symbol="@30",
-        bid_px=0.85, bid_sz=3.0,
-        ask_px=0.86, ask_sz=10.0,
+        bid_px=0.85,
+        bid_sz=3.0,
+        ask_px=0.86,
+        ask_sz=10.0,
         last_trade_ts_ns=now - 1,
         last_l2_ts_ns=now - 1,
         bid_levels=((0.85, 3.0), (0.70, 50.0)),  # 0.70 is far below limit
@@ -426,17 +525,28 @@ async def test_stop_loss_slippage_clamped_on_thin_book(tmp_path):
     )
     # Exit intent for 10 units at limit 0.85 (IOC sell)
     intent = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=10.0,
-        limit_price=0.85, cloid="hla-dp2b-0", time_in_force="ioc",
-        reduce_only=True, exit_reason="stop_loss",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=10.0,
+        limit_price=0.85,
+        cloid="hla-dp2b-0",
+        time_in_force="ioc",
+        reduce_only=True,
+        exit_reason="stop_loss",
     )
     inp = RiskInputs(
         question=replace(_q(), settled=False),
         question_fields={"class": "priceBinary", "underlying": "BTC", "period": "1h"},
-        reference_price=80_300.0, book=book,
-        recent_volume_usd=5_000.0, positions=[],
-        live_orders_total_notional=0.0, realized_pnl_today=0.0,
-        kill_switch_active=False, last_reconcile_ns=now - 1, now_ns=now,
+        reference_price=80_300.0,
+        book=book,
+        recent_volume_usd=5_000.0,
+        positions=[],
+        live_orders_total_notional=0.0,
+        realized_pnl_today=0.0,
+        kill_switch_active=False,
+        last_reconcile_ns=now - 1,
+        now_ns=now,
     )
 
     verdict = gate.check_pre_trade(intent, inp)
@@ -463,6 +573,7 @@ async def test_stop_loss_slippage_clamped_on_thin_book(tmp_path):
 # (c) Recovered lost-ACK fill: local-ghost with fills → position booked (SHR-46).
 # ---------------------------------------------------------------------------
 
+
 def test_reconcile_vanished_position_detected(tmp_path):
     """Path 3a: vanished position is surfaced in ReconcileResult.vanished_positions.
 
@@ -473,10 +584,17 @@ def test_reconcile_vanished_position_detected(tmp_path):
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     # Seed a live position.
-    dal.upsert_position(Position(
-        question_idx=42, symbol="@30", qty=10.0, avg_entry=0.92,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
-    ))
+    dal.upsert_position(
+        Position(
+            question_idx=42,
+            symbol="@30",
+            qty=10.0,
+            avg_entry=0.92,
+            realized_pnl=0.0,
+            last_update_ts_ns=1,
+            stop_loss_price=-1.0,
+        )
+    )
     # Venue reports nothing for this symbol.
     venue_state = ClearinghouseState(positions=(), account_value_usd=0.0)
 
@@ -495,9 +613,7 @@ def test_reconcile_vanished_position_detected(tmp_path):
     assert qidx == 42
     assert sym == "@30"
     # Position must also be deleted from the DB.
-    assert dal.get_position(42) is None, (
-        "Reconciler must delete the vanished position row."
-    )
+    assert dal.get_position(42) is None, "Reconciler must delete the vanished position row."
 
 
 def test_reconcile_venue_orphan_flagged_for_cancel(tmp_path):
@@ -527,12 +643,12 @@ def test_reconcile_venue_orphan_flagged_for_cancel(tmp_path):
         apply_position_changes=True,
     )
     result = rec.run(
-        venue_open=[venue_orphan], venue_state=venue_state, now_ns=2,
+        venue_open=[venue_orphan],
+        venue_state=venue_state,
+        now_ns=2,
     )
 
-    assert len(result.orphans_to_cancel) == 1, (
-        f"Expected 1 orphan to cancel; got {result.orphans_to_cancel}"
-    )
+    assert len(result.orphans_to_cancel) == 1, f"Expected 1 orphan to cancel; got {result.orphans_to_cancel}"
     orphan_cloid, orphan_symbol = result.orphans_to_cancel[0]
     assert orphan_symbol == "@30"
 
@@ -551,18 +667,35 @@ def test_reconcile_recovered_lost_ack_fill_books_position(tmp_path):
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     cloid = "hla-v31-lostack"
-    dal.upsert_order(OpenOrder(
-        cloid=cloid, venue_oid="v-la", question_idx=42, symbol="@30",
-        side="buy", price=0.60, size=100.0, status="open",
-        placed_ts_ns=1, last_update_ts_ns=1, strategy_id="v31",
-    ))
-    fills = [UserFillRow(
-        fill_id="fill-la", cloid=cloid, symbol="@30",
-        side="buy", price=0.60, size=100.0, fee=0.10, ts_ns=2,
-    )]
+    dal.upsert_order(
+        OpenOrder(
+            cloid=cloid,
+            venue_oid="v-la",
+            question_idx=42,
+            symbol="@30",
+            side="buy",
+            price=0.60,
+            size=100.0,
+            status="open",
+            placed_ts_ns=1,
+            last_update_ts_ns=1,
+            strategy_id="v31",
+        )
+    )
+    fills = [
+        UserFillRow(
+            fill_id="fill-la",
+            cloid=cloid,
+            symbol="@30",
+            side="buy",
+            price=0.60,
+            size=100.0,
+            fee=0.10,
+            ts_ns=2,
+        )
+    ]
     venue_state = ClearinghouseState(
-        positions=(VenuePosition(symbol="@30", qty=100.0,
-                                 avg_entry=0.60, unrealized_pnl=0.0),),
+        positions=(VenuePosition(symbol="@30", qty=100.0, avg_entry=0.60, unrealized_pnl=0.0),),
         account_value_usd=1000.0,
     )
 
@@ -575,9 +708,7 @@ def test_reconcile_recovered_lost_ack_fill_books_position(tmp_path):
     rec.run(venue_open=[], venue_state=venue_state, now_ns=3)
 
     pos = dal.get_position(42)
-    assert pos is not None, (
-        "Recovered lost-ACK fill must create a Position row (SHR-46)."
-    )
+    assert pos is not None, "Recovered lost-ACK fill must create a Position row (SHR-46)."
     assert pos.qty == pytest.approx(100.0)
     assert pos.avg_entry == pytest.approx(0.60)
 
@@ -595,6 +726,7 @@ def test_reconcile_recovered_lost_ack_fill_books_position(tmp_path):
 # require precise async timing to observe the pre-task state.
 # ---------------------------------------------------------------------------
 
+
 def test_restart_drift_gate_clean_match_not_blocked(tmp_path):
     """Path 4: restart with matching DB + venue state.
 
@@ -607,14 +739,20 @@ def test_restart_drift_gate_clean_match_not_blocked(tmp_path):
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     # Seed the DB position.
-    dal.upsert_position(Position(
-        question_idx=42, symbol="@30", qty=10.0, avg_entry=0.92,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
-    ))
+    dal.upsert_position(
+        Position(
+            question_idx=42,
+            symbol="@30",
+            qty=10.0,
+            avg_entry=0.92,
+            realized_pnl=0.0,
+            last_update_ts_ns=1,
+            stop_loss_price=-1.0,
+        )
+    )
     # Venue matches.
     venue_state = ClearinghouseState(
-        positions=(VenuePosition(symbol="@30", qty=10.0,
-                                 avg_entry=0.92, unrealized_pnl=0.0),),
+        positions=(VenuePosition(symbol="@30", qty=10.0, avg_entry=0.92, unrealized_pnl=0.0),),
         account_value_usd=1000.0,
     )
     block_path = tmp_path / "restart_blocked"
@@ -624,18 +762,17 @@ def test_restart_drift_gate_clean_match_not_blocked(tmp_path):
         account_alias="default",
     )
     result = gate.run(
-        venue_open=[], venue_state=venue_state,
-        fills_lookup=lambda _c: [], now_ns=2,
+        venue_open=[],
+        venue_state=venue_state,
+        fills_lookup=lambda _c: [],
+        now_ns=2,
     )
 
     assert not result.blocked, (
-        "RestartDriftGate must NOT block on a clean DB↔venue match; "
-        f"got blocked=True summary={result.summary!r}"
+        f"RestartDriftGate must NOT block on a clean DB↔venue match; got blocked=True summary={result.summary!r}"
     )
     positions = dal.all_positions()
-    assert len(positions) == 1, (
-        f"Position count must stay 1 (no double-booking); got {len(positions)}"
-    )
+    assert len(positions) == 1, f"Position count must stay 1 (no double-booking); got {len(positions)}"
     assert positions[0].qty == pytest.approx(10.0)
 
 
@@ -650,15 +787,21 @@ def test_restart_drift_gate_blocks_on_local_ghost(tmp_path):
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     # Seed a live open order with no venue match and no fills.
-    dal.upsert_order(OpenOrder(
-        cloid="hla-v1-ghost",
-        venue_oid="v-ghost",
-        question_idx=42, symbol="@30",
-        side="buy", price=0.95, size=10.0,
-        status="open",
-        placed_ts_ns=1, last_update_ts_ns=1,
-        strategy_id="late_resolution",
-    ))
+    dal.upsert_order(
+        OpenOrder(
+            cloid="hla-v1-ghost",
+            venue_oid="v-ghost",
+            question_idx=42,
+            symbol="@30",
+            side="buy",
+            price=0.95,
+            size=10.0,
+            status="open",
+            placed_ts_ns=1,
+            last_update_ts_ns=1,
+            strategy_id="late_resolution",
+        )
+    )
     venue_state = ClearinghouseState(positions=(), account_value_usd=0.0)
     block_path = tmp_path / "restart_blocked"
     gate = RestartDriftGate(
@@ -667,13 +810,14 @@ def test_restart_drift_gate_blocks_on_local_ghost(tmp_path):
         account_alias="default",
     )
     result = gate.run(
-        venue_open=[], venue_state=venue_state,
-        fills_lookup=lambda _c: [], now_ns=2,
+        venue_open=[],
+        venue_state=venue_state,
+        fills_lookup=lambda _c: [],
+        now_ns=2,
     )
 
     assert result.blocked, (
-        "RestartDriftGate must block on a local_ghost (order on DB but not "
-        f"on venue, no fills); got blocked=False"
+        f"RestartDriftGate must block on a local_ghost (order on DB but not on venue, no fills); got blocked=False"
     )
     assert block_path.exists(), "Gate must write the restart_blocked flag file."
 
@@ -691,8 +835,10 @@ def test_restart_drift_gate_blocks_on_local_ghost(tmp_path):
 #     price_change can't merge into stale pre-disconnect levels.
 # ---------------------------------------------------------------------------
 
+
 class _NullAdapter(VenueAdapter):
     """Adapter that yields nothing — for slot-building without driving events."""
+
     venue = "hyperliquid"
 
     def supports(self, *_a, **_k) -> bool:
@@ -710,6 +856,7 @@ class _CrashThenRecoverAdapter(VenueAdapter):
     reconnect, so we use a shared list of 'rounds' to hand out the streams in
     order.  Call count is tracked on the class so tests can assert it.
     """
+
     venue = "hyperliquid"
     _call_count: int = 0
 
@@ -723,7 +870,7 @@ class _CrashThenRecoverAdapter(VenueAdapter):
     async def stream(self, _subs: list) -> AsyncIterator:
         now = time.time_ns()
         expiry = now + 10 * 60 * 1_000_000_000
-        expiry_str = datetime.fromtimestamp(expiry / 1e9, tz=timezone.utc).strftime('%Y%m%d-%H%M')
+        expiry_str = datetime.fromtimestamp(expiry / 1e9, tz=timezone.utc).strftime("%Y%m%d-%H%M")
 
         call_no = type(self)._call_count
         type(self)._call_count += 1
@@ -733,28 +880,38 @@ class _CrashThenRecoverAdapter(VenueAdapter):
             for i in range(3):
                 ts = now - (3 - i) * 60_000_000_000
                 yield MarkEvent(
-                    venue="hyperliquid", product_type=ProductType.PERP,
-                    mechanism=Mechanism.CLOB, symbol="BTC",
-                    exchange_ts=ts, local_recv_ts=ts,
+                    venue="hyperliquid",
+                    product_type=ProductType.PERP,
+                    mechanism=Mechanism.CLOB,
+                    symbol="BTC",
+                    exchange_ts=ts,
+                    local_recv_ts=ts,
                     mark_px=80_300.0 + i,
                 )
             raise ConnectionError("simulated feed drop")
         else:
             # Second stream (after reconnect): yield a few more marks.
             yield QuestionMetaEvent(
-                venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-                mechanism=Mechanism.CLOB, symbol="qmeta",
-                exchange_ts=now, local_recv_ts=now,
-                question_idx=99, named_outcome_idxs=[3],
+                venue="hyperliquid",
+                product_type=ProductType.PREDICTION_BINARY,
+                mechanism=Mechanism.CLOB,
+                symbol="qmeta",
+                exchange_ts=now,
+                local_recv_ts=now,
+                question_idx=99,
+                named_outcome_idxs=[3],
                 keys=["class", "underlying", "period", "expiry", "strike"],
                 values=["priceBinary", "BTC", "1h", expiry_str, "80000"],
             )
             for i in range(3):
                 ts = now + i * 60_000_000_000
                 yield MarkEvent(
-                    venue="hyperliquid", product_type=ProductType.PERP,
-                    mechanism=Mechanism.CLOB, symbol="BTC",
-                    exchange_ts=ts, local_recv_ts=ts,
+                    venue="hyperliquid",
+                    product_type=ProductType.PERP,
+                    mechanism=Mechanism.CLOB,
+                    symbol="BTC",
+                    exchange_ts=ts,
+                    local_recv_ts=ts,
                     mark_px=80_500.0 + i,
                 )
             # Hold long enough for the test to observe then stop cleanly.
@@ -825,11 +982,14 @@ def test_pm_book_reset_clears_stale_state_on_reconnect():
 
     book = PmBook()
     # Simulate pre-disconnect full snapshot with bids at 0.40 and 0.39.
-    book.apply_book({
-        "asset_id": "A", "timestamp": 1,
-        "bids": [{"price": "0.40", "size": "100"}, {"price": "0.39", "size": "50"}],
-        "asks": [{"price": "0.60", "size": "80"}],
-    })
+    book.apply_book(
+        {
+            "asset_id": "A",
+            "timestamp": 1,
+            "bids": [{"price": "0.40", "size": "100"}, {"price": "0.39", "size": "50"}],
+            "asks": [{"price": "0.60", "size": "80"}],
+        }
+    )
     assert len(book._bids) == 2  # sanity
 
     # Simulate reconnect — adapter calls reset().
@@ -838,10 +998,13 @@ def test_pm_book_reset_clears_stale_state_on_reconnect():
     assert len(book._asks) == 0, "reset() must clear all ask levels"
 
     # Now a price_change arrives before the full snapshot (common at reconnect).
-    snap = book.apply_price_change({
-        "asset_id": "A", "timestamp": 2,
-        "changes": [{"price": "0.41", "size": "30", "side": "BUY"}],
-    })
+    snap = book.apply_price_change(
+        {
+            "asset_id": "A",
+            "timestamp": 2,
+            "changes": [{"price": "0.41", "size": "30", "side": "BUY"}],
+        }
+    )
 
     # Pre-reset bids (0.40, 0.39) must NOT appear in the snapshot.
     assert snap is not None
@@ -850,6 +1013,4 @@ def test_pm_book_reset_clears_stale_state_on_reconnect():
         f"got bid_px={snap.bid_px}. Stale pre-disconnect levels survived reset()."
     )
     # Pre-reset ask (0.60) must also be absent.
-    assert len(snap.ask_px) == 0, (
-        f"After reset, asks must be empty; got ask_px={snap.ask_px}"
-    )
+    assert len(snap.ask_px) == 0, f"After reset, asks must be empty; got ask_px={snap.ask_px}"

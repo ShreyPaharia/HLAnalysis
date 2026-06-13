@@ -5,6 +5,7 @@ miscellaneous small helpers consumed by both argument-parsing code and
 command handlers.  This module has **no** argparse or command-handler code —
 those live in ``_cli_args.py`` and ``_cli_commands.py`` respectively.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,6 +31,7 @@ _ENV_PM_NBA_CACHE = "HLBT_PM_NBA_CACHE_ROOT"
 # ---------------------------------------------------------------------------
 # Data source resolution
 # ---------------------------------------------------------------------------
+
 
 def _source_config_from_args(
     args: argparse.Namespace,
@@ -62,9 +64,7 @@ def _source_config_from_args(
             pm_flavor=getattr(args, "pm_flavor", None) or "btc_updown",
             pm_reference_source=getattr(args, "pm_reference_source", None) or "klines",
             pm_book_source=getattr(args, "pm_book_source", None) or "synthetic",
-            pm_binance_bbo_product_type=(
-                getattr(args, "pm_binance_bbo_product_type", None) or "perp"
-            ),
+            pm_binance_bbo_product_type=(getattr(args, "pm_binance_bbo_product_type", None) or "perp"),
             pm_liquidity_profile_path=getattr(args, "pm_liquidity_profile", None),
             reference_resample_seconds=reference_resample_seconds,
         )
@@ -75,8 +75,8 @@ def _source_config_from_args(
         # config-derived live-faithful value (mark + raw) when not explicitly set.
         _cli_ref_event = getattr(args, "ref_event", None)
         _cli_ref_ticks = getattr(args, "reference_ticks", None)
-        _default_ref_event = (resolved.reference_source if resolved is not None else "mark")
-        _default_ref_ticks = (resolved.reference_ticks if resolved is not None else "raw")
+        _default_ref_event = resolved.reference_source if resolved is not None else "mark"
+        _default_ref_ticks = resolved.reference_ticks if resolved is not None else "raw"
         return SourceConfig(
             kind="hl_hip4",
             cache_root=cache_root or os.environ.get(_ENV_HL_DATA),
@@ -181,6 +181,7 @@ def assert_hl_cadence_match(source_config: SourceConfig, params: dict) -> None:
 # Strike resolution helper
 # ---------------------------------------------------------------------------
 
+
 def _strike_for_synthetic(q: QuestionDescriptor) -> float:
     """Best-effort strike resolution for the synthetic source.
 
@@ -197,6 +198,7 @@ def _strike_for_synthetic(q: QuestionDescriptor) -> float:
 # ---------------------------------------------------------------------------
 # Hedge config helpers
 # ---------------------------------------------------------------------------
+
 
 def _extract_hedge_config(params: dict) -> tuple[dict, dict | None]:
     """Extract hedge_* keys from params and return (strategy_params, hedge_run_cfg_dict).
@@ -243,19 +245,16 @@ def _sim_risk_caps_from_args(args: argparse.Namespace):
     if inv is None and conc is None and dlc is None:
         return None
     from .halt_replay import SimRiskCaps
+
     return SimRiskCaps(
         daily_loss_cap_usd=dlc,
-        daily_window_start_hour_utc=int(
-            getattr(args, "sim_daily_window_start_hour_utc", 0) or 0
-        ),
+        daily_window_start_hour_utc=int(getattr(args, "sim_daily_window_start_hour_utc", 0) or 0),
         max_total_inventory_usd=inv,
         max_concurrent_positions=conc,
     )
 
 
-def _run_config_from_args(
-    args: argparse.Namespace, hedge_cfg: dict | None
-):
+def _run_config_from_args(args: argparse.Namespace, hedge_cfg: dict | None):
     """Assemble a :class:`RunConfig` from the shared run-config CLI args.
 
     Single builder used by both ``run`` and ``tune`` (they declare the same
@@ -264,6 +263,7 @@ def _run_config_from_args(
     ``--hedge-*`` flags (``tune``); ``None`` means hedging is off.
     """
     from .runner.hftbt_runner import RunConfig
+
     kwargs: dict = dict(
         scanner_interval_seconds=args.scanner_interval_seconds,
         tick_size=args.tick_size,
@@ -334,10 +334,7 @@ def _load_run_params(args: argparse.Namespace) -> dict:
         cfgs = load_strategies_config(Path(args.slot_config))
         by_alias = {c.account_alias: c for c in cfgs.strategies}
         if args.slot not in by_alias:
-            raise SystemExit(
-                f"--slot {args.slot!r} not found in {args.slot_config}; "
-                f"available: {sorted(by_alias)}"
-            )
+            raise SystemExit(f"--slot {args.slot!r} not found in {args.slot_config}; available: {sorted(by_alias)}")
         slot_cfg = by_alias[args.slot]
         # Mirror the live engine's scan cadence so a slot run evaluates intraday
         # exits (exit_safety_d / exit_edge) at the SAME granularity the engine
@@ -360,9 +357,7 @@ def _load_run_params(args: argparse.Namespace) -> dict:
         args.sim_max_concurrent_positions = slot_cfg.global_.max_concurrent_positions
         args.sim_daily_loss_cap_usd = slot_cfg.global_.daily_loss_cap_usd
         args.sim_daily_window_start_hour_utc = slot_cfg.global_.daily_window_start_hour_utc
-        strategy_id, params = backtest_params_from_slot(
-            slot_cfg, klass=getattr(args, "slot_class", None)
-        )
+        strategy_id, params = backtest_params_from_slot(slot_cfg, klass=getattr(args, "slot_class", None))
         args.strategy = strategy_id
         # Stash the StrategyConfig on args so cmd_run can stamp the shared
         # config sig (strategy_config_sig) in the report without a second YAML

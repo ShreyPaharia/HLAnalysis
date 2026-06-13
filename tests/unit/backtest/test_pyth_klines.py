@@ -27,8 +27,10 @@ def test_fetch_klines_1m_parses_shim_response():
     fake.json.return_value = {
         "s": "ok",
         "t": [1700000000, 1700000060],
-        "o": [60.5, 60.6], "h": [60.7, 60.8],
-        "l": [60.4, 60.5], "c": [60.6, 60.7],
+        "o": [60.5, 60.6],
+        "h": [60.7, 60.8],
+        "l": [60.4, 60.5],
+        "c": [60.6, 60.7],
     }
     fake.raise_for_status = Mock()
     with patch("hlanalysis.backtest.data._pyth_klines.requests.get", return_value=fake):

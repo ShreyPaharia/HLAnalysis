@@ -22,6 +22,7 @@ hftbacktest fills diverged by a few price ticks on the v1 fixture, so this
 optimisation was abandoned. The diff-based path here is bit-identical to the
 legacy builder.
 """
+
 from __future__ import annotations
 
 import logging
@@ -63,7 +64,7 @@ def _read_book_columns(
         f"""
         SELECT exchange_ts, bid_px, bid_sz, ask_px, ask_sz
         FROM read_parquet('{glob}', hive_partitioning=1)
-        WHERE date IN ({','.join(repr(d) for d in date_list)})
+        WHERE date IN ({",".join(repr(d) for d in date_list)})
           AND exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
         ORDER BY exchange_ts
         """
@@ -96,7 +97,7 @@ def _read_trade_columns(
         f"""
         SELECT exchange_ts, price, size, side
         FROM read_parquet('{glob}', hive_partitioning=1)
-        WHERE date IN ({','.join(repr(d) for d in date_list)})
+        WHERE date IN ({",".join(repr(d) for d in date_list)})
           AND exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
         ORDER BY exchange_ts
         """
@@ -125,7 +126,7 @@ def _read_settlement_columns(
             f"""
             SELECT exchange_ts, settle_ts, settled_side_idx
             FROM read_parquet('{glob}', hive_partitioning=1)
-            WHERE date IN ({','.join(repr(d) for d in date_list)})
+            WHERE date IN ({",".join(repr(d) for d in date_list)})
               AND exchange_ts >= {start_ns} AND exchange_ts <= {end_ns}
             ORDER BY exchange_ts
             """
@@ -168,10 +169,16 @@ def build_fast_path_bundle(
     for leg in q.leg_symbols:
         book_glob = book_glob_for(leg)
         trade_glob = trade_glob_for(leg)
-        book_cols = _read_book_columns(con, book_glob, date_list, q.start_ts_ns, q.end_ts_ns) \
-            if _glob_has_files(book_glob) else None
-        trade_cols = _read_trade_columns(con, trade_glob, date_list, q.start_ts_ns, q.end_ts_ns) \
-            if _glob_has_files(trade_glob) else None
+        book_cols = (
+            _read_book_columns(con, book_glob, date_list, q.start_ts_ns, q.end_ts_ns)
+            if _glob_has_files(book_glob)
+            else None
+        )
+        trade_cols = (
+            _read_trade_columns(con, trade_glob, date_list, q.start_ts_ns, q.end_ts_ns)
+            if _glob_has_files(trade_glob)
+            else None
+        )
         arr = build_leg_event_array_from_columns(book_cols, trade_cols)
         book_ts = book_cols["ts"] if book_cols is not None else np.zeros(0, dtype=np.int64)
         snap_best_ask, snap_best_bid = snap_best_from_columns(book_cols)
@@ -223,9 +230,7 @@ def build_fast_path_bundle(
     else:
         # Bars mode (default): resample to OHLC bars. See hl_hip4.py::_resample_reference
         # for the generator-path twin and detailed rationale.
-        ref_events = _resample_reference_rows(
-            ref_events_raw, resample_ns=reference_resample_ns
-        )
+        ref_events = _resample_reference_rows(ref_events_raw, resample_ns=reference_resample_ns)
 
     # Settlement events: per-leg.
     settle_events: list[SettlementEvent] = []
@@ -252,6 +257,7 @@ def build_fast_path_bundle(
 
 def _glob_has_files(glob: str) -> bool:
     from glob import glob as _glob
+
     return bool(_glob(glob, recursive=True))
 
 

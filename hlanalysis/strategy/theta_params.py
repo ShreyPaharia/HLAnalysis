@@ -9,6 +9,7 @@ and so the params/builder definitions live in a focused module.
 All symbols defined here are re-exported from ``theta_harvester.py`` so the
 existing import surface is fully preserved.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -48,6 +49,7 @@ class ThetaHarvesterParams(BaseModel):
       tte_max_seconds, stop_loss_pct. The live builder reads these from the
       strategy's ``defaults:`` block, not the ``theta:`` block.
     """
+
     model_config = ConfigDict(frozen=True)
 
     # === optional: entry edge filters ===
@@ -115,9 +117,9 @@ class ThetaHarvesterConfig:
     tte_max_seconds: int
     # === required: exit triggers ===
     stop_loss_pct: float | None
-    exit_edge_threshold: float          # exit when edge_held_side < this (typically <= 0)
+    exit_edge_threshold: float  # exit when edge_held_side < this (typically <= 0)
     take_profit_price: float | None  # exit when held_bid >= entry_px + this
-    time_stop_seconds: int              # exit when tau_s < this; 0 disables
+    time_stop_seconds: int  # exit when tau_s < this; 0 disables
     # === optional: entry edge filters ===
     # v3.1 entry upper-edge filter. Trade-level analysis of v3 PM-corpus run
     # surfaced an asymmetry: entries claiming edge >= 0.20 had hit rate 55%
@@ -221,9 +223,9 @@ class ThetaHarvesterConfig:
     # See hlanalysis/strategy/momentum_mr.py and
     # docs/specs/2026-05-28-v35-momentum-mr-design.md.
     momentum_mr_enabled: bool = False
-    momentum_mr_indicator: str = "z_ret"      # "z_ret" | "rsi" | "ma_sigma" | "hurst_ou"
+    momentum_mr_indicator: str = "z_ret"  # "z_ret" | "rsi" | "ma_sigma" | "hurst_ou"
     momentum_mr_lookback_min: int = 15
-    momentum_mr_mode: str = "gate"            # "gate" | "tilt"
+    momentum_mr_mode: str = "gate"  # "gate" | "tilt"
     momentum_mr_tau_gate: float = 1.0
     momentum_mr_alpha_tilt: float = 0.5
     # v3.6: Jump-Ratio trust weight. When True (and momentum_mr_enabled),
@@ -283,6 +285,7 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
     #   added to ThetaHarvesterParams automatically gets the right default here
     #   without touching this function — that is the single-source guarantee.
     from .theta_harvester import ThetaHarvesterStrategy  # noqa: PLC0415
+
     cfg = ThetaHarvesterConfig(
         vol_lookback_seconds=int(params["vol_lookback_seconds"]),
         vol_sampling_dt_seconds=int(params.get("vol_sampling_dt_seconds", 60)),
@@ -302,29 +305,18 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         take_profit_price=(float(params["take_profit_price"]) if params.get("take_profit_price") is not None else None),
         time_stop_seconds=int(params.get("time_stop_seconds", 0)),
         # --- optional knobs: defaults derived from _D (ThetaHarvesterParams) ---
-        edge_max=(
-            float(params["edge_max"]) if params.get("edge_max") is not None else _D.edge_max
-        ),
+        edge_max=(float(params["edge_max"]) if params.get("edge_max") is not None else _D.edge_max),
         min_distance_pct=(
-            float(params["min_distance_pct"])
-            if params.get("min_distance_pct") is not None
-            else _D.min_distance_pct
+            float(params["min_distance_pct"]) if params.get("min_distance_pct") is not None else _D.min_distance_pct
         ),
         min_bid_notional_usd=float(params.get("min_bid_notional_usd", _D.min_bid_notional_usd)),
-        gamma_lambda=(
-            float(params["gamma_lambda"])
-            if params.get("gamma_lambda") is not None
-            else _D.gamma_lambda
-        ),
+        gamma_lambda=(float(params["gamma_lambda"]) if params.get("gamma_lambda") is not None else _D.gamma_lambda),
         topup_enabled=bool(params.get("topup_enabled", _D.topup_enabled)),
         topup_threshold_pct=float(params.get("topup_threshold_pct", _D.topup_threshold_pct)),
         topup_min_notional_usd=float(params.get("topup_min_notional_usd", _D.topup_min_notional_usd)),
         exit_safety_d=float(params.get("exit_safety_d", _D.exit_safety_d)),
         vol_estimator=str(params.get("vol_estimator", _D.vol_estimator)),
-        lm_threshold=(
-            float(params["lm_threshold"])
-            if params.get("lm_threshold") is not None else _D.lm_threshold
-        ),
+        lm_threshold=(float(params["lm_threshold"]) if params.get("lm_threshold") is not None else _D.lm_threshold),
         exit_take_profit_mode=bool(params.get("exit_take_profit_mode", _D.exit_take_profit_mode)),
         exit_fee=float(params.get("exit_fee", _D.exit_fee)),
         fee_model=str(params.get("fee_model", _D.fee_model)),

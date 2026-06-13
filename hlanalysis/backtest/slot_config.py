@@ -16,6 +16,7 @@ strategy from these params reproduces the live config byte-for-byte (guarded by
 explicitly, so the sim can never silently flip it (e.g. to bipower) regardless of
 registry-builder defaults.
 """
+
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -31,7 +32,9 @@ from ..strategy.live_registry import live_registry_id
 
 
 def backtest_params_from_slot(
-    cfg: StrategyConfig, *, klass: str | None = None,
+    cfg: StrategyConfig,
+    *,
+    klass: str | None = None,
 ) -> tuple[str, dict]:
     """Return ``(registry_strategy_id, params)`` for a live slot.
 
@@ -44,6 +47,7 @@ def backtest_params_from_slot(
         strategy_id = live_registry_id(cfg.strategy_type)
     except KeyError:
         from ..strategy.live_registry import live_strategy_types  # noqa: PLC0415
+
         raise ValueError(
             f"slot {cfg.account_alias!r}: unsupported strategy_type "
             f"{cfg.strategy_type!r} for backtest (supported: "

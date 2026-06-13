@@ -8,6 +8,7 @@ the price interval in which a given leg wins. They were previously copy-pasted
 strategies there is nothing strategy-specific to keep decoupled. Consolidated
 here so a layout fix lands once.
 """
+
 from __future__ import annotations
 
 from .types import QuestionView
@@ -21,9 +22,7 @@ def kv_get(qv: QuestionView, key: str, default: str = "") -> str:
     return default
 
 
-def winning_region(
-    qv: QuestionView, symbol: str
-) -> tuple[float | None, float | None]:
+def winning_region(qv: QuestionView, symbol: str) -> tuple[float | None, float | None]:
     """Return (lo, hi) such that the leg ``symbol`` wins iff the underlying is in
     [lo, hi] at expiry. ``None`` denotes an unbounded side (-∞ for lo, +∞ for hi).
 
@@ -63,9 +62,9 @@ def winning_region(
         if k >= len(thr):
             return (None, None)
         if side_idx == 0:
-            return (thr[k], None)   # YES: above thr[k]
+            return (thr[k], None)  # YES: above thr[k]
         else:
-            return (None, thr[k])   # NO: at-or-below thr[k]
+            return (None, thr[k])  # NO: at-or-below thr[k]
 
     outcome_pos = idx // 2
 

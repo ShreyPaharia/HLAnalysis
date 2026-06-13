@@ -32,6 +32,7 @@ from hlanalysis.strategy.base import Strategy
 
 def test_strategy_abc_cannot_be_instantiated_directly():
     import pytest as _p
+
     with _p.raises(TypeError):
         Strategy()  # type: ignore[abstract]
 
@@ -156,9 +157,13 @@ def test_hold_when_tte_too_long():
     }
     s = LateResolutionStrategy(_cfg())
     d = s.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.HOLD
 
@@ -172,9 +177,13 @@ def test_hold_when_tte_too_short():
         "@31": _ref_book("@31", ask=0.06, bid=0.04, ts_ns=now - 100),
     }
     d = LateResolutionStrategy(_cfg()).evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.HOLD
 
@@ -189,9 +198,13 @@ def test_hold_when_winning_leg_not_extreme():
         "@31": _ref_book("@31", ask=0.22, bid=0.20, ts_ns=now - 100),
     }
     d = LateResolutionStrategy(_cfg()).evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.HOLD
 
@@ -205,10 +218,13 @@ def test_hold_when_distance_below_min():
         "@31": _ref_book("@31", ask=0.04, bid=0.03, ts_ns=now - 100),
     }
     d = LateResolutionStrategy(_cfg()).evaluate(
-        question=q, books=books,
+        question=q,
+        books=books,
         reference_price=80_050.0,  # only $50 above strike < $200 min
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.HOLD
 
@@ -223,9 +239,13 @@ def test_hold_when_realized_vol_above_cap():
     }
     high_vol_returns = tuple([0.05, -0.05] * 30)  # huge swings
     d = LateResolutionStrategy(_cfg()).evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=high_vol_returns, recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=high_vol_returns,
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.HOLD
 
@@ -240,15 +260,20 @@ def test_hold_when_book_stale():
         "@31": _ref_book("@31", ask=0.04, bid=0.03, ts_ns=stale_ts),
     }
     d = LateResolutionStrategy(_cfg()).evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.HOLD
 
 
 def test_hold_when_position_already_held():
     from hlanalysis.strategy.types import Position
+
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q()
@@ -257,13 +282,21 @@ def test_hold_when_position_already_held():
         "@31": _ref_book("@31", ask=0.04, bid=0.03, ts_ns=now - 100),
     }
     pos = Position(
-        question_idx=q.question_idx, symbol="@30", qty=10.0, avg_entry=0.95,
-        stop_loss_price=0.855, last_update_ts_ns=now - 1_000_000,
+        question_idx=q.question_idx,
+        symbol="@30",
+        qty=10.0,
+        avg_entry=0.95,
+        stop_loss_price=0.855,
+        last_update_ts_ns=now - 1_000_000,
     )
     d = LateResolutionStrategy(_cfg()).evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=pos, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=pos,
+        now_ns=now,
     )
     # No re-entry; exit logic runs separately (Task 6)
     assert d.action is not Action.ENTER
@@ -271,25 +304,40 @@ def test_hold_when_position_already_held():
 
 def test_exit_signal_when_question_is_settled():
     from hlanalysis.strategy.types import Position
+
     now = 10_000_000_000_000
     q = QuestionView(
-        question_idx=42, yes_symbol="@30", no_symbol="@31",
-        strike=80_000.0, expiry_ns=now - 1_000_000,
-        underlying="BTC", klass="priceBinary", period="1h",
-        settled=True, settled_side="yes",
+        question_idx=42,
+        yes_symbol="@30",
+        no_symbol="@31",
+        strike=80_000.0,
+        expiry_ns=now - 1_000_000,
+        underlying="BTC",
+        klass="priceBinary",
+        period="1h",
+        settled=True,
+        settled_side="yes",
     )
     books = {
         "@30": _ref_book("@30", ask=1.0, bid=1.0, ts_ns=now - 100),
         "@31": _ref_book("@31", ask=0.0, bid=0.0, ts_ns=now - 100),
     }
     pos = Position(
-        question_idx=q.question_idx, symbol="@30", qty=10.0, avg_entry=0.95,
-        stop_loss_price=0.855, last_update_ts_ns=now - 1_000_000,
+        question_idx=q.question_idx,
+        symbol="@30",
+        qty=10.0,
+        avg_entry=0.95,
+        stop_loss_price=0.855,
+        last_update_ts_ns=now - 1_000_000,
     )
     d = LateResolutionStrategy(_cfg()).evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=pos, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=pos,
+        now_ns=now,
     )
     assert d.action is Action.EXIT
     # Settlement-driven exit: zero intents — engine marks the position closed
@@ -299,6 +347,7 @@ def test_exit_signal_when_question_is_settled():
 
 def test_exit_intent_when_price_below_stop_loss():
     from hlanalysis.strategy.types import Position
+
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(expiry_ns=expiry)
@@ -307,13 +356,21 @@ def test_exit_intent_when_price_below_stop_loss():
         "@31": _ref_book("@31", ask=0.16, bid=0.15, ts_ns=now - 100),
     }
     pos = Position(
-        question_idx=q.question_idx, symbol="@30", qty=10.0, avg_entry=0.95,
-        stop_loss_price=0.855, last_update_ts_ns=now - 1_000_000,
+        question_idx=q.question_idx,
+        symbol="@30",
+        qty=10.0,
+        avg_entry=0.95,
+        stop_loss_price=0.855,
+        last_update_ts_ns=now - 1_000_000,
     )
     d = LateResolutionStrategy(_cfg()).evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=pos, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=pos,
+        now_ns=now,
     )
     assert d.action is Action.EXIT
     assert len(d.intents) == 1
@@ -331,9 +388,14 @@ from hlanalysis.strategy.regions import winning_region as _winning_region  # noq
 
 def _binary_qv() -> QuestionView:
     return QuestionView(
-        question_idx=1, yes_symbol="@30", no_symbol="@31",
-        strike=80_000.0, expiry_ns=0,
-        underlying="BTC", klass="priceBinary", period="1d",
+        question_idx=1,
+        yes_symbol="@30",
+        no_symbol="@31",
+        strike=80_000.0,
+        expiry_ns=0,
+        underlying="BTC",
+        klass="priceBinary",
+        period="1d",
         leg_symbols=("@30", "@31"),
     )
 
@@ -341,12 +403,16 @@ def _binary_qv() -> QuestionView:
 def _bucket_qv() -> QuestionView:
     # 2 thresholds → 3 outcomes (lowest, middle, highest), 2 legs each.
     return QuestionView(
-        question_idx=2, yes_symbol="@40", no_symbol="@41",
-        strike=float("nan"), expiry_ns=0,
-        underlying="BTC", klass="priceBucket", period="1d",
+        question_idx=2,
+        yes_symbol="@40",
+        no_symbol="@41",
+        strike=float("nan"),
+        expiry_ns=0,
+        underlying="BTC",
+        klass="priceBucket",
+        period="1d",
         leg_symbols=("@40", "@41", "@42", "@43", "@44", "@45"),
-        kv=(("class", "priceBucket"), ("underlying", "BTC"),
-            ("priceThresholds", "77991,81174")),
+        kv=(("class", "priceBucket"), ("underlying", "BTC"), ("priceThresholds", "77991,81174")),
     )
 
 
@@ -397,8 +463,13 @@ from hlanalysis.strategy.late_resolution import _safety_d_for_region  # noqa: E4
 def test_safety_d_lower_bounded_favorable():
     # Binary YES: lo=strike, hi=None. BTC above strike → positive d.
     d = _safety_d_for_region(
-        ref_price=80_300.0, lo=80_000.0, hi=None,
-        sigma_window=1.0, mu=0.0, tte_min=0.0, drift_aware=False,
+        ref_price=80_300.0,
+        lo=80_000.0,
+        hi=None,
+        sigma_window=1.0,
+        mu=0.0,
+        tte_min=0.0,
+        drift_aware=False,
     )
     assert d is not None
     assert math.isclose(d, math.log(80_300.0 / 80_000.0), rel_tol=1e-9)
@@ -407,8 +478,13 @@ def test_safety_d_lower_bounded_favorable():
 def test_safety_d_upper_bounded_favorable():
     # Binary NO: lo=None, hi=strike. BTC below strike → positive d.
     d = _safety_d_for_region(
-        ref_price=79_700.0, lo=None, hi=80_000.0,
-        sigma_window=1.0, mu=0.0, tte_min=0.0, drift_aware=False,
+        ref_price=79_700.0,
+        lo=None,
+        hi=80_000.0,
+        sigma_window=1.0,
+        mu=0.0,
+        tte_min=0.0,
+        drift_aware=False,
     )
     assert d is not None
     assert math.isclose(d, math.log(80_000.0 / 79_700.0), rel_tol=1e-9)
@@ -417,8 +493,13 @@ def test_safety_d_upper_bounded_favorable():
 def test_safety_d_lower_bounded_adverse_is_negative():
     # YES leg held but BTC dropped below strike: d < 0 → exit_safety_d fires.
     d = _safety_d_for_region(
-        ref_price=79_700.0, lo=80_000.0, hi=None,
-        sigma_window=1.0, mu=0.0, tte_min=0.0, drift_aware=False,
+        ref_price=79_700.0,
+        lo=80_000.0,
+        hi=None,
+        sigma_window=1.0,
+        mu=0.0,
+        tte_min=0.0,
+        drift_aware=False,
     )
     assert d is not None
     assert d < 0
@@ -430,8 +511,13 @@ def test_safety_d_middle_bucket_uses_nearer_boundary():
     lo, hi = 77_991.0, 81_174.0
     expected = min(math.log(ref / lo), math.log(hi / ref))
     d = _safety_d_for_region(
-        ref_price=ref, lo=lo, hi=hi,
-        sigma_window=1.0, mu=0.0, tte_min=0.0, drift_aware=False,
+        ref_price=ref,
+        lo=lo,
+        hi=hi,
+        sigma_window=1.0,
+        mu=0.0,
+        tte_min=0.0,
+        drift_aware=False,
     )
     assert d is not None
     assert math.isclose(d, expected, rel_tol=1e-9)
@@ -440,8 +526,13 @@ def test_safety_d_middle_bucket_uses_nearer_boundary():
 def test_safety_d_middle_bucket_adverse_when_outside_region():
     # ref below lo → ln(ref/lo) < 0 → min < 0.
     d = _safety_d_for_region(
-        ref_price=76_000.0, lo=77_991.0, hi=81_174.0,
-        sigma_window=1.0, mu=0.0, tte_min=0.0, drift_aware=False,
+        ref_price=76_000.0,
+        lo=77_991.0,
+        hi=81_174.0,
+        sigma_window=1.0,
+        mu=0.0,
+        tte_min=0.0,
+        drift_aware=False,
     )
     assert d is not None
     assert d < 0
@@ -450,8 +541,13 @@ def test_safety_d_middle_bucket_adverse_when_outside_region():
 def test_safety_d_drift_lower_bounded_adds_mu_tau():
     # (lo, None) adverse direction is downward; positive μ adds to safety.
     d = _safety_d_for_region(
-        ref_price=80_300.0, lo=80_000.0, hi=None,
-        sigma_window=1.0, mu=0.001, tte_min=10.0, drift_aware=True,
+        ref_price=80_300.0,
+        lo=80_000.0,
+        hi=None,
+        sigma_window=1.0,
+        mu=0.001,
+        tte_min=10.0,
+        drift_aware=True,
     )
     expected = math.log(80_300.0 / 80_000.0) + 0.001 * 10.0
     assert d is not None
@@ -461,8 +557,13 @@ def test_safety_d_drift_lower_bounded_adds_mu_tau():
 def test_safety_d_drift_upper_bounded_subtracts_mu_tau():
     # (None, hi) adverse direction is upward; positive μ subtracts from safety.
     d = _safety_d_for_region(
-        ref_price=79_700.0, lo=None, hi=80_000.0,
-        sigma_window=1.0, mu=0.001, tte_min=10.0, drift_aware=True,
+        ref_price=79_700.0,
+        lo=None,
+        hi=80_000.0,
+        sigma_window=1.0,
+        mu=0.001,
+        tte_min=10.0,
+        drift_aware=True,
     )
     expected = math.log(80_000.0 / 79_700.0) - 0.001 * 10.0
     assert d is not None
@@ -472,12 +573,22 @@ def test_safety_d_drift_upper_bounded_subtracts_mu_tau():
 def test_safety_d_drift_ignored_for_middle_bucket():
     # Two-sided region has no single adverse direction → drift dropped.
     d_no_drift = _safety_d_for_region(
-        ref_price=79_500.0, lo=77_991.0, hi=81_174.0,
-        sigma_window=1.0, mu=0.0, tte_min=0.0, drift_aware=False,
+        ref_price=79_500.0,
+        lo=77_991.0,
+        hi=81_174.0,
+        sigma_window=1.0,
+        mu=0.0,
+        tte_min=0.0,
+        drift_aware=False,
     )
     d_with_drift = _safety_d_for_region(
-        ref_price=79_500.0, lo=77_991.0, hi=81_174.0,
-        sigma_window=1.0, mu=0.01, tte_min=100.0, drift_aware=True,
+        ref_price=79_500.0,
+        lo=77_991.0,
+        hi=81_174.0,
+        sigma_window=1.0,
+        mu=0.01,
+        tte_min=100.0,
+        drift_aware=True,
     )
     assert d_no_drift is not None and d_with_drift is not None
     assert math.isclose(d_no_drift, d_with_drift, rel_tol=1e-9)
@@ -486,8 +597,13 @@ def test_safety_d_drift_ignored_for_middle_bucket():
 def test_safety_d_unbounded_returns_none():
     # NO leg of a middle bucket → caller passed (None, None). No gate available.
     d = _safety_d_for_region(
-        ref_price=80_000.0, lo=None, hi=None,
-        sigma_window=1.0, mu=0.0, tte_min=0.0, drift_aware=False,
+        ref_price=80_000.0,
+        lo=None,
+        hi=None,
+        sigma_window=1.0,
+        mu=0.0,
+        tte_min=0.0,
+        drift_aware=False,
     )
     assert d is None
 
@@ -499,12 +615,16 @@ def _bucket_q(expiry_ns: int) -> QuestionView:
     # 2 thresholds → 3 outcomes; legs are (lowest YES, lowest NO, middle YES,
     # middle NO, highest YES, highest NO).
     return QuestionView(
-        question_idx=99, yes_symbol="@40", no_symbol="@41",
-        strike=float("nan"), expiry_ns=expiry_ns,
-        underlying="BTC", klass="priceBucket", period="1d",
+        question_idx=99,
+        yes_symbol="@40",
+        no_symbol="@41",
+        strike=float("nan"),
+        expiry_ns=expiry_ns,
+        underlying="BTC",
+        klass="priceBucket",
+        period="1d",
         leg_symbols=("@40", "@41", "@42", "@43", "@44", "@45"),
-        kv=(("class", "priceBucket"), ("underlying", "BTC"),
-            ("priceThresholds", "77991,81174")),
+        kv=(("class", "priceBucket"), ("underlying", "BTC"), ("priceThresholds", "77991,81174")),
     )
 
 
@@ -543,11 +663,13 @@ def test_bucket_entry_picks_middle_yes_leg_when_safe():
         "@45": _ref_book("@45", ask=0.96, bid=0.95, ts_ns=now - 100),
     }
     d = LateResolutionStrategy(_bucket_cfg()).evaluate(
-        question=q, books=books,
+        question=q,
+        books=books,
         reference_price=79_500.0,
         recent_returns=tuple([0.0001, -0.0001] * 30),
         recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.ENTER
     assert d.intents[0].symbol == "@42"  # middle YES
@@ -567,11 +689,13 @@ def test_bucket_entry_blocked_by_safety_d_when_btc_near_boundary():
         "@45": _ref_book("@45", ask=0.96, bid=0.95, ts_ns=now - 100),
     }
     d = LateResolutionStrategy(_bucket_cfg()).evaluate(
-        question=q, books=books,
+        question=q,
+        books=books,
         reference_price=81_100.0,  # only ~$74 below upper bound 81_174
         recent_returns=tuple([0.005, -0.005] * 30),  # high vol
         recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.HOLD
 
@@ -581,6 +705,7 @@ def test_bucket_entry_blocked_by_safety_d_when_btc_near_boundary():
 
 def test_bucket_exit_safety_d_fires_when_btc_exits_middle_bucket():
     from hlanalysis.strategy.types import Position
+
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _bucket_q(expiry)
@@ -589,18 +714,24 @@ def test_bucket_exit_safety_d_fires_when_btc_exits_middle_bucket():
         "@43": _ref_book("@43", ask=0.10, bid=0.08, ts_ns=now - 100),
     }
     pos = Position(
-        question_idx=q.question_idx, symbol="@42", qty=10.0, avg_entry=0.95,
-        stop_loss_price=0.855, last_update_ts_ns=now - 1_000_000,
+        question_idx=q.question_idx,
+        symbol="@42",
+        qty=10.0,
+        avg_entry=0.95,
+        stop_loss_price=0.855,
+        last_update_ts_ns=now - 1_000_000,
     )
     cfg = _bucket_cfg(exit_safety_d=1.0)
     # BTC well above the upper bucket boundary 81_174 → middle-bucket safety_d
     # is strongly negative → exit fires.
     d = LateResolutionStrategy(cfg).evaluate(
-        question=q, books=books,
+        question=q,
+        books=books,
         reference_price=82_500.0,
         recent_returns=tuple([0.0001, -0.0001] * 30),
         recent_volume_usd=5_000.0,
-        position=pos, now_ns=now,
+        position=pos,
+        now_ns=now,
     )
     assert d.action is Action.EXIT
     assert d.intents[0].symbol == "@42"
@@ -629,16 +760,18 @@ def test_entry_notional_never_exceeds_max_position_usd():
         min_recent_volume_usd=0.0,
     )
     d = LateResolutionStrategy(cfg).evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.ENTER
     intent = d.intents[0]
     notional = intent.size * intent.limit_price
-    assert notional <= cfg.max_position_usd, (
-        f"notional {notional} would trip risk gate cap {cfg.max_position_usd}"
-    )
+    assert notional <= cfg.max_position_usd, f"notional {notional} would trip risk gate cap {cfg.max_position_usd}"
 
 
 # --- Targeted near-strike low-ask size cap ---
@@ -661,9 +794,13 @@ def test_size_cap_disabled_by_default_no_change_in_size():
     books = _cap_books(yes_ask=0.86, no_ask=0.14, ts_ns=now - 100)
     cfg = _cfg(price_extreme_threshold=0.80, min_recent_volume_usd=0.0)
     d = LateResolutionStrategy(cfg).evaluate(
-        question=q, books=books, reference_price=80_100.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_100.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.ENTER
     intent = d.intents[0]
@@ -686,9 +823,13 @@ def test_size_cap_halves_size_on_near_strike_low_ask_entry():
         size_cap_min_ask=0.88,
     )
     d = LateResolutionStrategy(cfg).evaluate(
-        question=q, books=books, reference_price=80_100.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_100.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.ENTER
     intent = d.intents[0]
@@ -711,9 +852,13 @@ def test_size_cap_does_not_apply_when_ask_above_min_ask():
         size_cap_min_ask=0.88,
     )
     d = LateResolutionStrategy(cfg).evaluate(
-        question=q, books=books, reference_price=80_100.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_100.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.ENTER
     intent = d.intents[0]
@@ -738,9 +883,13 @@ def test_size_cap_does_not_apply_when_far_from_strike():
         size_cap_min_ask=0.88,
     )
     d = LateResolutionStrategy(cfg).evaluate(
-        question=q, books=books, reference_price=81_500.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=81_500.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.ENTER
     intent = d.intents[0]
@@ -764,9 +913,13 @@ def test_size_cap_works_on_no_leg_for_binary():
         size_cap_min_ask=0.88,
     )
     d = LateResolutionStrategy(cfg).evaluate(
-        question=q, books=books, reference_price=79_900.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=79_900.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.ENTER
     intent = d.intents[0]
@@ -788,9 +941,13 @@ def test_size_cap_emits_diagnostic_when_active():
         size_cap_min_ask=0.88,
     )
     d = LateResolutionStrategy(cfg).evaluate(
-        question=q, books=books, reference_price=80_100.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_100.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.ENTER
     cap_diags = [d_ for d_ in d.diagnostics if d_.message == "size_cap_near_strike"]
@@ -818,9 +975,13 @@ def test_ask_based_gate_still_default_when_use_bid_for_entry_gate_false():
     }
     s = LateResolutionStrategy(_cfg())  # flag default False
     d = s.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.ENTER  # legacy behavior preserved
 
@@ -838,9 +999,13 @@ def test_bid_based_gate_rejects_wide_spread_stale_ask():
     }
     s = LateResolutionStrategy(_cfg(use_bid_for_entry_gate=True))
     d = s.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.HOLD
     assert any(diag.message == "no_extreme_leg" for diag in d.diagnostics)
@@ -862,9 +1027,13 @@ def test_bid_based_gate_allows_tight_spread_real_favourite():
     }
     s = LateResolutionStrategy(_cfg(use_bid_for_entry_gate=True))
     d = s.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.ENTER
     assert d.intents[0].symbol == "@30"
@@ -878,20 +1047,32 @@ def test_min_bid_notional_blocks_spoof_size_1_bid():
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
     spoof_book = BookState(
-        symbol="@30", bid_px=0.95, bid_sz=1.0, ask_px=0.97, ask_sz=100.0,
-        last_trade_ts_ns=now - 100, last_l2_ts_ns=now - 100,
+        symbol="@30",
+        bid_px=0.95,
+        bid_sz=1.0,
+        ask_px=0.97,
+        ask_sz=100.0,
+        last_trade_ts_ns=now - 100,
+        last_l2_ts_ns=now - 100,
     )
     books = {
         "@30": spoof_book,
         "@31": _ref_book("@31", ask=0.04, bid=0.03, ts_ns=now - 100),
     }
-    s = LateResolutionStrategy(_cfg(
-        use_bid_for_entry_gate=True, min_bid_notional_usd=10.0,
-    ))
+    s = LateResolutionStrategy(
+        _cfg(
+            use_bid_for_entry_gate=True,
+            min_bid_notional_usd=10.0,
+        )
+    )
     d = s.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d.action is Action.HOLD
 
@@ -903,27 +1084,39 @@ def test_stale_ask_cap_rejects_ask_above_price_extreme_max_when_using_bid_gate()
     introduced alongside the top-of-book limit change rejects this case,
     preserving the protection the old limit_price=price_extreme_max gave."""
     from hlanalysis.strategy.types import BookState
+
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
     # YES has fresh bid 0.95 (in [0.85, 0.99]) but stale-high ask 0.9995 > 0.99.
     yes_book = BookState(
-        symbol="@30", bid_px=0.95, bid_sz=100.0, ask_px=0.9995, ask_sz=50.0,
-        last_trade_ts_ns=now - 100, last_l2_ts_ns=now - 100,
+        symbol="@30",
+        bid_px=0.95,
+        bid_sz=100.0,
+        ask_px=0.9995,
+        ask_sz=50.0,
+        last_trade_ts_ns=now - 100,
+        last_l2_ts_ns=now - 100,
     )
     books = {
         "@30": yes_book,
         "@31": _ref_book("@31", ask=0.04, bid=0.03, ts_ns=now - 100),
     }
-    s = LateResolutionStrategy(_cfg(
-        use_bid_for_entry_gate=True,
-        price_extreme_threshold=0.85,
-        price_extreme_max=0.99,
-    ))
+    s = LateResolutionStrategy(
+        _cfg(
+            use_bid_for_entry_gate=True,
+            price_extreme_threshold=0.85,
+            price_extreme_max=0.99,
+        )
+    )
     d = s.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     # Neither leg eligible (YES rejected by ask cap, NO ask 0.04 < 0.85 threshold).
     assert d.action is Action.HOLD
@@ -946,12 +1139,12 @@ def _topup_cfg(**over):
         distance_from_strike_usd_min=200.0,
         vol_max=0.5,
         max_position_usd=100.0,
-        stop_loss_pct=1e9,            # disabled — focus on topup
+        stop_loss_pct=1e9,  # disabled — focus on topup
         max_strike_distance_pct=10.0,
         min_recent_volume_usd=1000.0,
         stale_data_halt_seconds=5,
-        min_safety_d=0.0,             # disable safety_d for clarity
-        exit_safety_d=0.0,            # no exit_safety_d; isolate topup
+        min_safety_d=0.0,  # disable safety_d for clarity
+        exit_safety_d=0.0,  # no exit_safety_d; isolate topup
     )
     base.update(over)
     return LateResolutionConfig(**base)
@@ -961,6 +1154,7 @@ def test_topup_emits_enter_when_held_under_target():
     """Position $48 ntl on $100 target → 52% shortfall ≥ 20% threshold; all
     v1 gates pass → ENTER with limit_price=current_ask."""
     from hlanalysis.strategy.types import Position
+
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
@@ -970,14 +1164,22 @@ def test_topup_emits_enter_when_held_under_target():
     }
     # qty 50 × ask 0.96 = $48 ntl on $100 target → 52% shortfall.
     pos = Position(
-        question_idx=q.question_idx, symbol="@30", qty=50.0, avg_entry=0.96,
-        stop_loss_price=0.0, last_update_ts_ns=now - 1_000_000,
+        question_idx=q.question_idx,
+        symbol="@30",
+        qty=50.0,
+        avg_entry=0.96,
+        stop_loss_price=0.0,
+        last_update_ts_ns=now - 1_000_000,
     )
     s = LateResolutionStrategy(_topup_cfg())
     d = s.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=pos, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=pos,
+        now_ns=now,
     )
     assert d.action is Action.ENTER
     assert d.intents[0].symbol == "@30"
@@ -992,6 +1194,7 @@ def test_topup_holds_when_shortfall_below_threshold():
     """Held $96 ntl on $100 target → 4% shortfall < 20% threshold → HOLD
     with the legacy have_position diag (no topup attempt made)."""
     from hlanalysis.strategy.types import Position
+
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
@@ -1000,14 +1203,22 @@ def test_topup_holds_when_shortfall_below_threshold():
         "@31": _ref_book("@31", ask=0.06, bid=0.04, ts_ns=now - 100),
     }
     pos = Position(
-        question_idx=q.question_idx, symbol="@30", qty=100.0, avg_entry=0.96,
-        stop_loss_price=0.0, last_update_ts_ns=now - 1_000_000,
+        question_idx=q.question_idx,
+        symbol="@30",
+        qty=100.0,
+        avg_entry=0.96,
+        stop_loss_price=0.0,
+        last_update_ts_ns=now - 1_000_000,
     )
     s = LateResolutionStrategy(_topup_cfg())
     d = s.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=pos, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=pos,
+        now_ns=now,
     )
     assert d.action is Action.HOLD
     # The topup attempt was skipped pre-gate-check; legacy have_position diag.
@@ -1019,6 +1230,7 @@ def test_topup_holds_when_topup_notional_below_min():
     triggers attempt; topup_size = floor(8.16/0.96*100)/100 = 8.50 contracts →
     $8.16 ntl < $11 floor → HOLD with below_min_notional skip reason."""
     from hlanalysis.strategy.types import Position
+
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
@@ -1027,14 +1239,22 @@ def test_topup_holds_when_topup_notional_below_min():
         "@31": _ref_book("@31", ask=0.06, bid=0.04, ts_ns=now - 100),
     }
     pos = Position(
-        question_idx=q.question_idx, symbol="@30", qty=4.0, avg_entry=0.96,
-        stop_loss_price=0.0, last_update_ts_ns=now - 1_000_000,
+        question_idx=q.question_idx,
+        symbol="@30",
+        qty=4.0,
+        avg_entry=0.96,
+        stop_loss_price=0.0,
+        last_update_ts_ns=now - 1_000_000,
     )
     s = LateResolutionStrategy(_topup_cfg(max_position_usd=12.0))
     d = s.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=pos, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=pos,
+        now_ns=now,
     )
     assert d.action is Action.HOLD
     skip = next(diag for diag in d.diagnostics if diag.message == "topup_skip")
@@ -1044,6 +1264,7 @@ def test_topup_holds_when_topup_notional_below_min():
 def test_topup_holds_when_entry_gate_now_fails():
     """Recent vol crosses vol_max ceiling — entry gate fails on topup attempt."""
     from hlanalysis.strategy.types import Position
+
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
@@ -1052,17 +1273,24 @@ def test_topup_holds_when_entry_gate_now_fails():
         "@31": _ref_book("@31", ask=0.06, bid=0.04, ts_ns=now - 100),
     }
     pos = Position(
-        question_idx=q.question_idx, symbol="@30", qty=30.0, avg_entry=0.96,
-        stop_loss_price=0.0, last_update_ts_ns=now - 1_000_000,
+        question_idx=q.question_idx,
+        symbol="@30",
+        qty=30.0,
+        avg_entry=0.96,
+        stop_loss_price=0.0,
+        last_update_ts_ns=now - 1_000_000,
     )
     s = LateResolutionStrategy(_topup_cfg(vol_max=0.001))
     # Alternating returns produce non-zero stdev → vol exceeds tiny vol_max.
     spiky = tuple((0.05 if i % 2 == 0 else -0.05) for i in range(60))
     d = s.evaluate(
-        question=q, books=books, reference_price=80_300.0,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
         recent_returns=spiky,
         recent_volume_usd=5_000.0,
-        position=pos, now_ns=now,
+        position=pos,
+        now_ns=now,
     )
     assert d.action is Action.HOLD
     skip = next(diag for diag in d.diagnostics if diag.message == "topup_skip")
@@ -1076,6 +1304,7 @@ def test_topup_holds_when_chosen_leg_differs_from_held():
     Set @31 ask=0.99 (above @30's 0.97) so entry's max-gate-price logic
     picks @31."""
     from hlanalysis.strategy.types import Position
+
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
@@ -1084,14 +1313,22 @@ def test_topup_holds_when_chosen_leg_differs_from_held():
         "@31": _ref_book("@31", ask=0.99, bid=0.98, ts_ns=now - 100),
     }
     pos = Position(
-        question_idx=q.question_idx, symbol="@30", qty=30.0, avg_entry=0.97,
-        stop_loss_price=0.0, last_update_ts_ns=now - 1_000_000,
+        question_idx=q.question_idx,
+        symbol="@30",
+        qty=30.0,
+        avg_entry=0.97,
+        stop_loss_price=0.0,
+        last_update_ts_ns=now - 1_000_000,
     )
     s = LateResolutionStrategy(_topup_cfg())
     d = s.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=pos, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=pos,
+        now_ns=now,
     )
     assert d.action is Action.HOLD
     skip = next(diag for diag in d.diagnostics if diag.message == "topup_skip")
@@ -1102,6 +1339,7 @@ def test_exit_takes_precedence_over_topup():
     """Stop-loss bid breach must close the position even when it's under-filled
     (which would otherwise trigger a topup)."""
     from hlanalysis.strategy.types import Position
+
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
@@ -1111,14 +1349,22 @@ def test_exit_takes_precedence_over_topup():
         "@31": _ref_book("@31", ask=0.16, bid=0.15, ts_ns=now - 100),
     }
     pos = Position(
-        question_idx=q.question_idx, symbol="@30", qty=50.0, avg_entry=0.95,
-        stop_loss_price=0.855, last_update_ts_ns=now - 1_000_000,
+        question_idx=q.question_idx,
+        symbol="@30",
+        qty=50.0,
+        avg_entry=0.95,
+        stop_loss_price=0.855,
+        last_update_ts_ns=now - 1_000_000,
     )
     s = LateResolutionStrategy(_topup_cfg(stop_loss_pct=10.0))
     d = s.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=pos, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=pos,
+        now_ns=now,
     )
     assert d.action is Action.EXIT
     assert d.intents[0].reduce_only is True
@@ -1126,6 +1372,7 @@ def test_exit_takes_precedence_over_topup():
 
 def test_topup_disabled_via_config_keeps_legacy_have_position():
     from hlanalysis.strategy.types import Position
+
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
@@ -1134,14 +1381,22 @@ def test_topup_disabled_via_config_keeps_legacy_have_position():
         "@31": _ref_book("@31", ask=0.06, bid=0.04, ts_ns=now - 100),
     }
     pos = Position(
-        question_idx=q.question_idx, symbol="@30", qty=50.0, avg_entry=0.96,
-        stop_loss_price=0.0, last_update_ts_ns=now - 1_000_000,
+        question_idx=q.question_idx,
+        symbol="@30",
+        qty=50.0,
+        avg_entry=0.96,
+        stop_loss_price=0.0,
+        last_update_ts_ns=now - 1_000_000,
     )
     s = LateResolutionStrategy(_topup_cfg(topup_enabled=False))
     d = s.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=pos, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=pos,
+        now_ns=now,
     )
     assert d.action is Action.HOLD
     assert any(diag.message == "have_position" for diag in d.diagnostics)
@@ -1152,6 +1407,7 @@ def test_topup_size_floors_to_two_decimals():
     """Sizing must use floor((shortfall/ask)*100)/100 — never overshoot target."""
     import math as _m
     from hlanalysis.strategy.types import Position
+
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
@@ -1162,14 +1418,22 @@ def test_topup_size_floors_to_two_decimals():
     # held 50 × 0.97 = $48.5 ntl on $100 → shortfall $51.5; @0.97 →
     # floor(51.5/0.97 * 100)/100 = floor(5309.27)/100 = 53.09 contracts.
     pos = Position(
-        question_idx=q.question_idx, symbol="@30", qty=50.0, avg_entry=0.97,
-        stop_loss_price=0.0, last_update_ts_ns=now - 1_000_000,
+        question_idx=q.question_idx,
+        symbol="@30",
+        qty=50.0,
+        avg_entry=0.97,
+        stop_loss_price=0.0,
+        last_update_ts_ns=now - 1_000_000,
     )
     s = LateResolutionStrategy(_topup_cfg())
     d = s.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=tuple([0.0001] * 60), recent_volume_usd=5_000.0,
-        position=pos, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=tuple([0.0001] * 60),
+        recent_volume_usd=5_000.0,
+        position=pos,
+        now_ns=now,
     )
     assert d.action is Action.ENTER
     assert _m.isclose(d.intents[0].size, 53.09, abs_tol=0.01)
@@ -1198,8 +1462,8 @@ def test_evaluate_uses_per_class_cfg_when_provided():
     """priceBucket questions must read tte_max from cfg_by_class['priceBucket'],
     not from the default cfg. Regression: build_late_resolution_config used to
     read only cfg.defaults, silently dropping per-class allowlist overrides."""
-    default = _cfg(tte_max_seconds=1800)        # 30min — same as existing tests
-    bucket = _cfg(tte_max_seconds=86400)        # 24h — what the YAML allowlist sets
+    default = _cfg(tte_max_seconds=1800)  # 30min — same as existing tests
+    bucket = _cfg(tte_max_seconds=86400)  # 24h — what the YAML allowlist sets
     s = LateResolutionStrategy(default, cfg_by_class={"priceBucket": bucket})
 
     now = 10_000_000_000_000
@@ -1207,8 +1471,13 @@ def test_evaluate_uses_per_class_cfg_when_provided():
 
     # priceBucket: TTE override applies → should NOT be tte_out_of_window.
     d_bucket = s.evaluate(
-        question=_q_bucket(expiry_ns=expiry_8h), books={}, reference_price=80_000.0,
-        recent_returns=(), recent_volume_usd=0.0, position=None, now_ns=now,
+        question=_q_bucket(expiry_ns=expiry_8h),
+        books={},
+        reference_price=80_000.0,
+        recent_returns=(),
+        recent_volume_usd=0.0,
+        position=None,
+        now_ns=now,
     )
     assert d_bucket.action is Action.HOLD
     assert not any(diag.message == "tte_out_of_window" for diag in d_bucket.diagnostics), (
@@ -1218,8 +1487,13 @@ def test_evaluate_uses_per_class_cfg_when_provided():
     # priceBinary at the same 8h TTE: no override → falls back to default tte_max=1800
     # → must still be tte_out_of_window.
     d_binary = s.evaluate(
-        question=_q(strike=80_000.0, expiry_ns=expiry_8h), books={}, reference_price=80_000.0,
-        recent_returns=(), recent_volume_usd=0.0, position=None, now_ns=now,
+        question=_q(strike=80_000.0, expiry_ns=expiry_8h),
+        books={},
+        reference_price=80_000.0,
+        recent_returns=(),
+        recent_volume_usd=0.0,
+        position=None,
+        now_ns=now,
     )
     assert d_binary.action is Action.HOLD
     assert any(diag.message == "tte_out_of_window" for diag in d_binary.diagnostics)
@@ -1266,11 +1540,15 @@ def test_evaluate_restores_default_cfg_after_per_class_call():
     now = 10_000_000_000_000
     expiry_8h = now + 8 * 3600 * 1_000_000_000
     s.evaluate(
-        question=_q_bucket(expiry_ns=expiry_8h), books={}, reference_price=80_000.0,
-        recent_returns=(), recent_volume_usd=0.0, position=None, now_ns=now,
+        question=_q_bucket(expiry_ns=expiry_8h),
+        books={},
+        reference_price=80_000.0,
+        recent_returns=(),
+        recent_volume_usd=0.0,
+        position=None,
+        now_ns=now,
     )
     assert s.cfg is default
-
 
 
 # --- Cadence awareness: vol_sampling_dt_seconds scales sigma_window / lookback ---
@@ -1314,15 +1592,25 @@ def test_entry_safety_gate_is_cadence_aware():
 
     s60 = LateResolutionStrategy(_cfg(vol_sampling_dt_seconds=60, **common))
     d60 = s60.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=returns, recent_volume_usd=5_000.0, position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=returns,
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d60.action is Action.ENTER
 
     s5 = LateResolutionStrategy(_cfg(vol_sampling_dt_seconds=5, **common))
     d5 = s5.evaluate(
-        question=q, books=books, reference_price=80_300.0,
-        recent_returns=returns, recent_volume_usd=5_000.0, position=None, now_ns=now,
+        question=q,
+        books=books,
+        reference_price=80_300.0,
+        recent_returns=returns,
+        recent_volume_usd=5_000.0,
+        position=None,
+        now_ns=now,
     )
     assert d5.action is Action.HOLD
     assert any("safety_d_below_min" in dg.message for dg in d5.diagnostics)

@@ -12,6 +12,7 @@ hand-inlined at ~5 sites across ``theta_harvester.py`` and ``nba_wp.py``:
 ``cfg`` is a ``ThetaHarvesterConfig`` (both callers share it). ``side`` selects
 the entry vs exit ladder; under ``pm_binary`` both sides use the same curve.
 """
+
 from __future__ import annotations
 
 from typing import Literal

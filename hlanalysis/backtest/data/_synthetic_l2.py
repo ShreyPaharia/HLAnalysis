@@ -8,6 +8,7 @@ to ≤ 1 (PM CLOB prices are in [0, 1]).
 This module deliberately stays free of `hlanalysis.sim.*` imports — `sim/`
 is scheduled for deletion in Task E.
 """
+
 from __future__ import annotations
 
 from collections.abc import Sequence

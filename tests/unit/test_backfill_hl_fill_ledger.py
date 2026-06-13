@@ -14,6 +14,7 @@ Test plan
 5. Venue fills with no '#' symbols at all → after_realized == 0.0.
 6. Multiple '#' fills: all are mirrored; realized_pnl_since matches sum.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -31,6 +32,7 @@ from tools.backfill_hl_fill_ledger import backfill_dal
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _dal(tmp_path, suffix="state.db") -> StateDAL:
     dal = StateDAL(tmp_path / suffix)
@@ -80,6 +82,7 @@ def _venue_row(
 # Tests
 # ---------------------------------------------------------------------------
 
+
 def test_wipes_router_fills_and_settlement_then_mirrors(tmp_path):
     """Normal path: stale router rows + bogus Settlement row are removed; venue
     '#' fills are mirrored; realized_pnl_since == venue truth."""
@@ -114,6 +117,7 @@ def test_wipes_router_fills_and_settlement_then_mirrors(tmp_path):
 
     # DB state: settlement table empty, fill table == venue mirror.
     from sqlmodel import Session, select
+
     with Session(dal._engine) as s:
         assert s.exec(select(Settlement)).all() == []
         fills = s.exec(select(Fill)).all()
@@ -143,12 +147,13 @@ def test_dry_run_writes_nothing(tmp_path):
     # Dry-run summary
     assert result["dry_run"] if "dry_run" in result else True  # key optional
     assert result["rows_mirrored"] == 0
-    assert result["fills_wiped"] == 1        # what WOULD be wiped
+    assert result["fills_wiped"] == 1  # what WOULD be wiped
     assert result["settlements_wiped"] == 1  # what WOULD be wiped
     assert result["after_realized"] == pytest.approx(before_pnl)  # unchanged
 
     # DB must be identical to before the call.
     from sqlmodel import Session, select
+
     with Session(dal._engine) as s:
         fills = s.exec(select(Fill)).all()
         settlements = s.exec(select(Settlement)).all()
@@ -219,7 +224,7 @@ def test_multiple_fills_realized_matches(tmp_path):
         _venue_row("t1", "#10", closed_pnl=12.0, fee=0.3),
         _venue_row("t2", "#11", closed_pnl=-3.5, fee=0.1),
         _venue_row("t3", "#12", closed_pnl=50.0, fee=0.5),
-        _venue_row("t4", "#13", closed_pnl=0.0, fee=0.05),   # open/neutral
+        _venue_row("t4", "#13", closed_pnl=0.0, fee=0.05),  # open/neutral
     ]
     expected = (12.0 - 0.3) + (-3.5 - 0.1) + (50.0 - 0.5) + (0.0 - 0.05)
     result = backfill_dal(dal, fills)
@@ -240,6 +245,7 @@ def test_symbol_to_question_forwarded(tmp_path):
     backfill_dal(dal, venue_fills, symbol_to_question=sym_map)
 
     from sqlmodel import Session, select
+
     with Session(dal._engine) as s:
         row = s.exec(select(Fill)).one()
     assert row.question_idx == 42

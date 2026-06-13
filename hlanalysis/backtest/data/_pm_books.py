@@ -9,6 +9,7 @@ Covers:
 
 Extracted verbatim from polymarket.py — no logic changes.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,14 +24,10 @@ _P_CLIP_HI = 1.0 - 1e-6
 
 # Recorded PM L2 book partitions (native recorder; coverage starts 2026-05-27).
 # Symbol partition is the PM token_id, joining to manifest yes/no token ids.
-_PM_BOOK_DATA_SUBPATH = (
-    "venue=polymarket/product_type=prediction_binary/mechanism=clob/event=book_snapshot"
-)
+_PM_BOOK_DATA_SUBPATH = "venue=polymarket/product_type=prediction_binary/mechanism=clob/event=book_snapshot"
 # Recorded PM settlement (on-chain redemption): the winning leg token redeems
 # at settle_price≈1.0. Authoritative for the resolved outcome when present.
-_PM_SETTLEMENT_DATA_SUBPATH = (
-    "venue=polymarket/product_type=prediction_binary/mechanism=clob/event=settlement"
-)
+_PM_SETTLEMENT_DATA_SUBPATH = "venue=polymarket/product_type=prediction_binary/mechanism=clob/event=settlement"
 
 
 # ---- Trade row parsing -------------------------------------------------------
@@ -63,7 +60,10 @@ def _parse_clob_trade(row: dict) -> _RawTrade | None:
 
 
 def _normalize_levels(
-    px: list[float] | None, sz: list[float] | None, *, descending: bool,
+    px: list[float] | None,
+    sz: list[float] | None,
+    *,
+    descending: bool,
 ) -> tuple[tuple[float, float], ...]:
     """Pair recorded (px, sz) levels and sort by price.
 
@@ -74,10 +74,7 @@ def _normalize_levels(
     if not px:
         return ()
     sz = sz or []
-    levels = [
-        (float(px[i]), float(sz[i]) if i < len(sz) else 0.0)
-        for i in range(len(px))
-    ]
+    levels = [(float(px[i]), float(sz[i]) if i < len(sz) else 0.0) for i in range(len(px))]
     levels.sort(key=lambda lv: lv[0], reverse=descending)
     return tuple(levels)
 

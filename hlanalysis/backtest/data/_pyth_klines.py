@@ -100,9 +100,7 @@ def fetch_klines_1m(pyth_symbol: str, start_ts_ns: int, end_ts_ns: int) -> list[
         return []
 
     rows = []
-    for ts, o, h, l, c in zip(
-        data["t"], data["o"], data["h"], data["l"], data["c"]
-    ):
+    for ts, o, h, l, c in zip(data["t"], data["o"], data["h"], data["l"], data["c"]):
         rows.append(
             {
                 "ts_ns": ts * 1_000_000_000,
@@ -138,9 +136,7 @@ def fetch_window_for_market(
         List of kline dicts (same shape as :func:`fetch_klines_1m`).
     """
     end_ts_s = market_end_ts_ns // 1_000_000_000
-    date_iso = datetime.datetime.fromtimestamp(end_ts_s, tz=datetime.UTC).strftime(
-        "%Y-%m-%d"
-    )
+    date_iso = datetime.datetime.fromtimestamp(end_ts_s, tz=datetime.UTC).strftime("%Y-%m-%d")
     symbol = active_cl_contract(date_iso)
 
     start_ts_ns = (end_ts_s - lookback_seconds) * 1_000_000_000

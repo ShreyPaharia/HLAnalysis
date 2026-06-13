@@ -14,6 +14,7 @@ The test ALSO demonstrates the pre-fix COUNT bug: calling the count path with
 ``n`` large enough to span the gap returns MORE bars than the time path —
 confirming they diverge after a gap.
 """
+
 from __future__ import annotations
 
 import math
@@ -85,12 +86,13 @@ def _build_ms_with_gap(
 # Core parity test: time-bounded live == time-bounded backtest rule
 # ---------------------------------------------------------------------------
 
+
 def test_time_bounded_recent_returns_excludes_pre_gap_bars():
     """After a feed gap, the time-bounded path must drop bars older than the
     lookback window — matching the backtest's ``slice_window`` rule."""
     dt_seconds = 5
-    lookback_seconds = 60     # 12 bars of dt=5 needed to cover 60s
-    gap_seconds = 120         # gap is 2× the lookback — pre-gap bars must be excluded
+    lookback_seconds = 60  # 12 bars of dt=5 needed to cover 60s
+    gap_seconds = 120  # gap is 2× the lookback — pre-gap bars must be excluded
 
     ms, all_bars, now_ns = _build_ms_with_gap(
         dt_seconds=dt_seconds,
@@ -114,15 +116,19 @@ def test_time_bounded_recent_returns_excludes_pre_gap_bars():
 
     # TIME-bounded live call
     live_rets = ms.recent_returns(
-        "BTC", n=1000, dt=dt_seconds,
-        now_ns=now_ns, lookback_seconds=lookback_seconds,
+        "BTC",
+        n=1000,
+        dt=dt_seconds,
+        now_ns=now_ns,
+        lookback_seconds=lookback_seconds,
     )
 
     assert len(live_rets) > 0, "no returns returned — gap too wide or lookback too small"
     np.testing.assert_allclose(
         np.asarray(live_rets, dtype=np.float64),
         np.asarray(expected_rets, dtype=np.float64),
-        rtol=0, atol=0,
+        rtol=0,
+        atol=0,
         err_msg="live time-bounded returns do not match backtest TIME rule",
     )
 
@@ -137,8 +143,8 @@ def test_time_bounded_excludes_more_bars_than_count_path_after_gap():
     produces different bar sets.
     """
     dt_seconds = 5
-    lookback_seconds = 30     # 6 bars
-    gap_seconds = 200         # far beyond lookback
+    lookback_seconds = 30  # 6 bars
+    gap_seconds = 200  # far beyond lookback
 
     ms, all_bars, now_ns = _build_ms_with_gap(
         dt_seconds=dt_seconds,
@@ -148,8 +154,11 @@ def test_time_bounded_excludes_more_bars_than_count_path_after_gap():
 
     # TIME-bounded path — should see only post-gap bars
     time_rets = ms.recent_returns(
-        "BTC", n=1000, dt=dt_seconds,
-        now_ns=now_ns, lookback_seconds=lookback_seconds,
+        "BTC",
+        n=1000,
+        dt=dt_seconds,
+        now_ns=now_ns,
+        lookback_seconds=lookback_seconds,
     )
     # COUNT path with a very large n — spans the gap
     count_rets = ms.recent_returns("BTC", n=1000, dt=dt_seconds)
@@ -157,18 +166,16 @@ def test_time_bounded_excludes_more_bars_than_count_path_after_gap():
     # There are only 4 post-gap bars → at most 3 post-gap returns.
     # The pre-gap bars add 9 more — count path must return more.
     assert len(count_rets) > len(time_rets), (
-        f"expected count path ({len(count_rets)}) > time path ({len(time_rets)}) "
-        "after a gap wider than the lookback"
+        f"expected count path ({len(count_rets)}) > time path ({len(time_rets)}) after a gap wider than the lookback"
     )
     # The time path returns only the in-window bars.
-    assert len(time_rets) <= 3, (
-        f"time path returned {len(time_rets)} returns but only 4 post-gap bars exist"
-    )
+    assert len(time_rets) <= 3, f"time path returned {len(time_rets)} returns but only 4 post-gap bars exist"
 
 
 # ---------------------------------------------------------------------------
 # Parity: time-bounded live == KlineRingBuffer slice_window (SIM path)
 # ---------------------------------------------------------------------------
+
 
 def test_time_bounded_matches_kline_ring_buffer():
     """The live time-bounded path must match the backtest KlineRingBuffer
@@ -195,8 +202,11 @@ def test_time_bounded_matches_kline_ring_buffer():
         ms_sim.apply_reference(bar)
 
     live_rets = ms_live.recent_returns(
-        "BTC", n=1000, dt=dt_seconds,
-        now_ns=now_ns, lookback_seconds=lookback_seconds,
+        "BTC",
+        n=1000,
+        dt=dt_seconds,
+        now_ns=now_ns,
+        lookback_seconds=lookback_seconds,
     )
     sim_rets = ms_sim.recent_returns(now_ns=now_ns, lookback_seconds=lookback_seconds)
 
@@ -205,7 +215,8 @@ def test_time_bounded_matches_kline_ring_buffer():
     np.testing.assert_allclose(
         np.asarray(live_rets, dtype=np.float64),
         sim_rets,
-        rtol=0, atol=0,
+        rtol=0,
+        atol=0,
         err_msg="live time-bounded path does not match sim KlineRingBuffer slice_window",
     )
 
@@ -213,6 +224,7 @@ def test_time_bounded_matches_kline_ring_buffer():
 # ---------------------------------------------------------------------------
 # recent_hl_bars time-bounded parity
 # ---------------------------------------------------------------------------
+
 
 def test_time_bounded_hl_bars_excludes_pre_gap():
     """The time-bounded recent_hl_bars call must also exclude pre-gap bars."""
@@ -229,18 +241,20 @@ def test_time_bounded_hl_bars_excludes_pre_gap():
 
     # Only 4 post-gap bars → at most 4 HL bars in window
     hl_bars = ms.recent_hl_bars(
-        "BTC", n=1000, dt=dt_seconds,
-        now_ns=now_ns, lookback_seconds=lookback_seconds,
+        "BTC",
+        n=1000,
+        dt=dt_seconds,
+        now_ns=now_ns,
+        lookback_seconds=lookback_seconds,
     )
     in_window_count = sum(1 for ts, _ in all_bars if ts >= cutoff_ns)
-    assert len(hl_bars) == in_window_count, (
-        f"expected {in_window_count} hl bars in window, got {len(hl_bars)}"
-    )
+    assert len(hl_bars) == in_window_count, f"expected {in_window_count} hl bars in window, got {len(hl_bars)}"
 
 
 # ---------------------------------------------------------------------------
 # No-gap case: time path == count path (both produce all bars)
 # ---------------------------------------------------------------------------
+
 
 def test_time_bounded_same_as_count_when_no_gap():
     """Without a gap, time-bounded and count paths must produce identical
@@ -255,8 +269,11 @@ def test_time_bounded_same_as_count_when_no_gap():
     now_ns = (len(closes) - 1) * dt_seconds * _S
 
     time_rets = ms.recent_returns(
-        "BTC", n=1000, dt=dt_seconds,
-        now_ns=now_ns, lookback_seconds=lookback_seconds,
+        "BTC",
+        n=1000,
+        dt=dt_seconds,
+        now_ns=now_ns,
+        lookback_seconds=lookback_seconds,
     )
     count_rets = ms.recent_returns("BTC", n=1000, dt=dt_seconds)
 
@@ -264,13 +281,15 @@ def test_time_bounded_same_as_count_when_no_gap():
     np.testing.assert_allclose(
         np.asarray(time_rets, dtype=np.float64),
         np.asarray(count_rets, dtype=np.float64),
-        rtol=0, atol=0,
+        rtol=0,
+        atol=0,
     )
 
 
 # ---------------------------------------------------------------------------
 # Scanner integration: scan() must use time-bounded path
 # ---------------------------------------------------------------------------
+
 
 def test_scanner_exposes_default_lookback_secs(tmp_path):
     """The Scanner must expose _default_lookback_secs so scan() can pass
@@ -282,21 +301,32 @@ def test_scanner_exposes_default_lookback_secs(tmp_path):
 
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC", "period": "1h"},
-        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=60,
-        tte_max_seconds=1800, price_extreme_threshold=0.95,
-        distance_from_strike_usd_min=200, vol_max=0.5,
+        max_position_usd=100,
+        stop_loss_pct=10,
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200,
+        vol_max=0.5,
         vol_lookback_seconds=60,
     )
     cfg = StrategyConfig(
-        name="late_resolution", paper_mode=True,
-        allowlist=[entry], blocklist_question_idxs=[],
+        name="late_resolution",
+        paper_mode=True,
+        allowlist=[entry],
+        blocklist_question_idxs=[],
         defaults=entry,
-        **{"global": GlobalRiskConfig(
-            max_total_inventory_usd=500, max_concurrent_positions=5,
-            daily_loss_cap_usd=200, max_strike_distance_pct=10,
-            min_recent_volume_usd=0,
-            stale_data_halt_seconds=5, reconcile_interval_seconds=60,
-        )},
+        **{
+            "global": GlobalRiskConfig(
+                max_total_inventory_usd=500,
+                max_concurrent_positions=5,
+                daily_loss_cap_usd=200,
+                max_strike_distance_pct=10,
+                min_recent_volume_usd=0,
+                stale_data_halt_seconds=5,
+                reconcile_interval_seconds=60,
+            )
+        },
     )
 
     ms = EngineMS()
@@ -313,8 +343,7 @@ def test_scanner_exposes_default_lookback_secs(tmp_path):
 
     # Verify _default_lookback_secs is exposed for time-bounded calls
     assert hasattr(scanner, "_default_lookback_secs"), (
-        "Scanner must expose _default_lookback_secs for the time-bounded call "
-        "in scan() — SHR-66"
+        "Scanner must expose _default_lookback_secs for the time-bounded call in scan() — SHR-66"
     )
     # And that it has a positive integer value matching the configured lookback
     assert scanner._default_lookback_secs == 60

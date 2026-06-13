@@ -1,6 +1,7 @@
 """CompositeAdapter merges multiple VenueAdapter streams into one async
 iterator. Engine ingest loop sees a single stream; under the hood each
 child adapter only receives subs matching its own `venue`."""
+
 from __future__ import annotations
 
 import asyncio
@@ -46,7 +47,8 @@ class _StubAdapter(VenueAdapter):
         return True
 
     async def stream(
-        self, subscriptions: list[Subscription],
+        self,
+        subscriptions: list[Subscription],
     ) -> AsyncIterator[NormalizedEvent]:
         self.received_subs = list(subscriptions)
         for ev in self._events:
@@ -59,26 +61,39 @@ class _StubAdapter(VenueAdapter):
 
 @pytest.mark.asyncio
 async def test_composite_interleaves_events_from_both_adapters():
-    hl = _StubAdapter("hyperliquid", [
-        _trade("hyperliquid", "BTC", 100.0),
-        _trade("hyperliquid", "BTC", 101.0),
-    ])
-    pm = _StubAdapter("polymarket", [
-        _trade("polymarket", "tok-yes", 0.5),
-        _trade("polymarket", "tok-yes", 0.51),
-    ])
+    hl = _StubAdapter(
+        "hyperliquid",
+        [
+            _trade("hyperliquid", "BTC", 100.0),
+            _trade("hyperliquid", "BTC", 101.0),
+        ],
+    )
+    pm = _StubAdapter(
+        "polymarket",
+        [
+            _trade("polymarket", "tok-yes", 0.5),
+            _trade("polymarket", "tok-yes", 0.51),
+        ],
+    )
     composite = CompositeAdapter([hl, pm])
 
     hl_sub = Subscription(
-        venue="hyperliquid", product_type=ProductType.PERP,
-        mechanism=Mechanism.CLOB, symbol="BTC", channels=("trades",),
+        venue="hyperliquid",
+        product_type=ProductType.PERP,
+        mechanism=Mechanism.CLOB,
+        symbol="BTC",
+        channels=("trades",),
     )
     pm_sub = Subscription(
-        venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="*", channels=("trades",),
+        venue="polymarket",
+        product_type=ProductType.PREDICTION_BINARY,
+        mechanism=Mechanism.CLOB,
+        symbol="*",
+        channels=("trades",),
     )
 
     received: list[NormalizedEvent] = []
+
     async def _drain() -> None:
         async for ev in composite.stream([hl_sub, pm_sub]):
             received.append(ev)
@@ -105,11 +120,15 @@ async def test_composite_skips_adapter_with_no_matching_subs():
     composite = CompositeAdapter([hl, pm])
 
     hl_sub = Subscription(
-        venue="hyperliquid", product_type=ProductType.PERP,
-        mechanism=Mechanism.CLOB, symbol="BTC", channels=("trades",),
+        venue="hyperliquid",
+        product_type=ProductType.PERP,
+        mechanism=Mechanism.CLOB,
+        symbol="BTC",
+        channels=("trades",),
     )
 
     received: list[NormalizedEvent] = []
+
     async def _drain() -> None:
         async for ev in composite.stream([hl_sub]):
             received.append(ev)

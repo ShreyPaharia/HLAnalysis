@@ -3,16 +3,23 @@ from __future__ import annotations
 import pytest
 
 from hlanalysis.engine.config import (
-    AllowlistEntry, GlobalRiskConfig, StrategyConfig,
+    AllowlistEntry,
+    GlobalRiskConfig,
+    StrategyConfig,
 )
 from hlanalysis.engine.market_state import MarketState
 from hlanalysis.engine.scanner import Scanner
 from hlanalysis.engine.state import StateDAL
 from hlanalysis.events import (
-    BboEvent, MarkEvent, Mechanism, ProductType, QuestionMetaEvent,
+    BboEvent,
+    MarkEvent,
+    Mechanism,
+    ProductType,
+    QuestionMetaEvent,
 )
 from hlanalysis.strategy.late_resolution import (
-    LateResolutionConfig, LateResolutionStrategy,
+    LateResolutionConfig,
+    LateResolutionStrategy,
 )
 from hlanalysis.strategy.types import Action
 
@@ -20,20 +27,31 @@ from hlanalysis.strategy.types import Action
 def _strategy_cfg() -> StrategyConfig:
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC", "period": "1h"},
-        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=60,
-        tte_max_seconds=1800, price_extreme_threshold=0.95,
-        distance_from_strike_usd_min=200, vol_max=0.5,
+        max_position_usd=100,
+        stop_loss_pct=10,
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200,
+        vol_max=0.5,
     )
     return StrategyConfig(
-        name="late_resolution", paper_mode=True,
-        allowlist=[entry], blocklist_question_idxs=[],
+        name="late_resolution",
+        paper_mode=True,
+        allowlist=[entry],
+        blocklist_question_idxs=[],
         defaults=entry,
-        **{"global": GlobalRiskConfig(
-            max_total_inventory_usd=500, max_concurrent_positions=5,
-            daily_loss_cap_usd=200, max_strike_distance_pct=10,
-            min_recent_volume_usd=0,  # disable for tests
-            stale_data_halt_seconds=5, reconcile_interval_seconds=60,
-        )},
+        **{
+            "global": GlobalRiskConfig(
+                max_total_inventory_usd=500,
+                max_concurrent_positions=5,
+                daily_loss_cap_usd=200,
+                max_strike_distance_pct=10,
+                min_recent_volume_usd=0,  # disable for tests
+                stale_data_halt_seconds=5,
+                reconcile_interval_seconds=60,
+            )
+        },
     )
 
 
@@ -41,38 +59,67 @@ def _seed_market(now_ns: int) -> MarketState:
     ms = MarketState()
     # Use a near-future expiry: 10 minutes after now (20231114-2223 for now=1_700_000_000_000_000_000)
     from datetime import datetime, timezone
-    expiry_str = datetime.fromtimestamp(
-        (now_ns + 10 * 60 * 1_000_000_000) / 1e9, tz=timezone.utc
-    ).strftime('%Y%m%d-%H%M')
-    ms.apply(QuestionMetaEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="qmeta",
-        exchange_ts=now_ns - 60_000_000_000, local_recv_ts=now_ns - 60_000_000_000,
-        question_idx=42, named_outcome_idxs=[3],
-        keys=["class", "underlying", "period", "expiry", "strike"],
-        values=["priceBinary", "BTC", "1h", expiry_str, "80000"],
-    ))
+
+    expiry_str = datetime.fromtimestamp((now_ns + 10 * 60 * 1_000_000_000) / 1e9, tz=timezone.utc).strftime(
+        "%Y%m%d-%H%M"
+    )
+    ms.apply(
+        QuestionMetaEvent(
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="qmeta",
+            exchange_ts=now_ns - 60_000_000_000,
+            local_recv_ts=now_ns - 60_000_000_000,
+            question_idx=42,
+            named_outcome_idxs=[3],
+            keys=["class", "underlying", "period", "expiry", "strike"],
+            values=["priceBinary", "BTC", "1h", expiry_str, "80000"],
+        )
+    )
     # 2026-05-21: MarketState now buckets marks to 1m windows. Space
     # timestamps 60s apart so each MarkEvent populates its own bucket.
     for i in range(8):
         ts = now_ns - (8 - i) * 60_000_000_000
-        ms.apply(MarkEvent(
-            venue="hyperliquid", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
-            symbol="BTC", exchange_ts=ts,
-            local_recv_ts=ts, mark_px=80_300.0 + i * 0.01,
-        ))
-    ms.apply(BboEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="#30",
-        exchange_ts=now_ns, local_recv_ts=now_ns,
-        bid_px=0.95, bid_sz=10.0, ask_px=0.96, ask_sz=10.0,
-    ))
-    ms.apply(BboEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="#31",
-        exchange_ts=now_ns, local_recv_ts=now_ns,
-        bid_px=0.04, bid_sz=10.0, ask_px=0.05, ask_sz=10.0,
-    ))
+        ms.apply(
+            MarkEvent(
+                venue="hyperliquid",
+                product_type=ProductType.PERP,
+                mechanism=Mechanism.CLOB,
+                symbol="BTC",
+                exchange_ts=ts,
+                local_recv_ts=ts,
+                mark_px=80_300.0 + i * 0.01,
+            )
+        )
+    ms.apply(
+        BboEvent(
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="#30",
+            exchange_ts=now_ns,
+            local_recv_ts=now_ns,
+            bid_px=0.95,
+            bid_sz=10.0,
+            ask_px=0.96,
+            ask_sz=10.0,
+        )
+    )
+    ms.apply(
+        BboEvent(
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="#31",
+            exchange_ts=now_ns,
+            local_recv_ts=now_ns,
+            bid_px=0.04,
+            bid_sz=10.0,
+            ask_px=0.05,
+            ask_sz=10.0,
+        )
+    )
     return ms
 
 
@@ -83,15 +130,23 @@ def test_scanner_emits_enter_for_allowlisted_question(tmp_path):
     dal.run_migrations()
     cfg = _strategy_cfg()
     rcfg = LateResolutionConfig(
-        tte_min_seconds=60, tte_max_seconds=1800,
-        price_extreme_threshold=0.95, distance_from_strike_usd_min=200.0,
-        vol_max=0.5, max_position_usd=100.0, stop_loss_pct=10.0,
-        max_strike_distance_pct=10.0, min_recent_volume_usd=0.0,
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200.0,
+        vol_max=0.5,
+        max_position_usd=100.0,
+        stop_loss_pct=10.0,
+        max_strike_distance_pct=10.0,
+        min_recent_volume_usd=0.0,
         stale_data_halt_seconds=5,
     )
     scanner = Scanner(
         strategy=LateResolutionStrategy(rcfg),
-        cfg=cfg, market_state=ms, dal=dal, kill_switch_path=tmp_path / "halt",
+        cfg=cfg,
+        market_state=ms,
+        dal=dal,
+        kill_switch_path=tmp_path / "halt",
         last_reconcile_ns=now,
     )
     decisions = scanner.scan(now_ns=now)
@@ -105,15 +160,23 @@ def test_scanner_skips_blocklisted_question(tmp_path):
     dal.run_migrations()
     cfg = _strategy_cfg().model_copy(update={"blocklist_question_idxs": [42]})
     rcfg = LateResolutionConfig(
-        tte_min_seconds=60, tte_max_seconds=1800,
-        price_extreme_threshold=0.95, distance_from_strike_usd_min=200.0,
-        vol_max=0.5, max_position_usd=100.0, stop_loss_pct=10.0,
-        max_strike_distance_pct=10.0, min_recent_volume_usd=0.0,
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200.0,
+        vol_max=0.5,
+        max_position_usd=100.0,
+        stop_loss_pct=10.0,
+        max_strike_distance_pct=10.0,
+        min_recent_volume_usd=0.0,
         stale_data_halt_seconds=5,
     )
     scanner = Scanner(
         strategy=LateResolutionStrategy(rcfg),
-        cfg=cfg, market_state=ms, dal=dal, kill_switch_path=tmp_path / "halt",
+        cfg=cfg,
+        market_state=ms,
+        dal=dal,
+        kill_switch_path=tmp_path / "halt",
         last_reconcile_ns=now,
     )
     decisions = scanner.scan(now_ns=now)
@@ -131,15 +194,23 @@ def _scanner_for(cfg: StrategyConfig, ms: MarketState, tmp_path, now: int) -> Sc
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     rcfg = LateResolutionConfig(
-        tte_min_seconds=60, tte_max_seconds=1800,
-        price_extreme_threshold=0.95, distance_from_strike_usd_min=200.0,
-        vol_max=0.5, max_position_usd=100.0, stop_loss_pct=10.0,
-        max_strike_distance_pct=10.0, min_recent_volume_usd=0.0,
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200.0,
+        vol_max=0.5,
+        max_position_usd=100.0,
+        stop_loss_pct=10.0,
+        max_strike_distance_pct=10.0,
+        min_recent_volume_usd=0.0,
         stale_data_halt_seconds=5,
     )
     return Scanner(
         strategy=LateResolutionStrategy(rcfg),
-        cfg=cfg, market_state=ms, dal=dal, kill_switch_path=tmp_path / "halt",
+        cfg=cfg,
+        market_state=ms,
+        dal=dal,
+        kill_switch_path=tmp_path / "halt",
         last_reconcile_ns=now,
     )
 
@@ -150,8 +221,7 @@ def test_scanner_matches_when_allowlist_scopes_to_question_venue(tmp_path):
     now = 1_700_000_000_000_000_000
     ms = _seed_market(now)
     cfg = _cfg_with_match(
-        {"class": "priceBinary", "underlying": "BTC", "period": "1h",
-         "venue": "hyperliquid"},
+        {"class": "priceBinary", "underlying": "BTC", "period": "1h", "venue": "hyperliquid"},
     )
     scanner = _scanner_for(cfg, ms, tmp_path, now)
     decisions = scanner.scan(now_ns=now)
@@ -165,8 +235,7 @@ def test_scanner_skips_question_from_other_venue(tmp_path):
     now = 1_700_000_000_000_000_000
     ms = _seed_market(now)
     cfg = _cfg_with_match(
-        {"class": "priceBinary", "underlying": "BTC",
-         "venue": "polymarket", "series_slug": "btc-up-or-down-daily"},
+        {"class": "priceBinary", "underlying": "BTC", "venue": "polymarket", "series_slug": "btc-up-or-down-daily"},
     )
     scanner = _scanner_for(cfg, ms, tmp_path, now)
     decisions = scanner.scan(now_ns=now)
@@ -175,20 +244,31 @@ def test_scanner_skips_question_from_other_venue(tmp_path):
 
 def _seed_pm_updown(now_ns: int, *, strike_ref_ts_ns: int) -> MarketState:
     ms = MarketState()
-    ms.apply(MarkEvent(
-        venue="binance", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
-        symbol="BTC", exchange_ts=now_ns, local_recv_ts=now_ns, mark_px=74_000.0,
-    ))
-    ms.apply(QuestionMetaEvent(
-        venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
-        exchange_ts=now_ns, local_recv_ts=now_ns,
-        question_idx=909100, named_outcome_idxs=[0, 1],
-        keys=["class", "underlying", "series_slug",
-              "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
-        values=["priceBinary", "BTC", "btc-up-or-down-daily",
-                "YES_TOKEN", "NO_TOKEN", str(strike_ref_ts_ns)],
-    ))
+    ms.apply(
+        MarkEvent(
+            venue="binance",
+            product_type=ProductType.PERP,
+            mechanism=Mechanism.CLOB,
+            symbol="BTC",
+            exchange_ts=now_ns,
+            local_recv_ts=now_ns,
+            mark_px=74_000.0,
+        )
+    )
+    ms.apply(
+        QuestionMetaEvent(
+            venue="polymarket",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="YES_TOKEN",
+            exchange_ts=now_ns,
+            local_recv_ts=now_ns,
+            question_idx=909100,
+            named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "series_slug", "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+            values=["priceBinary", "BTC", "btc-up-or-down-daily", "YES_TOKEN", "NO_TOKEN", str(strike_ref_ts_ns)],
+        )
+    )
     return ms
 
 
@@ -200,7 +280,7 @@ def test_scanner_reloads_persisted_pm_strike(tmp_path):
     ms = _seed_pm_updown(now, strike_ref_ts_ns=now - 120_000_000_000)
     cfg = _cfg_with_match({"class": "priceBinary", "underlying": "BTC"})
     scanner = _scanner_for(cfg, ms, tmp_path, now)
-    scanner.dal.set_pm_strike(909100, 73_644.92)   # as if the runtime captured it
+    scanner.dal.set_pm_strike(909100, 73_644.92)  # as if the runtime captured it
     scanner.scan(now_ns=now)
     assert ms.question(909100).strike == 73_644.92
 
@@ -278,12 +358,14 @@ def test_scanner_recent_returns_n_uses_max_vol_lookback_seconds():
 
     cfg = _strategy_cfg()
     # Override defaults + allowlist to a 1h lookback (60 samples expected).
-    cfg = cfg.model_copy(update={
-        "defaults": cfg.defaults.model_copy(update={"vol_lookback_seconds": 3600}),
-        "allowlist": [
-            cfg.allowlist[0].model_copy(update={"vol_lookback_seconds": 3600}),
-        ],
-    })
+    cfg = cfg.model_copy(
+        update={
+            "defaults": cfg.defaults.model_copy(update={"vol_lookback_seconds": 3600}),
+            "allowlist": [
+                cfg.allowlist[0].model_copy(update={"vol_lookback_seconds": 3600}),
+            ],
+        }
+    )
     n = Scanner._required_returns_n(cfg)
     assert n >= 60, f"expected >=60 bars for 3600s lookback, got {n}"
 
@@ -298,16 +380,22 @@ def test_scanner_recent_returns_n_picks_max_across_allowlist_entries():
     cfg = _strategy_cfg()
     long_entry = AllowlistEntry(
         match={"class": "priceBucket", "underlying": "BTC", "period": "1d"},
-        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=0,
-        tte_max_seconds=86400, price_extreme_threshold=0.85,
-        distance_from_strike_usd_min=0, vol_max=100,
+        max_position_usd=100,
+        stop_loss_pct=10,
+        tte_min_seconds=0,
+        tte_max_seconds=86400,
+        price_extreme_threshold=0.85,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
         vol_lookback_seconds=7200,
     )
     short_entry = cfg.allowlist[0].model_copy(update={"vol_lookback_seconds": 1800})
-    cfg = cfg.model_copy(update={
-        "defaults": cfg.defaults.model_copy(update={"vol_lookback_seconds": 1800}),
-        "allowlist": [short_entry, long_entry],
-    })
+    cfg = cfg.model_copy(
+        update={
+            "defaults": cfg.defaults.model_copy(update={"vol_lookback_seconds": 1800}),
+            "allowlist": [short_entry, long_entry],
+        }
+    )
     n = Scanner._required_returns_n(cfg)
     assert n >= 120, f"expected >=120 bars for 7200s lookback, got {n}"
 
@@ -318,14 +406,16 @@ def test_scanner_recent_returns_n_includes_theta_drift_lookback():
     from hlanalysis.engine.scanner import Scanner
     from hlanalysis.engine.config import ThetaParams
 
-    cfg = _strategy_cfg().model_copy(update={
-        "strategy_type": "theta_harvester",
-        "theta": ThetaParams(
-            vol_lookback_seconds=1800,
-            drift_lookback_seconds=7200,
-            vol_sampling_dt_seconds=60,
-        ),
-    })
+    cfg = _strategy_cfg().model_copy(
+        update={
+            "strategy_type": "theta_harvester",
+            "theta": ThetaParams(
+                vol_lookback_seconds=1800,
+                drift_lookback_seconds=7200,
+                vol_sampling_dt_seconds=60,
+            ),
+        }
+    )
     n = Scanner._required_returns_n(cfg)
     assert n >= 120, f"expected >=120 bars for 7200s drift lookback, got {n}"
 
@@ -335,12 +425,14 @@ def test_scanner_recent_returns_n_floors_at_32():
     that read recent_returns directly (e.g. v3.4 LM gate) keep working."""
     from hlanalysis.engine.scanner import Scanner
 
-    cfg = _strategy_cfg().model_copy(update={
-        "defaults": _strategy_cfg().defaults.model_copy(update={"vol_lookback_seconds": 600}),
-        "allowlist": [
-            _strategy_cfg().allowlist[0].model_copy(update={"vol_lookback_seconds": 600}),
-        ],
-    })
+    cfg = _strategy_cfg().model_copy(
+        update={
+            "defaults": _strategy_cfg().defaults.model_copy(update={"vol_lookback_seconds": 600}),
+            "allowlist": [
+                _strategy_cfg().allowlist[0].model_copy(update={"vol_lookback_seconds": 600}),
+            ],
+        }
+    )
     n = Scanner._required_returns_n(cfg)
     assert n == 32  # 600/60 = 10 → floored to 32
 
@@ -356,7 +448,11 @@ def test_gate_log_snapshot_uses_chosen_leg_book_when_diagnosed(tmp_path):
     """
     import json
     from hlanalysis.strategy.types import (
-        Action, BookState, Decision, Diagnostic, QuestionView,
+        Action,
+        BookState,
+        Decision,
+        Diagnostic,
+        QuestionView,
     )
 
     now = 1_700_000_000_000_000_000
@@ -364,45 +460,74 @@ def test_gate_log_snapshot_uses_chosen_leg_book_when_diagnosed(tmp_path):
     dal.run_migrations()
     cfg = _strategy_cfg()
     rcfg = LateResolutionConfig(
-        tte_min_seconds=60, tte_max_seconds=1800,
-        price_extreme_threshold=0.95, distance_from_strike_usd_min=200.0,
-        vol_max=0.5, max_position_usd=100.0, stop_loss_pct=10.0,
-        max_strike_distance_pct=10.0, min_recent_volume_usd=0.0,
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200.0,
+        vol_max=0.5,
+        max_position_usd=100.0,
+        stop_loss_pct=10.0,
+        max_strike_distance_pct=10.0,
+        min_recent_volume_usd=0.0,
         stale_data_halt_seconds=5,
     )
     log_path = tmp_path / "gate_decisions.jsonl"
     scanner = Scanner(
         strategy=LateResolutionStrategy(rcfg),
-        cfg=cfg, market_state=MarketState(), dal=dal,
+        cfg=cfg,
+        market_state=MarketState(),
+        dal=dal,
         kill_switch_path=tmp_path / "halt",
         last_reconcile_ns=now,
         gate_log_path=log_path,
     )
 
     bucket_q = QuestionView(
-        question_idx=14, yes_symbol="", no_symbol="", strike=0.0,
+        question_idx=14,
+        yes_symbol="",
+        no_symbol="",
+        strike=0.0,
         expiry_ns=now + 3600 * 1_000_000_000,
-        underlying="BTC", klass="priceBucket", period="1d",
+        underlying="BTC",
+        klass="priceBucket",
+        period="1d",
         leg_symbols=("#700", "#701", "#780", "#781"),
     )
     # First leg is a long-shot (price 0.01); chosen leg #780 is the favorite (0.95).
     books = {
-        "#700": BookState(symbol="#700", bid_px=0.00301, bid_sz=10.0,
-                          ask_px=0.01, ask_sz=10.0,
-                          last_trade_ts_ns=now, last_l2_ts_ns=now),
-        "#780": BookState(symbol="#780", bid_px=0.94, bid_sz=10.0,
-                          ask_px=0.95, ask_sz=10.0,
-                          last_trade_ts_ns=now, last_l2_ts_ns=now),
+        "#700": BookState(
+            symbol="#700",
+            bid_px=0.00301,
+            bid_sz=10.0,
+            ask_px=0.01,
+            ask_sz=10.0,
+            last_trade_ts_ns=now,
+            last_l2_ts_ns=now,
+        ),
+        "#780": BookState(
+            symbol="#780", bid_px=0.94, bid_sz=10.0, ask_px=0.95, ask_sz=10.0, last_trade_ts_ns=now, last_l2_ts_ns=now
+        ),
     }
-    decision = Decision(action=Action.HOLD, diagnostics=(
-        Diagnostic("info", "edge", (
-            ("p_model", "0.7847"), ("edge_yes", "-0.1706"),
-            ("chosen_leg", "#780"),
-        )),
-    ))
+    decision = Decision(
+        action=Action.HOLD,
+        diagnostics=(
+            Diagnostic(
+                "info",
+                "edge",
+                (
+                    ("p_model", "0.7847"),
+                    ("edge_yes", "-0.1706"),
+                    ("chosen_leg", "#780"),
+                ),
+            ),
+        ),
+    )
 
     scanner._maybe_log_gate_transition(
-        question=bucket_q, decision=decision, books=books, now_ns=now,
+        question=bucket_q,
+        decision=decision,
+        books=books,
+        now_ns=now,
     )
     row = json.loads(log_path.read_text().strip())
     # The chosen leg's book is what should appear in the snapshot columns.
@@ -419,7 +544,11 @@ def test_gate_log_snapshot_uses_held_position_book_when_no_chosen_leg(tmp_path):
     import json
     from hlanalysis.engine.state import Position as DalPosition
     from hlanalysis.strategy.types import (
-        Action, BookState, Decision, Diagnostic, QuestionView,
+        Action,
+        BookState,
+        Decision,
+        Diagnostic,
+        QuestionView,
     )
 
     now = 1_700_000_000_000_000_000
@@ -427,49 +556,77 @@ def test_gate_log_snapshot_uses_held_position_book_when_no_chosen_leg(tmp_path):
     dal.run_migrations()
     cfg = _strategy_cfg()
     rcfg = LateResolutionConfig(
-        tte_min_seconds=60, tte_max_seconds=1800,
-        price_extreme_threshold=0.95, distance_from_strike_usd_min=200.0,
-        vol_max=0.5, max_position_usd=100.0, stop_loss_pct=10.0,
-        max_strike_distance_pct=10.0, min_recent_volume_usd=0.0,
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200.0,
+        vol_max=0.5,
+        max_position_usd=100.0,
+        stop_loss_pct=10.0,
+        max_strike_distance_pct=10.0,
+        min_recent_volume_usd=0.0,
         stale_data_halt_seconds=5,
     )
     log_path = tmp_path / "gate_decisions.jsonl"
     scanner = Scanner(
         strategy=LateResolutionStrategy(rcfg),
-        cfg=cfg, market_state=MarketState(), dal=dal,
+        cfg=cfg,
+        market_state=MarketState(),
+        dal=dal,
         kill_switch_path=tmp_path / "halt",
         last_reconcile_ns=now,
         gate_log_path=log_path,
     )
 
     bucket_q = QuestionView(
-        question_idx=14, yes_symbol="", no_symbol="", strike=0.0,
+        question_idx=14,
+        yes_symbol="",
+        no_symbol="",
+        strike=0.0,
         expiry_ns=now + 3600 * 1_000_000_000,
-        underlying="BTC", klass="priceBucket", period="1d",
+        underlying="BTC",
+        klass="priceBucket",
+        period="1d",
         leg_symbols=("#700", "#701", "#780", "#781"),
     )
     books = {
-        "#700": BookState(symbol="#700", bid_px=0.018, bid_sz=10.0,
-                          ask_px=0.04, ask_sz=10.0,
-                          last_trade_ts_ns=now, last_l2_ts_ns=now),
-        "#780": BookState(symbol="#780", bid_px=0.94, bid_sz=10.0,
-                          ask_px=0.95, ask_sz=10.0,
-                          last_trade_ts_ns=now, last_l2_ts_ns=now),
+        "#700": BookState(
+            symbol="#700", bid_px=0.018, bid_sz=10.0, ask_px=0.04, ask_sz=10.0, last_trade_ts_ns=now, last_l2_ts_ns=now
+        ),
+        "#780": BookState(
+            symbol="#780", bid_px=0.94, bid_sz=10.0, ask_px=0.95, ask_sz=10.0, last_trade_ts_ns=now, last_l2_ts_ns=now
+        ),
     }
     # Topup-hold style decision: held position exists, no chosen_leg in diag.
     held_position = DalPosition(
-        question_idx=14, symbol="#780", qty=100.0, avg_entry=0.93,
-        realized_pnl=0.0, last_update_ts_ns=now, stop_loss_price=0.0,
+        question_idx=14,
+        symbol="#780",
+        qty=100.0,
+        avg_entry=0.93,
+        realized_pnl=0.0,
+        last_update_ts_ns=now,
+        stop_loss_price=0.0,
     )
-    decision = Decision(action=Action.HOLD, diagnostics=(
-        Diagnostic("info", "hold", (
-            ("edge_held", "0.0500"), ("held_p", "0.99"),
-            ("reason", "not_needed"),
-        )),
-    ))
+    decision = Decision(
+        action=Action.HOLD,
+        diagnostics=(
+            Diagnostic(
+                "info",
+                "hold",
+                (
+                    ("edge_held", "0.0500"),
+                    ("held_p", "0.99"),
+                    ("reason", "not_needed"),
+                ),
+            ),
+        ),
+    )
 
     scanner._maybe_log_gate_transition(
-        question=bucket_q, decision=decision, books=books, now_ns=now,
+        question=bucket_q,
+        decision=decision,
+        books=books,
+        now_ns=now,
         position=held_position,
     )
     row = json.loads(log_path.read_text().strip())
@@ -486,7 +643,11 @@ def test_gate_log_snapshot_prefers_binary_favorite_leg_when_no_chosen_leg(tmp_pa
     (0.90+), making the row mathematically inconsistent with the diag."""
     import json
     from hlanalysis.strategy.types import (
-        Action, BookState, Decision, Diagnostic, QuestionView,
+        Action,
+        BookState,
+        Decision,
+        Diagnostic,
+        QuestionView,
     )
 
     now = 1_700_000_000_000_000_000
@@ -494,40 +655,55 @@ def test_gate_log_snapshot_prefers_binary_favorite_leg_when_no_chosen_leg(tmp_pa
     dal.run_migrations()
     cfg = _strategy_cfg()
     rcfg = LateResolutionConfig(
-        tte_min_seconds=60, tte_max_seconds=1800,
-        price_extreme_threshold=0.95, distance_from_strike_usd_min=200.0,
-        vol_max=0.5, max_position_usd=100.0, stop_loss_pct=10.0,
-        max_strike_distance_pct=10.0, min_recent_volume_usd=0.0,
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200.0,
+        vol_max=0.5,
+        max_position_usd=100.0,
+        stop_loss_pct=10.0,
+        max_strike_distance_pct=10.0,
+        min_recent_volume_usd=0.0,
         stale_data_halt_seconds=5,
     )
     log_path = tmp_path / "gate_decisions.jsonl"
     scanner = Scanner(
         strategy=LateResolutionStrategy(rcfg),
-        cfg=cfg, market_state=MarketState(), dal=dal,
+        cfg=cfg,
+        market_state=MarketState(),
+        dal=dal,
         kill_switch_path=tmp_path / "halt",
         last_reconcile_ns=now,
         gate_log_path=log_path,
     )
 
     q = QuestionView(
-        question_idx=42, yes_symbol="@yes", no_symbol="@no", strike=80_000.0,
+        question_idx=42,
+        yes_symbol="@yes",
+        no_symbol="@no",
+        strike=80_000.0,
         expiry_ns=now + 600 * 1_000_000_000,
-        underlying="BTC", klass="priceBinary", period="1h",
+        underlying="BTC",
+        klass="priceBinary",
+        period="1h",
     )
     # NO is the favorite (mid 0.94), YES is the underdog (mid 0.07).
     books = {
-        "@yes": BookState(symbol="@yes", bid_px=0.06, bid_sz=200.0,
-                         ask_px=0.08, ask_sz=10.0,
-                         last_trade_ts_ns=now, last_l2_ts_ns=now),
-        "@no":  BookState(symbol="@no",  bid_px=0.93, bid_sz=5.0,
-                         ask_px=0.95, ask_sz=10.0,
-                         last_trade_ts_ns=now, last_l2_ts_ns=now),
+        "@yes": BookState(
+            symbol="@yes", bid_px=0.06, bid_sz=200.0, ask_px=0.08, ask_sz=10.0, last_trade_ts_ns=now, last_l2_ts_ns=now
+        ),
+        "@no": BookState(
+            symbol="@no", bid_px=0.93, bid_sz=5.0, ask_px=0.95, ask_sz=10.0, last_trade_ts_ns=now, last_l2_ts_ns=now
+        ),
     }
-    decision = Decision(action=Action.HOLD, diagnostics=(
-        Diagnostic("info", "bid_notional_too_thin", (("min_usd", "10.00"),)),
-    ))
+    decision = Decision(
+        action=Action.HOLD, diagnostics=(Diagnostic("info", "bid_notional_too_thin", (("min_usd", "10.00"),)),)
+    )
     scanner._maybe_log_gate_transition(
-        question=q, decision=decision, books=books, now_ns=now,
+        question=q,
+        decision=decision,
+        books=books,
+        now_ns=now,
     )
     row = json.loads(log_path.read_text().strip())
     assert row["ask_px"] == 0.95, f"should log NO favourite ask, got {row['ask_px']}"
@@ -541,7 +717,11 @@ def test_gate_log_snapshot_falls_back_to_first_leg_when_no_chosen_leg(tmp_path):
     reasons like tte_out_of_window), preserve the legacy first-leg snapshot."""
     import json
     from hlanalysis.strategy.types import (
-        Action, BookState, Decision, Diagnostic, QuestionView,
+        Action,
+        BookState,
+        Decision,
+        Diagnostic,
+        QuestionView,
     )
 
     now = 1_700_000_000_000_000_000
@@ -549,36 +729,51 @@ def test_gate_log_snapshot_falls_back_to_first_leg_when_no_chosen_leg(tmp_path):
     dal.run_migrations()
     cfg = _strategy_cfg()
     rcfg = LateResolutionConfig(
-        tte_min_seconds=60, tte_max_seconds=1800,
-        price_extreme_threshold=0.95, distance_from_strike_usd_min=200.0,
-        vol_max=0.5, max_position_usd=100.0, stop_loss_pct=10.0,
-        max_strike_distance_pct=10.0, min_recent_volume_usd=0.0,
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200.0,
+        vol_max=0.5,
+        max_position_usd=100.0,
+        stop_loss_pct=10.0,
+        max_strike_distance_pct=10.0,
+        min_recent_volume_usd=0.0,
         stale_data_halt_seconds=5,
     )
     log_path = tmp_path / "gate_decisions.jsonl"
     scanner = Scanner(
         strategy=LateResolutionStrategy(rcfg),
-        cfg=cfg, market_state=MarketState(), dal=dal,
+        cfg=cfg,
+        market_state=MarketState(),
+        dal=dal,
         kill_switch_path=tmp_path / "halt",
         last_reconcile_ns=now,
         gate_log_path=log_path,
     )
 
     q = QuestionView(
-        question_idx=42, yes_symbol="@30", no_symbol="@31", strike=80_000.0,
+        question_idx=42,
+        yes_symbol="@30",
+        no_symbol="@31",
+        strike=80_000.0,
         expiry_ns=now + 600 * 1_000_000_000,
-        underlying="BTC", klass="priceBinary", period="1h",
+        underlying="BTC",
+        klass="priceBinary",
+        period="1h",
     )
     books = {
-        "@30": BookState(symbol="@30", bid_px=0.95, bid_sz=10.0,
-                        ask_px=0.96, ask_sz=10.0,
-                        last_trade_ts_ns=now, last_l2_ts_ns=now),
+        "@30": BookState(
+            symbol="@30", bid_px=0.95, bid_sz=10.0, ask_px=0.96, ask_sz=10.0, last_trade_ts_ns=now, last_l2_ts_ns=now
+        ),
     }
-    decision = Decision(action=Action.HOLD, diagnostics=(
-        Diagnostic("info", "tte_out_of_window", (("tte_s", "8000"),)),
-    ))
+    decision = Decision(
+        action=Action.HOLD, diagnostics=(Diagnostic("info", "tte_out_of_window", (("tte_s", "8000"),)),)
+    )
     scanner._maybe_log_gate_transition(
-        question=q, decision=decision, books=books, now_ns=now,
+        question=q,
+        decision=decision,
+        books=books,
+        now_ns=now,
     )
     row = json.loads(log_path.read_text().strip())
     assert row["ask_px"] == 0.96
@@ -601,17 +796,20 @@ class _RecordingStrategy(LateResolutionStrategy):
     def evaluate(self, *, recent_hl_bars=(), recent_returns=(), **kw):
         self.seen_hl_bars = recent_hl_bars
         self.seen_returns = recent_returns
-        return super().evaluate(
-            recent_hl_bars=recent_hl_bars, recent_returns=recent_returns, **kw
-        )
+        return super().evaluate(recent_hl_bars=recent_hl_bars, recent_returns=recent_returns, **kw)
 
 
 def _rcfg(**overrides):
     base = dict(
-        tte_min_seconds=60, tte_max_seconds=1800,
-        price_extreme_threshold=0.95, distance_from_strike_usd_min=200.0,
-        vol_max=0.5, max_position_usd=100.0, stop_loss_pct=10.0,
-        max_strike_distance_pct=10.0, min_recent_volume_usd=0.0,
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200.0,
+        vol_max=0.5,
+        max_position_usd=100.0,
+        stop_loss_pct=10.0,
+        max_strike_distance_pct=10.0,
+        min_recent_volume_usd=0.0,
         stale_data_halt_seconds=5,
     )
     base.update(overrides)
@@ -624,40 +822,68 @@ def _seed_market_with_range(now_ns: int) -> MarketState:
     is ~0 but Parkinson σ (range-based) is large."""
     ms = MarketState()
     from datetime import datetime, timezone
-    expiry_str = datetime.fromtimestamp(
-        (now_ns + 10 * 60 * 1_000_000_000) / 1e9, tz=timezone.utc
-    ).strftime('%Y%m%d-%H%M')
-    ms.apply(QuestionMetaEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="qmeta",
-        exchange_ts=now_ns - 60_000_000_000, local_recv_ts=now_ns - 60_000_000_000,
-        question_idx=42, named_outcome_idxs=[3],
-        keys=["class", "underlying", "period", "expiry", "strike"],
-        values=["priceBinary", "BTC", "1h", expiry_str, "80000"],
-    ))
+
+    expiry_str = datetime.fromtimestamp((now_ns + 10 * 60 * 1_000_000_000) / 1e9, tz=timezone.utc).strftime(
+        "%Y%m%d-%H%M"
+    )
+    ms.apply(
+        QuestionMetaEvent(
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="qmeta",
+            exchange_ts=now_ns - 60_000_000_000,
+            local_recv_ts=now_ns - 60_000_000_000,
+            question_idx=42,
+            named_outcome_idxs=[3],
+            keys=["class", "underlying", "period", "expiry", "strike"],
+            values=["priceBinary", "BTC", "1h", expiry_str, "80000"],
+        )
+    )
     one_min = 60_000_000_000
     # 8 buckets; each opens+closes at 80_300 (flat closes) but swings ±300 mid.
     for i in range(8):
         bucket_base = now_ns - (8 - i) * one_min
         for off, px in ((0, 80_300.0), (1, 80_600.0), (2, 80_000.0), (3, 80_300.0)):
-            ms.apply(MarkEvent(
-                venue="hyperliquid", product_type=ProductType.PERP,
-                mechanism=Mechanism.CLOB, symbol="BTC",
-                exchange_ts=bucket_base + off, local_recv_ts=bucket_base + off,
-                mark_px=px,
-            ))
-    ms.apply(BboEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="#30",
-        exchange_ts=now_ns, local_recv_ts=now_ns,
-        bid_px=0.95, bid_sz=10.0, ask_px=0.96, ask_sz=10.0,
-    ))
-    ms.apply(BboEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="#31",
-        exchange_ts=now_ns, local_recv_ts=now_ns,
-        bid_px=0.04, bid_sz=10.0, ask_px=0.05, ask_sz=10.0,
-    ))
+            ms.apply(
+                MarkEvent(
+                    venue="hyperliquid",
+                    product_type=ProductType.PERP,
+                    mechanism=Mechanism.CLOB,
+                    symbol="BTC",
+                    exchange_ts=bucket_base + off,
+                    local_recv_ts=bucket_base + off,
+                    mark_px=px,
+                )
+            )
+    ms.apply(
+        BboEvent(
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="#30",
+            exchange_ts=now_ns,
+            local_recv_ts=now_ns,
+            bid_px=0.95,
+            bid_sz=10.0,
+            ask_px=0.96,
+            ask_sz=10.0,
+        )
+    )
+    ms.apply(
+        BboEvent(
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="#31",
+            exchange_ts=now_ns,
+            local_recv_ts=now_ns,
+            bid_px=0.04,
+            bid_sz=10.0,
+            ask_px=0.05,
+            ask_sz=10.0,
+        )
+    )
     return ms
 
 
@@ -670,8 +896,12 @@ def test_scanner_threads_recent_hl_bars_into_evaluate(tmp_path):
     dal.run_migrations()
     strat = _RecordingStrategy(_rcfg())
     scanner = Scanner(
-        strategy=strat, cfg=_strategy_cfg(), market_state=ms, dal=dal,
-        kill_switch_path=tmp_path / "halt", last_reconcile_ns=now,
+        strategy=strat,
+        cfg=_strategy_cfg(),
+        market_state=ms,
+        dal=dal,
+        kill_switch_path=tmp_path / "halt",
+        last_reconcile_ns=now,
     )
     scanner.scan(now_ns=now)
     assert strat.seen_hl_bars is not None
@@ -696,11 +926,12 @@ def test_parkinson_differs_from_stdev_on_live_scanner_path(tmp_path):
     def run(estimator: str):
         ms = _seed_market_with_range(now)
         scanner = Scanner(
-            strategy=LateResolutionStrategy(
-                _rcfg(vol_max=vmax, vol_estimator=estimator)
-            ),
-            cfg=_strategy_cfg(), market_state=ms, dal=dal,
-            kill_switch_path=tmp_path / "halt", last_reconcile_ns=now,
+            strategy=LateResolutionStrategy(_rcfg(vol_max=vmax, vol_estimator=estimator)),
+            cfg=_strategy_cfg(),
+            market_state=ms,
+            dal=dal,
+            kill_switch_path=tmp_path / "halt",
+            last_reconcile_ns=now,
         )
         return scanner.scan(now_ns=now)
 
@@ -721,8 +952,11 @@ def test_parkinson_equals_stdev_on_flat_series(tmp_path):
         ms = _seed_market(now)  # flat marks, no intra-bucket range
         scanner = Scanner(
             strategy=LateResolutionStrategy(_rcfg(vol_estimator=estimator)),
-            cfg=_strategy_cfg(), market_state=ms, dal=dal,
-            kill_switch_path=tmp_path / "halt", last_reconcile_ns=now,
+            cfg=_strategy_cfg(),
+            market_state=ms,
+            dal=dal,
+            kill_switch_path=tmp_path / "halt",
+            last_reconcile_ns=now,
         )
         return [d.decision.action for d in scanner.scan(now_ns=now)]
 
@@ -750,39 +984,73 @@ def _seed_pm_updown_with_books(now_ns: int, *, strike_ref_ts_ns: int) -> MarketS
     # Enough 60s-spaced BTC marks for recent_returns to have >2 entries.
     for i in range(10):
         ts = now_ns - (10 - i) * 60_000_000_000
-        ms.apply(MarkEvent(
-            venue="binance", product_type=ProductType.PERP,
-            mechanism=Mechanism.CLOB, symbol="BTC",
-            exchange_ts=ts, local_recv_ts=ts,
-            mark_px=74_000.0 + i * 0.5,
-        ))
+        ms.apply(
+            MarkEvent(
+                venue="binance",
+                product_type=ProductType.PERP,
+                mechanism=Mechanism.CLOB,
+                symbol="BTC",
+                exchange_ts=ts,
+                local_recv_ts=ts,
+                mark_px=74_000.0 + i * 0.5,
+            )
+        )
     expiry_str = datetime.fromtimestamp(
-        (now_ns + 600 * 1_000_000_000) / 1e9, tz=timezone.utc,
+        (now_ns + 600 * 1_000_000_000) / 1e9,
+        tz=timezone.utc,
     ).strftime("%Y%m%d-%H%M")
-    ms.apply(QuestionMetaEvent(
-        venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
-        exchange_ts=now_ns, local_recv_ts=now_ns,
-        question_idx=909100, named_outcome_idxs=[0, 1],
-        keys=["class", "underlying", "series_slug", "expiry",
-              "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
-        values=["priceBinary", "BTC", "btc-up-or-down-daily", expiry_str,
-                "YES_TOKEN", "NO_TOKEN", str(strike_ref_ts_ns)],
-    ))
+    ms.apply(
+        QuestionMetaEvent(
+            venue="polymarket",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="YES_TOKEN",
+            exchange_ts=now_ns,
+            local_recv_ts=now_ns,
+            question_idx=909100,
+            named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "series_slug", "expiry", "yes_token_id", "no_token_id", "strike_ref_ts_ns"],
+            values=[
+                "priceBinary",
+                "BTC",
+                "btc-up-or-down-daily",
+                expiry_str,
+                "YES_TOKEN",
+                "NO_TOKEN",
+                str(strike_ref_ts_ns),
+            ],
+        )
+    )
     # YES leg is the favourite at 0.96 ask — passes price_extreme_threshold=0.95.
     # Deep-enough bid so bid_notional gate (disabled at 0) is irrelevant.
-    ms.apply(BboEvent(
-        venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="YES_TOKEN",
-        exchange_ts=now_ns, local_recv_ts=now_ns,
-        bid_px=0.95, bid_sz=200.0, ask_px=0.96, ask_sz=200.0,
-    ))
-    ms.apply(BboEvent(
-        venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="NO_TOKEN",
-        exchange_ts=now_ns, local_recv_ts=now_ns,
-        bid_px=0.03, bid_sz=200.0, ask_px=0.04, ask_sz=200.0,
-    ))
+    ms.apply(
+        BboEvent(
+            venue="polymarket",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="YES_TOKEN",
+            exchange_ts=now_ns,
+            local_recv_ts=now_ns,
+            bid_px=0.95,
+            bid_sz=200.0,
+            ask_px=0.96,
+            ask_sz=200.0,
+        )
+    )
+    ms.apply(
+        BboEvent(
+            venue="polymarket",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="NO_TOKEN",
+            exchange_ts=now_ns,
+            local_recv_ts=now_ns,
+            bid_px=0.03,
+            bid_sz=200.0,
+            ask_px=0.04,
+            ask_sz=200.0,
+        )
+    )
     return ms
 
 
@@ -796,16 +1064,14 @@ def test_scanner_skips_pm_question_with_unresolved_strike(tmp_path):
     skipped before strategy.evaluate is called).
     """
     import math
+
     now = 1_700_000_000_000_000_000
     ms = _seed_pm_updown_with_books(now, strike_ref_ts_ns=now - 120_000_000_000)
     cfg = _cfg_with_match({"class": "priceBinary", "underlying": "BTC"})
     scanner = _scanner_for(cfg, ms, tmp_path, now)
     # Precondition: strike must still be NaN (no capture/persist).
-    assert math.isnan(ms.question(909100).strike), (
-        "precondition failed: expected NaN strike before guard test"
-    )
+    assert math.isnan(ms.question(909100).strike), "precondition failed: expected NaN strike before guard test"
     decisions = scanner.scan(now_ns=now)
     assert all(d.decision.action is not Action.ENTER for d in decisions), (
-        "scanner produced ENTER for a PM question with NaN strike — "
-        "NaN-strike guard is missing"
+        "scanner produced ENTER for a PM question with NaN strike — NaN-strike guard is missing"
     )

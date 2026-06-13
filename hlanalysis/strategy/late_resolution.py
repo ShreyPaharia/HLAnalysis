@@ -101,6 +101,7 @@ class LateResolutionParams(BaseModel):
       ``stale_data_halt_seconds`` — global-sourced: the live builder reads
       these from the strategy's ``global_`` block, not the allowlist entry.
     """
+
     model_config = ConfigDict(frozen=True)
 
     # === entry filters ===
@@ -142,12 +143,12 @@ class LateResolutionConfig:
     # === required: entry window / favorite-price / vol / sizing / safety ===
     tte_min_seconds: int
     tte_max_seconds: int
-    price_extreme_threshold: float    # winning-leg ask must be ≥ this (e.g. 0.95)
+    price_extreme_threshold: float  # winning-leg ask must be ≥ this (e.g. 0.95)
     distance_from_strike_usd_min: float
-    vol_max: float                    # annualised stdev of log-returns ceiling
+    vol_max: float  # annualised stdev of log-returns ceiling
     max_position_usd: float
-    stop_loss_pct: float              # absolute % drawdown at which the exit fires
-    max_strike_distance_pct: float    # reject if |strike − BTC|/BTC > this
+    stop_loss_pct: float  # absolute % drawdown at which the exit fires
+    max_strike_distance_pct: float  # reject if |strike − BTC|/BTC > this
     min_recent_volume_usd: float
     stale_data_halt_seconds: int
     # === optional: entry filters ===
@@ -293,9 +294,7 @@ class LateResolutionStrategy(Strategy):
         # self.cfg unmodified. See _cfg_for / evaluate.
         self.cfg = cfg
         self._default_cfg = cfg
-        self._cfg_by_class: dict[str, LateResolutionConfig] = (
-            dict(cfg_by_class) if cfg_by_class else {}
-        )
+        self._cfg_by_class: dict[str, LateResolutionConfig] = dict(cfg_by_class) if cfg_by_class else {}
 
     def _cfg_for(self, question: QuestionView) -> LateResolutionConfig:
         return self._cfg_by_class.get(question.klass, self._default_cfg)
@@ -311,17 +310,13 @@ class LateResolutionStrategy(Strategy):
         Python signature preserved for callers/tests."""
         return float(_nb_ewma_std(_as_f64(returns), float(lam)))
 
-    def _sigma_stdev(
-        self, returns_window: tuple[float, ...] | np.ndarray
-    ) -> float:
+    def _sigma_stdev(self, returns_window: tuple[float, ...] | np.ndarray) -> float:
         arr = _as_f64(returns_window)
         if self.cfg.vol_ewma_lambda > 0.0:
             return float(_nb_ewma_std(arr, float(self.cfg.vol_ewma_lambda)))
         return float(sample_std_returns(arr))
 
-    def _sigma_parkinson(
-        self, hl_window: tuple[tuple[float, float], ...] | np.ndarray
-    ) -> float:
+    def _sigma_parkinson(self, hl_window: tuple[tuple[float, float], ...] | np.ndarray) -> float:
         """Window-level Parkinson σ via JIT helper. With EWMA: variance decays
         by λ across bars; else arithmetic mean of per-bar σ²."""
         if isinstance(hl_window, np.ndarray):
@@ -339,9 +334,7 @@ class LateResolutionStrategy(Strategy):
             for i, (h, l) in enumerate(hl_window):
                 highs[i] = h
                 lows[i] = l
-        return float(
-            _nb_parkinson_sigma_window(highs, lows, float(self.cfg.vol_ewma_lambda))
-        )
+        return float(_nb_parkinson_sigma_window(highs, lows, float(self.cfg.vol_ewma_lambda)))
 
     def _sigma(
         self,
@@ -377,8 +370,12 @@ class LateResolutionStrategy(Strategy):
             return None
         mu = float(np.mean(returns_window)) if len(returns_window) >= 2 else 0.0
         return _safety_d_for_region(
-            ref_price=ref_price, lo=lo, hi=hi,
-            sigma_window=sigma_window, mu=mu, tte_min=tte_min,
+            ref_price=ref_price,
+            lo=lo,
+            hi=hi,
+            sigma_window=sigma_window,
+            mu=mu,
+            tte_min=tte_min,
             drift_aware=self.cfg.drift_aware_d,
         )
 
@@ -402,17 +399,27 @@ class LateResolutionStrategy(Strategy):
         resolved_cfg = self._cfg_for(question)
         if resolved_cfg is self.cfg:
             return self._evaluate_dispatch(
-                question=question, books=books, reference_price=reference_price,
-                recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
-                position=position, now_ns=now_ns, recent_hl_bars=recent_hl_bars,
+                question=question,
+                books=books,
+                reference_price=reference_price,
+                recent_returns=recent_returns,
+                recent_volume_usd=recent_volume_usd,
+                position=position,
+                now_ns=now_ns,
+                recent_hl_bars=recent_hl_bars,
             )
         prev_cfg = self.cfg
         self.cfg = resolved_cfg
         try:
             return self._evaluate_dispatch(
-                question=question, books=books, reference_price=reference_price,
-                recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
-                position=position, now_ns=now_ns, recent_hl_bars=recent_hl_bars,
+                question=question,
+                books=books,
+                reference_price=reference_price,
+                recent_returns=recent_returns,
+                recent_volume_usd=recent_volume_usd,
+                position=position,
+                now_ns=now_ns,
+                recent_hl_bars=recent_hl_bars,
             )
         finally:
             self.cfg = prev_cfg
@@ -450,16 +457,15 @@ class LateResolutionStrategy(Strategy):
                 and held_book.bid_px <= self.cfg.exit_bid_floor
             ):
                 intent = make_exit_intent(
-                    question, position, limit_price=held_book.bid_px,
+                    question,
+                    position,
+                    limit_price=held_book.bid_px,
                     exit_reason="exit_bid_below_floor",
                 )
                 return Decision(
                     action=Action.EXIT,
                     intents=(intent,),
-                    diagnostics=(
-                        Diagnostic("warn", "exit_bid_below_floor",
-                                   (("bid", f"{held_book.bid_px:.4f}"),)),
-                    ),
+                    diagnostics=(Diagnostic("warn", "exit_bid_below_floor", (("bid", f"{held_book.bid_px:.4f}"),)),),
                 )
 
             # Auxiliary fast σ_5m safety_d exit. Same shape as exit_safety_d but
@@ -478,36 +484,31 @@ class LateResolutionStrategy(Strategy):
                 if tte_s_now_5m > 0:
                     dt = max(1, self.cfg.vol_sampling_dt_seconds)
                     n_keep_5m = max(2, self.cfg.exit_vol_lookback_5m_seconds // dt)
-                    rw_5m = (
-                        recent_returns[-n_keep_5m:]
-                        if len(recent_returns) > n_keep_5m
-                        else recent_returns
-                    )
-                    hl_5m = (
-                        recent_hl_bars[-n_keep_5m:]
-                        if len(recent_hl_bars) > n_keep_5m
-                        else recent_hl_bars
-                    )
+                    rw_5m = recent_returns[-n_keep_5m:] if len(recent_returns) > n_keep_5m else recent_returns
+                    hl_5m = recent_hl_bars[-n_keep_5m:] if len(recent_hl_bars) > n_keep_5m else recent_hl_bars
                     if len(rw_5m) >= 2:
                         vol_5m = self._sigma(rw_5m, hl_5m)
                         sigma_window_5m = vol_5m * math.sqrt(max(tte_s_now_5m / dt, 1.0))
                         safety_d_5m = self._safety_d_for_leg(
-                            question=question, leg_symbol=position.symbol,
+                            question=question,
+                            leg_symbol=position.symbol,
                             ref_price=reference_price,
-                            sigma_window=sigma_window_5m, returns_window=rw_5m,
+                            sigma_window=sigma_window_5m,
+                            returns_window=rw_5m,
                             tte_min=tte_s_now_5m / dt,
                         )
                         if safety_d_5m is not None and safety_d_5m < self.cfg.exit_safety_d_5m:
                             intent = make_exit_intent(
-                                question, position, limit_price=held_book.bid_px,
+                                question,
+                                position,
+                                limit_price=held_book.bid_px,
                                 exit_reason="exit_safety_d_5m",
                             )
                             return Decision(
                                 action=Action.EXIT,
                                 intents=(intent,),
                                 diagnostics=(
-                                    Diagnostic("warn", "exit_safety_d_5m_below_min",
-                                               (("d", f"{safety_d_5m:.3f}"),)),
+                                    Diagnostic("warn", "exit_safety_d_5m_below_min", (("d", f"{safety_d_5m:.3f}"),)),
                                 ),
                             )
 
@@ -528,31 +529,30 @@ class LateResolutionStrategy(Strategy):
                     dt = max(1, self.cfg.vol_sampling_dt_seconds)
                     n_keep = max(2, self.cfg.vol_lookback_seconds // dt)
                     rw = recent_returns[-n_keep:] if len(recent_returns) > n_keep else recent_returns
-                    hl = (
-                        recent_hl_bars[-n_keep:]
-                        if len(recent_hl_bars) > n_keep
-                        else recent_hl_bars
-                    )
+                    hl = recent_hl_bars[-n_keep:] if len(recent_hl_bars) > n_keep else recent_hl_bars
                     if len(rw) >= 2:
                         vol_now = self._sigma(rw, hl)
                         sigma_window = vol_now * math.sqrt(max(tte_s_now / dt, 1.0))
                         safety_d_now = self._safety_d_for_leg(
-                            question=question, leg_symbol=position.symbol,
+                            question=question,
+                            leg_symbol=position.symbol,
                             ref_price=reference_price,
-                            sigma_window=sigma_window, returns_window=rw,
+                            sigma_window=sigma_window,
+                            returns_window=rw,
                             tte_min=tte_s_now / dt,
                         )
                         if safety_d_now is not None and safety_d_now < self.cfg.exit_safety_d:
                             intent = make_exit_intent(
-                                question, position, limit_price=held_book.bid_px,
+                                question,
+                                position,
+                                limit_price=held_book.bid_px,
                                 exit_reason="exit_safety_d",
                             )
                             return Decision(
                                 action=Action.EXIT,
                                 intents=(intent,),
                                 diagnostics=(
-                                    Diagnostic("warn", "exit_safety_d_below_min",
-                                               (("d", f"{safety_d_now:.3f}"),)),
+                                    Diagnostic("warn", "exit_safety_d_below_min", (("d", f"{safety_d_now:.3f}"),)),
                                 ),
                             )
 
@@ -561,7 +561,9 @@ class LateResolutionStrategy(Strategy):
             if held_book is not None and held_book.bid_px is not None:
                 if held_book.bid_px <= position.stop_loss_price:
                     intent = make_exit_intent(
-                        question, position, limit_price=held_book.bid_px,
+                        question,
+                        position,
+                        limit_price=held_book.bid_px,
                         exit_reason="exit_stop_loss",
                     )
                     return Decision(
@@ -574,22 +576,32 @@ class LateResolutionStrategy(Strategy):
             # Exit-eval already ran above and chose not to fire — topup is safe.
             if self.cfg.topup_enabled:
                 topup_dec = self._evaluate_topup(
-                    question=question, books=books, reference_price=reference_price,
-                    recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
-                    now_ns=now_ns, recent_hl_bars=recent_hl_bars, position=position,
+                    question=question,
+                    books=books,
+                    reference_price=reference_price,
+                    recent_returns=recent_returns,
+                    recent_volume_usd=recent_volume_usd,
+                    now_ns=now_ns,
+                    recent_hl_bars=recent_hl_bars,
+                    position=position,
                 )
                 if topup_dec is not None:
                     return topup_dec
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "have_position"),))
 
         return self._evaluate_entry(
-            question=question, books=books, reference_price=reference_price,
-            recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
-            now_ns=now_ns, recent_hl_bars=recent_hl_bars,
+            question=question,
+            books=books,
+            reference_price=reference_price,
+            recent_returns=recent_returns,
+            recent_volume_usd=recent_volume_usd,
+            now_ns=now_ns,
+            recent_hl_bars=recent_hl_bars,
         )
 
     def _evaluate_entry(
-        self, *,
+        self,
+        *,
         question: QuestionView,
         books: Mapping[str, BookState],
         reference_price: float,
@@ -609,9 +621,9 @@ class LateResolutionStrategy(Strategy):
         # 1) TTE — fixed [tte_min_seconds, tte_max_seconds] entry window.
         tte_s = (question.expiry_ns - now_ns) / 1e9
         if not (self.cfg.tte_min_seconds <= tte_s <= float(self.cfg.tte_max_seconds)):
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tte_s:.0f}"),)),
-            ))
+            return Decision(
+                action=Action.HOLD, diagnostics=(Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tte_s:.0f}"),)),)
+            )
 
         # 2) Pick the leg with the best ask in [threshold, max] across all legs
         # of this question. Generalises to multi-outcome (priceBucket): we follow
@@ -620,9 +632,7 @@ class LateResolutionStrategy(Strategy):
         # — buying NO of one bucket is structurally betting against a single
         # bucket, but it's the SAME exposure as a combination of other YES legs
         # at worse prices. YES-only avoids that redundancy.
-        legs = question.leg_symbols or (
-            (question.yes_symbol, question.no_symbol) if question.yes_symbol else ()
-        )
+        legs = question.leg_symbols or ((question.yes_symbol, question.no_symbol) if question.yes_symbol else ())
         if not legs:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_legs"),))
         eligible: tuple[str, ...]
@@ -676,9 +686,7 @@ class LateResolutionStrategy(Strategy):
                 best_book = b
 
         if best_book is None or best_symbol is None:
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "no_extreme_leg"),
-            ))
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_extreme_leg"),))
         win = best_book
         win_symbol = best_symbol
 
@@ -692,16 +700,14 @@ class LateResolutionStrategy(Strategy):
         dt = max(1, self.cfg.vol_sampling_dt_seconds)
         n_keep = max(2, self.cfg.vol_lookback_seconds // dt)
         returns_window = recent_returns[-n_keep:] if len(recent_returns) > n_keep else recent_returns
-        hl_window = (
-            recent_hl_bars[-n_keep:] if len(recent_hl_bars) > n_keep else recent_hl_bars
-        )
+        hl_window = recent_hl_bars[-n_keep:] if len(recent_hl_bars) > n_keep else recent_hl_bars
         if len(returns_window) < 2:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "vol_insufficient_data"),))
         vol = self._sigma(returns_window, hl_window)
         if vol > self.cfg.vol_max:
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "vol_above_cap", (("vol", f"{vol:.4f}"),)),
-            ))
+            return Decision(
+                action=Action.HOLD, diagnostics=(Diagnostic("info", "vol_above_cap", (("vol", f"{vol:.4f}"),)),)
+            )
 
         # 6b) Joint safety gate: how many σ from the leg's winning region is BTC
         # given remaining time? For binary YES leg the region is (strike, +∞)
@@ -713,22 +719,31 @@ class LateResolutionStrategy(Strategy):
             tte_min = max(tte_s / dt, 1.0)
             sigma_window = vol * math.sqrt(tte_min)
             safety_d = self._safety_d_for_leg(
-                question=question, leg_symbol=win_symbol,
+                question=question,
+                leg_symbol=win_symbol,
                 ref_price=reference_price,
-                sigma_window=sigma_window, returns_window=returns_window,
+                sigma_window=sigma_window,
+                returns_window=returns_window,
                 tte_min=tte_min,
             )
             if safety_d is not None and safety_d < self.cfg.min_safety_d:
-                return Decision(action=Action.HOLD, diagnostics=(
-                    Diagnostic("info", "safety_d_below_min",
-                               (("d", f"{safety_d:.3f}"),)),
-                ))
+                return Decision(
+                    action=Action.HOLD,
+                    diagnostics=(Diagnostic("info", "safety_d_below_min", (("d", f"{safety_d:.3f}"),)),),
+                )
 
         # 7) Recent-volume sanity (avoid dead questions)
         if recent_volume_usd < self.cfg.min_recent_volume_usd:
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "low_volume", (("vol_usd", f"{recent_volume_usd:.0f}")),),
-            ))
+            return Decision(
+                action=Action.HOLD,
+                diagnostics=(
+                    Diagnostic(
+                        "info",
+                        "low_volume",
+                        (("vol_usd", f"{recent_volume_usd:.0f}")),
+                    ),
+                ),
+            )
 
         # 8) Build the IOC intent. Size = size_usd / max(ask, limit_price). The
         # risk gate computes notional = size * limit_price; with limit_price set
@@ -759,10 +774,7 @@ class LateResolutionStrategy(Strategy):
                 nearest, denom = abs(reference_price - hi), hi
             if nearest is not None and denom is not None and denom > 0:
                 dist_pct = (nearest / denom) * 100.0
-                if (
-                    dist_pct < self.cfg.size_cap_max_dist_pct
-                    and win.ask_px < self.cfg.size_cap_min_ask
-                ):
+                if dist_pct < self.cfg.size_cap_max_dist_pct and win.ask_px < self.cfg.size_cap_min_ask:
                     scale *= 1.0 - self.cfg.size_cap_near_strike_pct
                     if scale < 0.0:
                         scale = 0.0
@@ -792,7 +804,10 @@ class LateResolutionStrategy(Strategy):
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"),))
 
         intent = make_entry_intent(
-            question, symbol=win_symbol, size=size, limit_price=win.ask_px,
+            question,
+            symbol=win_symbol,
+            size=size,
+            limit_price=win.ask_px,
         )
         return Decision(
             action=Action.ENTER,
@@ -801,7 +816,8 @@ class LateResolutionStrategy(Strategy):
         )
 
     def _evaluate_topup(
-        self, *,
+        self,
+        *,
         question: QuestionView,
         books: Mapping[str, BookState],
         reference_price: float,
@@ -827,14 +843,20 @@ class LateResolutionStrategy(Strategy):
         evaluator plus the two ``None`` early-outs (no_book / not_needed).
         """
         return run_topup(
-            question=question, books=books, position=position,
+            question=question,
+            books=books,
+            position=position,
             max_position_usd=self.cfg.max_position_usd,
             topup_threshold_pct=self.cfg.topup_threshold_pct,
             topup_min_notional_usd=self.cfg.topup_min_notional_usd,
             run_entry=lambda: self._evaluate_entry(
-                question=question, books=books, reference_price=reference_price,
-                recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
-                now_ns=now_ns, recent_hl_bars=recent_hl_bars,
+                question=question,
+                books=books,
+                reference_price=reference_price,
+                recent_returns=recent_returns,
+                recent_volume_usd=recent_volume_usd,
+                now_ns=now_ns,
+                recent_hl_bars=recent_hl_bars,
             ),
             on_no_book=lambda: None,
             on_not_needed=lambda current_ntl, target_ntl: None,

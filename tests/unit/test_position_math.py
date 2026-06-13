@@ -6,6 +6,7 @@ realized-PnL on partial reduce, close detection, stop-price stamping. Drift
 between the copies caused the position-accounting fidelity bugs in the project
 history. These tests pin the canonical semantics that both callers now share.
 """
+
 from __future__ import annotations
 
 import math
@@ -125,6 +126,6 @@ def test_closed_qty_carries_forward_across_addons() -> None:
     """An add-on (same-direction) fill realizes nothing and must preserve the
     accumulated closed_qty rather than resetting it."""
     pos, _ = apply_fill(None, "buy", 10.0, 0.95)
-    pos, _ = apply_fill(pos, "sell", 4.0, 0.80)   # closed_qty -> 4
-    pos, _ = apply_fill(pos, "buy", 2.0, 0.96)    # add-on
+    pos, _ = apply_fill(pos, "sell", 4.0, 0.80)  # closed_qty -> 4
+    pos, _ = apply_fill(pos, "buy", 2.0, 0.96)  # add-on
     assert pos is not None and pos.closed_qty == 4.0

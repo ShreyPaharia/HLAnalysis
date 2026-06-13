@@ -1,4 +1,5 @@
 """Analysis helpers shared across notebooks (DuckDB connection, partition globs, plotting)."""
+
 from hlanalysis.analysis.helpers import (
     DATA_ROOT,
     REPO_ROOT,

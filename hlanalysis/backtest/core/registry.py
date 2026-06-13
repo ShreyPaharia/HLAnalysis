@@ -8,9 +8,9 @@ from hlanalysis.strategy.base import Strategy
 _REGISTRY: dict[str, Callable[[dict[str, Any]], Strategy]] = {}
 
 
-def register(strategy_id: str) -> Callable[
-    [Callable[[dict[str, Any]], Strategy]], Callable[[dict[str, Any]], Strategy]
-]:
+def register(
+    strategy_id: str,
+) -> Callable[[Callable[[dict[str, Any]], Strategy]], Callable[[dict[str, Any]], Strategy]]:
     """Decorator: ``@register("v1_late_resolution")`` above the factory function."""
 
     def _wrap(
@@ -26,9 +26,7 @@ def register(strategy_id: str) -> Callable[
 
 def build(strategy_id: str, params: dict[str, Any]) -> Strategy:
     if strategy_id not in _REGISTRY:
-        raise KeyError(
-            f"Unknown strategy id: {strategy_id}. Registered: {sorted(_REGISTRY)}"
-        )
+        raise KeyError(f"Unknown strategy id: {strategy_id}. Registered: {sorted(_REGISTRY)}")
     return _REGISTRY[strategy_id](params)
 
 

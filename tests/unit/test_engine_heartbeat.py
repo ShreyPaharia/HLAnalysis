@@ -8,6 +8,7 @@ interval while subscriptions are active, it publishes a FeedStale alert (a live
 feed delivers a steady mark/book stream; zero events means the feed is dead, not
 a calm market).
 """
+
 from __future__ import annotations
 
 from pathlib import Path

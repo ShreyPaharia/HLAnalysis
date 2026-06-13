@@ -22,6 +22,7 @@ Module layout
                           existing ``from hlanalysis.backtest.cli import …``
                           keeps working.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -82,6 +83,7 @@ from ._cli_plumbing import (  # noqa: F401
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="hl-bt")

@@ -5,6 +5,7 @@ polymarket) gets the half-open-socket detection — not just binance (SHR-60).
 These tests target the base directly via a tiny concrete subclass; the
 per-venue adapter tests assert the venues actually route through it.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -65,7 +66,8 @@ async def test_watchdog_emits_feed_stale_and_returns_on_silent_stream():
     q: asyncio.Queue = asyncio.Queue()
 
     await asyncio.wait_for(
-        a._recv_until_stale(_SilentWS(), lambda m, t: [], "perp", q), timeout=1.0,
+        a._recv_until_stale(_SilentWS(), lambda m, t: [], "perp", q),
+        timeout=1.0,
     )
     kinds = [e.kind for e in await _drain(q)]
     assert any(k.startswith("feed_stale") for k in kinds), kinds
@@ -79,7 +81,8 @@ async def test_watchdog_health_carries_configured_product_type():
     q: asyncio.Queue = asyncio.Queue()
 
     await asyncio.wait_for(
-        a._recv_until_stale(_SilentWS(), lambda m, t: [], "", q), timeout=1.0,
+        a._recv_until_stale(_SilentWS(), lambda m, t: [], "", q),
+        timeout=1.0,
     )
     evs = await _drain(q)
     assert evs and all(e.product_type == ProductType.PREDICTION_BINARY for e in evs), evs
@@ -128,8 +131,13 @@ async def test_run_ws_emits_connected_then_reconnect_and_retries():
 
     task = asyncio.create_task(
         a._run_ws(
-            url="wss://x", subscribe=subscribe, handle=lambda m, t: [], queue=q,
-            label="perp", connect=connect, circuit_breaker=False,
+            url="wss://x",
+            subscribe=subscribe,
+            handle=lambda m, t: [],
+            queue=q,
+            label="perp",
+            connect=connect,
+            circuit_breaker=False,
         )
     )
     # let it connect → go stale → reconnect at least twice
@@ -167,8 +175,12 @@ async def test_circuit_breaker_trips_after_threshold():
 
     task = asyncio.create_task(
         a._run_ws(
-            url="wss://x", subscribe=lambda ws: asyncio.sleep(0),
-            handle=lambda m, t: [], queue=q, label="", connect=lambda u: _CtxBoom(),
+            url="wss://x",
+            subscribe=lambda ws: asyncio.sleep(0),
+            handle=lambda m, t: [],
+            queue=q,
+            label="",
+            connect=lambda u: _CtxBoom(),
             circuit_breaker=True,
         )
     )
@@ -186,6 +198,7 @@ async def test_circuit_breaker_trips_after_threshold():
 # a throttled log.warning once past the threshold — not silently swallow every
 # bad frame, which would hide a venue wire-format change.
 # ---------------------------------------------------------------------------
+
 
 class _MalformedFramesWS:
     """Delivers N malformed (non-JSON) frames then goes silent forever."""
@@ -213,9 +226,7 @@ async def test_decode_failure_counter_increments(caplog):
         a._recv_until_stale(_MalformedFramesWS(n_bad), lambda m, t: [], "x", q),
         timeout=2.0,
     )
-    assert a.decode_failures == n_bad, (
-        f"expected decode_failures={n_bad}, got {a.decode_failures}"
-    )
+    assert a.decode_failures == n_bad, f"expected decode_failures={n_bad}, got {a.decode_failures}"
 
 
 @pytest.mark.asyncio
@@ -239,13 +250,11 @@ async def test_decode_failure_warning_emitted_at_threshold(caplog):
             timeout=2.0,
         )
 
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING
-                and "decode" in r.message.lower()]
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING and "decode" in r.message.lower()]
     assert warnings, "no decode-failure warning logged at threshold"
     # Only one warning should fire for the threshold crossing (not one per frame).
-    assert len(warnings) == 1, (
-        f"expected exactly 1 threshold-crossing warning, got {len(warnings)}: "
-        + str([r.message for r in warnings])
+    assert len(warnings) == 1, f"expected exactly 1 threshold-crossing warning, got {len(warnings)}: " + str(
+        [r.message for r in warnings]
     )
 
 
@@ -266,22 +275,25 @@ async def test_real_polymarket_adapter_counts_decode_failures():
 
     n_bad = 3
     await asyncio.wait_for(
-        a._recv_until_stale(_MalformedFramesWS(n_bad), lambda m, t: [], "x",
-                            asyncio.Queue()),
+        a._recv_until_stale(_MalformedFramesWS(n_bad), lambda m, t: [], "x", asyncio.Queue()),
         timeout=2.0,
     )
     assert a.decode_failures == n_bad
 
 
-@pytest.mark.parametrize("adapter_path", [
-    "hlanalysis.adapters.polymarket:PolymarketAdapter",
-    "hlanalysis.adapters.binance:BinanceAdapter",
-    "hlanalysis.adapters.hyperliquid:HyperliquidAdapter",
-])
+@pytest.mark.parametrize(
+    "adapter_path",
+    [
+        "hlanalysis.adapters.polymarket:PolymarketAdapter",
+        "hlanalysis.adapters.binance:BinanceAdapter",
+        "hlanalysis.adapters.hyperliquid:HyperliquidAdapter",
+    ],
+)
 def test_all_adapters_initialize_decode_failures(adapter_path):
     """Every concrete adapter must expose decode_failures == 0 on a fresh
     instance, regardless of whether it overrides __init__."""
     import importlib
+
     mod_name, cls_name = adapter_path.split(":")
     cls = getattr(importlib.import_module(mod_name), cls_name)
     # default-constructible with stubs; only the attribute presence matters
@@ -295,6 +307,7 @@ def test_all_adapters_initialize_decode_failures(adapter_path):
 # ---------------------------------------------------------------------------
 # Fix 1: hyperliquid._fetch_outcome_meta must pass a (connect, read) tuple.
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_hyperliquid_fetch_outcome_meta_passes_tuple_timeout(monkeypatch):
@@ -313,6 +326,7 @@ async def test_hyperliquid_fetch_outcome_meta_passes_tuple_timeout(monkeypatch):
         class _R:
             def raise_for_status(self):
                 pass
+
             def json(self):
                 return {"outcomes": [], "questions": []}
 

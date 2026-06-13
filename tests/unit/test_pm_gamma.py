@@ -46,18 +46,20 @@ def test_iter_yields_every_market_in_multi_market_events():
     """Crypto weekly / equity hit-price / NBA games each pack multiple
     independent priceBinary markets under one event. The helper now yields
     each sub-market provided it has valid clobTokenIds + conditionId."""
-    events = [{
-        "id": "ev-multi",
-        "markets": [
-            {"conditionId": "c1", "clobTokenIds": "[\"t1y\", \"t1n\"]"},
-            {"conditionId": "c2", "clobTokenIds": "[\"t2y\", \"t2n\"]"},
-            {"conditionId": "c3", "clobTokenIds": "[\"t3y\", \"t3n\"]"},
-            # missing clobTokenIds → filtered out
-            {"conditionId": "c4"},
-            # missing conditionId → filtered out
-            {"clobTokenIds": "[\"t5y\", \"t5n\"]"},
-        ],
-    }]
+    events = [
+        {
+            "id": "ev-multi",
+            "markets": [
+                {"conditionId": "c1", "clobTokenIds": '["t1y", "t1n"]'},
+                {"conditionId": "c2", "clobTokenIds": '["t2y", "t2n"]'},
+                {"conditionId": "c3", "clobTokenIds": '["t3y", "t3n"]'},
+                # missing clobTokenIds → filtered out
+                {"conditionId": "c4"},
+                # missing conditionId → filtered out
+                {"clobTokenIds": '["t5y", "t5n"]'},
+            ],
+        }
+    ]
     gc = GammaClient(http_get=lambda url, params: events)
     markets = list(gc.iter_binary_markets(events))
     assert [m["conditionId"] for m in markets] == ["c1", "c2", "c3"]

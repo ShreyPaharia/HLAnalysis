@@ -8,6 +8,7 @@ adapters share one import site and the swap is benchmarkable / reversible.
 Schema-less on purpose: the adapters already validate fields downstream when
 they build pydantic NormalizedEvents, so we keep decode untyped and drop-in.
 """
+
 from __future__ import annotations
 
 from typing import Any

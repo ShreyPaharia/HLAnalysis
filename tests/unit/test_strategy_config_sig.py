@@ -10,6 +10,7 @@ Guards that:
 4. Backtest report parity: for a slot loaded from config/strategy.yaml,
    the sig stamped in the report equals strategy_config_sig(cfg).
 """
+
 from __future__ import annotations
 
 import copy
@@ -32,6 +33,7 @@ from hlanalysis.engine.diag import _build_config_fingerprint
 # ---------------------------------------------------------------------------
 # Minimal fixture builders (mirrors test_engine_diag.py patterns)
 # ---------------------------------------------------------------------------
+
 
 def _minimal_allowlist_entry(**kwargs: Any) -> AllowlistEntry:
     defaults = dict(
@@ -97,6 +99,7 @@ def _make_theta_cfg(**kwargs: Any) -> StrategyConfig:
 # 1. Determinism
 # ---------------------------------------------------------------------------
 
+
 def test_strategy_config_sig_is_deterministic_late_resolution() -> None:
     cfg = _make_late_resolution_cfg()
     assert strategy_config_sig(cfg) == strategy_config_sig(cfg)
@@ -118,6 +121,7 @@ def test_strategy_config_sig_is_16_hex_chars() -> None:
 # 2. Param-sensitivity
 # ---------------------------------------------------------------------------
 
+
 def test_sig_changes_when_defaults_field_changes() -> None:
     cfg_a = _make_late_resolution_cfg()
     # Mutate a defaults field — pydantic models are frozen so we build a new one.
@@ -132,9 +136,7 @@ def test_sig_changes_when_defaults_field_changes() -> None:
         defaults=new_defaults,
         **{"global": cfg_a.global_},
     )
-    assert strategy_config_sig(cfg_a) != strategy_config_sig(cfg_b), (
-        "sig must change when a defaults field changes"
-    )
+    assert strategy_config_sig(cfg_a) != strategy_config_sig(cfg_b), "sig must change when a defaults field changes"
 
 
 def test_sig_changes_when_allowlist_entry_changes() -> None:
@@ -149,9 +151,7 @@ def test_sig_changes_when_allowlist_entry_changes() -> None:
         defaults=cfg_a.defaults,
         **{"global": cfg_a.global_},
     )
-    assert strategy_config_sig(cfg_a) != strategy_config_sig(cfg_b), (
-        "sig must change when an allowlist entry changes"
-    )
+    assert strategy_config_sig(cfg_a) != strategy_config_sig(cfg_b), "sig must change when an allowlist entry changes"
 
 
 def test_sig_changes_when_global_risk_field_changes() -> None:
@@ -166,9 +166,7 @@ def test_sig_changes_when_global_risk_field_changes() -> None:
         defaults=cfg_a.defaults,
         **{"global": new_global},
     )
-    assert strategy_config_sig(cfg_a) != strategy_config_sig(cfg_b), (
-        "sig must change when a global_ field changes"
-    )
+    assert strategy_config_sig(cfg_a) != strategy_config_sig(cfg_b), "sig must change when a global_ field changes"
 
 
 def test_sig_changes_when_theta_field_changes() -> None:
@@ -185,9 +183,7 @@ def test_sig_changes_when_theta_field_changes() -> None:
         **{"global": cfg_a.global_},
         theta=new_theta,
     )
-    assert strategy_config_sig(cfg_a) != strategy_config_sig(cfg_b), (
-        "sig must change when a theta field changes"
-    )
+    assert strategy_config_sig(cfg_a) != strategy_config_sig(cfg_b), "sig must change when a theta field changes"
 
 
 def test_sig_changes_when_theta_added_vs_absent() -> None:
@@ -210,6 +206,7 @@ def test_sig_changes_when_theta_added_vs_absent() -> None:
 # ---------------------------------------------------------------------------
 # 3. Engine parity: strategy_config_sig == _build_config_fingerprint["hash"]
 # ---------------------------------------------------------------------------
+
 
 def test_engine_parity_late_resolution() -> None:
     """strategy_config_sig must equal _build_config_fingerprint[\"hash\"] for a
@@ -240,9 +237,7 @@ def test_engine_parity_v31_from_live_yaml() -> None:
     """
     cfgs = load_strategies_config(Path("config/strategy.yaml"))
     by_alias = {c.account_alias: c for c in cfgs.strategies}
-    assert "v31" in by_alias, (
-        "expected v31 slot in config/strategy.yaml for parity test"
-    )
+    assert "v31" in by_alias, "expected v31 slot in config/strategy.yaml for parity test"
     cfg = by_alias["v31"]
     fp = _build_config_fingerprint("v31", cfg)
     sig = strategy_config_sig(cfg)
@@ -256,6 +251,7 @@ def test_engine_parity_v31_from_live_yaml() -> None:
 # 4. Backtest report parity: the slot_config_sig line in report.md matches
 #    strategy_config_sig(cfg) for the same slot.
 # ---------------------------------------------------------------------------
+
 
 def test_report_writes_slot_config_sig_for_slot_run(tmp_path: Path) -> None:
     """write_single_run_report must stamp a slot_config_sig line when
@@ -288,12 +284,8 @@ def test_report_writes_slot_config_sig_for_slot_run(tmp_path: Path) -> None:
     )
 
     text = report_path.read_text()
-    assert f"`{expected_sig}`" in text, (
-        f"expected slot_config_sig `{expected_sig}` in report.md, got:\n{text}"
-    )
-    assert "slot config_sig" in text, (
-        "expected 'slot config_sig' label in report.md"
-    )
+    assert f"`{expected_sig}`" in text, f"expected slot_config_sig `{expected_sig}` in report.md, got:\n{text}"
+    assert "slot config_sig" in text, "expected 'slot config_sig' label in report.md"
 
 
 def test_report_omits_slot_config_sig_when_no_slot_cfg(tmp_path: Path) -> None:
@@ -323,6 +315,4 @@ def test_report_omits_slot_config_sig_when_no_slot_cfg(tmp_path: Path) -> None:
     )
 
     text = report_path.read_text()
-    assert "slot config_sig" not in text, (
-        "expected no slot_config_sig in report.md for non-slot run"
-    )
+    assert "slot config_sig" not in text, "expected no slot_config_sig in report.md for non-slot run"

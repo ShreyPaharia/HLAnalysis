@@ -9,6 +9,7 @@ Per-class dt note: a single ``hl-bt run`` uses ONE cadence (bucket dt=2 vs
 binary dt=5 are separate invocations). The assertion enforces this; mixing two
 cadences in one run is unsupported.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -21,6 +22,7 @@ from hlanalysis.backtest.cli import _source_config_from_args
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_args(data_source: str = "hl_hip4") -> argparse.Namespace:
     """Minimal args namespace that ``_source_config_from_args`` needs."""
@@ -41,6 +43,7 @@ def _make_args(data_source: str = "hl_hip4") -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 # Test 1: cadence is derived from vol_sampling_dt_seconds for hl_hip4
 # ---------------------------------------------------------------------------
+
 
 def test_hl_hip4_reference_resample_derived_from_config_dt5():
     """_source_config_from_args returns reference_resample_seconds == 5 when
@@ -69,6 +72,7 @@ def test_hl_hip4_reference_resample_derived_from_config_dt2():
 # ---------------------------------------------------------------------------
 # Test 2: assert_hl_cadence_match helper
 # ---------------------------------------------------------------------------
+
 
 def test_assert_hl_cadence_match_raises_on_mismatch():
     """assert_hl_cadence_match must raise ValueError when the SourceConfig's
@@ -112,6 +116,7 @@ def test_assert_hl_cadence_match_skipped_for_pm_nba():
 # ---------------------------------------------------------------------------
 # Test 3: end-to-end derivation from params dict (simulating cmd_run flow)
 # ---------------------------------------------------------------------------
+
 
 def test_end_to_end_derivation_from_params_dict():
     """Simulate what cmd_run does: load params, derive dt, build SourceConfig,

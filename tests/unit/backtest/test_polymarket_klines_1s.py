@@ -6,6 +6,7 @@ feed — the BTC-ref-equivalence experiment compares the two at dt=5. The 1s
 klines live in their own cache subdir (``btc_klines_1s``) so the canonical 1m
 ``btc_klines`` (used for PM strike resolution) is untouched.
 """
+
 from __future__ import annotations
 
 import json
@@ -38,7 +39,7 @@ def test_klines_1s_buckets_to_resample_seconds_ohlc(tmp_path: Path) -> None:
     base = 10 * _S  # ts aligned so floor(ts/5s) groups [10,11,12,13,14] then [15,16]
     klines = [
         _kline(base + 0 * _S, 100, 110, 99, 101),
-        _kline(base + 1 * _S, 101, 112, 98, 105),   # bucket-0 high=112, low=98
+        _kline(base + 1 * _S, 101, 112, 98, 105),  # bucket-0 high=112, low=98
         _kline(base + 2 * _S, 105, 108, 100, 106),
         _kline(base + 3 * _S, 106, 109, 101, 107),
         _kline(base + 4 * _S, 107, 111, 103, 108),  # bucket-0 close=108
@@ -47,7 +48,8 @@ def test_klines_1s_buckets_to_resample_seconds_ohlc(tmp_path: Path) -> None:
     ]
     _write_1s_klines(tmp_path, klines)
     ds = PolymarketDataSource(
-        cache_root=tmp_path, reference_source="klines_1s",
+        cache_root=tmp_path,
+        reference_source="klines_1s",
         reference_resample_seconds=5,
     )
     refs = ds._load_klines_1s_reference(base, base + 7 * _S)
@@ -66,7 +68,8 @@ def test_klines_1s_window_filter(tmp_path: Path) -> None:
     klines = [_kline(base + i * _S, 100, 100, 100, 100) for i in range(10)]
     _write_1s_klines(tmp_path, klines)
     ds = PolymarketDataSource(
-        cache_root=tmp_path, reference_source="klines_1s",
+        cache_root=tmp_path,
+        reference_source="klines_1s",
         reference_resample_seconds=1,
     )
     # Half-open [start, end): bars at base+2..base+4 only.
@@ -77,11 +80,12 @@ def test_klines_1s_window_filter(tmp_path: Path) -> None:
 def test_klines_1s_strike_still_uses_1m_klines(tmp_path: Path) -> None:
     # The 1s subdir feeds σ only; the canonical 1m btc_klines drives strikes.
     ds = PolymarketDataSource(
-        cache_root=tmp_path, reference_source="klines_1s",
+        cache_root=tmp_path,
+        reference_source="klines_1s",
         reference_resample_seconds=5,
     )
-    assert ds._klines_subdir == "btc_klines"          # strike source unchanged
-    assert ds._klines_1s_subdir == "btc_klines_1s"    # σ source is separate
+    assert ds._klines_subdir == "btc_klines"  # strike source unchanged
+    assert ds._klines_1s_subdir == "btc_klines_1s"  # σ source is separate
 
 
 def test_klines_1s_changes_bundle_config_sig(tmp_path: Path) -> None:
@@ -101,6 +105,7 @@ def test_invalid_reference_source_still_rejected(tmp_path: Path) -> None:
 # Fix-1: _load_klines_1s_reference routes through resample_ohlc — bit-identical
 # ---------------------------------------------------------------------------
 
+
 def _old_load_klines_1s_reference_inline(
     klines_rows: list[dict],
     *,
@@ -115,6 +120,7 @@ def _old_load_klines_1s_reference_inline(
     bit-identical output.  Do NOT change this function — it is the baseline.
     """
     from hlanalysis.backtest.core.events import ReferenceEvent
+
     out: list[ReferenceEvent] = []
     cur_bucket = None
     o = h = l = c = 0.0
@@ -130,19 +136,19 @@ def _old_load_klines_1s_reference_inline(
             o, h, l, c = ko, kh, kl, kc
             last_ts = ts
         elif bucket != cur_bucket:
-            out.append(ReferenceEvent(ts_ns=last_ts, symbol=symbol,
-                                      high=h, low=l, close=c, open=o))
+            out.append(ReferenceEvent(ts_ns=last_ts, symbol=symbol, high=h, low=l, close=c, open=o))
             cur_bucket = bucket
             o, h, l, c = ko, kh, kl, kc
             last_ts = ts
         else:
-            if kh > h: h = kh
-            if kl < l: l = kl
+            if kh > h:
+                h = kh
+            if kl < l:
+                l = kl
             c = kc
             last_ts = ts
     if cur_bucket is not None:
-        out.append(ReferenceEvent(ts_ns=last_ts, symbol=symbol,
-                                  high=h, low=l, close=c, open=o))
+        out.append(ReferenceEvent(ts_ns=last_ts, symbol=symbol, high=h, low=l, close=c, open=o))
     return [(r.ts_ns, r.high, r.low, r.close, r.open) for r in out]
 
 
@@ -158,6 +164,7 @@ def _old_load_binance_bbo_reference_inline(
     Kept here as baseline; do NOT change.
     """
     from hlanalysis.backtest.core.events import ReferenceEvent
+
     out: list[ReferenceEvent] = []
     cur_bucket = None
     h = l = c = o = 0.0
@@ -170,18 +177,18 @@ def _old_load_binance_bbo_reference_inline(
             h = l = c = o = mid
             last_ts = int(ts)
         elif bucket != cur_bucket:
-            out.append(ReferenceEvent(ts_ns=last_ts, symbol=symbol,
-                                      high=h, low=l, close=c, open=o))
+            out.append(ReferenceEvent(ts_ns=last_ts, symbol=symbol, high=h, low=l, close=c, open=o))
             cur_bucket = bucket
             h = l = c = o = mid
             last_ts = int(ts)
         else:
-            if mid > h: h = mid
-            if mid < l: l = mid
+            if mid > h:
+                h = mid
+            if mid < l:
+                l = mid
             c = mid
             last_ts = int(ts)
-    out.append(ReferenceEvent(ts_ns=last_ts, symbol=symbol,
-                               high=h, low=l, close=c, open=o))
+    out.append(ReferenceEvent(ts_ns=last_ts, symbol=symbol, high=h, low=l, close=c, open=o))
     return [(r.ts_ns, r.high, r.low, r.close, r.open) for r in out]
 
 
@@ -195,8 +202,8 @@ def test_klines_1s_resample_ohlc_path_bit_identical_to_old_inline(tmp_path: Path
     """
     base = 100 * _S
     klines_data = [
-        _kline(base + 0 * _S, 100.0, 110.0,  99.0, 101.0),
-        _kline(base + 1 * _S, 101.0, 112.0,  98.0, 105.0),
+        _kline(base + 0 * _S, 100.0, 110.0, 99.0, 101.0),
+        _kline(base + 1 * _S, 101.0, 112.0, 98.0, 105.0),
         _kline(base + 2 * _S, 105.0, 108.0, 100.0, 106.0),
         _kline(base + 3 * _S, 106.0, 109.0, 101.0, 107.0),
         _kline(base + 4 * _S, 107.0, 111.0, 103.0, 108.0),
@@ -227,17 +234,16 @@ def test_klines_1s_resample_ohlc_path_bit_identical_to_old_inline(tmp_path: Path
 
     # Old path: inline copy above.
     old_tuples = _old_load_klines_1s_reference_inline(
-        klines_data, start_ns=start_ns, end_ns=end_ns,
-        resample_ns=resample_ns, symbol="BTC",
+        klines_data,
+        start_ns=start_ns,
+        end_ns=end_ns,
+        resample_ns=resample_ns,
+        symbol="BTC",
     )
 
-    assert len(new_tuples) == len(old_tuples), (
-        f"bar count differs: new={len(new_tuples)} old={len(old_tuples)}"
-    )
+    assert len(new_tuples) == len(old_tuples), f"bar count differs: new={len(new_tuples)} old={len(old_tuples)}"
     for i, (new, old) in enumerate(zip(new_tuples, old_tuples)):
-        assert new == old, (
-            f"bar {i} differs: new={new} old={old} — resample_ohlc path is NOT bit-identical"
-        )
+        assert new == old, f"bar {i} differs: new={new} old={old} — resample_ohlc path is NOT bit-identical"
 
 
 def test_bbo_resample_ohlc_path_bit_identical_to_old_inline() -> None:
@@ -252,11 +258,11 @@ def test_bbo_resample_ohlc_path_bit_identical_to_old_inline() -> None:
 
     _NS = 1_000_000_000
     bbo_rows = [
-        (0 * _NS, 99.9, 100.1),   # mid=100.0   bucket 0
+        (0 * _NS, 99.9, 100.1),  # mid=100.0   bucket 0
         (1 * _NS, 101.9, 102.1),  # mid=102.0   bucket 0
-        (2 * _NS,  97.9,  98.1),  # mid= 98.0   bucket 0  ← new low
+        (2 * _NS, 97.9, 98.1),  # mid= 98.0   bucket 0  ← new low
         (3 * _NS, 103.9, 104.1),  # mid=104.0   bucket 0  ← new high
-        (4 * _NS,  99.9, 100.1),  # mid=100.0   bucket 0  close=100.0
+        (4 * _NS, 99.9, 100.1),  # mid=100.0   bucket 0  close=100.0
         (5 * _NS, 105.9, 106.1),  # mid=106.0   bucket 1
         (7 * _NS, 103.9, 104.1),  # mid=104.0   bucket 1
         (9 * _NS, 107.9, 108.1),  # mid=108.0   bucket 1  close=108.0
@@ -265,21 +271,22 @@ def test_bbo_resample_ohlc_path_bit_identical_to_old_inline() -> None:
     symbol = "BTC"
 
     # Old inline path (reference baseline).
-    old_tuples = _old_load_binance_bbo_reference_inline(
-        bbo_rows, resample_ns=resample_ns, symbol=symbol
-    )
+    old_tuples = _old_load_binance_bbo_reference_inline(bbo_rows, resample_ns=resample_ns, symbol=symbol)
 
     # New path: build samples the way _load_binance_bbo_reference does.
-    samples = [(int(ts), (float(bid)+float(ask))/2.0, (float(bid)+float(ask))/2.0,
-                (float(bid)+float(ask))/2.0, (float(bid)+float(ask))/2.0)
-               for ts, bid, ask in bbo_rows]
+    samples = [
+        (
+            int(ts),
+            (float(bid) + float(ask)) / 2.0,
+            (float(bid) + float(ask)) / 2.0,
+            (float(bid) + float(ask)) / 2.0,
+            (float(bid) + float(ask)) / 2.0,
+        )
+        for ts, bid, ask in bbo_rows
+    ]
     new_refs = _bucket_to_ref_events(samples, symbol=symbol, bucket_ns=resample_ns)
     new_tuples = [(r.ts_ns, r.high, r.low, r.close, r.open) for r in new_refs]
 
-    assert len(new_tuples) == len(old_tuples), (
-        f"bar count differs: new={len(new_tuples)} old={len(old_tuples)}"
-    )
+    assert len(new_tuples) == len(old_tuples), f"bar count differs: new={len(new_tuples)} old={len(old_tuples)}"
     for i, (new, old) in enumerate(zip(new_tuples, old_tuples)):
-        assert new == old, (
-            f"BBO bar {i} differs: new={new} old={old} — not bit-identical"
-        )
+        assert new == old, f"BBO bar {i} differs: new={new} old={old} — not bit-identical"

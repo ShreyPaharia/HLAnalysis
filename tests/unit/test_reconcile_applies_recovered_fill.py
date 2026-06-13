@@ -13,7 +13,9 @@ from __future__ import annotations
 import pytest
 
 from hlanalysis.engine.hl_client import (
-    ClearinghouseState, UserFillRow, VenuePosition,
+    ClearinghouseState,
+    UserFillRow,
+    VenuePosition,
 )
 from hlanalysis.engine.reconcile import Reconciler
 from hlanalysis.engine.state import OpenOrder, Position, StateDAL
@@ -29,25 +31,36 @@ def dal(tmp_path):
 def _pending_order(cloid: str, qidx: int = 42, symbol: str = "@30") -> OpenOrder:
     """A locally-pending (open) buy order — the lost-ACK case."""
     return OpenOrder(
-        cloid=cloid, venue_oid=f"v-{cloid}", question_idx=qidx, symbol=symbol,
-        side="buy", price=0.60, size=100.0, status="open",
-        placed_ts_ns=1, last_update_ts_ns=1, strategy_id="v31",
+        cloid=cloid,
+        venue_oid=f"v-{cloid}",
+        question_idx=qidx,
+        symbol=symbol,
+        side="buy",
+        price=0.60,
+        size=100.0,
+        status="open",
+        placed_ts_ns=1,
+        last_update_ts_ns=1,
+        strategy_id="v31",
     )
 
 
-def _fill(cloid: str, symbol: str = "@30", size: float = 100.0,
-          price: float = 0.60) -> UserFillRow:
+def _fill(cloid: str, symbol: str = "@30", size: float = 100.0, price: float = 0.60) -> UserFillRow:
     return UserFillRow(
-        fill_id=f"fill-{cloid}", cloid=cloid, symbol=symbol,
-        side="buy", price=price, size=size, fee=0.10, ts_ns=2,
+        fill_id=f"fill-{cloid}",
+        cloid=cloid,
+        symbol=symbol,
+        side="buy",
+        price=price,
+        size=size,
+        fee=0.10,
+        ts_ns=2,
     )
 
 
-def _venue_state_with_position(symbol: str = "@30", qty: float = 100.0,
-                                avg_entry: float = 0.60) -> ClearinghouseState:
+def _venue_state_with_position(symbol: str = "@30", qty: float = 100.0, avg_entry: float = 0.60) -> ClearinghouseState:
     return ClearinghouseState(
-        positions=(VenuePosition(symbol=symbol, qty=qty,
-                                 avg_entry=avg_entry, unrealized_pnl=0.0),),
+        positions=(VenuePosition(symbol=symbol, qty=qty, avg_entry=avg_entry, unrealized_pnl=0.0),),
         account_value_usd=1000.0,
     )
 
@@ -57,6 +70,7 @@ def _venue_state_with_position(symbol: str = "@30", qty: float = 100.0,
 # symbol_to_question={} ensures the Position comes from the local-ghost fix,
 # NOT from the fallback adopt-venue-orphan path.
 # ---------------------------------------------------------------------------
+
 
 def test_recovered_fill_books_position_in_apply_mode(dal):
     """Lost-ACK fill discovered by reconcile MUST create a Position row when
@@ -74,7 +88,7 @@ def test_recovered_fill_books_position_in_apply_mode(dal):
     r = Reconciler(
         dal,
         fills_lookup=lambda c: fills if c == cloid else [],
-        symbol_to_question={},   # no mapping → adopt-orphan cannot help
+        symbol_to_question={},  # no mapping → adopt-orphan cannot help
         apply_position_changes=True,
     )
     r.run(venue_open=[], venue_state=venue_state, now_ns=3)
@@ -99,7 +113,7 @@ def test_recovered_fill_order_still_marked_filled_in_apply_mode(dal):
     Reconciler(
         dal,
         fills_lookup=lambda c: fills if c == cloid else [],
-        symbol_to_question={},   # no mapping → isolate local-ghost path
+        symbol_to_question={},  # no mapping → isolate local-ghost path
         apply_position_changes=True,
     ).run(venue_open=[], venue_state=venue_state, now_ns=3)
 
@@ -121,8 +135,7 @@ def test_recovered_fill_no_position_if_venue_has_zero_qty(dal):
     # Venue shows qty=0 for that symbol (already settled/closed).
     # symbol_to_question={} ensures the adopt-orphan path also cannot adopt.
     venue_state = ClearinghouseState(
-        positions=(VenuePosition(symbol="@32", qty=0.0, avg_entry=0.60,
-                                 unrealized_pnl=0.0),),
+        positions=(VenuePosition(symbol="@32", qty=0.0, avg_entry=0.60, unrealized_pnl=0.0),),
         account_value_usd=0,
     )
 
@@ -165,6 +178,7 @@ def test_recovered_fill_no_position_if_symbol_absent_from_venue_state(dal):
 # in run() preserves both; the local-ghost fill-discovery path must match it.
 # ---------------------------------------------------------------------------
 
+
 def test_recovered_fill_preserves_existing_realized_pnl_and_stop(dal):
     """Position #46 was partially reduced (booking +12.50 realized) and carries a
     real stop at 0.50. A *second* order's ACK is lost and discovered via
@@ -173,16 +187,22 @@ def test_recovered_fill_preserves_existing_realized_pnl_and_stop(dal):
     cloid = "hla-v31-ffff"
     qidx = 46
     # Pre-existing tracked position with accumulated realized PnL and a real stop.
-    dal.upsert_position(Position(
-        question_idx=qidx, symbol="@34", qty=100.0, avg_entry=0.60,
-        realized_pnl=12.50, last_update_ts_ns=1, stop_loss_price=0.50,
-    ))
+    dal.upsert_position(
+        Position(
+            question_idx=qidx,
+            symbol="@34",
+            qty=100.0,
+            avg_entry=0.60,
+            realized_pnl=12.50,
+            last_update_ts_ns=1,
+            stop_loss_price=0.50,
+        )
+    )
     dal.upsert_order(_pending_order(cloid, qidx=qidx, symbol="@34"))
 
     fills = [_fill(cloid, symbol="@34", size=50.0, price=0.62)]
     # Venue truth: the lost-ACK add grew the position to 150 @ 0.6067.
-    venue_state = _venue_state_with_position(symbol="@34", qty=150.0,
-                                             avg_entry=0.6067)
+    venue_state = _venue_state_with_position(symbol="@34", qty=150.0, avg_entry=0.6067)
 
     Reconciler(
         dal,
@@ -194,17 +214,14 @@ def test_recovered_fill_preserves_existing_realized_pnl_and_stop(dal):
     pos = dal.get_position(qidx)
     assert pos is not None
     assert pos.qty == 150.0, "venue qty is authoritative"
-    assert pos.realized_pnl == 12.50, (
-        "prior partial-reduce realized PnL must survive fill-discovery"
-    )
-    assert pos.stop_loss_price == 0.50, (
-        "stop-loss must not be reset to DISABLED on a still-protected position"
-    )
+    assert pos.realized_pnl == 12.50, "prior partial-reduce realized PnL must survive fill-discovery"
+    assert pos.stop_loss_price == 0.50, "stop-loss must not be reset to DISABLED on a still-protected position"
 
 
 # ---------------------------------------------------------------------------
 # Alert-only path: apply_position_changes=False (PM live path — unchanged)
 # ---------------------------------------------------------------------------
+
 
 def test_recovered_fill_does_not_book_position_in_alert_only_mode(dal):
     """PM live (apply_position_changes=False): fill is replayed + order marked
@@ -215,20 +232,17 @@ def test_recovered_fill_does_not_book_position_in_alert_only_mode(dal):
     dal.upsert_order(_pending_order(cloid, qidx=qidx, symbol="pm-tok"))
 
     fills = [_fill(cloid, symbol="pm-tok", size=75.0, price=0.45)]
-    venue_state = _venue_state_with_position(symbol="pm-tok", qty=75.0,
-                                              avg_entry=0.45)
+    venue_state = _venue_state_with_position(symbol="pm-tok", qty=75.0, avg_entry=0.45)
 
     Reconciler(
         dal,
         fills_lookup=lambda c: fills if c == cloid else [],
-        symbol_to_question={},   # no mapping: also guards adopt-orphan path
-        apply_position_changes=False,   # PM live: alert-only
+        symbol_to_question={},  # no mapping: also guards adopt-orphan path
+        apply_position_changes=False,  # PM live: alert-only
     ).run(venue_open=[], venue_state=venue_state, now_ns=3)
 
     # Position must NOT be created in alert-only mode.
-    assert dal.get_position(qidx) is None, (
-        "PM alert-only mode must not create a Position from a recovered fill"
-    )
+    assert dal.get_position(qidx) is None, "PM alert-only mode must not create a Position from a recovered fill"
 
     # But the order + fill bookkeeping still happens.
     assert dal.get_order(cloid).status == "filled"

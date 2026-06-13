@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from hlanalysis.engine.state import (
-    CachedStateDAL, OpenOrder, Position, StateDAL,
+    CachedStateDAL,
+    OpenOrder,
+    Position,
+    StateDAL,
 )
 
 
@@ -15,16 +18,29 @@ def _mk(tmp_path: Path) -> CachedStateDAL:
 
 def _pos(qidx: int, qty: float) -> Position:
     return Position(
-        question_idx=qidx, symbol=f"#{qidx}", qty=qty, avg_entry=0.9,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=0.8,
+        question_idx=qidx,
+        symbol=f"#{qidx}",
+        qty=qty,
+        avg_entry=0.9,
+        realized_pnl=0.0,
+        last_update_ts_ns=1,
+        stop_loss_price=0.8,
     )
 
 
 def _ord(cloid: str, status: str) -> OpenOrder:
     return OpenOrder(
-        cloid=cloid, venue_oid=None, question_idx=1, symbol="#1", side="buy",
-        price=0.9, size=10.0, status=status, placed_ts_ns=1,
-        last_update_ts_ns=1, strategy_id="t",
+        cloid=cloid,
+        venue_oid=None,
+        question_idx=1,
+        symbol="#1",
+        side="buy",
+        price=0.9,
+        size=10.0,
+        status=status,
+        placed_ts_ns=1,
+        last_update_ts_ns=1,
+        strategy_id="t",
     )
 
 

@@ -4,6 +4,7 @@ Covers the pure analysis primitives: CSV parsing, regime-table enrichment,
 cap derivation, and own-fills reconciliation.  All tests are pure / in-memory
 — no disk I/O, no DuckDB.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -138,8 +139,7 @@ def test_per_leg_regime_table_known_legs() -> None:
 def test_per_leg_regime_table_unknown_leg() -> None:
     """An unknown leg (not in _LEG_WIDTH_REGIME) gets 'unknown', not an error."""
     unknown_csv = (
-        "group,kind,n,p10,p25,p50,p75,p90,p99,max,mean\n"
-        "#9999,binary,100,10.0,15.0,25.0,50.0,80.0,200.0,500.0,30.0\n"
+        "group,kind,n,p10,p25,p50,p75,p90,p99,max,mean\n#9999,binary,100,10.0,15.0,25.0,50.0,80.0,200.0,500.0,30.0\n"
     )
     rows = parse_summary_csv(unknown_csv)
     legs = per_leg_rows(rows)

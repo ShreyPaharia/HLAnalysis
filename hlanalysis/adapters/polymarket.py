@@ -23,6 +23,7 @@ Observed live-wire deviations (validated against the recorded fixture in
   - PM occasionally sends literal "PONG" string keepalives; non-JSON frames
     are discarded with a debug log.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -65,9 +66,7 @@ class PolymarketAdapter(BaseWsAdapter):
         gamma_client: GammaClient | None = None,
     ) -> None:
         super().__init__()
-        self._ws_factory = ws_factory or (
-            lambda url: websockets.connect(url, ping_interval=30)
-        )
+        self._ws_factory = ws_factory or (lambda url: websockets.connect(url, ping_interval=30))
         self._gamma = gamma_client or GammaClient()
         # SHR-62: per-asset stateful L2 book so price_change deltas emit MERGED
         # full snapshots rather than partial ones.  MarketState.apply treats
@@ -76,14 +75,9 @@ class PolymarketAdapter(BaseWsAdapter):
         self._pm_books: dict[str, PmBook] = {}
 
     def supports(self, product_type: ProductType, mechanism: Mechanism) -> bool:
-        return (
-            product_type == ProductType.PREDICTION_BINARY
-            and mechanism == Mechanism.CLOB
-        )
+        return product_type == ProductType.PREDICTION_BINARY and mechanism == Mechanism.CLOB
 
-    async def stream(
-        self, subscriptions: list[Subscription]
-    ) -> AsyncIterator[NormalizedEvent]:
+    async def stream(self, subscriptions: list[Subscription]) -> AsyncIterator[NormalizedEvent]:
         pm_subs = [s for s in subscriptions if s.venue == self.venue]
         if not pm_subs:
             return
@@ -106,7 +100,8 @@ class PolymarketAdapter(BaseWsAdapter):
                 klass = klass[0] if klass else "priceBinary"
             events = await asyncio.to_thread(
                 self._gamma.fetch_events,
-                series_slug=series_str, closed=False,
+                series_slug=series_str,
+                closed=False,
             )
             if klass == "priceBucket":
                 # Group the entire multi-strike event into one priceBucket
@@ -120,7 +115,8 @@ class PolymarketAdapter(BaseWsAdapter):
                     known_conditions[cond_id] = ev
                     if is_new:
                         qmeta = parse_gamma_event_to_bucket_question_meta(
-                            ev, series_slug=series_str,
+                            ev,
+                            series_slug=series_str,
                             local_recv_ts=time.time_ns(),
                             underlying=underlying,
                         )
@@ -133,7 +129,8 @@ class PolymarketAdapter(BaseWsAdapter):
                     # independently; _mark_settled routes by leg-symbol.
                     for mk in ev.get("markets") or []:
                         settle = parse_gamma_market_to_settlement(
-                            mk, series_slug=series_str,
+                            mk,
+                            series_slug=series_str,
                             local_recv_ts=time.time_ns(),
                         )
                         if settle is not None:
@@ -145,7 +142,8 @@ class PolymarketAdapter(BaseWsAdapter):
                 known_conditions[cond_id] = mk
                 if is_new:
                     qmeta = parse_gamma_market_to_question_meta(
-                        mk, series_slug=series_str,
+                        mk,
+                        series_slug=series_str,
                         local_recv_ts=time.time_ns(),
                         underlying=underlying,
                     )
@@ -153,7 +151,8 @@ class PolymarketAdapter(BaseWsAdapter):
                     toks = _json_decode(mk["clobTokenIds"])
                     active_tokens.update(str(t) for t in toks)
                 settle = parse_gamma_market_to_settlement(
-                    mk, series_slug=series_str,
+                    mk,
+                    series_slug=series_str,
                     local_recv_ts=time.time_ns(),
                 )
                 if settle is not None:
@@ -174,8 +173,8 @@ class PolymarketAdapter(BaseWsAdapter):
                     await _poll_one_series(sub, series_str)
                 except Exception:
                     log.exception(
-                        "gamma poll failed for series=%s; skipping it this "
-                        "cycle so other subscriptions still poll", series_str,
+                        "gamma poll failed for series=%s; skipping it this cycle so other subscriptions still poll",
+                        series_str,
                     )
                     continue
 
@@ -192,21 +191,25 @@ class PolymarketAdapter(BaseWsAdapter):
             # local book cannot survive a feed gap.  The first "book" message
             # after resubscription will re-seed each asset's book from scratch.
             self._pm_books.clear()
-            await ws.send(json.dumps({
-                "type": "market",
-                "assets_ids": sorted(active_tokens),
-            }))
-            await queue.put(self._health(
-                "subscribed", f"{len(active_tokens)} tokens",
-            ))
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "market",
+                        "assets_ids": sorted(active_tokens),
+                    }
+                )
+            )
+            await queue.put(
+                self._health(
+                    "subscribed",
+                    f"{len(active_tokens)} tokens",
+                )
+            )
 
         async def _ws_loop() -> None:
             await _gamma_poll_once()
             if not active_tokens:
-                await queue.put(
-                    self._health("no_active_markets",
-                                 "Gamma returned 0 active markets")
-                )
+                await queue.put(self._health("no_active_markets", "Gamma returned 0 active markets"))
                 return
             # BaseWsAdapter owns connect/backoff/circuit-breaker and the
             # per-frame staleness watchdog — PM previously used a bare recv()
@@ -253,9 +256,7 @@ class PolymarketAdapter(BaseWsAdapter):
                     asset_id = str(p.get("asset_id", ""))
                     if asset_id not in self._pm_books:
                         self._pm_books[asset_id] = PmBook()
-                    out.append(self._pm_books[asset_id].apply_book(
-                        p, local_recv_ts=recv_ns
-                    ))
+                    out.append(self._pm_books[asset_id].apply_book(p, local_recv_ts=recv_ns))
                 elif t == "price_change":
                     # SHR-62: merge delta into the full book; emit the merged
                     # snapshot so MarketState receives a complete replace rather
@@ -263,9 +264,7 @@ class PolymarketAdapter(BaseWsAdapter):
                     # path if no prior "book" frame was seen for this asset.
                     asset_id = str(p.get("asset_id", ""))
                     if asset_id in self._pm_books:
-                        ev = self._pm_books[asset_id].apply_price_change(
-                            p, local_recv_ts=recv_ns
-                        )
+                        ev = self._pm_books[asset_id].apply_price_change(p, local_recv_ts=recv_ns)
                     else:
                         # No prior full snapshot for this asset — fall back to
                         # the stateless partial emit so we don't drop the delta

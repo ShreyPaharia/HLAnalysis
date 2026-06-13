@@ -4,6 +4,7 @@ Re-uses v3's entry/exit logic verbatim by delegation, and additionally emits
 hedge OrderIntents on the configured hedge symbol whenever the binary position
 delta differs from the hedge book's tracked delta by more than rebalance_threshold.
 """
+
 from __future__ import annotations
 
 import math
@@ -32,7 +33,7 @@ def binary_delta(*, reference_price: float, strike: float, sigma: float, tau_yr:
     if tau_yr <= 0 or sigma <= 0 or reference_price <= 0:
         return 0.0
     ln_sk = math.log(reference_price / strike)
-    d = (ln_sk + (mu_eff - 0.5 * sigma ** 2) * tau_yr) / (sigma * math.sqrt(tau_yr))
+    d = (ln_sk + (mu_eff - 0.5 * sigma**2) * tau_yr) / (sigma * math.sqrt(tau_yr))
     phi = float(norm.pdf(d))
     return phi / (reference_price * sigma * math.sqrt(tau_yr))
 
@@ -43,8 +44,8 @@ class DeltaHedgedConfig:
     binary: ThetaHarvesterConfig
     # Hedge knobs
     hedge_symbol: str
-    rebalance_interval_s: int       # 0 means rebalance every tick
-    rebalance_threshold: float       # 0 means rebalance every tick (when interval elapsed)
+    rebalance_interval_s: int  # 0 means rebalance every tick
+    rebalance_threshold: float  # 0 means rebalance every tick (when interval elapsed)
 
 
 @dataclass(slots=True)
@@ -82,9 +83,14 @@ class DeltaHedgedStrategy(Strategy):
             self._last_question_idx = question.question_idx
 
         binary_decision = self._binary.evaluate(
-            question=question, books=books, reference_price=reference_price,
-            recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
-            position=position, now_ns=now_ns, recent_hl_bars=recent_hl_bars,
+            question=question,
+            books=books,
+            reference_price=reference_price,
+            recent_returns=recent_returns,
+            recent_volume_usd=recent_volume_usd,
+            position=position,
+            now_ns=now_ns,
+            recent_hl_bars=recent_hl_bars,
         )
 
         # No binary position and no entry → nothing to hedge
@@ -93,8 +99,12 @@ class DeltaHedgedStrategy(Strategy):
 
         # Compute target hedge delta
         target_delta_btc = self._target_delta(
-            question=question, position=position, binary_decision=binary_decision,
-            reference_price=reference_price, recent_returns=recent_returns, now_ns=now_ns,
+            question=question,
+            position=position,
+            binary_decision=binary_decision,
+            reference_price=reference_price,
+            recent_returns=recent_returns,
+            now_ns=now_ns,
         )
 
         # Decide whether to rebalance
@@ -104,7 +114,9 @@ class DeltaHedgedStrategy(Strategy):
             or now_ns - self._hedge_state.last_rebalance_ns >= self.cfg.rebalance_interval_s * 1_000_000_000
         )
         rel = abs(gap) / max(abs(target_delta_btc), 1e-9)
-        should_rebalance = interval_elapsed and (rel >= self.cfg.rebalance_threshold or self._hedge_state.hedge_qty_btc == 0.0)
+        should_rebalance = interval_elapsed and (
+            rel >= self.cfg.rebalance_threshold or self._hedge_state.hedge_qty_btc == 0.0
+        )
 
         if not should_rebalance:
             return binary_decision
@@ -131,15 +143,29 @@ class DeltaHedgedStrategy(Strategy):
         return Decision(
             action=binary_decision.action,
             intents=tuple(binary_decision.intents) + (hedge_intent,),
-            diagnostics=tuple(binary_decision.diagnostics) + (
-                Diagnostic("info", "hedge_rebalance", (
-                    ("target_delta_btc", f"{target_delta_btc:.6f}"),
-                    ("gap_btc", f"{gap:.6f}"),
-                )),
+            diagnostics=tuple(binary_decision.diagnostics)
+            + (
+                Diagnostic(
+                    "info",
+                    "hedge_rebalance",
+                    (
+                        ("target_delta_btc", f"{target_delta_btc:.6f}"),
+                        ("gap_btc", f"{gap:.6f}"),
+                    ),
+                ),
             ),
         )
 
-    def _target_delta(self, *, question: QuestionView, position: Position | None, binary_decision: Decision, reference_price: float, recent_returns: tuple[float, ...], now_ns: int) -> float:
+    def _target_delta(
+        self,
+        *,
+        question: QuestionView,
+        position: Position | None,
+        binary_decision: Decision,
+        reference_price: float,
+        recent_returns: tuple[float, ...],
+        now_ns: int,
+    ) -> float:
         """Return the BTC quantity needed to neutralize the BINARY position delta.
 
         Sign convention: a long YES at +Δ_bin per binary unit means we want to be SHORT
@@ -164,8 +190,11 @@ class DeltaHedgedStrategy(Strategy):
             return 0.0
         mu_eff = self._binary._mu(recent_returns)
         delta_per_unit = binary_delta(
-            reference_price=reference_price, strike=question.strike,
-            sigma=sigma, tau_yr=tau_yr, mu_eff=mu_eff,
+            reference_price=reference_price,
+            strike=question.strike,
+            sigma=sigma,
+            tau_yr=tau_yr,
+            mu_eff=mu_eff,
         )
         # NO leg's delta is the negative of YES's
         if held_symbol == question.no_symbol:

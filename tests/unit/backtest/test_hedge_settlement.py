@@ -9,6 +9,7 @@ Pure-logic tests for the two helpers the runner uses:
     hedge mid (so realized PnL captures the hedge's full round-trip, not just
     the opening leg).
 """
+
 from __future__ import annotations
 
 import pytest
@@ -46,13 +47,13 @@ def test_avg_entry_flip_through_zero_resets_basis() -> None:
 def test_mtm_fill_closes_long_with_sell_at_mark() -> None:
     f = _hedge_mtm_fill("BTC-PERP", qty=0.01, mark_px=81_000.0)
     assert f.is_hedge is True
-    assert f.side == "sell"          # closes a long
+    assert f.side == "sell"  # closes a long
     assert f.size == pytest.approx(0.01)
     assert f.price == pytest.approx(81_000.0)
 
 
 def test_mtm_fill_closes_short_with_buy_at_mark() -> None:
     f = _hedge_mtm_fill("BTC-PERP", qty=-0.02, mark_px=79_000.0)
-    assert f.side == "buy"           # closes a short
+    assert f.side == "buy"  # closes a short
     assert f.size == pytest.approx(0.02)
     assert f.price == pytest.approx(79_000.0)

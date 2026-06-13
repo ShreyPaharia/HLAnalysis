@@ -14,6 +14,7 @@ Regime:
   - "mr":       mean-reversion signal (overextended) — caller may gate against
   - "neutral":  insufficient signal / inadequate data
 """
+
 from __future__ import annotations
 
 import math
@@ -77,7 +78,9 @@ def momentum_mr_score(
 
 
 def _z_ret(
-    recent_returns: tuple[float, ...], lookback_min: int, favorite_side: int,
+    recent_returns: tuple[float, ...],
+    lookback_min: int,
+    favorite_side: int,
 ) -> tuple[float, str]:
     """z-score of the cumulative return over lookback_min vs a 4h reference σ."""
     if len(recent_returns) < max(lookback_min, 30):
@@ -107,7 +110,9 @@ def _z_ret(
 
 
 def _rsi(
-    recent_returns: tuple[float, ...], lookback_min: int, favorite_side: int,
+    recent_returns: tuple[float, ...],
+    lookback_min: int,
+    favorite_side: int,
 ) -> tuple[float, str]:
     """Wilder RSI(14) computed over the last `lookback_min + 14` bars (need 14
     to seed the smoothing). Returns score = (RSI − 50) / 50 signed to favorite.
@@ -143,7 +148,9 @@ def _rsi(
 
 
 def _ma_sigma(
-    recent_returns: tuple[float, ...], lookback_min: int, favorite_side: int,
+    recent_returns: tuple[float, ...],
+    lookback_min: int,
+    favorite_side: int,
 ) -> tuple[float, str]:
     """Distance of last cum-return from rolling-mean cum-return in σ units.
 
@@ -170,7 +177,9 @@ def _ma_sigma(
 
 
 def _hurst_ou(
-    recent_returns: tuple[float, ...], lookback_min: int, favorite_side: int,
+    recent_returns: tuple[float, ...],
+    lookback_min: int,
+    favorite_side: int,
 ) -> tuple[float, str]:
     """Estimate a pseudo-Hurst exponent via the lag-k autocorrelation of
     the return series (full available history, lag = lookback_min).
@@ -212,7 +221,9 @@ def _hurst_ou(
 
 
 def _sdr(
-    recent_returns: tuple[float, ...], lookback_min: int, favorite_side: int,
+    recent_returns: tuple[float, ...],
+    lookback_min: int,
+    favorite_side: int,
 ) -> tuple[float, str]:
     """Signed Drift Ratio — same as z_ret but uses √BPV as the denominator
     instead of rolling sample-std, making it robust to jump contamination.
@@ -251,7 +262,9 @@ def _sdr(
 
 
 def _ou_z(
-    recent_returns: tuple[float, ...], lookback_min: int, favorite_side: int,
+    recent_returns: tuple[float, ...],
+    lookback_min: int,
+    favorite_side: int,
 ) -> tuple[float, str]:
     """OU mean-reversion z-score.
 
@@ -293,7 +306,7 @@ def _ou_z(
     residuals = log_price[1:] - (c + phi * log_price[:-1])
     sigma_e = float(np.std(residuals, ddof=1)) if len(residuals) > 1 else 0.0
 
-    one_minus_phi2 = 1.0 - phi ** 2
+    one_minus_phi2 = 1.0 - phi**2
     if one_minus_phi2 <= 0.0 or sigma_e <= 0.0:
         return 0.0, "neutral"
 

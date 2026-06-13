@@ -29,12 +29,14 @@ def _substitute_env(raw: Any) -> Any:
     if isinstance(raw, list):
         return [_substitute_env(v) for v in raw]
     if isinstance(raw, str):
+
         def repl(m: re.Match[str]) -> str:
             key = m.group(1)
             val = os.environ.get(key)
             if val is None:
                 raise ValueError(f"missing env var: {key}")
             return val
+
         return _ENV_RE.sub(repl, raw)
     return raw
 
@@ -146,6 +148,7 @@ class ThetaParams(ThetaHarvesterParams):
     dropped (SHR-65). `tests/unit/test_theta_config_parity.py` guards the
     mirror; `test_single_source_property` guards the inheritance structure.
     """
+
     # extra='forbid' stays on ThetaParams (not on ThetaHarvesterParams) so the
     # base model itself stays permissive — ThetaHarvesterParams is also used as a
     # mixin base for theta_overrides entries, which share the same extra='forbid'
@@ -193,10 +196,9 @@ class StrategyConfig(BaseModel):
     def _check_strategy_type(cls, v: str) -> str:
         valid = live_strategy_types()
         if v not in valid:
-            raise ValueError(
-                f"unknown strategy_type {v!r}; registered live types: {valid}"
-            )
+            raise ValueError(f"unknown strategy_type {v!r}; registered live types: {valid}")
         return v
+
     # Optional theta_harvester params (ignored when strategy_type != theta_harvester).
     theta: ThetaParams | None = None
     # Optional per-question.klass theta overrides. Maps a question class (e.g.
@@ -235,6 +237,7 @@ class StrategiesConfig(BaseModel):
     flat list and runs each entry against its own (HLClient, RiskGate, Router,
     Reconciler, StateDAL) — orders, fills, risk are isolated per (strategy,
     account)."""
+
     model_config = ConfigDict(frozen=True)
     strategies: list[StrategyConfig]
 
@@ -356,6 +359,8 @@ class DeployConfig(BaseModel):
 # Kept as a read-only view; remove after the call sites are migrated.
 def _hl_accounts(self: DeployConfig) -> dict[str, HyperliquidAccount]:
     return {a: c for a, c in self.accounts.items() if isinstance(c, HyperliquidAccount)}
+
+
 DeployConfig.hl_accounts = property(_hl_accounts)  # type: ignore[assignment]
 
 
@@ -432,9 +437,7 @@ def _entry_matches(match: dict[str, str | list[str]], fields: dict[str, str]) ->
     return True
 
 
-def match_question(
-    cfg: StrategyConfig, *, question_idx: int, fields: dict[str, str]
-) -> AllowlistEntry | None:
+def match_question(cfg: StrategyConfig, *, question_idx: int, fields: dict[str, str]) -> AllowlistEntry | None:
     """Return the first allowlist entry matching `fields`, or None.
 
     Blocklist takes precedence: if `question_idx` is in `blocklist_question_idxs`,

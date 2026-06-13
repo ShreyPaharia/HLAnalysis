@@ -43,7 +43,8 @@ class ReplayRunner:
         # preserves legacy replay behaviour (32 one-minute bars).
         self._sampling_dt_seconds = int(sampling_dt_seconds)
         self._market.set_reference_cadence(
-            reference_symbol, sampling_dt_seconds=self._sampling_dt_seconds,
+            reference_symbol,
+            sampling_dt_seconds=self._sampling_dt_seconds,
         )
         # σ/OHLC source for the reference symbol, mirroring the live engine.
         # "mark" (default) preserves legacy replay; "bbo" sources σ from the
@@ -78,27 +79,28 @@ class ReplayRunner:
                     books=books,
                     reference_price=ref,
                     recent_returns=self._market.recent_returns(
-                        self._ref, n=self._recent_returns_n,
+                        self._ref,
+                        n=self._recent_returns_n,
                         now_ns=now_ns,
                         lookback_seconds=self._recent_returns_n * self._sampling_dt_seconds,
                     ),
                     recent_hl_bars=self._market.recent_hl_bars(
-                        self._ref, n=self._recent_returns_n,
+                        self._ref,
+                        n=self._recent_returns_n,
                         now_ns=now_ns,
                         lookback_seconds=self._recent_returns_n * self._sampling_dt_seconds,
                     ),
-                    recent_volume_usd=self._market.recent_volume_usd(
-                        q.yes_symbol, now=now_ns
-                    ) + self._market.recent_volume_usd(
-                        q.no_symbol, now=now_ns
-                    ),
+                    recent_volume_usd=self._market.recent_volume_usd(q.yes_symbol, now=now_ns)
+                    + self._market.recent_volume_usd(q.no_symbol, now=now_ns),
                     position=self._positions.get(q.question_idx),
                     now_ns=now_ns,
                 )
                 if d.action is not Action.HOLD:
                     logger.info(
                         "replay decision question_idx={} action={} intents={}",
-                        q.question_idx, d.action.value, len(d.intents),
+                        q.question_idx,
+                        d.action.value,
+                        len(d.intents),
                     )
                 yield d
 
@@ -127,17 +129,22 @@ class ReplayRunner:
         )
 
         TYPE_MAP: dict[str, type[Any]] = {
-            "trade": TradeEvent, "book_snapshot": BookSnapshotEvent,
-            "book_delta": BookDeltaEvent, "bbo": BboEvent, "mark": MarkEvent,
-            "oracle": OracleEvent, "open_interest": OpenInterestEvent,
-            "funding": FundingEvent, "liquidation": LiquidationEvent,
-            "market_meta": MarketMetaEvent, "question_meta": QuestionMetaEvent,
-            "settlement": SettlementEvent, "health": HealthEvent,
+            "trade": TradeEvent,
+            "book_snapshot": BookSnapshotEvent,
+            "book_delta": BookDeltaEvent,
+            "bbo": BboEvent,
+            "mark": MarkEvent,
+            "oracle": OracleEvent,
+            "open_interest": OpenInterestEvent,
+            "funding": FundingEvent,
+            "liquidation": LiquidationEvent,
+            "market_meta": MarketMetaEvent,
+            "question_meta": QuestionMetaEvent,
+            "settlement": SettlementEvent,
+            "health": HealthEvent,
         }
         con = duckdb.connect()
-        rows = con.execute(
-            f"SELECT * FROM read_parquet('{parquet_glob}') ORDER BY exchange_ts"
-        ).fetchall()
+        rows = con.execute(f"SELECT * FROM read_parquet('{parquet_glob}') ORDER BY exchange_ts").fetchall()
         cols = [d[0] for d in con.description]
 
         def _gen() -> Iterator[NormalizedEvent]:

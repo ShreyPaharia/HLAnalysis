@@ -1,4 +1,5 @@
 """`hl-bt run` must produce identical results whether serial or parallel."""
+
 from __future__ import annotations
 from pathlib import Path
 import pytest
@@ -10,13 +11,31 @@ CONFIG = Path(__file__).resolve().parents[2] / "fixtures" / "configs" / "v1-smok
 
 def _run(tmp: Path, workers: int) -> str:
     out = tmp / f"w{workers}"
-    rc = cli_main([
-        "run", "--strategy", "v1_late_resolution",
-        "--data-source", "hl_hip4", "--config", str(CONFIG),
-        "--cache-root", str(FIXTURE),
-        "--out-dir", str(out), "--start", "2026-05-09", "--end", "2026-05-11",
-        "--kind", "binary", "--max-markets", "2", "--workers", str(workers),
-    ])
+    rc = cli_main(
+        [
+            "run",
+            "--strategy",
+            "v1_late_resolution",
+            "--data-source",
+            "hl_hip4",
+            "--config",
+            str(CONFIG),
+            "--cache-root",
+            str(FIXTURE),
+            "--out-dir",
+            str(out),
+            "--start",
+            "2026-05-09",
+            "--end",
+            "2026-05-11",
+            "--kind",
+            "binary",
+            "--max-markets",
+            "2",
+            "--workers",
+            str(workers),
+        ]
+    )
     assert rc == 0
     return (out / "report.md").read_text()
 

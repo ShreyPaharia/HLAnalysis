@@ -18,6 +18,7 @@ Two streams are exercised:
   * synthetic bbo-sourced + multi-cadence streams (the PM σ path + the
     (symbol, dt) fan-out), which the mark-only corpus does not cover.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -61,6 +62,7 @@ _S = 1_000_000_000
 # --------------------------------------------------------------------------
 # Load the pre-refactor engine MarketState from the base commit as a module.
 # --------------------------------------------------------------------------
+
 
 def _load_old_market_state() -> Any:
     """Return the ``MarketState`` class as it existed at the base commit.
@@ -140,18 +142,14 @@ def _load_corpus_events() -> list[NormalizedEvent]:
         if cls is None:
             continue
         glob = str(event_dir / "**" / "*.parquet")
-        rows = con.execute(
-            f"SELECT * FROM read_parquet('{glob}', union_by_name=true)"
-        ).fetchall()
+        rows = con.execute(f"SELECT * FROM read_parquet('{glob}', union_by_name=true)").fetchall()
         cols = [d[0] for d in con.description]
         import msgspec
 
         accepted = {f.name for f in msgspec.structs.fields(cls)}
         for row in rows:
             d = dict(zip(cols, row, strict=False))
-            clean = {
-                k: v for k, v in d.items() if v is not None and k in accepted
-            }
+            clean = {k: v for k, v in d.items() if v is not None and k in accepted}
             try:
                 out.append(cls(**clean))
             except Exception:  # noqa: BLE001 - skip rows the type can't accept
@@ -164,14 +162,20 @@ def _load_corpus_events() -> list[NormalizedEvent]:
 # Query-surface comparison.
 # --------------------------------------------------------------------------
 
+
 def _book_tuple(ms: Any, sym: str) -> Any:
     b = ms.book(sym)
     if b is None:
         return None
     return (
-        b.bid_px, b.bid_sz, b.ask_px, b.ask_sz,
-        b.last_trade_ts_ns, b.last_l2_ts_ns,
-        tuple(b.ask_levels), tuple(b.bid_levels),
+        b.bid_px,
+        b.bid_sz,
+        b.ask_px,
+        b.ask_sz,
+        b.last_trade_ts_ns,
+        b.last_l2_ts_ns,
+        tuple(b.ask_levels),
+        tuple(b.bid_levels),
     )
 
 
@@ -217,30 +221,29 @@ def _assert_same_reference_reads(
 
     # recent_volume_usd per leg.
     for leg in legs:
-        assert old.recent_volume_usd(leg, now=now_ns) == new.recent_volume_usd(
-            leg, now=now_ns
-        ), f"recent_volume_usd[{leg}] @ {ctx}"
+        assert old.recent_volume_usd(leg, now=now_ns) == new.recent_volume_usd(leg, now=now_ns), (
+            f"recent_volume_usd[{leg}] @ {ctx}"
+        )
 
 
 def _assert_same_sigma(o_ret, o_hl, n_ret, n_hl, *, ctx: str) -> None:
     o_r = np.asarray(o_ret, dtype=np.float64)
     n_r = np.asarray(n_ret, dtype=np.float64)
     assert float(sample_std_returns(o_r)) == float(sample_std_returns(n_r)), f"stdev σ @ {ctx}"
-    assert float(bipower_variation_sigma(o_r)) == float(
-        bipower_variation_sigma(n_r)
-    ), f"bipower σ @ {ctx}"
+    assert float(bipower_variation_sigma(o_r)) == float(bipower_variation_sigma(n_r)), f"bipower σ @ {ctx}"
     o_h = np.ascontiguousarray(np.asarray(o_hl, dtype=np.float64).reshape(-1, 2)[:, 0]) if o_hl else np.empty(0)
     o_l = np.ascontiguousarray(np.asarray(o_hl, dtype=np.float64).reshape(-1, 2)[:, 1]) if o_hl else np.empty(0)
     n_h = np.ascontiguousarray(np.asarray(n_hl, dtype=np.float64).reshape(-1, 2)[:, 0]) if n_hl else np.empty(0)
     n_l = np.ascontiguousarray(np.asarray(n_hl, dtype=np.float64).reshape(-1, 2)[:, 1]) if n_hl else np.empty(0)
-    assert float(parkinson_sigma_window(o_h, o_l, 0.0)) == float(
-        parkinson_sigma_window(n_h, n_l, 0.0)
-    ), f"parkinson σ @ {ctx}"
+    assert float(parkinson_sigma_window(o_h, o_l, 0.0)) == float(parkinson_sigma_window(n_h, n_l, 0.0)), (
+        f"parkinson σ @ {ctx}"
+    )
 
 
 # --------------------------------------------------------------------------
 # Tests.
 # --------------------------------------------------------------------------
+
 
 def test_bit_identical_on_recorded_hl_corpus() -> None:
     """Real-engine replay of the recorded HL HIP-4 corpus: every engine query
@@ -272,35 +275,61 @@ def test_bit_identical_on_recorded_hl_corpus() -> None:
         _assert_same_books(old, new, syms, ctx)
         for dt in (60, 5):
             _assert_same_reference_reads(
-                old, new, ref="BTC", legs=legs, now_ns=now_ns, dt=dt,
-                n=400, lookback_seconds=3600, ctx=ctx,
+                old,
+                new,
+                ref="BTC",
+                legs=legs,
+                now_ns=now_ns,
+                dt=dt,
+                n=400,
+                lookback_seconds=3600,
+                ctx=ctx,
             )
         compared += 1
 
     assert compared > 50, "too few comparison points — corpus too small?"
 
     # Final-state full comparison (every leg + reference series).
-    final_ns = (events[-1].exchange_ts or events[-1].local_recv_ts)
+    final_ns = events[-1].exchange_ts or events[-1].local_recv_ts
     _assert_same_books(old, new, syms, "final")
     for dt in (60, 5):
         _assert_same_reference_reads(
-            old, new, ref="BTC", legs=legs, now_ns=final_ns, dt=dt,
-            n=10_000, lookback_seconds=3600, ctx="final",
+            old,
+            new,
+            ref="BTC",
+            legs=legs,
+            now_ns=final_ns,
+            dt=dt,
+            n=10_000,
+            lookback_seconds=3600,
+            ctx="final",
         )
 
 
 def _mark(symbol: str, px: float, ts: int) -> MarkEvent:
     return MarkEvent(
-        venue="hyperliquid", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
-        symbol=symbol, exchange_ts=ts, local_recv_ts=ts, mark_px=px,
+        venue="hyperliquid",
+        product_type=ProductType.PERP,
+        mechanism=Mechanism.CLOB,
+        symbol=symbol,
+        exchange_ts=ts,
+        local_recv_ts=ts,
+        mark_px=px,
     )
 
 
 def _bbo(symbol: str, bid: float, ask: float, ts: int) -> BboEvent:
     return BboEvent(
-        venue="binance", product_type=ProductType.PERP, mechanism=Mechanism.CLOB,
-        symbol=symbol, exchange_ts=ts, local_recv_ts=ts,
-        bid_px=bid, bid_sz=5.0, ask_px=ask, ask_sz=5.0,
+        venue="binance",
+        product_type=ProductType.PERP,
+        mechanism=Mechanism.CLOB,
+        symbol=symbol,
+        exchange_ts=ts,
+        local_recv_ts=ts,
+        bid_px=bid,
+        bid_sz=5.0,
+        ask_px=ask,
+        ask_sz=5.0,
     )
 
 
@@ -329,8 +358,15 @@ def test_bit_identical_bbo_sourced_sigma() -> None:
         ctx = f"bbo event#{i}"
         _assert_same_books(old, new, ["BTCUSDT"], ctx)
         _assert_same_reference_reads(
-            old, new, ref="BTCUSDT", legs=[], now_ns=now_ns, dt=5,
-            n=10_000, lookback_seconds=3600, ctx=ctx,
+            old,
+            new,
+            ref="BTCUSDT",
+            legs=[],
+            now_ns=now_ns,
+            dt=5,
+            n=10_000,
+            lookback_seconds=3600,
+            ctx=ctx,
         )
 
 
@@ -349,12 +385,19 @@ def test_bit_identical_multi_cadence_and_volume() -> None:
         ts = base + i * 700_000_000  # 0.7s spacing → multiple ticks per bucket
         events.append(_mark("BTC", 80_000.0 + (i % 11) * 3.0, ts))
         if i % 4 == 0:
-            events.append(TradeEvent(
-                venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-                mechanism=Mechanism.CLOB, symbol="#30",
-                exchange_ts=ts, local_recv_ts=ts, price=0.5 + (i % 3) * 0.01,
-                size=1.0 + (i % 5), side="buy",
-            ))
+            events.append(
+                TradeEvent(
+                    venue="hyperliquid",
+                    product_type=ProductType.PREDICTION_BINARY,
+                    mechanism=Mechanism.CLOB,
+                    symbol="#30",
+                    exchange_ts=ts,
+                    local_recv_ts=ts,
+                    price=0.5 + (i % 3) * 0.01,
+                    size=1.0 + (i % 5),
+                    side="buy",
+                )
+            )
 
     for i, ev in enumerate(events):
         old.apply(ev)
@@ -365,8 +408,15 @@ def test_bit_identical_multi_cadence_and_volume() -> None:
         ctx = f"multicad event#{i}"
         for dt in (5, 2):
             _assert_same_reference_reads(
-                old, new, ref="BTC", legs=["#30"], now_ns=now_ns, dt=dt,
-                n=10_000, lookback_seconds=3600, ctx=ctx,
+                old,
+                new,
+                ref="BTC",
+                legs=["#30"],
+                now_ns=now_ns,
+                dt=dt,
+                n=10_000,
+                lookback_seconds=3600,
+                ctx=ctx,
             )
         # dt-less default read resolves to the first registered cadence (dt=5).
         assert old.recent_returns("BTC", n=64) == new.recent_returns("BTC", n=64), ctx

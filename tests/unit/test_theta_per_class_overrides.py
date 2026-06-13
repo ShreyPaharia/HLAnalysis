@@ -15,6 +15,7 @@ These tests pin the new `theta_overrides:` path:
   * vol_sampling_dt_seconds is shared-feed-coupled and rejected per-class
   * unknown knobs still fail loud (extra='forbid' inherited from ThetaParams)
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -43,9 +44,12 @@ from hlanalysis.strategy.types import BookState, QuestionView
 
 def _global() -> GlobalRiskConfig:
     return GlobalRiskConfig(
-        max_total_inventory_usd=1100, max_concurrent_positions=5,
-        daily_loss_cap_usd=100, max_strike_distance_pct=50,
-        min_recent_volume_usd=100, stale_data_halt_seconds=30,
+        max_total_inventory_usd=1100,
+        max_concurrent_positions=5,
+        daily_loss_cap_usd=100,
+        max_strike_distance_pct=50,
+        min_recent_volume_usd=100,
+        stale_data_halt_seconds=30,
         reconcile_interval_seconds=15,
     )
 
@@ -53,9 +57,13 @@ def _global() -> GlobalRiskConfig:
 def _entry(klass: str) -> AllowlistEntry:
     return AllowlistEntry(
         match={"class": klass, "underlying": "BTC"},
-        max_position_usd=500, stop_loss_pct=None, tte_min_seconds=0,
-        tte_max_seconds=43200, price_extreme_threshold=0.0,
-        distance_from_strike_usd_min=0, vol_max=100,
+        max_position_usd=500,
+        stop_loss_pct=None,
+        tte_min_seconds=0,
+        tte_max_seconds=43200,
+        price_extreme_threshold=0.0,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
     )
 
 
@@ -63,18 +71,29 @@ def _theta_cfg(theta_overrides: dict | None = None) -> StrategyConfig:
     """A v31-like theta_harvester slot with binary+bucket allowlist entries and
     a shared `theta:` block (favorite_threshold=0.85, exit_safety_d=1.0)."""
     defaults = AllowlistEntry(
-        match={}, max_position_usd=500, stop_loss_pct=None, tte_min_seconds=0,
-        tte_max_seconds=43200, price_extreme_threshold=0.0,
-        distance_from_strike_usd_min=0, vol_max=100,
+        match={},
+        max_position_usd=500,
+        stop_loss_pct=None,
+        tte_min_seconds=0,
+        tte_max_seconds=43200,
+        price_extreme_threshold=0.0,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
     )
     kwargs: dict = dict(
-        name="theta_harvester", account_alias="v31", paper_mode=False,
+        name="theta_harvester",
+        account_alias="v31",
+        paper_mode=False,
         strategy_type="theta_harvester",
         allowlist=[_entry("priceBinary"), _entry("priceBucket")],
-        blocklist_question_idxs=[], defaults=defaults,
+        blocklist_question_idxs=[],
+        defaults=defaults,
         theta=ThetaParams(
-            vol_lookback_seconds=3600, vol_sampling_dt_seconds=5,
-            favorite_threshold=0.85, exit_safety_d=1.0, edge_buffer=0.02,
+            vol_lookback_seconds=3600,
+            vol_sampling_dt_seconds=5,
+            favorite_threshold=0.85,
+            exit_safety_d=1.0,
+            edge_buffer=0.02,
         ),
         **{"global": _global()},
     )
@@ -85,12 +104,19 @@ def _theta_cfg(theta_overrides: dict | None = None) -> StrategyConfig:
 
 def _question(klass: str) -> QuestionView:
     return QuestionView(
-        question_idx=1, yes_symbol="", no_symbol="", strike=100_000.0,
-        expiry_ns=10**18, underlying="BTC", klass=klass, period="24h",
+        question_idx=1,
+        yes_symbol="",
+        no_symbol="",
+        strike=100_000.0,
+        expiry_ns=10**18,
+        underlying="BTC",
+        klass=klass,
+        period="24h",
     )
 
 
 # --- no override → bit-identical to today -----------------------------------
+
 
 def test_no_overrides_yields_empty_by_class_map() -> None:
     """With no `theta_overrides:` block the by-class map is empty, so the
@@ -114,8 +140,7 @@ def test_live_strategy_yaml_bucket_override_matches_tune() -> None:
     If someone edits config/strategy.yaml's theta config, this pins the
     intended live values so a typo/regression fails loudly."""
     cfgs = load_strategies_config(Path("config/strategy.yaml"))
-    theta = {c.account_alias: c for c in cfgs.strategies
-             if c.strategy_type == "theta_harvester"}
+    theta = {c.account_alias: c for c in cfgs.strategies if c.strategy_type == "theta_harvester"}
 
     v31 = theta["v31"]
     base = build_theta_harvester_config(v31)
@@ -123,9 +148,9 @@ def test_live_strategy_yaml_bucket_override_matches_tune() -> None:
     # bucket: mechanical tilt only; risk gates restored to the binary baseline
     assert bucket.vol_lookback_seconds == 2700
     assert bucket.vol_sampling_dt_seconds == 2
-    assert bucket.favorite_threshold == 0.85   # restored (was 0.80 overfit)
-    assert bucket.edge_buffer == 0.02          # restored (was 0.005 overfit)
-    assert bucket.exit_safety_d == 1.0         # restored (was 0.0 overfit)
+    assert bucket.favorite_threshold == 0.85  # restored (was 0.80 overfit)
+    assert bucket.edge_buffer == 0.02  # restored (was 0.005 overfit)
+    assert bucket.exit_safety_d == 1.0  # restored (was 0.0 overfit)
     # binary (the instance default): only vol_lookback diverges to the binary
     # tune (3600→900 @dt5); fav/dt/esd/eb stay at prod (eb=0 does not stack).
     assert base.favorite_threshold == 0.85
@@ -174,25 +199,25 @@ def test_bucket_override_risk_gates_not_below_binary() -> None:
     # (alias, klass) cells exempt from the not-below-binary check; see docstring.
     _RISK_GATE_EXEMPT = {("v31_pm", "priceBucket")}
     cfgs = load_strategies_config(Path("config/strategy.yaml"))
-    theta = {c.account_alias: c for c in cfgs.strategies
-             if c.strategy_type == "theta_harvester"}
+    theta = {c.account_alias: c for c in cfgs.strategies if c.strategy_type == "theta_harvester"}
     for alias, cfg in theta.items():
         base = build_theta_harvester_config(cfg)
         for klass, override in build_theta_harvester_configs_by_class(cfg).items():
             if (alias, klass) in _RISK_GATE_EXEMPT:
                 continue
             assert override.favorite_threshold >= base.favorite_threshold, (
-                f"{alias}/{klass} favorite_threshold "
-                f"{override.favorite_threshold} < binary {base.favorite_threshold}")
+                f"{alias}/{klass} favorite_threshold {override.favorite_threshold} < binary {base.favorite_threshold}"
+            )
             assert override.edge_buffer >= base.edge_buffer, (
-                f"{alias}/{klass} edge_buffer "
-                f"{override.edge_buffer} < binary {base.edge_buffer}")
+                f"{alias}/{klass} edge_buffer {override.edge_buffer} < binary {base.edge_buffer}"
+            )
             assert override.exit_safety_d >= base.exit_safety_d, (
-                f"{alias}/{klass} exit_safety_d "
-                f"{override.exit_safety_d} < binary {base.exit_safety_d}")
+                f"{alias}/{klass} exit_safety_d {override.exit_safety_d} < binary {base.exit_safety_d}"
+            )
 
 
 # --- per-class override applies, other classes keep defaults -----------------
+
 
 def test_bucket_override_applies_binary_keeps_default() -> None:
     """A priceBucket favorite_threshold=0.80 override applies to buckets while
@@ -203,17 +228,21 @@ def test_bucket_override_applies_binary_keeps_default() -> None:
 
     assert by_class["priceBucket"].favorite_threshold == 0.80
     assert base.favorite_threshold == 0.85  # binary (default) unchanged
-    assert "priceBinary" not in by_class      # falls through to base
+    assert "priceBinary" not in by_class  # falls through to base
 
 
 def test_override_only_touches_set_fields() -> None:
     """Resolution order = per-class override > instance theta defaults. Fields
     the override does NOT set keep the instance theta value verbatim."""
-    cfg = _theta_cfg(theta_overrides={"priceBucket": {
-        "favorite_threshold": 0.80,
-        "vol_lookback_seconds": 2700,
-        "edge_buffer": 0.005,
-    }})
+    cfg = _theta_cfg(
+        theta_overrides={
+            "priceBucket": {
+                "favorite_threshold": 0.80,
+                "vol_lookback_seconds": 2700,
+                "edge_buffer": 0.005,
+            }
+        }
+    )
     base = build_theta_harvester_config(cfg)
     bucket = build_theta_harvester_configs_by_class(cfg)["priceBucket"]
 
@@ -237,11 +266,12 @@ def test_override_to_dataclass_default_value_still_applies() -> None:
     base = build_theta_harvester_config(cfg)
     bucket = build_theta_harvester_configs_by_class(cfg)["priceBucket"]
 
-    assert base.exit_safety_d == 1.0       # instance default
-    assert bucket.exit_safety_d == 0.0     # explicit override wins
+    assert base.exit_safety_d == 1.0  # instance default
+    assert bucket.exit_safety_d == 0.0  # explicit override wins
 
 
 # --- strategy wiring: the swap selects per-class config ----------------------
+
 
 def test_strategy_cfg_for_selects_per_class() -> None:
     """ThetaHarvesterStrategy resolves the per-class config by question.klass,
@@ -261,20 +291,27 @@ def test_strategy_restores_cfg_after_evaluate() -> None:
     cfg = _theta_cfg(theta_overrides={"priceBucket": {"favorite_threshold": 0.80}})
     base = build_theta_harvester_config(cfg)
     strat = ThetaHarvesterStrategy(
-        base, cfg_by_class=build_theta_harvester_configs_by_class(cfg),
+        base,
+        cfg_by_class=build_theta_harvester_configs_by_class(cfg),
     )
     # A settled bucket question returns immediately but still runs the swap.
     q = _question("priceBucket")
     q = dataclasses.replace(q, settled=True)
     strat.evaluate(
-        question=q, books={}, reference_price=100_000.0, recent_returns=(),
-        recent_volume_usd=0.0, position=None, now_ns=10**17,
+        question=q,
+        books={},
+        reference_price=100_000.0,
+        recent_returns=(),
+        recent_volume_usd=0.0,
+        position=None,
+        now_ns=10**17,
     )
     assert strat.cfg is base
     assert strat.cfg.favorite_threshold == 0.85
 
 
 # --- guards ------------------------------------------------------------------
+
 
 def test_vol_sampling_dt_override_now_allowed() -> None:
     """Post (symbol, dt) refactor: a per-class vol_sampling_dt_seconds override
@@ -296,17 +333,29 @@ def test_unknown_override_knob_fails_loud() -> None:
 
 # --- bit-identical replay: overrides for one class don't perturb another -----
 
+
 def _book(symbol: str, *, bid: float, ask: float) -> BookState:
     return BookState(
-        symbol=symbol, bid_px=bid, bid_sz=100.0, ask_px=ask, ask_sz=100.0,
-        last_trade_ts_ns=0, last_l2_ts_ns=0,
+        symbol=symbol,
+        bid_px=bid,
+        bid_sz=100.0,
+        ask_px=ask,
+        ask_sz=100.0,
+        last_trade_ts_ns=0,
+        last_l2_ts_ns=0,
     )
 
 
 def _binary_question() -> QuestionView:
     return QuestionView(
-        question_idx=0, yes_symbol="YES", no_symbol="NO", strike=100_000.0,
-        expiry_ns=3600 * 10**9, underlying="BTC", klass="priceBinary", period="1d",
+        question_idx=0,
+        yes_symbol="YES",
+        no_symbol="NO",
+        strike=100_000.0,
+        expiry_ns=3600 * 10**9,
+        underlying="BTC",
+        klass="priceBinary",
+        period="1d",
     )
 
 
@@ -315,15 +364,22 @@ def test_binary_evaluate_bit_identical_with_and_without_bucket_override() -> Non
     Decision built with a bucket override present is byte-for-byte identical to
     the Decision built with no overrides at all (legacy path)."""
     cfg_plain = _theta_cfg()
-    cfg_over = _theta_cfg(theta_overrides={"priceBucket": {
-        "favorite_threshold": 0.80, "exit_safety_d": 0.0, "edge_buffer": 0.005,
-    }})
+    cfg_over = _theta_cfg(
+        theta_overrides={
+            "priceBucket": {
+                "favorite_threshold": 0.80,
+                "exit_safety_d": 0.0,
+                "edge_buffer": 0.005,
+            }
+        }
+    )
     base_plain = build_theta_harvester_config(cfg_plain)
     base_over = build_theta_harvester_config(cfg_over)
 
     strat_plain = ThetaHarvesterStrategy(base_plain)  # legacy 1-arg construction
     strat_over = ThetaHarvesterStrategy(
-        base_over, cfg_by_class=build_theta_harvester_configs_by_class(cfg_over),
+        base_over,
+        cfg_by_class=build_theta_harvester_configs_by_class(cfg_over),
     )
 
     qv = _binary_question()
@@ -333,8 +389,13 @@ def test_binary_evaluate_bit_identical_with_and_without_bucket_override() -> Non
     }
     rets = tuple([0.0001] * 120)
     call = dict(
-        question=qv, books=books, reference_price=120_000.0, recent_returns=rets,
-        recent_volume_usd=1000.0, position=None, now_ns=0,
+        question=qv,
+        books=books,
+        reference_price=120_000.0,
+        recent_returns=rets,
+        recent_volume_usd=1000.0,
+        position=None,
+        now_ns=0,
     )
     d_plain = strat_plain.evaluate(**call)
     d_over = strat_over.evaluate(**call)

@@ -24,6 +24,7 @@ two implementations in separate files lets the GBM strategy stay byte-for-byte
 identical to the existing PM/HL backtests (no risk of regressing v3.1 numbers
 when iterating on the NBA path).
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -63,37 +64,39 @@ class NBAWinProbStrategy(Strategy):
         # A. Settlement always wins.
         if question.settled:
             if position is not None:
-                return Decision(action=Action.EXIT,
-                                diagnostics=(Diagnostic("info", "exit_settlement"),))
+                return Decision(action=Action.EXIT, diagnostics=(Diagnostic("info", "exit_settlement"),))
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "settled"),))
 
         # B. Need a valid WP probability.
         p_yes_home = float(reference_price)
         if not (0.0 < p_yes_home < 1.0):
-            return Decision(action=Action.HOLD,
-                            diagnostics=(Diagnostic("info", "wp_unavailable"),))
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "wp_unavailable"),))
 
         # C. TTE — keep the gate; NBA games are < 4h so callers usually leave
         # the bounds wide. tau_s referenced for diagnostics only.
         tau_s = (question.expiry_ns - now_ns) / 1e9
         if tau_s <= 0:
-            return Decision(action=Action.HOLD,
-                            diagnostics=(Diagnostic("info", "tau_nonpositive"),))
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "tau_nonpositive"),))
         if not (self.cfg.tte_min_seconds <= tau_s <= self.cfg.tte_max_seconds):
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tau_s:.0f}"),)),
-            ))
+            return Decision(
+                action=Action.HOLD, diagnostics=(Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tau_s:.0f}"),)),)
+            )
 
         # D. Existing position → exits.
         if position is not None:
             return self._evaluate_held(
-                question=question, books=books, p_yes_home=p_yes_home,
-                position=position, tau_s=tau_s,
+                question=question,
+                books=books,
+                p_yes_home=p_yes_home,
+                position=position,
+                tau_s=tau_s,
             )
 
         # E. No position → entry.
         return self._evaluate_entry(
-            question=question, books=books, p_yes_home=p_yes_home,
+            question=question,
+            books=books,
+            p_yes_home=p_yes_home,
         )
 
     # -- entry ------------------------------------------------------------
@@ -109,7 +112,10 @@ class NBAWinProbStrategy(Strategy):
         return fee_per_share(self.cfg, p, side="entry")
 
     def _evaluate_entry(
-        self, *, question: QuestionView, books: Mapping[str, BookState],
+        self,
+        *,
+        question: QuestionView,
+        books: Mapping[str, BookState],
         p_yes_home: float,
     ) -> Decision:
         legs = (question.yes_symbol, question.no_symbol)
@@ -128,64 +134,80 @@ class NBAWinProbStrategy(Strategy):
 
         # Favorite-mid gate.
         if self.cfg.favorite_threshold > 0.0:
+
             def _mid(b: BookState) -> float:
                 if b.bid_px is not None and b.ask_px is not None:
                     return (b.bid_px + b.ask_px) / 2.0
                 return b.ask_px if b.ask_px is not None else (b.bid_px or 0.0)
+
             per_leg = [t for t in per_leg if _mid(t[3]) >= self.cfg.favorite_threshold]
             if not per_leg:
-                return Decision(action=Action.HOLD,
-                                diagnostics=(Diagnostic("info", "no_favorite"),))
+                return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_favorite"),))
 
         # Bid-notional sanity gate.
         if self.cfg.min_bid_notional_usd > 0.0:
+
             def _bid_ntl(b: BookState) -> float:
                 return (b.bid_px or 0.0) * (b.bid_sz or 0.0)
+
             per_leg = [t for t in per_leg if _bid_ntl(t[3]) >= self.cfg.min_bid_notional_usd]
             if not per_leg:
-                return Decision(action=Action.HOLD, diagnostics=(
-                    Diagnostic("info", "bid_notional_too_thin"),
-                ))
+                return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "bid_notional_too_thin"),))
 
         chosen_sym, chosen_p, chosen_edge, chosen_book = max(per_leg, key=lambda t: t[2])
 
-        diag = Diagnostic("info", "edge", (
-            ("p_model", f"{p_yes_home:.4f}"),
-            ("chosen_leg", chosen_sym),
-            ("chosen_p", f"{chosen_p:.4f}"),
-            ("chosen_edge", f"{chosen_edge:.4f}"),
-        ))
+        diag = Diagnostic(
+            "info",
+            "edge",
+            (
+                ("p_model", f"{p_yes_home:.4f}"),
+                ("chosen_leg", chosen_sym),
+                ("chosen_p", f"{chosen_p:.4f}"),
+                ("chosen_edge", f"{chosen_edge:.4f}"),
+            ),
+        )
 
         if chosen_edge <= self.cfg.edge_buffer:
             return Decision(action=Action.HOLD, diagnostics=(diag,))
         if self.cfg.edge_max is not None and chosen_edge >= self.cfg.edge_max:
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "edge_too_extreme",
-                           (("edge", f"{chosen_edge:.4f}"),)), diag,
-            ))
+            return Decision(
+                action=Action.HOLD,
+                diagnostics=(
+                    Diagnostic("info", "edge_too_extreme", (("edge", f"{chosen_edge:.4f}"),)),
+                    diag,
+                ),
+            )
 
         size = max(0.0, round_size(self.cfg.max_position_usd, chosen_book.ask_px))
         if size <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"), diag))
 
         intent = make_entry_intent(
-            question, symbol=chosen_sym, size=size, limit_price=chosen_book.ask_px,
+            question,
+            symbol=chosen_sym,
+            size=size,
+            limit_price=chosen_book.ask_px,
         )
         return Decision(
-            action=Action.ENTER, intents=(intent,),
+            action=Action.ENTER,
+            intents=(intent,),
             diagnostics=(Diagnostic("info", "entry"), diag),
         )
 
     # -- held -------------------------------------------------------------
 
     def _evaluate_held(
-        self, *, question: QuestionView, books: Mapping[str, BookState],
-        p_yes_home: float, position: Position, tau_s: float,
+        self,
+        *,
+        question: QuestionView,
+        books: Mapping[str, BookState],
+        p_yes_home: float,
+        position: Position,
+        tau_s: float,
     ) -> Decision:
         held = books.get(position.symbol)
         if held is None or held.bid_px is None or held.ask_px is None:
-            return Decision(action=Action.HOLD,
-                            diagnostics=(Diagnostic("info", "no_book_exit"),))
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_book_exit"),))
 
         # Hard stop.
         if self.cfg.stop_loss_pct is not None and held.bid_px <= position.stop_loss_price:
@@ -196,8 +218,7 @@ class NBAWinProbStrategy(Strategy):
             return self._exit(question, position, held, reason="exit_time_stop")
 
         # Take-profit (price).
-        if (self.cfg.take_profit_price is not None
-                and held.bid_px >= position.avg_entry + self.cfg.take_profit_price):
+        if self.cfg.take_profit_price is not None and held.bid_px >= position.avg_entry + self.cfg.take_profit_price:
             return self._exit(question, position, held, reason="exit_take_profit")
 
         # Edge-based exit.
@@ -213,18 +234,24 @@ class NBAWinProbStrategy(Strategy):
         if should_exit:
             return self._exit(question, position, held, reason="exit_edge")
 
-        return Decision(action=Action.HOLD, diagnostics=(
-            Diagnostic("info", "hold", (
-                ("edge_held", f"{edge_held:.4f}"),
-                ("held_p", f"{held_p:.4f}"),
-                ("tau_s", f"{tau_s:.0f}"),
-            )),
-        ))
+        return Decision(
+            action=Action.HOLD,
+            diagnostics=(
+                Diagnostic(
+                    "info",
+                    "hold",
+                    (
+                        ("edge_held", f"{edge_held:.4f}"),
+                        ("held_p", f"{held_p:.4f}"),
+                        ("tau_s", f"{tau_s:.0f}"),
+                    ),
+                ),
+            ),
+        )
 
     def _exit(self, q: QuestionView, pos: Position, held: BookState, *, reason: str) -> Decision:
         intent = make_exit_intent(q, pos, limit_price=held.bid_px, exit_reason=reason)
-        return Decision(action=Action.EXIT, intents=(intent,),
-                        diagnostics=(Diagnostic("info", reason),))
+        return Decision(action=Action.EXIT, intents=(intent,), diagnostics=(Diagnostic("info", reason),))
 
 
 from hlanalysis.backtest.core.registry import register  # noqa: E402

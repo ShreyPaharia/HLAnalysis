@@ -23,6 +23,7 @@ With reference_price=200,000 BTC, @Y2 is the dominant favorite (p_win ≈ 1.0).
 The "wide book" is placed on @Y2 with bid=0.60, ask=0.95 (half-spread=0.175) —
 mirroring the real live #1670 / #2280 bucket that drove the doom loop.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -34,6 +35,7 @@ from hlanalysis.strategy.types import Action, BookState, Position, QuestionView
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 def _bucket_question(*, expiry_ns: int = 10**18) -> QuestionView:
     """priceBucket with 2 thresholds [55000, 85000] → 3 YES/NO pairs.
@@ -75,18 +77,25 @@ def _binary_question(*, expiry_ns: int = 10**18) -> QuestionView:
 def _book(sym: str, *, bid: float, ask: float, sz: float = 100.0) -> BookState:
     return BookState(
         symbol=sym,
-        bid_px=bid, bid_sz=sz,
-        ask_px=ask, ask_sz=sz,
-        last_trade_ts_ns=0, last_l2_ts_ns=0,
+        bid_px=bid,
+        bid_sz=sz,
+        ask_px=ask,
+        ask_sz=sz,
+        last_trade_ts_ns=0,
+        last_l2_ts_ns=0,
     )
 
 
-def _pos(sym: str, *, qty: float = 100.0, entry_px: float = 0.95,
-         stop_pct: float | None = None, question_idx: int = 42) -> Position:
+def _pos(
+    sym: str, *, qty: float = 100.0, entry_px: float = 0.95, stop_pct: float | None = None, question_idx: int = 42
+) -> Position:
     sl_px = 0.0 if stop_pct is None else entry_px * (1.0 - stop_pct)
     return Position(
-        question_idx=question_idx, symbol=sym, qty=qty,
-        avg_entry=entry_px, stop_loss_price=sl_px,
+        question_idx=question_idx,
+        symbol=sym,
+        qty=qty,
+        avg_entry=entry_px,
+        stop_loss_price=sl_px,
         last_update_ts_ns=0,
     )
 
@@ -142,7 +151,7 @@ def _wide_bucket_books_entry() -> dict[str, BookState]:
         "@N0": _book("@N0", bid=0.01, ask=0.04),
         "@Y1": _book("@Y1", bid=0.01, ask=0.04),
         "@N1": _book("@N1", bid=0.01, ask=0.04),
-        "@Y2": _book("@Y2", bid=_WIDE_BID, ask=_WIDE_ASK),   # wide
+        "@Y2": _book("@Y2", bid=_WIDE_BID, ask=_WIDE_ASK),  # wide
         "@N2": _book("@N2", bid=0.01, ask=0.40),
     }
 
@@ -154,7 +163,7 @@ def _tight_bucket_books_entry() -> dict[str, BookState]:
         "@N0": _book("@N0", bid=0.01, ask=0.04),
         "@Y1": _book("@Y1", bid=0.01, ask=0.04),
         "@N1": _book("@N1", bid=0.01, ask=0.04),
-        "@Y2": _book("@Y2", bid=0.94, ask=0.96),   # tight: spread=0.02, half=0.01
+        "@Y2": _book("@Y2", bid=0.94, ask=0.96),  # tight: spread=0.02, half=0.01
         "@N2": _book("@N2", bid=0.01, ask=0.09),
     }
 
@@ -174,6 +183,7 @@ def _tight_binary_books() -> dict[str, BookState]:
 def _dec_action_and_msgs(dec: object) -> tuple[Action, list[str]]:
     """Helper: extract (action, diagnostic_message_list) from a Decision."""
     from hlanalysis.strategy.types import Decision
+
     assert isinstance(dec, Decision)
     return dec.action, [d.message for d in dec.diagnostics]
 
@@ -181,6 +191,7 @@ def _dec_action_and_msgs(dec: object) -> tuple[Action, list[str]]:
 # ---------------------------------------------------------------------------
 # (a) entry_spread_gate tests
 # ---------------------------------------------------------------------------
+
 
 class TestEntrySpreadGate:
     """entry_spread_gate=True: skip entry when live half-spread exceeds edge budget."""
@@ -197,13 +208,16 @@ class TestEntrySpreadGate:
         q = _bucket_question(expiry_ns=3600 * 10**9)
         # BTC=200k >> 85k → @Y2 p_win≈1.0; ask=0.95 → raw_edge≈0.05 → enters
         dec = strat.evaluate(
-            question=q, books=_wide_bucket_books_entry(), reference_price=200_000.0,
-            recent_returns=_RETS, recent_volume_usd=1000.0, position=None, now_ns=0,
+            question=q,
+            books=_wide_bucket_books_entry(),
+            reference_price=200_000.0,
+            recent_returns=_RETS,
+            recent_volume_usd=1000.0,
+            position=None,
+            now_ns=0,
         )
         action, msgs = _dec_action_and_msgs(dec)
-        assert action == Action.ENTER, (
-            f"expected ENTER without gate; msgs={msgs}"
-        )
+        assert action == Action.ENTER, f"expected ENTER without gate; msgs={msgs}"
 
     def test_gate_fires_on_wide_bucket_book(self) -> None:
         """entry_spread_gate=True + wide bucket book → HOLD when spread > edge budget."""
@@ -214,22 +228,23 @@ class TestEntrySpreadGate:
         strat = _strat(
             entry_spread_gate=True,
             favorite_threshold=0.0,
-            edge_buffer=0.20,          # large buffer so budget < half-spread
+            edge_buffer=0.20,  # large buffer so budget < half-spread
             half_spread_assumption=0.0,
             fee_taker=0.0,
         )
         q = _bucket_question(expiry_ns=3600 * 10**9)
         dec = strat.evaluate(
-            question=q, books=_wide_bucket_books_entry(), reference_price=200_000.0,
-            recent_returns=_RETS, recent_volume_usd=1000.0, position=None, now_ns=0,
+            question=q,
+            books=_wide_bucket_books_entry(),
+            reference_price=200_000.0,
+            recent_returns=_RETS,
+            recent_volume_usd=1000.0,
+            position=None,
+            now_ns=0,
         )
         action, msgs = _dec_action_and_msgs(dec)
-        assert action == Action.HOLD, (
-            f"expected HOLD with spread gate on wide book; msgs={msgs}"
-        )
-        assert "entry_spread_too_wide" in msgs, (
-            f"expected 'entry_spread_too_wide' diagnostic; got {msgs}"
-        )
+        assert action == Action.HOLD, f"expected HOLD with spread gate on wide book; msgs={msgs}"
+        assert "entry_spread_too_wide" in msgs, f"expected 'entry_spread_too_wide' diagnostic; got {msgs}"
 
     def test_gate_does_not_fire_on_tight_binary_book(self) -> None:
         """entry_spread_gate=True + tight binary book → gate does NOT suppress entry."""
@@ -244,13 +259,16 @@ class TestEntrySpreadGate:
         )
         q = _binary_question(expiry_ns=3600 * 10**9)
         dec = strat.evaluate(
-            question=q, books=_tight_binary_books(), reference_price=120_000.0,
-            recent_returns=_RETS, recent_volume_usd=1000.0, position=None, now_ns=0,
+            question=q,
+            books=_tight_binary_books(),
+            reference_price=120_000.0,
+            recent_returns=_RETS,
+            recent_volume_usd=1000.0,
+            position=None,
+            now_ns=0,
         )
         action, msgs = _dec_action_and_msgs(dec)
-        assert action == Action.ENTER, (
-            f"gate should not fire on tight binary; msgs={msgs}"
-        )
+        assert action == Action.ENTER, f"gate should not fire on tight binary; msgs={msgs}"
 
     def test_gate_inert_when_spread_smaller_than_edge_budget(self) -> None:
         """entry_spread_gate=True is inert when live half-spread < edge budget."""
@@ -266,18 +284,22 @@ class TestEntrySpreadGate:
         )
         q = _bucket_question(expiry_ns=3600 * 10**9)
         dec = strat.evaluate(
-            question=q, books=_tight_bucket_books_entry(), reference_price=200_000.0,
-            recent_returns=_RETS, recent_volume_usd=1000.0, position=None, now_ns=0,
+            question=q,
+            books=_tight_bucket_books_entry(),
+            reference_price=200_000.0,
+            recent_returns=_RETS,
+            recent_volume_usd=1000.0,
+            position=None,
+            now_ns=0,
         )
         action, msgs = _dec_action_and_msgs(dec)
-        assert action == Action.ENTER, (
-            f"gate should be inert when spread < budget; msgs={msgs}"
-        )
+        assert action == Action.ENTER, f"gate should be inert when spread < budget; msgs={msgs}"
 
 
 # ---------------------------------------------------------------------------
 # (b) exit_spread_hold tests
 # ---------------------------------------------------------------------------
+
 
 class TestExitSpreadHold:
     """exit_spread_hold > 0: suppress exit_safety_d + exit_edge on wide held book."""
@@ -286,19 +308,22 @@ class TestExitSpreadHold:
         """With exit_spread_hold=0.0 (default), exit_safety_d fires normally."""
         strat = _strat(
             exit_safety_d=1.0,
-            exit_spread_hold=0.0,   # disabled
+            exit_spread_hold=0.0,  # disabled
         )
         q = _bucket_question(expiry_ns=3600 * 10**9)
         pos = _pos("@Y2", entry_px=0.95)
         # BTC=10k far below all thresholds → @Y2 safety_d very negative → EXIT
         dec = strat.evaluate(
-            question=q, books=_wide_held_books(), reference_price=10_000.0,
-            recent_returns=_RETS, recent_volume_usd=1000.0, position=pos, now_ns=0,
+            question=q,
+            books=_wide_held_books(),
+            reference_price=10_000.0,
+            recent_returns=_RETS,
+            recent_volume_usd=1000.0,
+            position=pos,
+            now_ns=0,
         )
         action, msgs = _dec_action_and_msgs(dec)
-        assert action == Action.EXIT, (
-            f"exit_safety_d should fire when hold=0.0; msgs={msgs}"
-        )
+        assert action == Action.EXIT, f"exit_safety_d should fire when hold=0.0; msgs={msgs}"
 
     def test_exit_spread_hold_suppresses_exit_safety_d_on_wide_book(self) -> None:
         """exit_spread_hold active: suppress exit_safety_d (hold to settle)."""
@@ -311,16 +336,17 @@ class TestExitSpreadHold:
         pos = _pos("@Y2", entry_px=0.95)
         # BTC=10k → safety_d very negative; but book is wide → suppressed
         dec = strat.evaluate(
-            question=q, books=_wide_held_books(), reference_price=10_000.0,
-            recent_returns=_RETS, recent_volume_usd=1000.0, position=pos, now_ns=0,
+            question=q,
+            books=_wide_held_books(),
+            reference_price=10_000.0,
+            recent_returns=_RETS,
+            recent_volume_usd=1000.0,
+            position=pos,
+            now_ns=0,
         )
         action, msgs = _dec_action_and_msgs(dec)
-        assert action == Action.HOLD, (
-            f"exit_spread_hold should suppress exit_safety_d; msgs={msgs}"
-        )
-        assert "hold_spread_too_wide" in msgs, (
-            f"expected 'hold_spread_too_wide' diagnostic; got {msgs}"
-        )
+        assert action == Action.HOLD, f"exit_spread_hold should suppress exit_safety_d; msgs={msgs}"
+        assert "hold_spread_too_wide" in msgs, f"expected 'hold_spread_too_wide' diagnostic; got {msgs}"
 
     def test_exit_spread_hold_suppresses_exit_edge_on_wide_book(self) -> None:
         """exit_spread_hold active: suppress exit_edge (not just safety_d)."""
@@ -335,13 +361,16 @@ class TestExitSpreadHold:
         q = _bucket_question(expiry_ns=3600 * 10**9)
         pos = _pos("@Y2", entry_px=0.95)
         dec = strat.evaluate(
-            question=q, books=_wide_held_books(), reference_price=10_000.0,
-            recent_returns=_RETS, recent_volume_usd=1000.0, position=pos, now_ns=0,
+            question=q,
+            books=_wide_held_books(),
+            reference_price=10_000.0,
+            recent_returns=_RETS,
+            recent_volume_usd=1000.0,
+            position=pos,
+            now_ns=0,
         )
         action, msgs = _dec_action_and_msgs(dec)
-        assert action == Action.HOLD, (
-            f"exit_spread_hold should suppress exit_edge; msgs={msgs}"
-        )
+        assert action == Action.HOLD, f"exit_spread_hold should suppress exit_edge; msgs={msgs}"
 
     def test_stop_loss_still_fires_when_exit_spread_hold_on(self) -> None:
         """Stop-loss MUST fire even with exit_spread_hold active (invariant)."""
@@ -354,16 +383,17 @@ class TestExitSpreadHold:
         q = _bucket_question(expiry_ns=3600 * 10**9)
         pos = _pos("@Y2", entry_px=0.95, stop_pct=0.10)
         dec = strat.evaluate(
-            question=q, books=_wide_held_books(), reference_price=10_000.0,
-            recent_returns=_RETS, recent_volume_usd=1000.0, position=pos, now_ns=0,
+            question=q,
+            books=_wide_held_books(),
+            reference_price=10_000.0,
+            recent_returns=_RETS,
+            recent_volume_usd=1000.0,
+            position=pos,
+            now_ns=0,
         )
         action, msgs = _dec_action_and_msgs(dec)
-        assert action == Action.EXIT, (
-            f"stop-loss must fire regardless of exit_spread_hold; msgs={msgs}"
-        )
-        assert "exit_stop_loss" in msgs, (
-            f"expected 'exit_stop_loss'; got {msgs}"
-        )
+        assert action == Action.EXIT, f"stop-loss must fire regardless of exit_spread_hold; msgs={msgs}"
+        assert "exit_stop_loss" in msgs, f"expected 'exit_stop_loss'; got {msgs}"
 
     def test_exit_spread_hold_does_not_suppress_when_book_is_tight(self) -> None:
         """exit_spread_hold must NOT suppress exit_safety_d when book is tight."""
@@ -376,18 +406,22 @@ class TestExitSpreadHold:
         q = _binary_question(expiry_ns=3600 * 10**9)
         pos = _pos("YES", entry_px=0.95, question_idx=7)
         dec = strat.evaluate(
-            question=q, books=_tight_binary_books(), reference_price=50_000.0,
-            recent_returns=_RETS, recent_volume_usd=1000.0, position=pos, now_ns=0,
+            question=q,
+            books=_tight_binary_books(),
+            reference_price=50_000.0,
+            recent_returns=_RETS,
+            recent_volume_usd=1000.0,
+            position=pos,
+            now_ns=0,
         )
         action, msgs = _dec_action_and_msgs(dec)
-        assert action == Action.EXIT, (
-            f"exit_safety_d should fire on tight book (spread below threshold); msgs={msgs}"
-        )
+        assert action == Action.EXIT, f"exit_safety_d should fire on tight book (spread below threshold); msgs={msgs}"
 
 
 # ---------------------------------------------------------------------------
 # Bit-identical to pre-SHR-102 baseline when flags are at defaults
 # ---------------------------------------------------------------------------
+
 
 class TestDefaultBitIdentical:
     """When new fields are at their disabled defaults, the Decision must be
@@ -397,13 +431,23 @@ class TestDefaultBitIdentical:
     so the test is stable.
     """
 
-    def _msgs(self, strat: ThetaHarvesterStrategy, *, question: QuestionView,
-               books: dict[str, BookState], ref: float,
-               position: Position | None) -> tuple[Action, list[str]]:
+    def _msgs(
+        self,
+        strat: ThetaHarvesterStrategy,
+        *,
+        question: QuestionView,
+        books: dict[str, BookState],
+        ref: float,
+        position: Position | None,
+    ) -> tuple[Action, list[str]]:
         dec = strat.evaluate(
-            question=question, books=books, reference_price=ref,
-            recent_returns=_RETS, recent_volume_usd=1000.0,
-            position=position, now_ns=0,
+            question=question,
+            books=books,
+            reference_price=ref,
+            recent_returns=_RETS,
+            recent_volume_usd=1000.0,
+            position=position,
+            now_ns=0,
         )
         return _dec_action_and_msgs(dec)
 
@@ -411,13 +455,17 @@ class TestDefaultBitIdentical:
         """Binary entry: new fields at disabled defaults → same action + diags."""
         cfg_no_new = _base_cfg(favorite_threshold=0.0, edge_buffer=0.0)
         cfg_with_defaults = _base_cfg(
-            favorite_threshold=0.0, edge_buffer=0.0,
-            entry_spread_gate=False, exit_spread_hold=0.0,
+            favorite_threshold=0.0,
+            edge_buffer=0.0,
+            entry_spread_gate=False,
+            exit_spread_hold=0.0,
         )
         q = _binary_question(expiry_ns=3600 * 10**9)
         books = _tight_binary_books()
         a1, m1 = self._msgs(ThetaHarvesterStrategy(cfg_no_new), question=q, books=books, ref=120_000.0, position=None)
-        a2, m2 = self._msgs(ThetaHarvesterStrategy(cfg_with_defaults), question=q, books=books, ref=120_000.0, position=None)
+        a2, m2 = self._msgs(
+            ThetaHarvesterStrategy(cfg_with_defaults), question=q, books=books, ref=120_000.0, position=None
+        )
         assert a1 == a2, f"action mismatch: {a1} vs {a2}"
         assert m1 == m2, f"diags mismatch: {m1} vs {m2}"
 
@@ -425,16 +473,21 @@ class TestDefaultBitIdentical:
         """Bucket exit with wide book: new fields at defaults → same action + diags."""
         cfg_no_new = _base_cfg(exit_safety_d=0.0, exit_edge_threshold=-0.01, favorite_threshold=0.0)
         cfg_with_defaults = _base_cfg(
-            exit_safety_d=0.0, exit_edge_threshold=-0.01, favorite_threshold=0.0,
-            entry_spread_gate=False, exit_spread_hold=0.0,
+            exit_safety_d=0.0,
+            exit_edge_threshold=-0.01,
+            favorite_threshold=0.0,
+            entry_spread_gate=False,
+            exit_spread_hold=0.0,
         )
         q = _bucket_question(expiry_ns=3600 * 10**9)
         pos = _pos("@Y2", entry_px=0.95)
         # BTC=200k → @Y2 p_win≈1.0; bid=0.60; edge_held=1.0-0.60≈0.40 > -0.01 → HOLD
-        a1, m1 = self._msgs(ThetaHarvesterStrategy(cfg_no_new),
-                            question=q, books=_wide_held_books(), ref=200_000.0, position=pos)
-        a2, m2 = self._msgs(ThetaHarvesterStrategy(cfg_with_defaults),
-                            question=q, books=_wide_held_books(), ref=200_000.0, position=pos)
+        a1, m1 = self._msgs(
+            ThetaHarvesterStrategy(cfg_no_new), question=q, books=_wide_held_books(), ref=200_000.0, position=pos
+        )
+        a2, m2 = self._msgs(
+            ThetaHarvesterStrategy(cfg_with_defaults), question=q, books=_wide_held_books(), ref=200_000.0, position=pos
+        )
         assert a1 == a2, f"action mismatch: {a1} vs {a2}"
         assert m1 == m2, f"diags mismatch: {m1} vs {m2}"
 
@@ -442,13 +495,25 @@ class TestDefaultBitIdentical:
         """Bucket entry with wide book at defaults → same action + diags as before."""
         cfg_no_new = _base_cfg(favorite_threshold=0.0, edge_buffer=0.0)
         cfg_with_defaults = _base_cfg(
-            favorite_threshold=0.0, edge_buffer=0.0,
-            entry_spread_gate=False, exit_spread_hold=0.0,
+            favorite_threshold=0.0,
+            edge_buffer=0.0,
+            entry_spread_gate=False,
+            exit_spread_hold=0.0,
         )
         q = _bucket_question(expiry_ns=3600 * 10**9)
-        a1, m1 = self._msgs(ThetaHarvesterStrategy(cfg_no_new),
-                            question=q, books=_wide_bucket_books_entry(), ref=200_000.0, position=None)
-        a2, m2 = self._msgs(ThetaHarvesterStrategy(cfg_with_defaults),
-                            question=q, books=_wide_bucket_books_entry(), ref=200_000.0, position=None)
+        a1, m1 = self._msgs(
+            ThetaHarvesterStrategy(cfg_no_new),
+            question=q,
+            books=_wide_bucket_books_entry(),
+            ref=200_000.0,
+            position=None,
+        )
+        a2, m2 = self._msgs(
+            ThetaHarvesterStrategy(cfg_with_defaults),
+            question=q,
+            books=_wide_bucket_books_entry(),
+            ref=200_000.0,
+            position=None,
+        )
         assert a1 == a2, f"action mismatch: {a1} vs {a2}"
         assert m1 == m2, f"diags mismatch: {m1} vs {m2}"

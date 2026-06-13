@@ -8,6 +8,7 @@ Timing convention: all ts_ns values are ``local_recv_ts`` (nanoseconds since
 epoch, captured by ``time.time_ns()`` on the recording host).  Venue-provided
 ``exchange_ts`` is NOT used for ordering — see book.py for per-venue caveats.
 """
+
 from __future__ import annotations
 
 import duckdb
@@ -75,9 +76,7 @@ def quoted_spread_bps(
     try:
         raw = con.execute(sql, [end_ns]).df()
     except duckdb.IOException:
-        raw = pd.DataFrame(
-            {"ts_ns": pd.Series([], dtype="int64"), "spread_bps": pd.Series([], dtype="float64")}
-        )
+        raw = pd.DataFrame({"ts_ns": pd.Series([], dtype="int64"), "spread_bps": pd.Series([], dtype="float64")})
 
     raw["ts_ns"] = raw["ts_ns"].astype("int64")
     raw["spread_bps"] = raw["spread_bps"].astype("float64")
@@ -137,9 +136,7 @@ def book_imbalance(
         ``ts_ns``      (int64)   — local_recv_ts of the snapshot.
         ``imbalance``  (float64) — imbalance in [-1, +1]; NaN if total size = 0.
     """
-    glob = glob_for(
-        venue=venue, product_type=product_type, event="book_snapshot", symbol=symbol
-    )
+    glob = glob_for(venue=venue, product_type=product_type, event="book_snapshot", symbol=symbol)
     sql = f"""
         SELECT local_recv_ts AS ts_ns, bid_sz, ask_sz
         FROM read_parquet('{glob}', hive_partitioning=true)
@@ -371,8 +368,7 @@ def cross_correlation(
     n = len(x)
     if max_lag >= n:
         raise ValueError(
-            f"max_lag ({max_lag}) must be less than len(x) ({n}). "
-            "Reduce max_lag or provide a longer series."
+            f"max_lag ({max_lag}) must be less than len(x) ({n}). Reduce max_lag or provide a longer series."
         )
 
     xv = x.reset_index(drop=True).to_numpy(dtype="float64")

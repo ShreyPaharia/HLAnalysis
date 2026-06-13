@@ -6,6 +6,7 @@ swing). ``backtest_params_from_slot`` reuses the engine's config builders; the
 registry strategy built from its emitted params must reproduce the live decision
 config field-for-field, for the slot default AND every per-class override.
 """
+
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -73,9 +74,9 @@ def test_vol_estimator_pinned_not_silently_bipower():
     must NOT silently become bipower in the sim. Building the slot's params
     through the registry reproduces the live estimator exactly."""
     cfg = next(
-        c for c in _slots()
-        if c.strategy_type == "theta_harvester"
-        and build_theta_harvester_config(c).vol_estimator == "sample_std"
+        c
+        for c in _slots()
+        if c.strategy_type == "theta_harvester" and build_theta_harvester_config(c).vol_estimator == "sample_std"
     )
     strategy_id, params = backtest_params_from_slot(cfg)
     sim = build_strategy_for_run(strategy_id, params)

@@ -7,6 +7,7 @@ intermittently raises ``IOException: No files found`` even though the files exis
 the deep recursive walk; a flat (non-date-partitioned) layout falls back to the
 original glob unchanged.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

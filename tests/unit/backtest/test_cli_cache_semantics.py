@@ -8,6 +8,7 @@ opt-in (default OFF) and set ``HLBT_CACHE_EVENT_ARRAYS=1`` when
 ``--cache-event-arrays`` was passed — even though that flag was already a
 no-op in ``cmd_run``.  This file verifies the fixed semantics.
 """
+
 from __future__ import annotations
 
 import os
@@ -29,6 +30,7 @@ def _caching_enabled_fresh() -> bool:
         os.environ.pop("HLBT_NO_CACHE", None)
         os.environ.pop("HLBT_CACHE_EVENT_ARRAYS", None)
         from hlanalysis.backtest.data._event_array_cache import caching_enabled
+
         return caching_enabled()
 
 
@@ -38,9 +40,8 @@ def test_cache_default_on_when_no_env_vars_set() -> None:
         os.environ.pop("HLBT_NO_CACHE", None)
         os.environ.pop("HLBT_CACHE_EVENT_ARRAYS", None)
         from hlanalysis.backtest.data._event_array_cache import caching_enabled
-        assert caching_enabled() is True, (
-            "cache must be default-ON (returns True) when no env vars are set"
-        )
+
+        assert caching_enabled() is True, "cache must be default-ON (returns True) when no env vars are set"
 
 
 def test_no_cache_env_disables_cache() -> None:
@@ -48,9 +49,8 @@ def test_no_cache_env_disables_cache() -> None:
     with mock.patch.dict(os.environ, {"HLBT_NO_CACHE": "1"}, clear=False):
         os.environ.pop("HLBT_CACHE_EVENT_ARRAYS", None)
         from hlanalysis.backtest.data._event_array_cache import caching_enabled
-        assert caching_enabled() is False, (
-            "HLBT_NO_CACHE=1 must disable the cache"
-        )
+
+        assert caching_enabled() is False, "HLBT_NO_CACHE=1 must disable the cache"
 
 
 def test_cache_event_arrays_set_to_1_is_same_as_default() -> None:
@@ -63,6 +63,7 @@ def test_cache_event_arrays_set_to_1_is_same_as_default() -> None:
         os.environ.pop("HLBT_NO_CACHE", None)
         os.environ.pop("HLBT_CACHE_EVENT_ARRAYS", None)
         from hlanalysis.backtest.data._event_array_cache import caching_enabled
+
         state_unset = caching_enabled()
 
     with mock.patch.dict(os.environ, {"HLBT_CACHE_EVENT_ARRAYS": "1"}, clear=False):
@@ -88,13 +89,9 @@ def test_cmd_tune_argparse_declares_cache_event_arrays_as_noop() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--cache-event-arrays", action="store_true", help="no-op test")
     args = p.parse_args([])
-    assert args.cache_event_arrays is False, (
-        "--cache-event-arrays must default to False"
-    )
+    assert args.cache_event_arrays is False, "--cache-event-arrays must default to False"
     args2 = p.parse_args(["--cache-event-arrays"])
-    assert args2.cache_event_arrays is True, (
-        "--cache-event-arrays must be parseable (for back-compat)"
-    )
+    assert args2.cache_event_arrays is True, "--cache-event-arrays must be parseable (for back-compat)"
 
 
 def test_cmd_tune_comment_reflects_default_on() -> None:
@@ -114,6 +111,7 @@ def test_cmd_tune_comment_reflects_default_on() -> None:
 
         # Simulate the args that would be passed when --cache-event-arrays is given.
         import argparse
+
         args = argparse.Namespace(
             cache_event_arrays=True,
             rebuild_cache=False,
@@ -129,9 +127,9 @@ def test_cmd_tune_comment_reflects_default_on() -> None:
         # NOT replicated here — that's the fix.
 
         from hlanalysis.backtest.data._event_array_cache import caching_enabled
+
         assert caching_enabled() is True, (
-            "cache must still be ON after cmd_tune --cache-event-arrays wiring "
-            "(flag is a no-op; cache is default-ON)"
+            "cache must still be ON after cmd_tune --cache-event-arrays wiring (flag is a no-op; cache is default-ON)"
         )
 
 
@@ -148,11 +146,8 @@ def test_cmd_run_and_cmd_tune_have_identical_no_cache_wiring() -> None:
     import hlanalysis.backtest.cli as cli_mod
 
     src = inspect.getsource(cli_mod.cmd_tune)
-    assert "HLBT_NO_CACHE" in src, (
-        "cmd_tune must wire HLBT_NO_CACHE (for --no-cache flag) — Fix-3"
-    )
+    assert "HLBT_NO_CACHE" in src, "cmd_tune must wire HLBT_NO_CACHE (for --no-cache flag) — Fix-3"
     # Also confirm the old dead code is gone.
     assert 'os.environ["HLBT_CACHE_EVENT_ARRAYS"] = "1"' not in src, (
-        "cmd_tune must NOT set HLBT_CACHE_EVENT_ARRAYS=1 — that was the stale "
-        "opt-in code; Fix-3 removes it"
+        "cmd_tune must NOT set HLBT_CACHE_EVENT_ARRAYS=1 — that was the stale opt-in code; Fix-3 removes it"
     )

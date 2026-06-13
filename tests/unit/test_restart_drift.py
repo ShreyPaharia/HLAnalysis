@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 from hlanalysis.engine.hl_client import (
-    ClearinghouseState, OpenOrderRow, UserFillRow,
+    ClearinghouseState,
+    OpenOrderRow,
+    UserFillRow,
 )
 from hlanalysis.engine.reconcile import Reconciler
 from hlanalysis.engine.restart_drift import RestartDriftGate
@@ -31,11 +33,21 @@ def test_clean_state_does_not_block(tmp_path, dal):
 
 
 def test_local_ghost_blocks_restart(tmp_path, dal):
-    dal.upsert_order(OpenOrder(
-        cloid="hla-ghost", venue_oid="v", question_idx=42, symbol="@30",
-        side="buy", price=0.95, size=10.0, status="open",
-        placed_ts_ns=1, last_update_ts_ns=1, strategy_id="x",
-    ))
+    dal.upsert_order(
+        OpenOrder(
+            cloid="hla-ghost",
+            venue_oid="v",
+            question_idx=42,
+            symbol="@30",
+            side="buy",
+            price=0.95,
+            size=10.0,
+            status="open",
+            placed_ts_ns=1,
+            last_update_ts_ns=1,
+            strategy_id="x",
+        )
+    )
     block = tmp_path / "restart_blocked"
     gate = RestartDriftGate(dal=dal, block_path=block)
     res = gate.run(
@@ -66,10 +78,17 @@ def test_venue_orphan_blocks(tmp_path, dal):
     block = tmp_path / "restart_blocked"
     gate = RestartDriftGate(dal=dal, block_path=block)
     res = gate.run(
-        venue_open=[OpenOrderRow(
-            cloid="hla-orphan", venue_oid="v", symbol="@30",
-            side="buy", price=0.95, size=10.0, placed_ts_ns=1,
-        )],
+        venue_open=[
+            OpenOrderRow(
+                cloid="hla-orphan",
+                venue_oid="v",
+                symbol="@30",
+                side="buy",
+                price=0.95,
+                size=10.0,
+                placed_ts_ns=1,
+            )
+        ],
         venue_state=ClearinghouseState(positions=(), account_value_usd=0),
         fills_lookup=lambda _c: [],
         now_ns=2,

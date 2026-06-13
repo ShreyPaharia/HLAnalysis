@@ -10,6 +10,7 @@ legacy per-cell Python builder it replaced. ``_naive_build_leg_event_array`` is
 an independent re-implementation of that legacy builder, kept inline so the
 regression oracle does not depend on the deleted code.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -105,10 +106,7 @@ def _naive_build_leg_event_array(snapshots, trades):
 
 
 def _multiset(arr: np.ndarray) -> list[tuple]:
-    return sorted(
-        (int(r["exch_ts"]), int(r["ev"]), float(r["px"]), float(r["qty"]))
-        for r in arr
-    )
+    return sorted((int(r["exch_ts"]), int(r["ev"]), float(r["px"]), float(r["qty"])) for r in arr)
 
 
 def test_unified_builder_matches_naive_on_synthetic_source() -> None:
@@ -171,11 +169,13 @@ def test_unified_builder_duplicate_timestamp_final_depth() -> None:
     unified = build_leg_event_array_from_snapshots(snaps, [])
     naive = _naive_build_leg_event_array(snaps, [])
     assert _multiset(unified) == _multiset(naive)
+
     # Reconstruct the final bid depth at ts=20 the way hftbacktest would: apply
     # every event in array order, last write per price wins.
     def final_bids(arr):
         depth: dict[float, float] = {}
         from hftbacktest.types import BUY_EVENT
+
         for r in arr:
             if int(r["ev"]) & BUY_EVENT:
                 px, qty = float(r["px"]), float(r["qty"])
@@ -184,6 +184,7 @@ def test_unified_builder_duplicate_timestamp_final_depth() -> None:
                 else:
                     depth[px] = qty
         return depth
+
     assert final_bids(unified) == final_bids(naive)
     # Concretely: only 0.48 survives at ts=20.
     assert final_bids(unified) == {0.48: 70.0}
@@ -194,12 +195,13 @@ def test_unified_builder_clears_match_naive_multiset() -> None:
     builder must match the naive oracle as a multiset (clear ordering within a
     timestamp is fill-irrelevant)."""
     snaps = [
-        BookSnapshot(ts_ns=10, symbol="#1",
-                     bids=((0.59, 100.0), (0.58, 200.0), (0.57, 300.0)),
-                     asks=((0.61, 100.0), (0.62, 200.0))),
-        BookSnapshot(ts_ns=20, symbol="#1",
-                     bids=((0.58, 210.0),),
-                     asks=((0.62, 220.0),)),
+        BookSnapshot(
+            ts_ns=10,
+            symbol="#1",
+            bids=((0.59, 100.0), (0.58, 200.0), (0.57, 300.0)),
+            asks=((0.61, 100.0), (0.62, 200.0)),
+        ),
+        BookSnapshot(ts_ns=20, symbol="#1", bids=((0.58, 210.0),), asks=((0.62, 220.0),)),
     ]
     unified = build_leg_event_array_from_snapshots(snaps, [])
     naive = _naive_build_leg_event_array(snaps, [])

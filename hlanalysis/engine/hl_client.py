@@ -110,7 +110,7 @@ def _extract_cloid_hex32(internal_cloid: str) -> str:
     """
     s = internal_cloid
     if s.startswith("hla-"):
-        s = s[len("hla-"):]
+        s = s[len("hla-") :]
     elif s.startswith("0x") or s.startswith("0X"):
         s = s[2:]
     if "-" in s:
@@ -157,6 +157,7 @@ class HLClient:
             import eth_account  # type: ignore[import-not-found]
             from hyperliquid.exchange import Exchange  # type: ignore[import-not-found]
             from hyperliquid.info import Info  # type: ignore[import-not-found]
+
             try:
                 wallet = eth_account.Account.from_key(api_secret_key)
                 self._exchange = Exchange(wallet, base_url=base_url, account_address=account_address)
@@ -216,13 +217,17 @@ class HLClient:
         # filled at the requested price; price <= 0 is rejected. This is a
         # placeholder — fidelity improves in Plan 1C with a fake L2.
         if req.price <= 0:
-            ack = OrderAck(cloid=req.cloid, venue_oid=f"paper-{req.cloid}",
-                           status="rejected", error="non_marketable_paper_default")
+            ack = OrderAck(
+                cloid=req.cloid, venue_oid=f"paper-{req.cloid}", status="rejected", error="non_marketable_paper_default"
+            )
             self._paper_orders[req.cloid] = ack
             return ack
         ack = OrderAck(
-            cloid=req.cloid, venue_oid=f"paper-{req.cloid}",
-            status="filled", fill_price=req.price, fill_size=req.size,
+            cloid=req.cloid,
+            venue_oid=f"paper-{req.cloid}",
+            status="filled",
+            fill_price=req.price,
+            fill_size=req.size,
         )
         self._paper_orders[req.cloid] = ack
         # Track virtual position (only on entries; paper exit logic netts out)
@@ -235,27 +240,43 @@ class HLClient:
                     self._paper_positions.pop(req.symbol, None)
                 else:
                     self._paper_positions[req.symbol] = VenuePosition(
-                        symbol=req.symbol, qty=new_qty,
-                        avg_entry=existing.avg_entry, unrealized_pnl=0.0,
+                        symbol=req.symbol,
+                        qty=new_qty,
+                        avg_entry=existing.avg_entry,
+                        unrealized_pnl=0.0,
                     )
         else:
             existing = self._paper_positions.get(req.symbol)
             if existing is None:
                 self._paper_positions[req.symbol] = VenuePosition(
-                    symbol=req.symbol, qty=signed, avg_entry=req.price, unrealized_pnl=0.0,
+                    symbol=req.symbol,
+                    qty=signed,
+                    avg_entry=req.price,
+                    unrealized_pnl=0.0,
                 )
             else:
                 # Average up
                 tot = existing.qty + signed
                 avg = (existing.qty * existing.avg_entry + signed * req.price) / tot if tot else 0.0
                 self._paper_positions[req.symbol] = VenuePosition(
-                    symbol=req.symbol, qty=tot, avg_entry=avg, unrealized_pnl=0.0,
+                    symbol=req.symbol,
+                    qty=tot,
+                    avg_entry=avg,
+                    unrealized_pnl=0.0,
                 )
         ts = time.time_ns()
-        self._paper_fills.append(UserFillRow(
-            fill_id=f"f-{req.cloid}-{ts}", cloid=req.cloid, symbol=req.symbol,
-            side=req.side, price=req.price, size=req.size, fee=0.0, ts_ns=ts,
-        ))
+        self._paper_fills.append(
+            UserFillRow(
+                fill_id=f"f-{req.cloid}-{ts}",
+                cloid=req.cloid,
+                symbol=req.symbol,
+                side=req.side,
+                price=req.price,
+                size=req.size,
+                fee=0.0,
+                ts_ns=ts,
+            )
+        )
         return ack
 
     def _live_place_safe(self, req: PlaceRequest) -> OrderAck:
@@ -287,11 +308,14 @@ class HLClient:
             except (KeyError, AttributeError):
                 pass
             import math as _math
-            quant = 10 ** sz_decimals
+
+            quant = 10**sz_decimals
             sized = _math.floor(req.size * quant) / quant if quant > 1 else _math.floor(req.size)
             if sized <= 0:
                 return OrderAck(
-                    cloid=req.cloid, venue_oid="", status="rejected",
+                    cloid=req.cloid,
+                    venue_oid="",
+                    status="rejected",
                     error=f"size {req.size} flooring to {sz_decimals} decimals → 0",
                 )
             # SDK expects cloid as a Cloid object (32-byte hex). Accept three
@@ -301,12 +325,16 @@ class HLClient:
             #   - hla-<alias>-<hex>          (multi-account; alias may contain non-hex chars)
             # The wire form drops the alias — HL only needs the 32-char hex tail.
             from hyperliquid.utils.types import Cloid  # type: ignore[import-not-found]
+
             cloid_str = req.cloid
             if not cloid_str.startswith("0x"):
                 cloid_str = f"0x{_extract_cloid_hex32(cloid_str)}"
             cloid_obj = Cloid.from_str(cloid_str)
             resp = self._exchange.order(
-                req.symbol, req.side == "buy", sized, req.price,
+                req.symbol,
+                req.side == "buy",
+                sized,
+                req.price,
                 {"limit": {"tif": "Ioc" if req.time_in_force == "ioc" else "Gtc"}},
                 reduce_only=req_reduce_only,
                 cloid=cloid_obj,
@@ -318,18 +346,25 @@ class HLClient:
         data = resp.get("response", {}).get("data", {}).get("statuses", [{}])[0]
         if "error" in data:
             return OrderAck(
-                cloid=req.cloid, venue_oid="", status="rejected", error=str(data["error"]),
+                cloid=req.cloid,
+                venue_oid="",
+                status="rejected",
+                error=str(data["error"]),
             )
         if "filled" in data:
             f = data["filled"]
             return OrderAck(
-                cloid=req.cloid, venue_oid=str(f.get("oid", "")),
-                status="filled", fill_price=float(f.get("avgPx", 0)),
+                cloid=req.cloid,
+                venue_oid=str(f.get("oid", "")),
+                status="filled",
+                fill_price=float(f.get("avgPx", 0)),
                 fill_size=float(f.get("totalSz", 0)),
             )
         if "resting" in data:
             return OrderAck(
-                cloid=req.cloid, venue_oid=str(data["resting"].get("oid", "")), status="open",
+                cloid=req.cloid,
+                venue_oid=str(data["resting"].get("oid", "")),
+                status="open",
             )
         return OrderAck(cloid=req.cloid, venue_oid="", status="rejected", error="unknown_response")
 
@@ -337,6 +372,7 @@ class HLClient:
     def _live_cancel(self, *, cloid: str, symbol: str) -> bool:
         assert self._exchange is not None
         from hyperliquid.utils.types import Cloid  # type: ignore[import-not-found]
+
         cloid_str = cloid if cloid.startswith("0x") else f"0x{_extract_cloid_hex32(cloid)}"
         cloid_obj = Cloid.from_str(cloid_str)
         try:
@@ -360,15 +396,17 @@ class HLClient:
             _reraise_rest(e)
         out: list[OpenOrderRow] = []
         for r in rows or []:
-            out.append(OpenOrderRow(
-                cloid=str(r.get("cloid", "")),
-                venue_oid=str(r.get("oid", "")),
-                symbol=str(r.get("coin", "")),
-                side="buy" if r.get("side") == "B" else "sell",
-                price=float(r.get("limitPx", 0)),
-                size=float(r.get("sz", 0)),
-                placed_ts_ns=int(r.get("timestamp", 0)) * 1_000_000,
-            ))
+            out.append(
+                OpenOrderRow(
+                    cloid=str(r.get("cloid", "")),
+                    venue_oid=str(r.get("oid", "")),
+                    symbol=str(r.get("coin", "")),
+                    side="buy" if r.get("side") == "B" else "sell",
+                    price=float(r.get("limitPx", 0)),
+                    size=float(r.get("sz", 0)),
+                    placed_ts_ns=int(r.get("timestamp", 0)) * 1_000_000,
+                )
+            )
         return out
 
     @_read_retry
@@ -389,12 +427,14 @@ class HLClient:
             qty = float(p.get("szi", 0))
             if qty == 0:
                 continue
-            positions.append(VenuePosition(
-                symbol=str(p.get("coin", "")),
-                qty=qty,
-                avg_entry=float(p.get("entryPx", 0)),
-                unrealized_pnl=float(p.get("unrealizedPnl", 0)),
-            ))
+            positions.append(
+                VenuePosition(
+                    symbol=str(p.get("coin", "")),
+                    qty=qty,
+                    avg_entry=float(p.get("entryPx", 0)),
+                    unrealized_pnl=float(p.get("unrealizedPnl", 0)),
+                )
+            )
         # HIP-4 outcome shares are classified as spot on HL and live in
         # spotClearinghouseState.balances as coin="+N", NOT in the perp
         # assetPositions list above. Without merging them the reconciler's
@@ -425,12 +465,14 @@ class HLClient:
                 continue
             entry_ntl = float(bal.get("entryNtl", 0))
             avg_entry = entry_ntl / qty if qty > 0 else 0.0
-            positions.append(VenuePosition(
-                symbol=f"#{n_str}",
-                qty=qty,
-                avg_entry=avg_entry,
-                unrealized_pnl=0.0,
-            ))
+            positions.append(
+                VenuePosition(
+                    symbol=f"#{n_str}",
+                    qty=qty,
+                    avg_entry=avg_entry,
+                    unrealized_pnl=0.0,
+                )
+            )
         perp_value = float(data.get("marginSummary", {}).get("accountValue", 0))
         return ClearinghouseState(
             positions=tuple(positions),
@@ -473,36 +515,32 @@ class HLClient:
             ts_ns = ts_ms * 1_000_000
             if ts_ns < since_ts_ns:
                 continue
-            out.append(UserFillRow(
-                fill_id=str(r.get("tid", r.get("hash", ""))),
-                cloid=str(r.get("cloid", "")),
-                symbol=str(r.get("coin", "")),
-                side="buy" if r.get("side") == "B" else "sell",
-                price=float(r.get("px", 0)),
-                size=float(r.get("sz", 0)),
-                fee=float(r.get("fee", 0)),
-                ts_ns=ts_ns,
-                closed_pnl=float(r.get("closedPnl", 0) or 0),
-            ))
+            out.append(
+                UserFillRow(
+                    fill_id=str(r.get("tid", r.get("hash", ""))),
+                    cloid=str(r.get("cloid", "")),
+                    symbol=str(r.get("coin", "")),
+                    side="buy" if r.get("side") == "B" else "sell",
+                    price=float(r.get("px", 0)),
+                    size=float(r.get("sz", 0)),
+                    fee=float(r.get("fee", 0)),
+                    ts_ns=ts_ns,
+                    closed_pnl=float(r.get("closedPnl", 0) or 0),
+                )
+            )
         return out
 
     # HL reports HIP-4 / bucket settlement as a fill (dir="Settlement",
     # closedPnl populated), so realized_pnl_since already includes settlement.
     settlement_reported_as_fill = True
 
-    def realized_pnl_for_symbol(
-        self, symbol: str, *, since_ts_ns: int = 0
-    ) -> float:
+    def realized_pnl_for_symbol(self, symbol: str, *, since_ts_ns: int = 0) -> float:
         """Venue-truth realized PnL for one leg: Σ(closedPnl − fee) over this
         account's fills on `symbol` since the cutoff. Because HIP-4 settlement
         is a fill, this captures the settlement payout exactly — used to book
         settlement Exits from HL truth instead of re-deriving a winning leg
         (the latter mislabels multi-leg buckets, booking winners as losses)."""
-        return sum(
-            f.closed_pnl - f.fee
-            for f in self.user_fills(since_ts_ns=since_ts_ns)
-            if f.symbol == symbol
-        )
+        return sum(f.closed_pnl - f.fee for f in self.user_fills(since_ts_ns=since_ts_ns) if f.symbol == symbol)
 
     @_read_retry
     def account_pnl_all_time(self) -> float | None:

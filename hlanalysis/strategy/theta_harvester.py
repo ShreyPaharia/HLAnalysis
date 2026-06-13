@@ -56,9 +56,7 @@ class ThetaHarvesterStrategy(Strategy):
         # reading self.cfg unmodified. Mirrors LateResolutionStrategy.
         self.cfg = cfg
         self._default_cfg = cfg
-        self._cfg_by_class: dict[str, ThetaHarvesterConfig] = (
-            dict(cfg_by_class) if cfg_by_class else {}
-        )
+        self._cfg_by_class: dict[str, ThetaHarvesterConfig] = dict(cfg_by_class) if cfg_by_class else {}
 
     def _cfg_for(self, question: QuestionView) -> ThetaHarvesterConfig:
         return self._cfg_by_class.get(question.klass, self._default_cfg)
@@ -83,17 +81,27 @@ class ThetaHarvesterStrategy(Strategy):
         resolved_cfg = self._cfg_for(question)
         if resolved_cfg is self.cfg:
             return self._evaluate(
-                question=question, books=books, reference_price=reference_price,
-                recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
-                position=position, now_ns=now_ns, recent_hl_bars=recent_hl_bars,
+                question=question,
+                books=books,
+                reference_price=reference_price,
+                recent_returns=recent_returns,
+                recent_volume_usd=recent_volume_usd,
+                position=position,
+                now_ns=now_ns,
+                recent_hl_bars=recent_hl_bars,
             )
         prev_cfg = self.cfg
         self.cfg = resolved_cfg
         try:
             return self._evaluate(
-                question=question, books=books, reference_price=reference_price,
-                recent_returns=recent_returns, recent_volume_usd=recent_volume_usd,
-                position=position, now_ns=now_ns, recent_hl_bars=recent_hl_bars,
+                question=question,
+                books=books,
+                reference_price=reference_price,
+                recent_returns=recent_returns,
+                recent_volume_usd=recent_volume_usd,
+                position=position,
+                now_ns=now_ns,
+                recent_hl_bars=recent_hl_bars,
             )
         finally:
             self.cfg = prev_cfg
@@ -136,16 +144,27 @@ class ThetaHarvesterStrategy(Strategy):
         # is enabled, we consider adding to the existing position.
         if position is not None:
             exit_dec = self._evaluate_exits(
-                question=question, books=books, reference_price=reference_price,
-                sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr, tau_s=tau_s, position=position,
+                question=question,
+                books=books,
+                reference_price=reference_price,
+                sigma=sigma,
+                mu_eff=mu_eff,
+                tau_yr=tau_yr,
+                tau_s=tau_s,
+                position=position,
             )
             if exit_dec.action == Action.EXIT:
                 return exit_dec
             if not self.cfg.topup_enabled:
                 return exit_dec
             topup_dec = self._evaluate_topup(
-                question=question, books=books, reference_price=reference_price,
-                sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr, position=position,
+                question=question,
+                books=books,
+                reference_price=reference_price,
+                sigma=sigma,
+                mu_eff=mu_eff,
+                tau_yr=tau_yr,
+                position=position,
                 recent_returns=recent_returns,
             )
             if topup_dec.action == Action.ENTER:
@@ -159,8 +178,12 @@ class ThetaHarvesterStrategy(Strategy):
 
         # Phase D: no-position entry (v2 logic)
         return self._evaluate_entry(
-            question=question, books=books, reference_price=reference_price,
-            sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+            question=question,
+            books=books,
+            reference_price=reference_price,
+            sigma=sigma,
+            mu_eff=mu_eff,
+            tau_yr=tau_yr,
             recent_returns=recent_returns,
         )
 
@@ -176,7 +199,8 @@ class ThetaHarvesterStrategy(Strategy):
             arr,
             dt_seconds=self.cfg.vol_sampling_dt_seconds,
             estimator=self.cfg.vol_estimator,
-            clip_min=self.cfg.vol_clip_min, clip_max=self.cfg.vol_clip_max,
+            clip_min=self.cfg.vol_clip_min,
+            clip_max=self.cfg.vol_clip_max,
         )
         return sigma if sigma > 0 else None
 
@@ -190,16 +214,22 @@ class ThetaHarvesterStrategy(Strategy):
         return self.cfg.drift_blend * ann
 
     def _evaluate_entry(
-        self, *, question: QuestionView, books: Mapping[str, BookState],
-        reference_price: float, sigma: float, mu_eff: float, tau_yr: float,
+        self,
+        *,
+        question: QuestionView,
+        books: Mapping[str, BookState],
+        reference_price: float,
+        sigma: float,
+        mu_eff: float,
+        tau_yr: float,
         recent_returns: tuple[float, ...] = (),
     ) -> Decision:
         # TTE entry window — fixed [tte_min_seconds, tte_max_seconds] bound.
         tau_s = tau_yr * _ANNUAL_SECONDS
         if not (self.cfg.tte_min_seconds <= tau_s <= float(self.cfg.tte_max_seconds)):
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tau_s:.0f}"),)),
-            ))
+            return Decision(
+                action=Action.HOLD, diagnostics=(Diagnostic("info", "tte_out_of_window", (("tte_s", f"{tau_s:.0f}"),)),)
+            )
 
         # Near-strike hover veto. PM corpus shows entries below 0.20% lose
         # -$7.68/entry on average across 57 entries, while the 0.20-0.50%
@@ -218,11 +248,16 @@ class ThetaHarvesterStrategy(Strategy):
         ):
             dist_pct = abs(reference_price - question.strike) / reference_price
             if dist_pct < self.cfg.min_distance_pct:
-                return Decision(action=Action.HOLD, diagnostics=(
-                    Diagnostic("info", "near_strike_hover",
-                               (("dist_pct", f"{dist_pct:.5f}"),
-                                ("min_dist_pct", f"{self.cfg.min_distance_pct:.5f}"))),
-                ))
+                return Decision(
+                    action=Action.HOLD,
+                    diagnostics=(
+                        Diagnostic(
+                            "info",
+                            "near_strike_hover",
+                            (("dist_pct", f"{dist_pct:.5f}"), ("min_dist_pct", f"{self.cfg.min_distance_pct:.5f}")),
+                        ),
+                    ),
+                )
 
         # Determine candidate legs. For binaries we keep the historical
         # (yes_symbol, no_symbol) ordering so behavior is bit-for-bit unchanged
@@ -257,8 +292,12 @@ class ThetaHarvesterStrategy(Strategy):
                 continue
             lo, hi = _winning_region(question, sym)
             pp = _p_leg_win_prob_and_phi(
-                reference_price=reference_price, lo=lo, hi=hi,
-                sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+                reference_price=reference_price,
+                lo=lo,
+                hi=hi,
+                sigma=sigma,
+                mu_eff=mu_eff,
+                tau_yr=tau_yr,
             )
             if pp is None:
                 continue  # NO leg of a middle bucket — no contiguous winning region
@@ -279,12 +318,14 @@ class ThetaHarvesterStrategy(Strategy):
         # pass the threshold on the ask alone. Default False preserves legacy
         # _mid fallback behavior (bit-identical when off).
         if self.cfg.favorite_threshold > 0.0:
+
             def _mid(b: BookState) -> float:
                 if b.bid_px is not None and b.ask_px is not None:
                     return (b.bid_px + b.ask_px) / 2.0
                 if self.cfg.require_two_sided_entry:
                     return 0.0  # one-sided quote fails the favorite gate
                 return b.ask_px if b.ask_px is not None else (b.bid_px or 0.0)
+
             per_leg = [t for t in per_leg if _mid(t[3]) >= self.cfg.favorite_threshold]
             if not per_leg:
                 return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_favorite"),))
@@ -294,14 +335,20 @@ class ThetaHarvesterStrategy(Strategy):
         # interest — passing the mid threshold doesn't mean the price is real.
         # 0 disables.
         if self.cfg.min_bid_notional_usd > 0.0:
+
             def _bid_ntl(b: BookState) -> float:
                 return (b.bid_px or 0.0) * (b.bid_sz or 0.0)
+
             per_leg = [t for t in per_leg if _bid_ntl(t[3]) >= self.cfg.min_bid_notional_usd]
             if not per_leg:
-                return Decision(action=Action.HOLD, diagnostics=(
-                    Diagnostic("info", "bid_notional_too_thin",
-                               (("min_usd", f"{self.cfg.min_bid_notional_usd:.2f}"),)),
-                ))
+                return Decision(
+                    action=Action.HOLD,
+                    diagnostics=(
+                        Diagnostic(
+                            "info", "bid_notional_too_thin", (("min_usd", f"{self.cfg.min_bid_notional_usd:.2f}"),)
+                        ),
+                    ),
+                )
 
         # Pick the leg with the highest GAMMA-AWARE effective edge. For λ=None
         # (legacy) this collapses to picking on raw edge. For λ>0 we subtract
@@ -333,22 +380,27 @@ class ThetaHarvesterStrategy(Strategy):
                 fair_edge = chosen_p - mid - fee_entry
                 edge_budget = fair_edge - self.cfg.edge_buffer
                 if live_half_spread > edge_budget:
-                    return Decision(action=Action.HOLD, diagnostics=(
-                        Diagnostic("info", "entry_spread_too_wide", (
-                            ("half_spread", f"{live_half_spread:.4f}"),
-                            ("edge_budget", f"{edge_budget:.4f}"),
-                            ("fair_edge", f"{fair_edge:.4f}"),
-                        )),
-                    ))
+                    return Decision(
+                        action=Action.HOLD,
+                        diagnostics=(
+                            Diagnostic(
+                                "info",
+                                "entry_spread_too_wide",
+                                (
+                                    ("half_spread", f"{live_half_spread:.4f}"),
+                                    ("edge_budget", f"{edge_budget:.4f}"),
+                                    ("fair_edge", f"{fair_edge:.4f}"),
+                                ),
+                            ),
+                        ),
+                    )
 
         # v3.5: momentum / MR gate — skip if regime == "mr" and aligned-signed
         # score < -tau_gate. Computed AFTER favorite is chosen so we know which
         # side to align to.
-        if (
-            self.cfg.momentum_mr_enabled
-            and self.cfg.momentum_mr_mode == "gate"
-        ):
+        if self.cfg.momentum_mr_enabled and self.cfg.momentum_mr_mode == "gate":
             from hlanalysis.strategy.momentum_mr import momentum_mr_score
+
             fav_side = +1 if chosen_sym == question.yes_symbol else -1
             mm_score, mm_regime = momentum_mr_score(
                 recent_returns=recent_returns,
@@ -371,9 +423,9 @@ class ThetaHarvesterStrategy(Strategy):
             if self.cfg.momentum_mr_jr_trust_weight:
                 gate_diag_kv.append(("jr_trust", f"{trust:.3f}"))
             if mm_regime == "mr" and mm_score < -self.cfg.momentum_mr_tau_gate:
-                return Decision(action=Action.HOLD, diagnostics=(
-                    Diagnostic("info", "momentum_mr_gate", tuple(gate_diag_kv)),
-                ))
+                return Decision(
+                    action=Action.HOLD, diagnostics=(Diagnostic("info", "momentum_mr_gate", tuple(gate_diag_kv)),)
+                )
 
         # Build the edge diagnostic. Binary questions keep the p_model /
         # edge_yes / edge_no schema (meaningful per-side); multi-leg buckets
@@ -384,19 +436,30 @@ class ThetaHarvesterStrategy(Strategy):
             no_ = books.get(question.no_symbol)
             # Binary always has both legs at this point because per_leg is non-empty
             # (favorite gate already passed if active). p_yes = P(S>strike).
-            p_yes_view = _p_leg_win_prob(
-                reference_price=reference_price, lo=question.strike, hi=None,
-                sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
-            ) or 0.0
+            p_yes_view = (
+                _p_leg_win_prob(
+                    reference_price=reference_price,
+                    lo=question.strike,
+                    hi=None,
+                    sigma=sigma,
+                    mu_eff=mu_eff,
+                    tau_yr=tau_yr,
+                )
+                or 0.0
+            )
             fee_yes = fee_per_share(self.cfg, p_yes_view, side="entry")
             fee_no = fee_per_share(self.cfg, 1.0 - p_yes_view, side="entry")
             edge_yes = (
-                p_yes_view - (yes.ask_px if yes and yes.ask_px is not None else 1.0)
-                - fee_yes - self.cfg.half_spread_assumption
+                p_yes_view
+                - (yes.ask_px if yes and yes.ask_px is not None else 1.0)
+                - fee_yes
+                - self.cfg.half_spread_assumption
             )
             edge_no = (
-                (1.0 - p_yes_view) - (no_.ask_px if no_ and no_.ask_px is not None else 1.0)
-                - fee_no - self.cfg.half_spread_assumption
+                (1.0 - p_yes_view)
+                - (no_.ask_px if no_ and no_.ask_px is not None else 1.0)
+                - fee_no
+                - self.cfg.half_spread_assumption
             )
             # Apply favorite-gate disabling sentinels so the diagnostic mirrors
             # the legacy behavior exactly (existing tests check exact values).
@@ -406,14 +469,18 @@ class ThetaHarvesterStrategy(Strategy):
                 else:
                     edge_yes = -1e9
             ln_sk = math.log(reference_price / question.strike)
-            diag = Diagnostic("info", "edge", (
-                ("p_model", f"{p_yes_view:.4f}"),
-                ("edge_yes", f"{edge_yes:.4f}"),
-                ("edge_no", f"{edge_no:.4f}"),
-                ("sigma", f"{sigma:.4f}"),
-                ("tau_yr", f"{tau_yr:.12f}"),
-                ("ln_sk", f"{ln_sk:.4f}"),
-            ))
+            diag = Diagnostic(
+                "info",
+                "edge",
+                (
+                    ("p_model", f"{p_yes_view:.4f}"),
+                    ("edge_yes", f"{edge_yes:.4f}"),
+                    ("edge_no", f"{edge_no:.4f}"),
+                    ("sigma", f"{sigma:.4f}"),
+                    ("tau_yr", f"{tau_yr:.12f}"),
+                    ("ln_sk", f"{ln_sk:.4f}"),
+                ),
+            )
         else:
             # Bucket (multi-leg) diagnostic. Buckets have no binary YES/NO, so we
             # emit NATIVE fields — chosen_leg / chosen_edge — for the chosen leg
@@ -422,25 +489,27 @@ class ThetaHarvesterStrategy(Strategy):
             # fixed-schema diagnostics parquet (backtest/runner) and the entry
             # fill-meta reader keep their populated value without an off-schema
             # column; edge_no is intentionally omitted (no sentinel).
-            diag = Diagnostic("info", "edge", (
-                ("p_model", f"{chosen_p:.4f}"),
-                ("chosen_leg", chosen_sym),
-                ("chosen_edge", f"{chosen_edge:.4f}"),
-                ("edge_yes", f"{chosen_edge:.4f}"),
-                ("sigma", f"{sigma:.4f}"),
-                ("tau_yr", f"{tau_yr:.12f}"),
-                ("ln_sk", "0.0000"),
-            ))
+            diag = Diagnostic(
+                "info",
+                "edge",
+                (
+                    ("p_model", f"{chosen_p:.4f}"),
+                    ("chosen_leg", chosen_sym),
+                    ("chosen_edge", f"{chosen_edge:.4f}"),
+                    ("edge_yes", f"{chosen_edge:.4f}"),
+                    ("sigma", f"{sigma:.4f}"),
+                    ("tau_yr", f"{tau_yr:.12f}"),
+                    ("ln_sk", "0.0000"),
+                ),
+            )
 
         # v3.5: momentum / MR tilt — scale the effective edge_buffer by
         # (1 - alpha_tilt * score). Aligned momentum (score > 0) lowers the
         # bar; MR against favorite (score < 0) raises it.
         effective_edge_buffer = self.cfg.edge_buffer
-        if (
-            self.cfg.momentum_mr_enabled
-            and self.cfg.momentum_mr_mode == "tilt"
-        ):
+        if self.cfg.momentum_mr_enabled and self.cfg.momentum_mr_mode == "tilt":
             from hlanalysis.strategy.momentum_mr import momentum_mr_score
+
             fav_side = +1 if chosen_sym == question.yes_symbol else -1
             mm_score, mm_regime = momentum_mr_score(
                 recent_returns=recent_returns,
@@ -453,9 +522,7 @@ class ThetaHarvesterStrategy(Strategy):
                 mm_score = mm_score * trust
             else:
                 trust = 1.0
-            effective_edge_buffer = self.cfg.edge_buffer * (
-                1.0 - self.cfg.momentum_mr_alpha_tilt * mm_score
-            )
+            effective_edge_buffer = self.cfg.edge_buffer * (1.0 - self.cfg.momentum_mr_alpha_tilt * mm_score)
             # Append a single tilt diagnostic alongside `diag` below.
             tilt_diag_kv: list = [
                 ("indicator", self.cfg.momentum_mr_indicator),
@@ -476,57 +543,86 @@ class ThetaHarvesterStrategy(Strategy):
             if tilt_diag is not None:
                 diags = (tilt_diag,) + diags
             if gamma_lambda > 0.0 and chosen_edge > effective_edge_buffer:
-                diags = (Diagnostic("info", "edge_after_gamma_below_buffer", (
-                    ("raw_edge", f"{chosen_edge:.4f}"),
-                    ("phi_d", f"{chosen_phi:.4f}"),
-                    ("gamma_penalty", f"{gamma_lambda * chosen_phi:.4f}"),
-                )),) + diags
+                diags = (
+                    Diagnostic(
+                        "info",
+                        "edge_after_gamma_below_buffer",
+                        (
+                            ("raw_edge", f"{chosen_edge:.4f}"),
+                            ("phi_d", f"{chosen_phi:.4f}"),
+                            ("gamma_penalty", f"{gamma_lambda * chosen_phi:.4f}"),
+                        ),
+                    ),
+                ) + diags
             return Decision(action=Action.HOLD, diagnostics=diags)
 
         if self.cfg.edge_max is not None and chosen_edge >= self.cfg.edge_max:
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "edge_too_extreme", (
-                    ("edge", f"{chosen_edge:.4f}"),
-                    ("edge_max", f"{self.cfg.edge_max:.4f}"),
-                )),
-                diag,
-            ))
+            return Decision(
+                action=Action.HOLD,
+                diagnostics=(
+                    Diagnostic(
+                        "info",
+                        "edge_too_extreme",
+                        (
+                            ("edge", f"{chosen_edge:.4f}"),
+                            ("edge_max", f"{self.cfg.edge_max:.4f}"),
+                        ),
+                    ),
+                    diag,
+                ),
+            )
 
         # v3.4-LMgate: Lee-Mykland (2008) post-edge jump filter — TRULY τ-free.
         # Stat = |r_last| / √(BV_per_sample), comparing the latest log-return
         # to the jump-robust per-sample σ over the same window. > threshold
         # ⇒ jump that the market may not have repriced yet. None disables.
         if self.cfg.lm_threshold is not None and len(recent_returns) > 0:
-            n_keep = max(
-                2, self.cfg.vol_lookback_seconds // self.cfg.vol_sampling_dt_seconds
-            )
+            n_keep = max(2, self.cfg.vol_lookback_seconds // self.cfg.vol_sampling_dt_seconds)
             window = recent_returns[-n_keep:]
             if len(window) < 2:
-                return Decision(action=Action.HOLD, diagnostics=(
-                    Diagnostic("info", "lm_no_returns"), diag,
-                ))
+                return Decision(
+                    action=Action.HOLD,
+                    diagnostics=(
+                        Diagnostic("info", "lm_no_returns"),
+                        diag,
+                    ),
+                )
             arr = np.asarray(window, dtype=np.float64)
             bv_per_sample = float(bipower_variation_sigma(arr))
             if bv_per_sample <= 0.0:
-                return Decision(action=Action.HOLD, diagnostics=(
-                    Diagnostic("info", "lm_bv_zero"), diag,
-                ))
+                return Decision(
+                    action=Action.HOLD,
+                    diagnostics=(
+                        Diagnostic("info", "lm_bv_zero"),
+                        diag,
+                    ),
+                )
             lm_stat = abs(float(arr[-1])) / bv_per_sample
             if lm_stat < self.cfg.lm_threshold:
-                return Decision(action=Action.HOLD, diagnostics=(
-                    Diagnostic("info", "lm_gate_no_jump", (
-                        ("lm_stat", f"{lm_stat:.3f}"),
-                        ("lm_threshold", f"{self.cfg.lm_threshold:.3f}"),
-                    )),
-                    diag,
-                ))
+                return Decision(
+                    action=Action.HOLD,
+                    diagnostics=(
+                        Diagnostic(
+                            "info",
+                            "lm_gate_no_jump",
+                            (
+                                ("lm_stat", f"{lm_stat:.3f}"),
+                                ("lm_threshold", f"{self.cfg.lm_threshold:.3f}"),
+                            ),
+                        ),
+                        diag,
+                    ),
+                )
 
         size = max(0.0, round_size(self.cfg.max_position_usd, chosen_book.ask_px))
         if size <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"), diag))
 
         intent = make_entry_intent(
-            question, symbol=chosen_sym, size=size, limit_price=chosen_book.ask_px,
+            question,
+            symbol=chosen_sym,
+            size=size,
+            limit_price=chosen_book.ask_px,
         )
         diags_out: tuple = (Diagnostic("info", "entry"), diag)
         if tilt_diag is not None:
@@ -538,7 +634,16 @@ class ThetaHarvesterStrategy(Strategy):
         )
 
     def _evaluate_exits(
-        self, *, question: QuestionView, books: Mapping[str, BookState], reference_price: float, sigma: float, mu_eff: float, tau_yr: float, tau_s: float, position: Position,
+        self,
+        *,
+        question: QuestionView,
+        books: Mapping[str, BookState],
+        reference_price: float,
+        sigma: float,
+        mu_eff: float,
+        tau_yr: float,
+        tau_s: float,
+        position: Position,
     ) -> Decision:
         held = books.get(position.symbol)
         if held is None or held.bid_px is None or held.ask_px is None:
@@ -587,36 +692,48 @@ class ThetaHarvesterStrategy(Strategy):
         # Skipped when _spread_hold_active (SHR-102 hold-to-settle).
         if self.cfg.exit_safety_d > 0.0 and not _spread_hold_active:
             safety_d = _safety_d_for_region(
-                reference_price=reference_price, lo=lo, hi=hi,
-                sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+                reference_price=reference_price,
+                lo=lo,
+                hi=hi,
+                sigma=sigma,
+                mu_eff=mu_eff,
+                tau_yr=tau_yr,
             )
             if safety_d is not None and safety_d < self.cfg.exit_safety_d:
                 intent = make_exit_intent(
-                    question, position, limit_price=held.bid_px,
+                    question,
+                    position,
+                    limit_price=held.bid_px,
                     exit_reason="exit_safety_d",
                 )
                 return Decision(
                     action=Action.EXIT,
                     intents=(intent,),
                     diagnostics=(
-                        Diagnostic("info", "exit_safety_d", (
-                            ("exit_reason", "safety_d_below_threshold"),
-                            ("exit_safety_d", f"{safety_d:.4f}"),
-                            ("exit_threshold", f"{self.cfg.exit_safety_d:.4f}"),
-                        )),
+                        Diagnostic(
+                            "info",
+                            "exit_safety_d",
+                            (
+                                ("exit_reason", "safety_d_below_threshold"),
+                                ("exit_safety_d", f"{safety_d:.4f}"),
+                                ("exit_threshold", f"{self.cfg.exit_safety_d:.4f}"),
+                            ),
+                        ),
                     ),
                 )
 
         pp = _p_leg_win_prob_and_phi(
-            reference_price=reference_price, lo=lo, hi=hi,
-            sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+            reference_price=reference_price,
+            lo=lo,
+            hi=hi,
+            sigma=sigma,
+            mu_eff=mu_eff,
+            tau_yr=tau_yr,
         )
         if pp is None:
             # Middle-bucket NO with no contiguous winning region. Skip edge
             # check; rely on stop_loss / time_stop / settlement.
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "hold_no_region"),
-            ))
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "hold_no_region"),))
         held_p, phi_d_held = pp
         # Exit-edge MUST reference the price we'd actually fill at — the BID —
         # not the ask of the held leg. The legacy ASK-based formulation has the
@@ -664,22 +781,40 @@ class ThetaHarvesterStrategy(Strategy):
         if exit_now and not _spread_hold_active:
             return self._exit_intent(question, position, held, reason="exit_edge")
 
-        hold_diags: tuple = (Diagnostic("info", "hold", (
-            ("edge_held", f"{edge_held:.4f}"),
-            ("held_p", f"{held_p:.4f}"),
-            ("tau_s", f"{tau_s:.0f}"),
-        )),)
+        hold_diags: tuple = (
+            Diagnostic(
+                "info",
+                "hold",
+                (
+                    ("edge_held", f"{edge_held:.4f}"),
+                    ("held_p", f"{held_p:.4f}"),
+                    ("tau_s", f"{tau_s:.0f}"),
+                ),
+            ),
+        )
         if _spread_hold_active:
             held_half_spread_val = (held.ask_px - held.bid_px) / 2.0  # type: ignore[operator]
-            hold_diags = (Diagnostic("info", "hold_spread_too_wide", (
-                ("half_spread", f"{held_half_spread_val:.4f}"),
-                ("exit_spread_hold", f"{self.cfg.exit_spread_hold:.4f}"),
-            )),) + hold_diags
+            hold_diags = (
+                Diagnostic(
+                    "info",
+                    "hold_spread_too_wide",
+                    (
+                        ("half_spread", f"{held_half_spread_val:.4f}"),
+                        ("exit_spread_hold", f"{self.cfg.exit_spread_hold:.4f}"),
+                    ),
+                ),
+            ) + hold_diags
         return Decision(action=Action.HOLD, diagnostics=hold_diags)
 
     def _evaluate_topup(
-        self, *, question: QuestionView, books: Mapping[str, BookState],
-        reference_price: float, sigma: float, mu_eff: float, tau_yr: float,
+        self,
+        *,
+        question: QuestionView,
+        books: Mapping[str, BookState],
+        reference_price: float,
+        sigma: float,
+        mu_eff: float,
+        tau_yr: float,
         position: Position,
         recent_returns: tuple[float, ...] = (),
     ) -> Decision:
@@ -695,10 +830,11 @@ class ThetaHarvesterStrategy(Strategy):
         evaluator and the no_book / not_needed branches (which, unlike v1,
         return HOLD ``topup_skip`` diagnostics rather than ``None``).
         """
+
         def _on_no_book() -> Decision:
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "topup_skip", (("reason", "no_book"),)),
-            ))
+            return Decision(
+                action=Action.HOLD, diagnostics=(Diagnostic("info", "topup_skip", (("reason", "no_book"),)),)
+            )
 
         def _on_not_needed(current_ntl: float, target_ntl: float) -> Decision:
             # Demoted from info → debug 2026-05-22: fires every scan tick (~1/s)
@@ -709,24 +845,40 @@ class ThetaHarvesterStrategy(Strategy):
             # (gate_decisions.jsonl) and renders in the bus-event journal log.
             logger.debug(
                 "topup_skip q={} sym={} reason=not_needed current_ntl=${:.2f} target_ntl=${:.2f}",
-                question.question_idx, position.symbol, current_ntl, target_ntl,
+                question.question_idx,
+                position.symbol,
+                current_ntl,
+                target_ntl,
             )
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "topup_skip", (
-                    ("reason", "not_needed"),
-                    ("current_ntl", f"{current_ntl:.2f}"),
-                    ("target_ntl", f"{target_ntl:.2f}"),
-                )),
-            ))
+            return Decision(
+                action=Action.HOLD,
+                diagnostics=(
+                    Diagnostic(
+                        "info",
+                        "topup_skip",
+                        (
+                            ("reason", "not_needed"),
+                            ("current_ntl", f"{current_ntl:.2f}"),
+                            ("target_ntl", f"{target_ntl:.2f}"),
+                        ),
+                    ),
+                ),
+            )
 
         return run_topup(
-            question=question, books=books, position=position,
+            question=question,
+            books=books,
+            position=position,
             max_position_usd=self.cfg.max_position_usd,
             topup_threshold_pct=self.cfg.topup_threshold_pct,
             topup_min_notional_usd=self.cfg.topup_min_notional_usd,
             run_entry=lambda: self._evaluate_entry(
-                question=question, books=books, reference_price=reference_price,
-                sigma=sigma, mu_eff=mu_eff, tau_yr=tau_yr,
+                question=question,
+                books=books,
+                reference_price=reference_price,
+                sigma=sigma,
+                mu_eff=mu_eff,
+                tau_yr=tau_yr,
                 recent_returns=recent_returns,
             ),
             on_no_book=_on_no_book,
@@ -735,9 +887,13 @@ class ThetaHarvesterStrategy(Strategy):
 
     def _exit_intent(self, question: QuestionView, position: Position, held: BookState, *, reason: str) -> Decision:
         intent = make_exit_intent(
-            question, position, limit_price=held.bid_px, exit_reason=reason,
+            question,
+            position,
+            limit_price=held.bid_px,
+            exit_reason=reason,
         )
         return Decision(
-            action=Action.EXIT, intents=(intent,),
+            action=Action.EXIT,
+            intents=(intent,),
             diagnostics=(Diagnostic("info", reason),),
         )

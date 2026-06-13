@@ -11,6 +11,7 @@ different σ input (the train/serve skew this collapse eliminates). These tests
 pin the canonical bucketer's exact semantics: floor(ts/dt) bucket assignment,
 high=max / low=min / close=last selection, last-tick timestamp per bar.
 """
+
 from __future__ import annotations
 
 from hlanalysis.marketdata.ohlc import bucket_index, resample_ohlc, update_bar
@@ -88,13 +89,9 @@ def test_all_three_loaders_produce_identical_bars() -> None:
     ticks_ns = [0, 1, 2, 5, 7, 9, 12, 13, 20, 26]
     raw = [ReferenceEvent(t * s, "BTC", p, p, p) for t, p in zip(ticks_ns, prices)]
 
-    gen_bars = [ev for _ts, ev in _resample_reference(
-        iter((r.ts_ns, r) for r in raw), resample_ns=resample_ns
-    )]
+    gen_bars = [ev for _ts, ev in _resample_reference(iter((r.ts_ns, r) for r in raw), resample_ns=resample_ns)]
     list_bars = _resample_reference_rows(raw, resample_ns=resample_ns)
-    canon = list(resample_ohlc(
-        ((r.ts_ns, r.high, r.low, r.close) for r in raw), bucket_ns=resample_ns
-    ))
+    canon = list(resample_ohlc(((r.ts_ns, r.high, r.low, r.close) for r in raw), bucket_ns=resample_ns))
 
     def as_tuples(bars: list[ReferenceEvent]) -> list[tuple]:
         return [(b.ts_ns, b.high, b.low, b.close) for b in bars]

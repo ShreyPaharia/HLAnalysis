@@ -15,6 +15,7 @@ at migration time has, from the engine's accounting perspective, closed nothing
 yet. The ALTER mirrors the ``0003_fill_closed_pnl`` pattern already folded into
 the baseline, so the column appends to the stored CREATE text.
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -27,9 +28,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE position ADD COLUMN closed_qty REAL NOT NULL DEFAULT 0.0"
-    )
+    op.execute("ALTER TABLE position ADD COLUMN closed_qty REAL NOT NULL DEFAULT 0.0")
 
 
 def downgrade() -> None:

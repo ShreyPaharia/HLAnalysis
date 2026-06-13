@@ -2,6 +2,7 @@
 
 TDD: tests are written first; they FAIL before the implementation lands.
 """
+
 from __future__ import annotations
 
 import json
@@ -29,6 +30,7 @@ from hlanalysis.engine.risk_events import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _capture_json_logs(fn):
     """Call fn() with a JSON loguru sink and return list of parsed log dicts."""
     buf = StringIO()
@@ -50,6 +52,7 @@ def _capture_json_logs(fn):
 # JSON sink tests
 # ---------------------------------------------------------------------------
 
+
 class TestJsonSink:
     def test_json_sink_produces_valid_json_per_line(self):
         """Each log record must be a parseable JSON object."""
@@ -68,6 +71,7 @@ class TestJsonSink:
 
     def test_json_sink_bound_fields_in_extra(self):
         """Fields bound via logger.bind() must appear in record.extra."""
+
         def emit():
             logger.bind(alias="v1", question_idx=42).info("bound test")
 
@@ -119,6 +123,7 @@ class TestLogFormatCliFlag:
     def test_main_parses_log_format_json(self):
         """Parsing --log-format json should not raise."""
         import argparse
+
         # Replicate the parser logic from main.py (after implementation)
         p = argparse.ArgumentParser()
         p.add_argument("--log-format", choices=["json", "pretty"], default="json")
@@ -127,6 +132,7 @@ class TestLogFormatCliFlag:
 
     def test_main_parses_log_format_pretty(self):
         import argparse
+
         p = argparse.ArgumentParser()
         p.add_argument("--log-format", choices=["json", "pretty"], default="json")
         args = p.parse_args(["--log-format", "pretty"])
@@ -134,6 +140,7 @@ class TestLogFormatCliFlag:
 
     def test_main_default_log_format_is_json(self):
         import argparse
+
         p = argparse.ArgumentParser()
         p.add_argument("--log-format", choices=["json", "pretty"], default="json")
         args = p.parse_args([])
@@ -143,6 +150,7 @@ class TestLogFormatCliFlag:
 # ---------------------------------------------------------------------------
 # Structured bus-event logging tests
 # ---------------------------------------------------------------------------
+
 
 class TestEventBusStructuredLogging:
     """publish() must bind key event fields as top-level loguru extra fields."""
@@ -215,9 +223,14 @@ class TestEventBusStructuredLogging:
         try:
             bus = EventBus(maxsize=8)
             ev = Entry(
-                ts_ns=1, account_alias="v1",
-                cloid="cl001", question_idx=7,
-                symbol="BTC-UP", side="buy", size=10.0, price=0.55,
+                ts_ns=1,
+                account_alias="v1",
+                cloid="cl001",
+                question_idx=7,
+                symbol="BTC-UP",
+                side="buy",
+                size=10.0,
+                price=0.55,
             )
             await bus.publish(ev)
         finally:
@@ -244,9 +257,13 @@ class TestEventBusStructuredLogging:
         try:
             bus = EventBus(maxsize=8)
             ev = Exit(
-                ts_ns=2, account_alias="v31",
-                question_idx=3, symbol="BTC-UP",
-                qty=10.0, realized_pnl=1.5, reason="exit_safety_d",
+                ts_ns=2,
+                account_alias="v31",
+                question_idx=3,
+                symbol="BTC-UP",
+                qty=10.0,
+                realized_pnl=1.5,
+                reason="exit_safety_d",
             )
             await bus.publish(ev)
         finally:
@@ -293,6 +310,7 @@ class TestEventBusStructuredLogging:
         sub2 = bus.subscribe()
         await bus.publish(RiskVeto(ts_ns=1, reason="cap", account_alias="v1"))
         import asyncio
+
         e1 = await asyncio.wait_for(sub1.get(), timeout=0.5)
         e2 = await asyncio.wait_for(sub2.get(), timeout=0.5)
         assert e1.reason == "cap" and e2.reason == "cap"
@@ -301,6 +319,7 @@ class TestEventBusStructuredLogging:
     async def test_publish_log_failure_does_not_block(self):
         """If the logger raises, publish must still enqueue to subscribers."""
         import asyncio
+
         bus = EventBus(maxsize=8)
         sub = bus.subscribe()
 
@@ -328,9 +347,15 @@ class TestEventBusStructuredLogging:
         try:
             bus = EventBus(maxsize=8)
             ev = OrderRejected(
-                ts_ns=1, account_alias="v1",
-                cloid="cl999", question_idx=4, symbol="BTC-UP",
-                side="buy", size=5.0, price=0.6, error="funder mismatch",
+                ts_ns=1,
+                account_alias="v1",
+                cloid="cl999",
+                question_idx=4,
+                symbol="BTC-UP",
+                side="buy",
+                size=5.0,
+                price=0.6,
+                error="funder mismatch",
             )
             await bus.publish(ev)
         finally:

@@ -3,6 +3,7 @@
 so we drive them with a SimpleNamespace stub and a real StateDAL instead of
 spinning up the full EngineRuntime.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -30,15 +31,32 @@ def _make_slot(tmp_path, *, alias: str = "v31_pm"):
     )
 
 
-def _put_order(dal: StateDAL, *, cloid: str, status: str, last_update_ts_ns: int,
-               placed_ts_ns: int | None = None, side: str = "buy",
-               size: float = 10.0, price: float = 0.55) -> None:
-    dal.upsert_order(OpenOrder(
-        cloid=cloid, venue_oid=f"v-{cloid}", question_idx=42,
-        symbol="0xdeadbeef", side=side, price=price, size=size, status=status,
-        placed_ts_ns=placed_ts_ns or last_update_ts_ns,
-        last_update_ts_ns=last_update_ts_ns, strategy_id="v31",
-    ))
+def _put_order(
+    dal: StateDAL,
+    *,
+    cloid: str,
+    status: str,
+    last_update_ts_ns: int,
+    placed_ts_ns: int | None = None,
+    side: str = "buy",
+    size: float = 10.0,
+    price: float = 0.55,
+) -> None:
+    dal.upsert_order(
+        OpenOrder(
+            cloid=cloid,
+            venue_oid=f"v-{cloid}",
+            question_idx=42,
+            symbol="0xdeadbeef",
+            side=side,
+            price=price,
+            size=size,
+            status=status,
+            placed_ts_ns=placed_ts_ns or last_update_ts_ns,
+            last_update_ts_ns=last_update_ts_ns,
+            strategy_id="v31",
+        )
+    )
 
 
 def test_unconfirmed_fires_for_open_order_past_threshold(tmp_path):
@@ -96,7 +114,9 @@ def test_unconfirmed_deduplicates_until_cloid_clears(tmp_path):
 
     # Now flip status to filled — alerted set should be evicted on next scan
     slot.dal.update_order_status(
-        cloid="hla-v31-c", status="filled", now_ns=now + 10_000_000_000,
+        cloid="hla-v31-c",
+        status="filled",
+        now_ns=now + 10_000_000_000,
     )
     _pm_check_unconfirmed_orders(slot, now + 10_000_000_000)
     assert "hla-v31-c" not in slot.pm.alerted_unconfirmed_cloids

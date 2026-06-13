@@ -3,6 +3,7 @@ payoff helpers for the hftbacktest runner.
 
 Extracted verbatim from ``hftbt_runner.py`` — no logic changes.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -46,9 +47,7 @@ def _classify_reject(book: BookState, side: str, submit_px: float) -> bool:
     return book.bid_px is not None and submit_px <= book.bid_px
 
 
-def _inter_order_blocked(
-    now_ns: int, last_order_ns: int | None, min_inter_order_ns: int
-) -> bool:
+def _inter_order_blocked(now_ns: int, last_order_ns: int | None, min_inter_order_ns: int) -> bool:
     """SHR-79/SHR-89: would dispatching an order on this leg now violate the
     minimum inter-order re-fire floor?
 
@@ -196,7 +195,11 @@ def _is_fleeting_bid(
 
 
 def _hedge_avg_entry(
-    prev_qty: float, prev_avg: float, fill_side: str, fill_size: float, fill_price: float,
+    prev_qty: float,
+    prev_avg: float,
+    fill_side: str,
+    fill_size: float,
+    fill_price: float,
 ) -> tuple[float, float]:
     """Return (new_qty, new_avg_entry) after applying a hedge fill (SHR-55).
 
@@ -210,9 +213,7 @@ def _hedge_avg_entry(
     if prev_qty == 0.0:
         return new_qty, fill_price
     if (prev_qty > 0) == (add > 0):  # growing in the same direction
-        new_avg = (prev_avg * abs(prev_qty) + fill_price * fill_size) / (
-            abs(prev_qty) + fill_size
-        )
+        new_avg = (prev_avg * abs(prev_qty) + fill_price * fill_size) / (abs(prev_qty) + fill_size)
         return new_qty, new_avg
     if abs(add) < abs(prev_qty):  # partial reduction — basis unchanged
         return new_qty, prev_avg

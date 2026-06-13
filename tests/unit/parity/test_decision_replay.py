@@ -7,6 +7,7 @@ Because sim and live run the *same* unified evaluate() (SHR-97), a decision
 divergence must be an INPUT divergence — so the core measures per-field input
 skew at matched decision points and flags phantom (one-sided) actions.
 """
+
 from __future__ import annotations
 
 from hlanalysis.parity.decision_replay import (
@@ -20,15 +21,26 @@ S = 1_000_000_000  # 1s in ns
 
 def _live(qi, ts, action, *, sigma=0.4, ref=60000.0, p_model=0.04, edge=0.02):
     return LiveDecision(
-        question_idx=qi, ts_ns=ts, action=action, symbol="#1",
-        sigma=sigma, reference_price=ref, p_model=p_model, edge=edge,
+        question_idx=qi,
+        ts_ns=ts,
+        action=action,
+        symbol="#1",
+        sigma=sigma,
+        reference_price=ref,
+        p_model=p_model,
+        edge=edge,
     )
 
 
 def _tick(qi, ts, action, *, sigma=0.4, ref=60000.0, p_model=0.04, edge=0.02):
     return SimTick(
-        question_idx=qi, ts_ns=ts, action=action,
-        sigma=sigma, reference_price=ref, p_model=p_model, edge=edge,
+        question_idx=qi,
+        ts_ns=ts,
+        action=action,
+        sigma=sigma,
+        reference_price=ref,
+        p_model=p_model,
+        edge=edge,
     )
 
 
@@ -38,7 +50,7 @@ def test_exact_match_zero_skew():
     live = [_live(1, 100 * S, "enter")]
     sim = [
         _tick(1, 100 * S - S, "hold"),
-        _tick(1, 100 * S, "enter"),     # same action, same ts, same inputs
+        _tick(1, 100 * S, "enter"),  # same action, same ts, same inputs
         _tick(1, 100 * S + S, "hold"),
     ]
     r = replay(live, sim, ts_tol_ns=2 * S)
@@ -61,14 +73,14 @@ def test_input_skew_on_sigma():
     sk = r.field_skews["sigma"]
     assert sk.n == 1
     assert abs(sk.max_abs - 0.10) < 1e-9
-    assert abs(sk.median_rel - 0.25) < 1e-9   # |0.40-0.50|/0.40
+    assert abs(sk.median_rel - 0.25) < 1e-9  # |0.40-0.50|/0.40
 
 
 # --------------------------------------------------------------------------- #
 # Live decided, sim never took that action in-window → unmatched live decision.
 def test_unmatched_live_decision():
     live = [_live(1, 100 * S, "enter")]
-    sim = [_tick(1, 100 * S, "hold")]     # sim only ever holds here
+    sim = [_tick(1, 100 * S, "hold")]  # sim only ever holds here
     r = replay(live, sim, ts_tol_ns=S)
     assert r.n_live_matched == 0
     assert r.decision_match_rate() == 0.0
@@ -82,8 +94,8 @@ def test_unmatched_live_decision():
 def test_phantom_sim_action():
     live = [_live(1, 100 * S, "enter")]
     sim = [
-        _tick(1, 100 * S, "enter"),       # matches the live enter
-        _tick(1, 200 * S, "enter"),       # phantom: no live decision near here
+        _tick(1, 100 * S, "enter"),  # matches the live enter
+        _tick(1, 200 * S, "enter"),  # phantom: no live decision near here
     ]
     r = replay(live, sim, ts_tol_ns=S)
     assert r.n_sim_actions == 2
@@ -96,7 +108,7 @@ def test_phantom_sim_action():
 # Matching respects question_idx: same ts, different question ≠ a match.
 def test_question_isolation():
     live = [_live(1, 100 * S, "enter")]
-    sim = [_tick(2, 100 * S, "enter")]    # right ts, WRONG question
+    sim = [_tick(2, 100 * S, "enter")]  # right ts, WRONG question
     r = replay(live, sim, ts_tol_ns=S)
     assert r.n_live_matched == 0
     assert r.n_sim_phantom == 1
@@ -109,7 +121,7 @@ def test_action_type_must_match():
     sim = [_tick(1, 100 * S, "enter")]
     r = replay(live, sim, ts_tol_ns=S)
     assert r.n_live_matched == 0
-    assert r.n_sim_phantom == 1   # the sim enter is itself unmatched
+    assert r.n_sim_phantom == 1  # the sim enter is itself unmatched
 
 
 # --------------------------------------------------------------------------- #

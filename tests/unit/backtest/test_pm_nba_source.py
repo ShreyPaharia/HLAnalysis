@@ -27,19 +27,22 @@ def test_pbp_to_rows_basic():
             {
                 "clock": {"displayValue": "12:00"},
                 "period": {"number": 1, "displayValue": "1st Quarter"},
-                "homeScore": 0, "awayScore": 0,
+                "homeScore": 0,
+                "awayScore": 0,
                 "wallclock": "2024-12-01T19:30:00Z",
             },
             {
                 "clock": {"displayValue": "5:00"},
                 "period": {"number": 2},
-                "homeScore": 30, "awayScore": 25,
+                "homeScore": 30,
+                "awayScore": 25,
                 "wallclock": "2024-12-01T20:10:00Z",
             },
             {
                 "clock": {"displayValue": "0:00"},
                 "period": {"number": 5},
-                "homeScore": 110, "awayScore": 110,
+                "homeScore": 110,
+                "awayScore": 110,
                 "wallclock": "2024-12-01T22:05:00Z",
             },
         ]
@@ -58,12 +61,24 @@ def test_pbp_to_rows_basic():
 
 def test_pbp_parquet_roundtrip(tmp_path: Path):
     rows = [
-        {"ts_ns": 1_700_000_000_000_000_000, "period": 1,
-         "seconds_remaining_in_period": 720, "score_diff_home": 0,
-         "is_overtime": False, "home_score": 0, "away_score": 0},
-        {"ts_ns": 1_700_000_300_000_000_000, "period": 1,
-         "seconds_remaining_in_period": 600, "score_diff_home": 4,
-         "is_overtime": False, "home_score": 8, "away_score": 4},
+        {
+            "ts_ns": 1_700_000_000_000_000_000,
+            "period": 1,
+            "seconds_remaining_in_period": 720,
+            "score_diff_home": 0,
+            "is_overtime": False,
+            "home_score": 0,
+            "away_score": 0,
+        },
+        {
+            "ts_ns": 1_700_000_300_000_000_000,
+            "period": 1,
+            "seconds_remaining_in_period": 600,
+            "score_diff_home": 4,
+            "is_overtime": False,
+            "home_score": 8,
+            "away_score": 4,
+        },
     ]
     out = tmp_path / "401584893.parquet"
     write_pbp_parquet(out, rows)
@@ -107,6 +122,7 @@ def test_wp_features_shape():
     assert feats[0] == 5
     # Feature 1: log(total_seconds_remaining + 1)
     import math
+
     assert abs(feats[1] - math.log(601)) < 1e-9
     # Feature 2: period_indicator (1 for OT, 0 otherwise)
     assert feats[2] == 0
@@ -147,10 +163,20 @@ def test_match_pm_to_espn_by_date_and_teams():
         "endDate": "2024-12-25T22:30:00Z",
     }
     espn_games = [
-        {"id": "401584900", "away": "Boston Celtics", "home": "Los Angeles Lakers",
-         "status": "STATUS_FINAL", "start_iso": "2024-12-25T20:00:00Z"},
-        {"id": "401584901", "away": "Knicks", "home": "Heat",
-         "status": "STATUS_FINAL", "start_iso": "2024-12-25T19:00:00Z"},
+        {
+            "id": "401584900",
+            "away": "Boston Celtics",
+            "home": "Los Angeles Lakers",
+            "status": "STATUS_FINAL",
+            "start_iso": "2024-12-25T20:00:00Z",
+        },
+        {
+            "id": "401584901",
+            "away": "Knicks",
+            "home": "Heat",
+            "status": "STATUS_FINAL",
+            "start_iso": "2024-12-25T19:00:00Z",
+        },
     ]
     match = match_pm_to_espn(pm_event, espn_games)
     assert match is not None
@@ -163,8 +189,13 @@ def test_match_pm_to_espn_returns_none_when_no_team_match():
         "endDate": "2024-12-25T22:30:00Z",
     }
     espn_games = [
-        {"id": "401584901", "away": "Knicks", "home": "Heat",
-         "status": "STATUS_FINAL", "start_iso": "2024-12-25T19:00:00Z"},
+        {
+            "id": "401584901",
+            "away": "Knicks",
+            "home": "Heat",
+            "status": "STATUS_FINAL",
+            "start_iso": "2024-12-25T19:00:00Z",
+        },
     ]
     assert match_pm_to_espn(pm_event, espn_games) is None
 
@@ -208,13 +239,15 @@ def _seed_pm_nba_cache(cache_root: Path) -> str:
     pm_trades_dir = cache_root / "pm_trades"
     pm_trades_dir.mkdir(parents=True, exist_ok=True)
     pq.write_table(
-        pa.table({
-            "ts_ns": [1_700_000_001_000_000_000, 1_700_000_005_000_000_000],
-            "token_id": ["TOK_HOME", "TOK_HOME"],
-            "side": ["buy", "buy"],
-            "price": [0.55, 0.62],
-            "size": [100.0, 50.0],
-        }),
+        pa.table(
+            {
+                "ts_ns": [1_700_000_001_000_000_000, 1_700_000_005_000_000_000],
+                "token_id": ["TOK_HOME", "TOK_HOME"],
+                "side": ["buy", "buy"],
+                "price": [0.55, 0.62],
+                "size": [100.0, 50.0],
+            }
+        ),
         pm_trades_dir / f"{cond_id}.parquet",
     )
 
@@ -222,19 +255,21 @@ def _seed_pm_nba_cache(cache_root: Path) -> str:
     wp_dir = cache_root / "wp_series"
     wp_dir.mkdir(parents=True, exist_ok=True)
     pq.write_table(
-        pa.table({
-            "ts_ns": [
-                1_700_000_000_500_000_000,
-                1_700_000_002_000_000_000,
-                1_700_000_006_000_000_000,
-                1_700_000_009_000_000_000,
-            ],
-            "p_yes_home": [0.50, 0.58, 0.71, 0.95],
-            "score_diff_home": [0, 5, 12, 22],
-            "total_seconds_remaining": [2880, 2400, 600, 30],
-            "period": [1, 1, 4, 4],
-            "is_overtime": [False, False, False, False],
-        }),
+        pa.table(
+            {
+                "ts_ns": [
+                    1_700_000_000_500_000_000,
+                    1_700_000_002_000_000_000,
+                    1_700_000_006_000_000_000,
+                    1_700_000_009_000_000_000,
+                ],
+                "p_yes_home": [0.50, 0.58, 0.71, 0.95],
+                "score_diff_home": [0, 5, 12, 22],
+                "total_seconds_remaining": [2880, 2400, 600, 30],
+                "period": [1, 1, 4, 4],
+                "is_overtime": [False, False, False, False],
+            }
+        ),
         wp_dir / f"{game_id}.parquet",
     )
     return cond_id
@@ -262,7 +297,10 @@ def test_events_emits_book_trade_reference_and_settlement(tmp_path: Path):
     events = list(ds.events(descs[0]))
 
     from hlanalysis.backtest.core.events import (
-        BookSnapshot, TradeEvent, ReferenceEvent, SettlementEvent,
+        BookSnapshot,
+        TradeEvent,
+        ReferenceEvent,
+        SettlementEvent,
     )
 
     n_book = sum(1 for e in events if isinstance(e, BookSnapshot))
@@ -309,38 +347,53 @@ def test_fetch_and_cache_writes_manifest_and_trades(tmp_path, monkeypatch):
     cache_root = tmp_path / "pm_nba_live"
     cache_root.mkdir(parents=True)
 
-    gamma_events = [{
-        "title": "Boston Celtics vs Los Angeles Lakers",
-        "endDate": "2024-12-25T22:30:00Z",
-        "startDate": "2024-12-25T20:00:00Z",
-        "markets": [{
-            "conditionId": "0xfeedbeef",
-            "clobTokenIds": '["TOK_LEFT","TOK_RIGHT"]',
-            "outcomes": '["Boston Celtics","Los Angeles Lakers"]',
-            "outcomePrices": '["1","0"]',
-            "startDate": "2024-12-25T20:00:00Z",
+    gamma_events = [
+        {
+            "title": "Boston Celtics vs Los Angeles Lakers",
             "endDate": "2024-12-25T22:30:00Z",
-            "volume": 12000.0,
-        }],
-    }]
-    pm_trades = [
-        {"timestamp": 1735156800.0, "asset": "TOK_LEFT", "side": "BUY",
-         "price": 0.45, "size": 100.0},
-        {"timestamp": 1735157000.0, "asset": "TOK_LEFT", "side": "BUY",
-         "price": 0.50, "size": 50.0},
+            "startDate": "2024-12-25T20:00:00Z",
+            "markets": [
+                {
+                    "conditionId": "0xfeedbeef",
+                    "clobTokenIds": '["TOK_LEFT","TOK_RIGHT"]',
+                    "outcomes": '["Boston Celtics","Los Angeles Lakers"]',
+                    "outcomePrices": '["1","0"]',
+                    "startDate": "2024-12-25T20:00:00Z",
+                    "endDate": "2024-12-25T22:30:00Z",
+                    "volume": 12000.0,
+                }
+            ],
+        }
     ]
-    espn_scoreboard = [{
-        "id": "401584900", "home": "Boston Celtics", "away": "Los Angeles Lakers",
-        "status": "STATUS_FINAL", "start_iso": "2024-12-25T20:00:00Z",
-    }]
+    pm_trades = [
+        {"timestamp": 1735156800.0, "asset": "TOK_LEFT", "side": "BUY", "price": 0.45, "size": 100.0},
+        {"timestamp": 1735157000.0, "asset": "TOK_LEFT", "side": "BUY", "price": 0.50, "size": 50.0},
+    ]
+    espn_scoreboard = [
+        {
+            "id": "401584900",
+            "home": "Boston Celtics",
+            "away": "Los Angeles Lakers",
+            "status": "STATUS_FINAL",
+            "start_iso": "2024-12-25T20:00:00Z",
+        }
+    ]
     espn_summary = {
         "plays": [
-            {"clock": {"displayValue": "12:00"}, "period": {"number": 1},
-             "homeScore": 0, "awayScore": 0,
-             "wallclock": "2024-12-25T20:00:00Z"},
-            {"clock": {"displayValue": "0:00"}, "period": {"number": 4},
-             "homeScore": 110, "awayScore": 100,
-             "wallclock": "2024-12-25T22:30:00Z"},
+            {
+                "clock": {"displayValue": "12:00"},
+                "period": {"number": 1},
+                "homeScore": 0,
+                "awayScore": 0,
+                "wallclock": "2024-12-25T20:00:00Z",
+            },
+            {
+                "clock": {"displayValue": "0:00"},
+                "period": {"number": 4},
+                "homeScore": 110,
+                "awayScore": 100,
+                "wallclock": "2024-12-25T22:30:00Z",
+            },
         ]
     }
 
@@ -348,27 +401,35 @@ def test_fetch_and_cache_writes_manifest_and_trades(tmp_path, monkeypatch):
     class _StubModel:
         def predict_proba(self, X):
             import numpy as np
+
             return np.array([[0.5, 0.5]] * len(X))
 
-    with patch(
-        "hlanalysis.backtest.data.pm_nba._fetch_nba_gamma_events",
-        return_value=gamma_events,
-    ), patch(
-        "hlanalysis.backtest.data.pm_nba._fetch_pm_trades_raw",
-        return_value=pm_trades,
-    ), patch(
-        "hlanalysis.backtest.data.pm_nba.fetch_scoreboard",
-        return_value=espn_scoreboard,
-    ), patch(
-        "hlanalysis.backtest.data.pm_nba.fetch_summary",
-        return_value=espn_summary,
-    ), patch(
-        "hlanalysis.backtest.data.pm_nba._load_wp_model",
-        return_value=_StubModel(),
+    with (
+        patch(
+            "hlanalysis.backtest.data.pm_nba._fetch_nba_gamma_events",
+            return_value=gamma_events,
+        ),
+        patch(
+            "hlanalysis.backtest.data.pm_nba._fetch_pm_trades_raw",
+            return_value=pm_trades,
+        ),
+        patch(
+            "hlanalysis.backtest.data.pm_nba.fetch_scoreboard",
+            return_value=espn_scoreboard,
+        ),
+        patch(
+            "hlanalysis.backtest.data.pm_nba.fetch_summary",
+            return_value=espn_summary,
+        ),
+        patch(
+            "hlanalysis.backtest.data.pm_nba._load_wp_model",
+            return_value=_StubModel(),
+        ),
     ):
         ds = PolymarketNBADataSource(cache_root=cache_root)
         descs = ds.fetch_and_cache(
-            start="2024-12-01", end="2024-12-31",
+            start="2024-12-01",
+            end="2024-12-31",
             wp_model_path=Path("data/nba_wp/wp_logistic.joblib"),
         )
 

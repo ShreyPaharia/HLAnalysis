@@ -18,6 +18,7 @@ These tests pin:
   - the BTCUSDT book is populated but UNREAD for σ by default (mark-sourced),
     so existing slots' decisions are unchanged.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -41,6 +42,7 @@ from hlanalysis.events import BboEvent, Mechanism, NormalizedEvent, ProductType
 
 # ---- subscription wiring ----
 
+
 def test_engine_subscribes_binance_spot_reference():
     sub = binance_spot_reference_subscription()  # default = BTCUSDT
     assert sub.venue == "binance"
@@ -51,11 +53,12 @@ def test_engine_subscribes_binance_spot_reference():
 
 def test_build_engine_subscriptions_includes_spot_reference_only():
     from hlanalysis.config import RecorderConfig
+
     cfg = RecorderConfig(subscriptions=[])
     subs = build_engine_subscriptions(cfg)
     binance = [(s.product_type, s.symbol) for s in subs if s.venue == "binance"]
     assert (ProductType.SPOT, "BTCUSDT") in binance
-    assert (ProductType.PERP, "BTCUSDT") not in binance   # perp feed removed
+    assert (ProductType.PERP, "BTCUSDT") not in binance  # perp feed removed
 
 
 def test_build_engine_subscriptions_has_btc_and_eth_binance_bbo_subs():
@@ -78,10 +81,7 @@ def test_build_engine_subscriptions_preserves_hl_and_pm_unchanged():
 
     # Every HL + PM sub from symbols.yaml is present verbatim; nothing dropped
     # or mutated, and no other venues leak in.
-    expected_hlpm = [
-        s for s in sym_cfg.subscriptions
-        if s.venue in ("hyperliquid", "polymarket")
-    ]
+    expected_hlpm = [s for s in sym_cfg.subscriptions if s.venue in ("hyperliquid", "polymarket")]
     got_hlpm = [s for s in subs if s.venue in ("hyperliquid", "polymarket")]
     assert got_hlpm == expected_hlpm
     assert {s.venue for s in subs} == {"hyperliquid", "polymarket", "binance"}
@@ -96,6 +96,7 @@ def test_engine_adapter_routes_binance_to_binance_adapter():
 
 
 # ---- bbo-only is pure WS (no REST premium poll) ----
+
 
 @pytest.mark.asyncio
 async def test_bbo_only_spot_sub_spawns_no_rest_premium_poll(monkeypatch):
@@ -142,8 +143,11 @@ async def test_perp_sub_with_mark_does_spawn_rest_premium_poll(monkeypatch):
     monkeypatch.setattr(BinanceAdapter, "_poll_perp_premium", _fake_poll)
 
     mark_sub = Subscription(
-        venue="binance", product_type=ProductType.PERP,
-        mechanism=Mechanism.CLOB, symbol="BTCUSDT", channels=("bbo", "mark"),
+        venue="binance",
+        product_type=ProductType.PERP,
+        mechanism=Mechanism.CLOB,
+        symbol="BTCUSDT",
+        channels=("bbo", "mark"),
     )
     await _run_stream_briefly(BinanceAdapter(), [mark_sub])
 
@@ -152,14 +156,21 @@ async def test_perp_sub_with_mark_does_spawn_rest_premium_poll(monkeypatch):
 
 # ---- BBO reaches MarketState book ----
 
+
 def test_binance_spot_bookticker_handle_produces_btcusdt_bbo():
     """The real adapter ``_handle`` turns a spot bookTicker frame into a
     BTCUSDT BboEvent (no stubbing of the parse path)."""
     sub = binance_spot_reference_subscription()
     sym_to_sub = {"BTCUSDT": sub}
     msg = {
-        "e": "bookTicker", "s": "BTCUSDT", "u": 123, "E": 1_700_000_000,
-        "b": "80000.1", "B": "2.5", "a": "80000.3", "A": "1.1",
+        "e": "bookTicker",
+        "s": "BTCUSDT",
+        "u": 123,
+        "E": 1_700_000_000,
+        "b": "80000.1",
+        "B": "2.5",
+        "a": "80000.3",
+        "A": "1.1",
     }
     out = BinanceAdapter()._handle(msg, recv_ns=999, sym_to_sub=sym_to_sub, label="spot")
     assert len(out) == 1
@@ -206,6 +217,7 @@ async def test_btcusdt_bbo_reaches_market_state_through_composite():
 
 # ---- default behaviour unchanged: BTCUSDT book unread for σ ----
 
+
 def test_btcusdt_book_populated_but_unread_for_sigma_by_default():
     """With no reference source registered (default "mark"), the BTCUSDT BBO
     populates the book ONLY — it does NOT feed the σ/OHLC reference. So
@@ -223,11 +235,20 @@ def test_btcusdt_book_populated_but_unread_for_sigma_by_default():
 
 # ---- helpers ----
 
+
 def _btcusdt_spot_bbo(bid: float, ask: float, *, recv_ns: int) -> BboEvent:
     return BboEvent(
-        venue="binance", product_type=ProductType.SPOT, mechanism=Mechanism.CLOB,
-        symbol="BTCUSDT", exchange_ts=0, local_recv_ts=recv_ns, seq=1,
-        bid_px=bid, bid_sz=1.0, ask_px=ask, ask_sz=1.0,
+        venue="binance",
+        product_type=ProductType.SPOT,
+        mechanism=Mechanism.CLOB,
+        symbol="BTCUSDT",
+        exchange_ts=0,
+        local_recv_ts=recv_ns,
+        seq=1,
+        bid_px=bid,
+        bid_sz=1.0,
+        ask_px=ask,
+        ask_sz=1.0,
     )
 
 

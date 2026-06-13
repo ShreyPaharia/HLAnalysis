@@ -28,6 +28,7 @@ row written before this migration came from ``_book_fill``. The one-time HL
 ledger backfill (tools/backfill_hl_fill_ledger.py) wipes each HL slot's fill rows
 and re-mirrors them as 'venue'.
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -40,9 +41,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE fill ADD COLUMN source TEXT NOT NULL DEFAULT 'router'"
-    )
+    op.execute("ALTER TABLE fill ADD COLUMN source TEXT NOT NULL DEFAULT 'router'")
 
 
 def downgrade() -> None:

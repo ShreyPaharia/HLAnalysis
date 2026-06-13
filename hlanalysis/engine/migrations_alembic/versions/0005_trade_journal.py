@@ -22,6 +22,7 @@ A fresh DB creates the table here; pre-existing (baseline-stamped) DBs gain it
 on upgrade. No rows to backfill — the journal populates forward as the engine
 emits decisions.
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -58,10 +59,7 @@ def upgrade() -> None:
     reject_reason         TEXT
 )"""
     )
-    op.execute(
-        "CREATE INDEX idx_trade_journal_decision_ts "
-        "ON trade_journal(decision_ts_ns)"
-    )
+    op.execute("CREATE INDEX idx_trade_journal_decision_ts ON trade_journal(decision_ts_ns)")
 
 
 def downgrade() -> None:

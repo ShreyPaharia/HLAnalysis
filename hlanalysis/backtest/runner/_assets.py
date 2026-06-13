@@ -2,6 +2,7 @@
 
 Extracted verbatim from ``hftbt_runner.py`` — no logic changes.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -58,9 +59,7 @@ def _initial_clear_array(start_ts_ns: int) -> np.ndarray:
     return arr
 
 
-def _latency_span(
-    arr: np.ndarray, start_ts_ns: int | None, end_ts_ns: int | None
-) -> tuple[int, int]:
+def _latency_span(arr: np.ndarray, start_ts_ns: int | None, end_ts_ns: int | None) -> tuple[int, int]:
     """Resolve the [start, end] ts window the latency model spans. Callers in the
     runner pass the question's start/end; low-level tests may omit them, in which
     case the window is derived from the event array's exch_ts range."""
@@ -76,8 +75,11 @@ def _latency_span(
 
 
 def _build_asset(
-    arr: np.ndarray, cfg: Any, *,
-    start_ts_ns: int | None = None, end_ts_ns: int | None = None,
+    arr: np.ndarray,
+    cfg: Any,
+    *,
+    start_ts_ns: int | None = None,
+    end_ts_ns: int | None = None,
 ) -> Any:
     # SHR-79: partial_fill_exchange replaces no_partial_fill_exchange so IOC
     # orders fill only real recorded book depth and walk levels naturally.
@@ -87,8 +89,7 @@ def _build_asset(
     asset = hb.BacktestAsset().data(arr).linear_asset(1.0)
     asset = cfg.effective_latency_model().apply(asset, start_ts_ns=start, end_ts_ns=end)
     return (
-        asset
-        .risk_adverse_queue_model()
+        asset.risk_adverse_queue_model()
         .partial_fill_exchange()
         .trading_value_fee_model(0.0, 0.0)
         .tick_size(cfg.tick_size)
@@ -98,16 +99,18 @@ def _build_asset(
 
 
 def _build_hedge_asset(
-    arr: np.ndarray, cfg: Any, *,
-    start_ts_ns: int | None = None, end_ts_ns: int | None = None,
+    arr: np.ndarray,
+    cfg: Any,
+    *,
+    start_ts_ns: int | None = None,
+    end_ts_ns: int | None = None,
 ) -> Any:
     """Like _build_asset but uses hedge-specific tick/lot sizes."""
     start, end = _latency_span(arr, start_ts_ns, end_ts_ns)
     asset = hb.BacktestAsset().data(arr).linear_asset(1.0)
     asset = cfg.effective_latency_model().apply(asset, start_ts_ns=start, end_ts_ns=end)
     return (
-        asset
-        .risk_adverse_queue_model()
+        asset.risk_adverse_queue_model()
         .partial_fill_exchange()
         .trading_value_fee_model(0.0, 0.0)
         .tick_size(cfg.hedge_tick_size)
@@ -116,9 +119,7 @@ def _build_hedge_asset(
     )
 
 
-def _book_state(
-    hbt: Any, asset_no: int, symbol: str, *, last_l2_ts_ns: int = 0
-) -> BookState | None:
+def _book_state(hbt: Any, asset_no: int, symbol: str, *, last_l2_ts_ns: int = 0) -> BookState | None:
     depth = hbt.depth(asset_no)
     bid = float(depth.best_bid)
     ask = float(depth.best_ask)

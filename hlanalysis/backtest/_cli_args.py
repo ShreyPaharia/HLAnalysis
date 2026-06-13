@@ -4,6 +4,7 @@ Contains :func:`_add_run_config_args` (the shared run-config flag group) and
 per-subcommand parser builders (:func:`_build_run_parser`,
 :func:`_build_tune_parser`, etc.).  No command-handler logic lives here.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -121,32 +122,37 @@ def _build_strategies_parser(sp) -> None:
 
 def _build_run_parser(sp) -> None:
     pr = sp.add_parser("run", help="Run one strategy config across discovered questions")
-    pr.add_argument("--strategy", default=None,
-                    help="Registry strategy id. Required unless --slot is given "
-                         "(--slot derives it from the live config).")
+    pr.add_argument(
+        "--strategy",
+        default=None,
+        help="Registry strategy id. Required unless --slot is given (--slot derives it from the live config).",
+    )
     pr.add_argument(
         "--data-source",
         required=True,
         choices=["synthetic", "polymarket", "hl_hip4", "pm_nba"],
     )
-    pr.add_argument("--config", default=None,
-                    help="JSON file of param dict. Mutually exclusive with --slot.")
+    pr.add_argument("--config", default=None, help="JSON file of param dict. Mutually exclusive with --slot.")
     pr.add_argument(
-        "--slot", default=None,
+        "--slot",
+        default=None,
         help="(SHR-99) Run from a live strategy.yaml slot by account_alias "
-             "(e.g. v31). Sources the EXACT live decision config via the engine "
-             "config builders — no hand-written JSON to drift. Sets --strategy.",
+        "(e.g. v31). Sources the EXACT live decision config via the engine "
+        "config builders — no hand-written JSON to drift. Sets --strategy.",
     )
     pr.add_argument(
-        "--slot-config", default="config/strategy.yaml", dest="slot_config",
-        help="Path to the live strategy config for --slot (default "
-             "config/strategy.yaml).",
+        "--slot-config",
+        default="config/strategy.yaml",
+        dest="slot_config",
+        help="Path to the live strategy config for --slot (default config/strategy.yaml).",
     )
     pr.add_argument(
-        "--slot-class", default=None, dest="slot_class",
+        "--slot-class",
+        default=None,
+        dest="slot_class",
         help="(--slot only) Select a per-class override config (e.g. priceBucket) "
-             "matching the engine's per-question.klass resolution. Omit for the "
-             "slot default. Run one class per invocation (one σ cadence).",
+        "matching the engine's per-question.klass resolution. Omit for the "
+        "slot default. Run one class per invocation (one σ cadence).",
     )
     pr.add_argument("--out-dir", required=True)
     pr.add_argument("--start", default=None)
@@ -163,8 +169,7 @@ def _build_run_parser(sp) -> None:
         "--pm-flavor",
         choices=sorted(PM_FLAVORS),
         default="btc_updown",
-        help="(polymarket only) Which PM series + reference asset to load. "
-        "Default: btc_updown.",
+        help="(polymarket only) Which PM series + reference asset to load. Default: btc_updown.",
     )
     pr.add_argument(
         "--hedge-data-path",
@@ -258,19 +263,31 @@ def _build_run_parser(sp) -> None:
         "MarketState so σ is warm at market open. Default: auto-derived from "
         "max(vol_lookback_seconds) across param classes. Pass 0 to disable.",
     )
-    pr.add_argument("--workers", type=int, default=1,
-                    help="Parallel worker processes for independent markets "
-                         "(default 1 = serial). Use up to #cores for big runs.")
-    pr.add_argument("--no-cache", "--fresh", dest="no_cache", action="store_true",
-                    help="Disable the event-array cache for this run (it is "
-                         "default-ON) and force a fresh build. Use when you "
-                         "suspect a stale/poisoned cached entry.")
-    pr.add_argument("--cache-event-arrays", action="store_true",
-                    help="(deprecated, no-op) The event-array cache is now "
-                         "default-ON; this flag is kept for back-compat.")
-    pr.add_argument("--rebuild-cache", action="store_true",
-                    help="Ignore cached event arrays and rebuild them once "
-                         "(then repopulate the cache).")
+    pr.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel worker processes for independent markets (default 1 = serial). Use up to #cores for big runs.",
+    )
+    pr.add_argument(
+        "--no-cache",
+        "--fresh",
+        dest="no_cache",
+        action="store_true",
+        help="Disable the event-array cache for this run (it is "
+        "default-ON) and force a fresh build. Use when you "
+        "suspect a stale/poisoned cached entry.",
+    )
+    pr.add_argument(
+        "--cache-event-arrays",
+        action="store_true",
+        help="(deprecated, no-op) The event-array cache is now default-ON; this flag is kept for back-compat.",
+    )
+    pr.add_argument(
+        "--rebuild-cache",
+        action="store_true",
+        help="Ignore cached event arrays and rebuild them once (then repopulate the cache).",
+    )
     pr.set_defaults(func=cmd_run)
 
 
@@ -290,8 +307,7 @@ def _build_fetch_parser(sp) -> None:
         "--pm-flavor",
         choices=sorted(PM_FLAVORS),
         default="btc_updown",
-        help="(polymarket only) Which PM series + reference asset to load. "
-        "Default: btc_updown.",
+        help="(polymarket only) Which PM series + reference asset to load. Default: btc_updown.",
     )
     pf.add_argument("--min-trades", type=int, default=30)
     pf.add_argument("--min-volume-usd", type=float, default=1000.0)
@@ -317,8 +333,7 @@ def _build_tune_parser(sp) -> None:
         "--pm-flavor",
         choices=sorted(PM_FLAVORS),
         default="btc_updown",
-        help="(polymarket only) Which PM series + reference asset to load. "
-        "Default: btc_updown.",
+        help="(polymarket only) Which PM series + reference asset to load. Default: btc_updown.",
     )
     pt.add_argument("--start", default=None)
     pt.add_argument("--end", default=None)
@@ -326,15 +341,23 @@ def _build_tune_parser(sp) -> None:
     pt.add_argument("--skip-markets", type=int, default=0)
     pt.add_argument("--max-markets", type=int, default=None)
     pt.add_argument("--top-k", type=int, default=10)
-    pt.add_argument("--no-cache", "--fresh", dest="no_cache", action="store_true",
-                    help="Disable the event-array cache for this sweep (it is "
-                         "default-ON) and force fresh builds.")
-    pt.add_argument("--cache-event-arrays", action="store_true",
-                    help="(deprecated, no-op) The event-array cache is now "
-                         "default-ON; kept for back-compat.")
-    pt.add_argument("--rebuild-cache", action="store_true",
-                    help="Ignore cached event arrays and rebuild them once "
-                         "(then reuse across the sweep).")
+    pt.add_argument(
+        "--no-cache",
+        "--fresh",
+        dest="no_cache",
+        action="store_true",
+        help="Disable the event-array cache for this sweep (it is default-ON) and force fresh builds.",
+    )
+    pt.add_argument(
+        "--cache-event-arrays",
+        action="store_true",
+        help="(deprecated, no-op) The event-array cache is now default-ON; kept for back-compat.",
+    )
+    pt.add_argument(
+        "--rebuild-cache",
+        action="store_true",
+        help="Ignore cached event arrays and rebuild them once (then reuse across the sweep).",
+    )
     pt.add_argument(
         "--kind",
         choices=["binary", "bucket", "both"],

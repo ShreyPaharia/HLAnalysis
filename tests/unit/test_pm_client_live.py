@@ -1,6 +1,7 @@
 """Live-mode PMClient tests. All paths inject a `_FakeClob` via
 `client._sdk` — no network and no real py-clob-client-v2 SDK calls.
 """
+
 from __future__ import annotations
 
 from hlanalysis.engine.exec_types import PlaceRequest
@@ -37,13 +38,15 @@ class _FakeClob:
         self._trades = trades or []
 
     def create_and_post_order(self, *, order_args, options, order_type):
-        self.placed.append({
-            "token_id": order_args.token_id,
-            "price": order_args.price,
-            "size": order_args.size,
-            "side": str(order_args.side),
-            "order_type": str(order_type),
-        })
+        self.placed.append(
+            {
+                "token_id": order_args.token_id,
+                "price": order_args.price,
+                "size": order_args.size,
+                "side": str(order_args.side),
+                "order_type": str(order_type),
+            }
+        )
         if self._place_resp is not None:
             return self._place_resp
         # PM CLOB taker-perspective convention: BUY → making=USDC paid,
@@ -61,15 +64,22 @@ class _FakeClob:
         }
 
     def create_and_post_market_order(
-        self, *, order_args, options, order_type, defer_exec=False,
+        self,
+        *,
+        order_args,
+        options,
+        order_type,
+        defer_exec=False,
     ):
-        self.market_placed.append({
-            "token_id": order_args.token_id,
-            "amount": order_args.amount,
-            "price": order_args.price,
-            "side": str(order_args.side),
-            "order_type": str(order_type),
-        })
+        self.market_placed.append(
+            {
+                "token_id": order_args.token_id,
+                "amount": order_args.amount,
+                "price": order_args.price,
+                "side": str(order_args.side),
+                "order_type": str(order_type),
+            }
+        )
         if self._place_resp is not None:
             return self._place_resp
         # Market BUY: `amount` is USDC paid → making=USDC, taking=shares.
@@ -111,8 +121,12 @@ class _FakeClob:
 
 def _client() -> PMClient:
     return PMClient(
-        paper_mode=False, clob_host="x", chain_id=137,
-        private_key="0x0", clob_api_key="k", clob_api_secret="s",
+        paper_mode=False,
+        clob_host="x",
+        chain_id=137,
+        private_key="0x0",
+        clob_api_key="k",
+        clob_api_secret="s",
         clob_api_passphrase="p",
     )
 
@@ -124,11 +138,17 @@ def test_live_place_translates_request_to_FAK_market_order():
     fake = _FakeClob()
     c = _client()
     c._sdk = fake  # inject fake
-    ack = c.place(PlaceRequest(
-        cloid="hla-v31_pm-1", symbol="71321...992563",
-        side="buy", size=100, price=0.92,
-        reduce_only=False, time_in_force="ioc",
-    ))
+    ack = c.place(
+        PlaceRequest(
+            cloid="hla-v31_pm-1",
+            symbol="71321...992563",
+            side="buy",
+            size=100,
+            price=0.92,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
     assert not fake.placed, "ioc must not use the limit (create_and_post_order) path"
     assert fake.market_placed, "create_and_post_market_order was not invoked"
     placed = fake.market_placed[0]
@@ -152,10 +172,17 @@ def test_live_place_ioc_buy_rounds_usdc_amount_to_2_decimals():
     fake = _FakeClob()
     c = _client()
     c._sdk = fake
-    ack = c.place(PlaceRequest(
-        cloid="m1", symbol="tok", side="buy", size=53.19, price=0.94,
-        reduce_only=False, time_in_force="ioc",
-    ))
+    ack = c.place(
+        PlaceRequest(
+            cloid="m1",
+            symbol="tok",
+            side="buy",
+            size=53.19,
+            price=0.94,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
     assert fake.market_placed, "create_and_post_market_order was not invoked"
     amount = fake.market_placed[0]["amount"]
     assert amount == 49.99  # round_down(0.94 * 53.19, 2)
@@ -169,10 +196,17 @@ def test_live_place_ioc_sell_amount_is_share_count():
     fake = _FakeClob()
     c = _client()
     c._sdk = fake
-    c.place(PlaceRequest(
-        cloid="s1", symbol="tok", side="sell", size=40.0, price=0.94,
-        reduce_only=False, time_in_force="ioc",
-    ))
+    c.place(
+        PlaceRequest(
+            cloid="s1",
+            symbol="tok",
+            side="sell",
+            size=40.0,
+            price=0.94,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
     assert fake.market_placed[0]["amount"] == 40.0
     assert fake.market_placed[0]["order_type"].endswith("FAK")
 
@@ -187,10 +221,17 @@ def test_live_place_ioc_sell_clamps_price_above_max_to_0_99():
     fake = _FakeClob()
     c = _client()
     c._sdk = fake
-    ack = c.place(PlaceRequest(
-        cloid="clamp-sell", symbol="tok", side="sell", size=56.1685,
-        price=0.992, reduce_only=True, time_in_force="ioc",
-    ))
+    ack = c.place(
+        PlaceRequest(
+            cloid="clamp-sell",
+            symbol="tok",
+            side="sell",
+            size=56.1685,
+            price=0.992,
+            reduce_only=True,
+            time_in_force="ioc",
+        )
+    )
     assert fake.market_placed, "create_and_post_market_order was not invoked"
     assert fake.market_placed[0]["price"] == 0.99
     assert ack.status == "filled"
@@ -202,10 +243,17 @@ def test_live_place_ioc_buy_clamps_price_below_min_to_0_01():
     fake = _FakeClob()
     c = _client()
     c._sdk = fake
-    c.place(PlaceRequest(
-        cloid="clamp-buy", symbol="tok", side="buy", size=10.0,
-        price=0.005, reduce_only=False, time_in_force="ioc",
-    ))
+    c.place(
+        PlaceRequest(
+            cloid="clamp-buy",
+            symbol="tok",
+            side="buy",
+            size=10.0,
+            price=0.005,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
     assert fake.market_placed[0]["price"] == 0.01
 
 
@@ -214,10 +262,17 @@ def test_live_place_gtc_clamps_price_to_valid_range():
     fake = _FakeClob()
     c = _client()
     c._sdk = fake
-    c.place(PlaceRequest(
-        cloid="clamp-gtc", symbol="tok", side="sell", size=10.0,
-        price=1.0, reduce_only=False, time_in_force="gtc",
-    ))
+    c.place(
+        PlaceRequest(
+            cloid="clamp-gtc",
+            symbol="tok",
+            side="sell",
+            size=10.0,
+            price=1.0,
+            reduce_only=False,
+            time_in_force="gtc",
+        )
+    )
     assert fake.placed[0]["price"] == 0.99
 
 
@@ -225,10 +280,17 @@ def test_live_place_in_range_price_passes_through_unchanged():
     fake = _FakeClob()
     c = _client()
     c._sdk = fake
-    c.place(PlaceRequest(
-        cloid="ok", symbol="tok", side="buy", size=10.0,
-        price=0.5, reduce_only=False, time_in_force="ioc",
-    ))
+    c.place(
+        PlaceRequest(
+            cloid="ok",
+            symbol="tok",
+            side="buy",
+            size=10.0,
+            price=0.5,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
     assert fake.market_placed[0]["price"] == 0.5
 
 
@@ -236,23 +298,41 @@ def test_live_place_gtc_maps_to_GTC_order_type():
     fake = _FakeClob()
     c = _client()
     c._sdk = fake
-    c.place(PlaceRequest(
-        cloid="g1", symbol="tok", side="sell", size=10, price=0.4,
-        reduce_only=False, time_in_force="gtc",
-    ))
+    c.place(
+        PlaceRequest(
+            cloid="g1",
+            symbol="tok",
+            side="sell",
+            size=10,
+            price=0.4,
+            reduce_only=False,
+            time_in_force="gtc",
+        )
+    )
     assert fake.placed[0]["order_type"].endswith("GTC")
 
 
 def test_live_place_failure_response_returns_rejected_ack():
-    fake = _FakeClob(place_resp={
-        "success": False, "errorMsg": "below minimum size", "orderID": "",
-    })
+    fake = _FakeClob(
+        place_resp={
+            "success": False,
+            "errorMsg": "below minimum size",
+            "orderID": "",
+        }
+    )
     c = _client()
     c._sdk = fake
-    ack = c.place(PlaceRequest(
-        cloid="r1", symbol="tok", side="buy", size=1, price=0.5,
-        reduce_only=False, time_in_force="ioc",
-    ))
+    ack = c.place(
+        PlaceRequest(
+            cloid="r1",
+            symbol="tok",
+            side="buy",
+            size=1,
+            price=0.5,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
     assert ack.status == "rejected"
     assert "below minimum size" in (ack.error or "")
     # no mapping recorded on failure
@@ -264,10 +344,17 @@ def test_live_cancel_resolves_cloid_via_local_map():
     c = _client()
     c._sdk = fake
     # Place first to populate the cloid→oid map.
-    c.place(PlaceRequest(
-        cloid="c1", symbol="tok", side="buy", size=10, price=0.5,
-        reduce_only=False, time_in_force="ioc",
-    ))
+    c.place(
+        PlaceRequest(
+            cloid="c1",
+            symbol="tok",
+            side="buy",
+            size=10,
+            price=0.5,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
+    )
     ok = c.cancel(cloid="c1", symbol="tok")
     assert ok is True
     assert fake.canceled == ["0xfakeid"]
@@ -284,18 +371,28 @@ def test_live_cancel_unknown_cloid_returns_false():
 
 
 def test_live_open_orders_maps_response_to_OpenOrderRow():
-    fake = _FakeClob(open_orders=[
-        {
-            "id": "0xabc", "asset_id": "tok-1", "side": "BUY",
-            "price": "0.55", "original_size": "100", "size_matched": "30",
-            "created_at": 1_700_000_000,
-        },
-        {
-            "id": "0xdef", "asset_id": "tok-2", "side": "SELL",
-            "price": "0.30", "original_size": "50", "size_matched": "0",
-            "created_at": 1_700_000_100,
-        },
-    ])
+    fake = _FakeClob(
+        open_orders=[
+            {
+                "id": "0xabc",
+                "asset_id": "tok-1",
+                "side": "BUY",
+                "price": "0.55",
+                "original_size": "100",
+                "size_matched": "30",
+                "created_at": 1_700_000_000,
+            },
+            {
+                "id": "0xdef",
+                "asset_id": "tok-2",
+                "side": "SELL",
+                "price": "0.30",
+                "original_size": "50",
+                "size_matched": "0",
+                "created_at": 1_700_000_100,
+            },
+        ]
+    )
     c = _client()
     c._sdk = fake
     # Seed a known mapping for one of the orders to validate reverse-lookup.
@@ -328,8 +425,13 @@ def test_live_clearinghouse_state_reflects_usdc_balance():
 
 def _client_with_funder() -> PMClient:
     return PMClient(
-        paper_mode=False, clob_host="x", chain_id=137, private_key="0x0",
-        clob_api_key="k", clob_api_secret="s", clob_api_passphrase="p",
+        paper_mode=False,
+        clob_host="x",
+        chain_id=137,
+        private_key="0x0",
+        clob_api_key="k",
+        clob_api_secret="s",
+        clob_api_passphrase="p",
         funder_address="0xFUNDER",
     )
 
@@ -451,18 +553,30 @@ def test_live_clearinghouse_state_positions_unknown_without_funder():
 
 
 def test_live_user_fills_maps_trades_to_UserFillRow():
-    fake = _FakeClob(trades=[
-        {
-            "id": "t-1", "taker_order_id": "0xabc", "asset_id": "tok-1",
-            "side": "BUY", "price": "0.55", "size": "100",
-            "fee_rate_bps": "10", "match_time": 1_700_000_050,
-        },
-        {
-            "id": "t-2", "taker_order_id": "0xdef", "asset_id": "tok-2",
-            "side": "SELL", "price": "0.30", "size": "50",
-            "fee_rate_bps": "0", "match_time": 1_700_000_200,
-        },
-    ])
+    fake = _FakeClob(
+        trades=[
+            {
+                "id": "t-1",
+                "taker_order_id": "0xabc",
+                "asset_id": "tok-1",
+                "side": "BUY",
+                "price": "0.55",
+                "size": "100",
+                "fee_rate_bps": "10",
+                "match_time": 1_700_000_050,
+            },
+            {
+                "id": "t-2",
+                "taker_order_id": "0xdef",
+                "asset_id": "tok-2",
+                "side": "SELL",
+                "price": "0.30",
+                "size": "50",
+                "fee_rate_bps": "0",
+                "match_time": 1_700_000_200,
+            },
+        ]
+    )
     c = _client()
     c._sdk = fake
     c._cloid_to_oid["hla-1"] = "0xabc"
@@ -484,18 +598,30 @@ def test_live_user_fills_maps_trades_to_UserFillRow():
 
 
 def test_live_user_fills_filters_by_since_ts_ns():
-    fake = _FakeClob(trades=[
-        {
-            "id": "old", "taker_order_id": "x", "asset_id": "tok",
-            "side": "BUY", "price": "0.5", "size": "10",
-            "fee_rate_bps": "0", "match_time": 1_000,
-        },
-        {
-            "id": "new", "taker_order_id": "y", "asset_id": "tok",
-            "side": "BUY", "price": "0.5", "size": "10",
-            "fee_rate_bps": "0", "match_time": 2_000,
-        },
-    ])
+    fake = _FakeClob(
+        trades=[
+            {
+                "id": "old",
+                "taker_order_id": "x",
+                "asset_id": "tok",
+                "side": "BUY",
+                "price": "0.5",
+                "size": "10",
+                "fee_rate_bps": "0",
+                "match_time": 1_000,
+            },
+            {
+                "id": "new",
+                "taker_order_id": "y",
+                "asset_id": "tok",
+                "side": "BUY",
+                "price": "0.5",
+                "size": "10",
+                "fee_rate_bps": "0",
+                "match_time": 2_000,
+            },
+        ]
+    )
     c = _client()
     c._sdk = fake
     # since_ts_ns=1500s in ns → only "new" survives.
@@ -508,34 +634,54 @@ def test_zero_fill_ioc_is_cancelled_not_open():
     resting. Mapping its zero-fill ack to status='open' creates a phantom live
     order that blocks re-entry/exit on that question_idx (SHR-48 in-flight
     guard) and inflates the inventory cap until the next reconcile pass."""
-    fake = _FakeClob(place_resp={
-        "success": True, "orderID": "0xfake",
-        "makingAmount": "0", "takingAmount": "0",
-    })
+    fake = _FakeClob(
+        place_resp={
+            "success": True,
+            "orderID": "0xfake",
+            "makingAmount": "0",
+            "takingAmount": "0",
+        }
+    )
     c = _client()
     c._sdk = fake
-    ack = c.place(PlaceRequest(
-        cloid="hla-v31_pm-1", symbol="tok", side="buy", size=100, price=0.92,
-        reduce_only=False, time_in_force="ioc",
-    ))
-    assert ack.fill_size == 0.0
-    assert ack.status == "cancelled", (
-        "a zero-fill IOC/FAK is killed, not resting — must not be 'open'"
+    ack = c.place(
+        PlaceRequest(
+            cloid="hla-v31_pm-1",
+            symbol="tok",
+            side="buy",
+            size=100,
+            price=0.92,
+            reduce_only=False,
+            time_in_force="ioc",
+        )
     )
+    assert ack.fill_size == 0.0
+    assert ack.status == "cancelled", "a zero-fill IOC/FAK is killed, not resting — must not be 'open'"
 
 
 def test_zero_fill_gtc_limit_stays_open():
     """A GTC limit that doesn't immediately fill legitimately RESTS on the book,
     so its zero-fill ack must remain status='open' (the conditional fix must not
     relabel resting limits)."""
-    fake = _FakeClob(place_resp={
-        "success": True, "orderID": "0xfake",
-        "makingAmount": "0", "takingAmount": "0",
-    })
+    fake = _FakeClob(
+        place_resp={
+            "success": True,
+            "orderID": "0xfake",
+            "makingAmount": "0",
+            "takingAmount": "0",
+        }
+    )
     c = _client()
     c._sdk = fake
-    ack = c.place(PlaceRequest(
-        cloid="hla-v31_pm-2", symbol="tok", side="buy", size=100, price=0.50,
-        reduce_only=False, time_in_force="gtc",
-    ))
+    ack = c.place(
+        PlaceRequest(
+            cloid="hla-v31_pm-2",
+            symbol="tok",
+            side="buy",
+            size=100,
+            price=0.50,
+            reduce_only=False,
+            time_in_force="gtc",
+        )
+    )
     assert ack.status == "open"

@@ -16,6 +16,7 @@ continue to work without modification.
 
 Do NOT import ``runtime.py`` from this module — that would create a cycle.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -26,9 +27,7 @@ from .exec_types import ClearinghouseState, OpenOrderRow, UserFillRow
 from .scanner import Scanner
 
 
-async def venue_snapshot(slot: object) -> tuple[
-    list[OpenOrderRow], ClearinghouseState, list[UserFillRow]
-]:
+async def venue_snapshot(slot: object) -> tuple[list[OpenOrderRow], ClearinghouseState, list[UserFillRow]]:
     """Fetch venue open-orders, clearinghouse state, and the full fills list
     off the event loop. Fills are fetched once and reused as the reconcile
     `fills_lookup` for every cloid — the live lambda ignores its cloid arg
@@ -82,17 +81,20 @@ async def realized_pnl_today(
     # slot is AccountSlot at runtime; use getattr for the cycle-free typing.
     alias: str = slot.alias  # type: ignore[attr-defined]
     window_start_ns = Scanner._daily_window_start_ns(
-        now_ns, hour=slot.cfg.global_.daily_window_start_hour_utc,  # type: ignore[attr-defined]
+        now_ns,
+        hour=slot.cfg.global_.daily_window_start_hour_utc,  # type: ignore[attr-defined]
     )
     try:
         venue_pnl = await asyncio.to_thread(
-            slot.exec_client.realized_pnl_since, window_start_ns,  # type: ignore[attr-defined]
+            slot.exec_client.realized_pnl_since,
+            window_start_ns,  # type: ignore[attr-defined]
             outcome_only=True,
         )
         venue_pnl_failures[alias] = 0
         if slot.is_pm:  # type: ignore[attr-defined]
             settlement_pnl = await asyncio.to_thread(
-                slot.dal.settlement_pnl_since, window_start_ns,  # type: ignore[attr-defined]
+                slot.dal.settlement_pnl_since,
+                window_start_ns,  # type: ignore[attr-defined]
             )
             return venue_pnl + settlement_pnl
         return venue_pnl  # HL: settlement already in venue fills' closedPnl
@@ -100,17 +102,20 @@ async def realized_pnl_today(
         n = venue_pnl_failures.get(alias, 0) + 1
         venue_pnl_failures[alias] = n
         logger.warning(
-            "realized_pnl_since failed alias={} (consecutive={}); using "
-            "settlement-inclusive DAL", alias, n,
+            "realized_pnl_since failed alias={} (consecutive={}); using settlement-inclusive DAL",
+            alias,
+            n,
         )
         if n >= daily_loss_venue_fail_halt:
             logger.error(
                 "venue PnL unreadable for {} consecutive checks; halting "
                 "slot {} (fail-safe — cap can't be trusted venue-blind)",
-                n, alias,
+                n,
+                alias,
             )
             slot.halted = True  # type: ignore[attr-defined]
         # DAL realized_pnl_since already includes settlement PnL (SHR-53).
         return await asyncio.to_thread(
-            slot.dal.realized_pnl_since, window_start_ns,  # type: ignore[attr-defined]
+            slot.dal.realized_pnl_since,
+            window_start_ns,  # type: ignore[attr-defined]
         )

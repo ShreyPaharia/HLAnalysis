@@ -14,6 +14,7 @@ The caller supplies those two behaviours as ``on_no_book`` / ``on_not_needed``
 callables and the entry evaluation as ``run_entry``; the shared tail (re-run
 entry, gate-failed / leg-changed / below-min-notional skips, emit) is identical.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
@@ -57,66 +58,95 @@ def run_topup(
     # bid notional, etc.) so we delegate rather than duplicate.
     entry_dec = run_entry()
     if entry_dec.action != Action.ENTER or not entry_dec.intents:
-        failed_gate = (
-            entry_dec.diagnostics[0].message
-            if entry_dec.diagnostics else "unknown"
-        )
+        failed_gate = entry_dec.diagnostics[0].message if entry_dec.diagnostics else "unknown"
         logger.debug(
             "topup_skip q={} sym={} reason=gate_failed:{} current_ntl=${:.2f} target_ntl=${:.2f}",
-            question.question_idx, position.symbol, failed_gate,
-            current_ntl, target_ntl,
+            question.question_idx,
+            position.symbol,
+            failed_gate,
+            current_ntl,
+            target_ntl,
         )
-        return Decision(action=Action.HOLD, diagnostics=(
-            Diagnostic("info", "topup_skip", (
-                ("reason", f"gate_failed:{failed_gate}"),
-            )),
-        ))
+        return Decision(
+            action=Action.HOLD,
+            diagnostics=(Diagnostic("info", "topup_skip", (("reason", f"gate_failed:{failed_gate}"),)),),
+        )
     candidate = entry_dec.intents[0]
     if candidate.symbol != position.symbol:
         logger.debug(
             "topup_skip q={} sym={} reason=leg_changed chosen={} current_ntl=${:.2f} target_ntl=${:.2f}",
-            question.question_idx, position.symbol, candidate.symbol,
-            current_ntl, target_ntl,
+            question.question_idx,
+            position.symbol,
+            candidate.symbol,
+            current_ntl,
+            target_ntl,
         )
-        return Decision(action=Action.HOLD, diagnostics=(
-            Diagnostic("info", "topup_skip", (
-                ("reason", "leg_changed"),
-                ("chosen", candidate.symbol),
-            )),
-        ))
+        return Decision(
+            action=Action.HOLD,
+            diagnostics=(
+                Diagnostic(
+                    "info",
+                    "topup_skip",
+                    (
+                        ("reason", "leg_changed"),
+                        ("chosen", candidate.symbol),
+                    ),
+                ),
+            ),
+        )
 
     topup_size = round_size(shortfall_ntl, ask)
     topup_ntl = topup_size * ask
     if topup_ntl < topup_min_notional_usd:
         logger.debug(
             "topup_skip q={} sym={} reason=below_min_notional topup_ntl=${:.2f} min=${:.2f}",
-            question.question_idx, position.symbol, topup_ntl,
+            question.question_idx,
+            position.symbol,
+            topup_ntl,
             topup_min_notional_usd,
         )
-        return Decision(action=Action.HOLD, diagnostics=(
-            Diagnostic("info", "topup_skip", (
-                ("reason", "below_min_notional"),
-                ("topup_ntl", f"{topup_ntl:.2f}"),
-            )),
-        ))
+        return Decision(
+            action=Action.HOLD,
+            diagnostics=(
+                Diagnostic(
+                    "info",
+                    "topup_skip",
+                    (
+                        ("reason", "below_min_notional"),
+                        ("topup_ntl", f"{topup_ntl:.2f}"),
+                    ),
+                ),
+            ),
+        )
 
     intent = make_entry_intent(
-        question, symbol=position.symbol, size=topup_size, limit_price=ask,
+        question,
+        symbol=position.symbol,
+        size=topup_size,
+        limit_price=ask,
     )
     logger.info(
-        "topup_emit q={} sym={} side=buy current_ntl=${:.2f} target_ntl=${:.2f} "
-        "topup_size={:.2f} ask={:.5f}",
-        question.question_idx, position.symbol, current_ntl, target_ntl,
-        topup_size, ask,
+        "topup_emit q={} sym={} side=buy current_ntl=${:.2f} target_ntl=${:.2f} topup_size={:.2f} ask={:.5f}",
+        question.question_idx,
+        position.symbol,
+        current_ntl,
+        target_ntl,
+        topup_size,
+        ask,
     )
     return Decision(
-        action=Action.ENTER, intents=(intent,),
+        action=Action.ENTER,
+        intents=(intent,),
         diagnostics=(
-            Diagnostic("info", "topup_emit", (
-                ("current_ntl", f"{current_ntl:.2f}"),
-                ("target_ntl", f"{target_ntl:.2f}"),
-                ("topup_size", f"{topup_size:.2f}"),
-                ("ask", f"{ask:.5f}"),
-            )),
+            Diagnostic(
+                "info",
+                "topup_emit",
+                (
+                    ("current_ntl", f"{current_ntl:.2f}"),
+                    ("target_ntl", f"{target_ntl:.2f}"),
+                    ("topup_size", f"{topup_size:.2f}"),
+                    ("ask", f"{ask:.5f}"),
+                ),
+            ),
         ),
     )

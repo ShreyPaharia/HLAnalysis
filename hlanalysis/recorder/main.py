@@ -25,11 +25,7 @@ def main() -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if args.log_file is not None:
         args.log_file.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(
-            TimedRotatingFileHandler(
-                args.log_file, when="midnight", backupCount=14, utc=True
-            )
-        )
+        handlers.append(TimedRotatingFileHandler(args.log_file, when="midnight", backupCount=14, utc=True))
     logging.basicConfig(
         level=args.log_level.upper(),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",

@@ -40,8 +40,7 @@ def test_window_filter_only_keeps_in_window_returns():
     # tests/unit/test_sim_market_state.py.
     buf = KlineRingBuffer()
     for i in range(5):
-        buf.append(ts_ns=i * NS_PER_MIN, high=100.0 + i, low=100.0 + i,
-                   close=100.0 + i + 1)
+        buf.append(ts_ns=i * NS_PER_MIN, high=100.0 + i, low=100.0 + i, close=100.0 + i + 1)
     rets, _hls = buf.slice_window(now_ns=4 * NS_PER_MIN, lookback_seconds=120)
     # Cutoff = 4 - 2 = 2 minutes. Kept closes: ts=2,3,4 → 2 returns.
     assert len(rets) == 2
@@ -79,20 +78,17 @@ def test_latest_close():
 
 def test_hl_excludes_degenerate_bars():
     buf = KlineRingBuffer()
-    buf.append(ts_ns=0, high=0.0, low=1.0, close=1.0)             # h=0 excluded
-    buf.append(ts_ns=NS_PER_MIN, high=1.0, low=0.0, close=1.0)    # l=0 excluded
+    buf.append(ts_ns=0, high=0.0, low=1.0, close=1.0)  # h=0 excluded
+    buf.append(ts_ns=NS_PER_MIN, high=1.0, low=0.0, close=1.0)  # l=0 excluded
     buf.append(ts_ns=2 * NS_PER_MIN, high=1.5, low=0.5, close=1.0)  # kept
     _rets, hls = buf.slice_window(now_ns=2 * NS_PER_MIN, lookback_seconds=3600)
     assert np.array_equal(hls, np.array([[1.5, 0.5]]))
 
 
-@pytest.mark.parametrize("now_min,lookback,expected_rets",
-                         [(0, 120, 0), (4, 120, 2), (4, 60, 1), (4, 0, 0)])
+@pytest.mark.parametrize("now_min,lookback,expected_rets", [(0, 120, 0), (4, 120, 2), (4, 60, 1), (4, 0, 0)])
 def test_window_boundaries(now_min, lookback, expected_rets):
     buf = KlineRingBuffer()
     for i in range(5):
-        buf.append(ts_ns=i * NS_PER_MIN, high=100.0, low=100.0,
-                   close=100.0 + i + 1)
-    rets, _ = buf.slice_window(now_ns=now_min * NS_PER_MIN,
-                               lookback_seconds=lookback)
+        buf.append(ts_ns=i * NS_PER_MIN, high=100.0, low=100.0, close=100.0 + i + 1)
+    rets, _ = buf.slice_window(now_ns=now_min * NS_PER_MIN, lookback_seconds=lookback)
     assert len(rets) == expected_rets

@@ -7,11 +7,15 @@ from dataclasses import replace
 import pytest
 
 from hlanalysis.engine.config import (
-    AllowlistEntry, GlobalRiskConfig, StrategyConfig,
+    AllowlistEntry,
+    GlobalRiskConfig,
+    StrategyConfig,
 )
 from hlanalysis.engine.event_bus import EventBus
 from hlanalysis.engine.exec_types import (
-    ClearinghouseState, OrderAck, PlaceRequest,
+    ClearinghouseState,
+    OrderAck,
+    PlaceRequest,
 )
 from hlanalysis.engine.hl_client import HLClient
 from hlanalysis.engine.risk import RiskGate, RiskInputs
@@ -19,45 +23,72 @@ from hlanalysis.engine.risk_events import RiskVeto
 from hlanalysis.engine.router import Router
 from hlanalysis.engine.state import Position, StateDAL
 from hlanalysis.strategy.types import (
-    Action, BookState, Decision, OrderIntent, QuestionView,
+    Action,
+    BookState,
+    Decision,
+    OrderIntent,
+    QuestionView,
 )
 
 
 def _strategy_cfg() -> StrategyConfig:
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC", "period": "1h"},
-        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=60,
-        tte_max_seconds=1800, price_extreme_threshold=0.95,
-        distance_from_strike_usd_min=200, vol_max=0.5,
+        max_position_usd=100,
+        stop_loss_pct=10,
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200,
+        vol_max=0.5,
     )
     return StrategyConfig(
-        name="late_resolution", paper_mode=True,
-        allowlist=[entry], blocklist_question_idxs=[],
+        name="late_resolution",
+        paper_mode=True,
+        allowlist=[entry],
+        blocklist_question_idxs=[],
         defaults=entry,
-        **{"global": GlobalRiskConfig(
-            max_total_inventory_usd=500, max_concurrent_positions=5,
-            daily_loss_cap_usd=200, max_strike_distance_pct=10,
-            min_recent_volume_usd=1000, stale_data_halt_seconds=5,
-            reconcile_interval_seconds=60,
-        )},
+        **{
+            "global": GlobalRiskConfig(
+                max_total_inventory_usd=500,
+                max_concurrent_positions=5,
+                daily_loss_cap_usd=200,
+                max_strike_distance_pct=10,
+                min_recent_volume_usd=1000,
+                stale_data_halt_seconds=5,
+                reconcile_interval_seconds=60,
+            )
+        },
     )
 
 
 def _q() -> QuestionView:
     return QuestionView(
-        question_idx=42, yes_symbol="@30", no_symbol="@31",
-        strike=80_000.0, expiry_ns=10_000_000_000_000_001 + 600_000_000_000,
-        underlying="BTC", klass="priceBinary", period="1h",
+        question_idx=42,
+        yes_symbol="@30",
+        no_symbol="@31",
+        strike=80_000.0,
+        expiry_ns=10_000_000_000_000_001 + 600_000_000_000,
+        underlying="BTC",
+        klass="priceBinary",
+        period="1h",
     )
 
 
 def _decision_enter() -> Decision:
     return Decision(
         action=Action.ENTER,
-        intents=(OrderIntent(
-            question_idx=42, symbol="@30", side="buy", size=10.0,
-            limit_price=0.95, cloid="hla-router-1", time_in_force="ioc",
-        ),),
+        intents=(
+            OrderIntent(
+                question_idx=42,
+                symbol="@30",
+                side="buy",
+                size=10.0,
+                limit_price=0.95,
+                cloid="hla-router-1",
+                time_in_force="ioc",
+            ),
+        ),
     )
 
 
@@ -66,9 +97,15 @@ def _approval_inputs() -> RiskInputs:
         question=_q(),
         question_fields={"class": "priceBinary", "underlying": "BTC", "period": "1h"},
         reference_price=80_300.0,
-        book=BookState(symbol="@30", bid_px=0.94, bid_sz=10.0, ask_px=0.95,
-                       ask_sz=10.0, last_trade_ts_ns=10_000_000_000_000_000,
-                       last_l2_ts_ns=10_000_000_000_000_000),
+        book=BookState(
+            symbol="@30",
+            bid_px=0.94,
+            bid_sz=10.0,
+            ask_px=0.95,
+            ask_sz=10.0,
+            last_trade_ts_ns=10_000_000_000_000_000,
+            last_l2_ts_ns=10_000_000_000_000_000,
+        ),
         recent_volume_usd=5_000.0,
         positions=[],
         live_orders_total_notional=0.0,
@@ -85,8 +122,7 @@ async def test_approved_decision_writes_db_row_and_calls_place(tmp_path):
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
@@ -102,12 +138,12 @@ async def test_exit_reason_is_threaded_to_exit_event(tmp_path):
     what makes Telegram alerts distinguish safety_d / edge / time_stop exits
     from a true stop loss."""
     from hlanalysis.engine.risk_events import Entry, Exit
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
@@ -118,9 +154,15 @@ async def test_exit_reason_is_threaded_to_exit_event(tmp_path):
 
     # 2) Close it with a non-stop_loss reason.
     exit_intent = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=10.0,
-        limit_price=0.95, cloid="hla-router-exit", time_in_force="ioc",
-        reduce_only=True, exit_reason="exit_safety_d_5m",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=10.0,
+        limit_price=0.95,
+        cloid="hla-router-exit",
+        time_in_force="ioc",
+        reduce_only=True,
+        exit_reason="exit_safety_d_5m",
     )
     exit_dec = Decision(action=Action.EXIT, intents=(exit_intent,))
     await router.handle(exit_dec, inputs=_approval_inputs(), now_ns=3)
@@ -135,24 +177,28 @@ async def test_reduce_only_without_exit_reason_falls_back_to_stop_loss(tmp_path)
     without setting exit_reason keeps the legacy "stop_loss" label — so any
     pre-existing tests / external observers continue to see the same wire shape."""
     from hlanalysis.engine.risk_events import Entry, Exit
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
     await asyncio.wait_for(sub.get(), timeout=0.5)  # drain entry
 
     legacy_exit = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=10.0,
-        limit_price=0.95, cloid="hla-router-exit-legacy", time_in_force="ioc",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=10.0,
+        limit_price=0.95,
+        cloid="hla-router-exit-legacy",
+        time_in_force="ioc",
         reduce_only=True,
     )
-    await router.handle(Decision(action=Action.EXIT, intents=(legacy_exit,)),
-                        inputs=_approval_inputs(), now_ns=3)
+    await router.handle(Decision(action=Action.EXIT, intents=(legacy_exit,)), inputs=_approval_inputs(), now_ns=3)
     ev = await asyncio.wait_for(sub.get(), timeout=0.5)
     assert isinstance(ev, Exit)
     assert ev.reason == "stop_loss"
@@ -163,12 +209,12 @@ async def test_addon_fill_publishes_entry_for_telegram(tmp_path):
     """Topups and other same-direction add-ons must emit Entry so Telegram
     alerts fire — not only the initial open."""
     from hlanalysis.engine.risk_events import Entry
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
@@ -177,10 +223,17 @@ async def test_addon_fill_publishes_entry_for_telegram(tmp_path):
 
     topup = Decision(
         action=Action.ENTER,
-        intents=(OrderIntent(
-            question_idx=42, symbol="@30", side="buy", size=5.0,
-            limit_price=0.95, cloid="hla-router-topup", time_in_force="ioc",
-        ),),
+        intents=(
+            OrderIntent(
+                question_idx=42,
+                symbol="@30",
+                side="buy",
+                size=5.0,
+                limit_price=0.95,
+                cloid="hla-router-topup",
+                time_in_force="ioc",
+            ),
+        ),
     )
     await router.handle(topup, inputs=_approval_inputs(), now_ns=3)
     ev = await asyncio.wait_for(sub.get(), timeout=0.5)
@@ -195,12 +248,12 @@ async def test_addon_fill_publishes_entry_for_telegram(tmp_path):
 async def test_partial_reduce_does_not_publish_entry(tmp_path):
     """Selling part of a long must not look like a new ENTRY in Telegram."""
     from hlanalysis.engine.risk_events import Entry, Exit
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
@@ -208,12 +261,17 @@ async def test_partial_reduce_does_not_publish_entry(tmp_path):
     assert isinstance(await asyncio.wait_for(sub.get(), timeout=0.5), Entry)
 
     partial = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=4.0,
-        limit_price=0.95, cloid="hla-router-partial", time_in_force="ioc",
-        reduce_only=True, exit_reason="exit_edge",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=4.0,
+        limit_price=0.95,
+        cloid="hla-router-partial",
+        time_in_force="ioc",
+        reduce_only=True,
+        exit_reason="exit_edge",
     )
-    await router.handle(Decision(action=Action.EXIT, intents=(partial,)),
-                        inputs=_approval_inputs(), now_ns=3)
+    await router.handle(Decision(action=Action.EXIT, intents=(partial,)), inputs=_approval_inputs(), now_ns=3)
     assert sub.qsize() == 0
     p = dal.get_position(42)
     assert p is not None and p.qty == pytest.approx(6.0)
@@ -228,8 +286,7 @@ async def test_book_fill_persists_fill_row_with_closed_pnl(tmp_path):
     dal.run_migrations()
     bus = EventBus()
     bus.subscribe()  # so publishes don't block
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
@@ -237,14 +294,19 @@ async def test_book_fill_persists_fill_row_with_closed_pnl(tmp_path):
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
 
     exit_intent = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=10.0,
-        limit_price=0.90, cloid="hla-router-close", time_in_force="ioc",
-        reduce_only=True, exit_reason="exit_safety_d",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=10.0,
+        limit_price=0.90,
+        cloid="hla-router-close",
+        time_in_force="ioc",
+        reduce_only=True,
+        exit_reason="exit_safety_d",
     )
     # Approval requires a non-stale book and matching question; reuse the
     # entry inputs and patch the reference_price to keep gate happy.
-    await router.handle(Decision(action=Action.EXIT, intents=(exit_intent,)),
-                        inputs=_approval_inputs(), now_ns=3)
+    await router.handle(Decision(action=Action.EXIT, intents=(exit_intent,)), inputs=_approval_inputs(), now_ns=3)
 
     fills = dal.fills_for_cloid("hla-router-1") + dal.fills_for_cloid("hla-router-close")
     assert len(fills) == 2
@@ -271,8 +333,7 @@ async def test_partial_reduce_preserves_avg_entry_and_pnl(tmp_path):
     dal.run_migrations()
     bus = EventBus()
     bus.subscribe()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
@@ -284,27 +345,36 @@ async def test_partial_reduce_preserves_avg_entry_and_pnl(tmp_path):
 
     # Partial reduce 1: sell 4 @ 0.80.
     sell1 = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=4.0,
-        limit_price=0.80, cloid="hla-router-sell1", time_in_force="ioc",
-        reduce_only=True, exit_reason="exit_edge",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=4.0,
+        limit_price=0.80,
+        cloid="hla-router-sell1",
+        time_in_force="ioc",
+        reduce_only=True,
+        exit_reason="exit_edge",
     )
-    await router.handle(Decision(action=Action.EXIT, intents=(sell1,)),
-                        inputs=_approval_inputs(), now_ns=3)
+    await router.handle(Decision(action=Action.EXIT, intents=(sell1,)), inputs=_approval_inputs(), now_ns=3)
     p = dal.get_position(42)
     assert p is not None and p.qty == pytest.approx(6.0)
-    assert p.avg_entry == pytest.approx(0.95), \
-        f"avg_entry drifted after partial reduce: {p.avg_entry}"
+    assert p.avg_entry == pytest.approx(0.95), f"avg_entry drifted after partial reduce: {p.avg_entry}"
     f1 = dal.fills_for_cloid("hla-router-sell1")[0]
     assert f1.closed_pnl == pytest.approx((0.80 - 0.95) * 4.0)
 
     # Partial reduce 2: sell 3 @ 0.70. Must use the ORIGINAL 0.95 basis.
     sell2 = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=3.0,
-        limit_price=0.70, cloid="hla-router-sell2", time_in_force="ioc",
-        reduce_only=True, exit_reason="exit_edge",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=3.0,
+        limit_price=0.70,
+        cloid="hla-router-sell2",
+        time_in_force="ioc",
+        reduce_only=True,
+        exit_reason="exit_edge",
     )
-    await router.handle(Decision(action=Action.EXIT, intents=(sell2,)),
-                        inputs=_approval_inputs(), now_ns=4)
+    await router.handle(Decision(action=Action.EXIT, intents=(sell2,)), inputs=_approval_inputs(), now_ns=4)
     p = dal.get_position(42)
     assert p is not None and p.qty == pytest.approx(3.0)
     assert p.avg_entry == pytest.approx(0.95)
@@ -323,12 +393,12 @@ async def test_multi_partial_close_exit_reports_total_qty_not_last_lot(tmp_path)
     the entire trade's loss, implying an impossible -$8.60/share on a binary.
     """
     from hlanalysis.engine.risk_events import Entry, Exit
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
@@ -339,22 +409,32 @@ async def test_multi_partial_close_exit_reports_total_qty_not_last_lot(tmp_path)
     # Two silent partial reduces: sell 4 @ 0.80, then sell 3 @ 0.70.
     for i, (sz, px) in enumerate(((4.0, 0.80), (3.0, 0.70)), start=1):
         partial = OrderIntent(
-            question_idx=42, symbol="@30", side="sell", size=sz,
-            limit_price=px, cloid=f"hla-router-p{i}", time_in_force="ioc",
-            reduce_only=True, exit_reason="exit_safety_d",
+            question_idx=42,
+            symbol="@30",
+            side="sell",
+            size=sz,
+            limit_price=px,
+            cloid=f"hla-router-p{i}",
+            time_in_force="ioc",
+            reduce_only=True,
+            exit_reason="exit_safety_d",
         )
-        await router.handle(Decision(action=Action.EXIT, intents=(partial,)),
-                            inputs=_approval_inputs(), now_ns=2 + i)
+        await router.handle(Decision(action=Action.EXIT, intents=(partial,)), inputs=_approval_inputs(), now_ns=2 + i)
     assert sub.qsize() == 0, "partial reduces must stay silent"
 
     # Final close: sell the last 3 @ 0.70.
     final = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=3.0,
-        limit_price=0.70, cloid="hla-router-final", time_in_force="ioc",
-        reduce_only=True, exit_reason="exit_safety_d",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=3.0,
+        limit_price=0.70,
+        cloid="hla-router-final",
+        time_in_force="ioc",
+        reduce_only=True,
+        exit_reason="exit_safety_d",
     )
-    await router.handle(Decision(action=Action.EXIT, intents=(final,)),
-                        inputs=_approval_inputs(), now_ns=10)
+    await router.handle(Decision(action=Action.EXIT, intents=(final,)), inputs=_approval_inputs(), now_ns=10)
     exit_ev = await asyncio.wait_for(sub.get(), timeout=0.5)
     assert isinstance(exit_ev, Exit)
     # Total closed = 4 + 3 + 3 = 10 (not the 3-share final lot).
@@ -372,19 +452,22 @@ async def test_addon_buy_recomputes_avg_entry(tmp_path):
     dal.run_migrations()
     bus = EventBus()
     bus.subscribe()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
 
     addon = OrderIntent(
-        question_idx=42, symbol="@30", side="buy", size=5.0,
-        limit_price=0.92, cloid="hla-router-addon", time_in_force="ioc",
+        question_idx=42,
+        symbol="@30",
+        side="buy",
+        size=5.0,
+        limit_price=0.92,
+        cloid="hla-router-addon",
+        time_in_force="ioc",
     )
-    await router.handle(Decision(action=Action.ENTER, intents=(addon,)),
-                        inputs=_approval_inputs(), now_ns=3)
+    await router.handle(Decision(action=Action.ENTER, intents=(addon,)), inputs=_approval_inputs(), now_ns=3)
     p = dal.get_position(42)
     expected = (10.0 * 0.95 + 5.0 * 0.92) / 15.0
     assert p is not None and p.qty == pytest.approx(15.0)
@@ -395,20 +478,32 @@ def _strategy_cfg_with_slippage(slip_cap: float = 0.005) -> StrategyConfig:
     # Mirrors _strategy_cfg but enables the depth-walk gate (HL default 0).
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC", "period": "1h"},
-        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=60,
-        tte_max_seconds=1800, price_extreme_threshold=0.95,
-        distance_from_strike_usd_min=200, vol_max=0.5,
+        max_position_usd=100,
+        stop_loss_pct=10,
+        tte_min_seconds=60,
+        tte_max_seconds=1800,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=200,
+        vol_max=0.5,
     )
     return StrategyConfig(
-        name="late_resolution", paper_mode=True,
-        allowlist=[entry], blocklist_question_idxs=[],
+        name="late_resolution",
+        paper_mode=True,
+        allowlist=[entry],
+        blocklist_question_idxs=[],
         defaults=entry,
-        **{"global": GlobalRiskConfig(
-            max_total_inventory_usd=500, max_concurrent_positions=5,
-            daily_loss_cap_usd=200, max_strike_distance_pct=10,
-            min_recent_volume_usd=1000, stale_data_halt_seconds=5,
-            reconcile_interval_seconds=60, max_slippage_pct=slip_cap,
-        )},
+        **{
+            "global": GlobalRiskConfig(
+                max_total_inventory_usd=500,
+                max_concurrent_positions=5,
+                daily_loss_cap_usd=200,
+                max_strike_distance_pct=10,
+                min_recent_volume_usd=1000,
+                stale_data_halt_seconds=5,
+                reconcile_interval_seconds=60,
+                max_slippage_pct=slip_cap,
+            )
+        },
     )
 
 
@@ -422,15 +517,18 @@ async def test_depth_walk_clamps_intent_size_before_place(tmp_path):
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = _strategy_cfg_with_slippage(slip_cap=0.005)
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
     # Inside ask 0.95 has only 3 contracts. Strategy intends 10 @ 0.95.
     inputs = replace(
         _approval_inputs(),
         book=BookState(
-            symbol="@30", bid_px=0.94, bid_sz=10.0, ask_px=0.95, ask_sz=3.0,
+            symbol="@30",
+            bid_px=0.94,
+            bid_sz=10.0,
+            ask_px=0.95,
+            ask_sz=3.0,
             last_trade_ts_ns=10_000_000_000_000_000,
             last_l2_ts_ns=10_000_000_000_000_000,
             ask_levels=((0.95, 3.0), (0.97, 50.0)),
@@ -449,8 +547,7 @@ async def test_vetoed_decision_publishes_veto_and_does_not_call_place(tmp_path):
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = _strategy_cfg()
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
     inputs = replace(_approval_inputs(), kill_switch_active=True)
@@ -475,12 +572,12 @@ async def test_post_exit_cooldown_blocks_immediate_reentry(tmp_path):
     on 2026-05-19 where the strategy re-bought 200 shares ~1 second after
     selling, paying the spread on every cycle."""
     from hlanalysis.engine.risk_events import Entry, Exit, RiskVeto
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = _cfg_with_cooldown(60)
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
@@ -490,25 +587,38 @@ async def test_post_exit_cooldown_blocks_immediate_reentry(tmp_path):
 
     # 2) Close it (publishes Exit).
     exit_intent = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=10.0,
-        limit_price=0.95, cloid="hla-router-close", time_in_force="ioc",
-        reduce_only=True, exit_reason="exit_safety_d",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=10.0,
+        limit_price=0.95,
+        cloid="hla-router-close",
+        time_in_force="ioc",
+        reduce_only=True,
+        exit_reason="exit_safety_d",
     )
     close_ts = 2_000_000_000
-    await router.handle(Decision(action=Action.EXIT, intents=(exit_intent,)),
-                        inputs=_approval_inputs(), now_ns=close_ts)
+    await router.handle(
+        Decision(action=Action.EXIT, intents=(exit_intent,)), inputs=_approval_inputs(), now_ns=close_ts
+    )
     assert isinstance(await asyncio.wait_for(sub.get(), timeout=0.5), Exit)
 
     # 3) Try to re-enter 5 seconds later — should be vetoed by cooldown.
     reentry = Decision(
         action=Action.ENTER,
-        intents=(OrderIntent(
-            question_idx=42, symbol="@30", side="buy", size=10.0,
-            limit_price=0.95, cloid="hla-router-reentry", time_in_force="ioc",
-        ),),
+        intents=(
+            OrderIntent(
+                question_idx=42,
+                symbol="@30",
+                side="buy",
+                size=10.0,
+                limit_price=0.95,
+                cloid="hla-router-reentry",
+                time_in_force="ioc",
+            ),
+        ),
     )
-    await router.handle(reentry, inputs=_approval_inputs(),
-                        now_ns=close_ts + 5_000_000_000)
+    await router.handle(reentry, inputs=_approval_inputs(), now_ns=close_ts + 5_000_000_000)
     veto = await asyncio.wait_for(sub.get(), timeout=0.5)
     assert isinstance(veto, RiskVeto)
     assert veto.reason == "post_exit_cooldown"
@@ -521,36 +631,49 @@ async def test_post_exit_cooldown_expires_and_allows_reentry(tmp_path):
     """After the cooldown window has elapsed, ENTER decisions on the same
     question_idx must proceed through the risk gate as normal."""
     from hlanalysis.engine.risk_events import Entry, Exit
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = _cfg_with_cooldown(60)
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=1_000_000_000)
     await asyncio.wait_for(sub.get(), timeout=0.5)
     exit_intent = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=10.0,
-        limit_price=0.95, cloid="hla-router-close-2", time_in_force="ioc",
-        reduce_only=True, exit_reason="exit_safety_d",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=10.0,
+        limit_price=0.95,
+        cloid="hla-router-close-2",
+        time_in_force="ioc",
+        reduce_only=True,
+        exit_reason="exit_safety_d",
     )
     close_ts = 2_000_000_000
-    await router.handle(Decision(action=Action.EXIT, intents=(exit_intent,)),
-                        inputs=_approval_inputs(), now_ns=close_ts)
+    await router.handle(
+        Decision(action=Action.EXIT, intents=(exit_intent,)), inputs=_approval_inputs(), now_ns=close_ts
+    )
     await asyncio.wait_for(sub.get(), timeout=0.5)  # drain exit
 
     # 61 seconds later — cooldown expired.
     reentry = Decision(
         action=Action.ENTER,
-        intents=(OrderIntent(
-            question_idx=42, symbol="@30", side="buy", size=10.0,
-            limit_price=0.95, cloid="hla-router-reentry-2", time_in_force="ioc",
-        ),),
+        intents=(
+            OrderIntent(
+                question_idx=42,
+                symbol="@30",
+                side="buy",
+                size=10.0,
+                limit_price=0.95,
+                cloid="hla-router-reentry-2",
+                time_in_force="ioc",
+            ),
+        ),
     )
-    await router.handle(reentry, inputs=_approval_inputs(),
-                        now_ns=close_ts + 61_000_000_000)
+    await router.handle(reentry, inputs=_approval_inputs(), now_ns=close_ts + 61_000_000_000)
     # Should have placed and got back an Entry event (paper client fills immediately).
     ev = await asyncio.wait_for(sub.get(), timeout=0.5)
     assert isinstance(ev, Entry)
@@ -562,31 +685,45 @@ async def test_post_exit_cooldown_disabled_when_seconds_is_zero(tmp_path):
     re-entry can fire on the very next scan tick. Regression guard so the
     feature doesn't quietly become mandatory."""
     from hlanalysis.engine.risk_events import Entry
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = _strategy_cfg()  # default cooldown=0
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=1_000_000_000)
     await asyncio.wait_for(sub.get(), timeout=0.5)
     exit_intent = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=10.0,
-        limit_price=0.95, cloid="hla-router-close-3", time_in_force="ioc",
-        reduce_only=True, exit_reason="exit_safety_d",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=10.0,
+        limit_price=0.95,
+        cloid="hla-router-close-3",
+        time_in_force="ioc",
+        reduce_only=True,
+        exit_reason="exit_safety_d",
     )
-    await router.handle(Decision(action=Action.EXIT, intents=(exit_intent,)),
-                        inputs=_approval_inputs(), now_ns=2_000_000_000)
+    await router.handle(
+        Decision(action=Action.EXIT, intents=(exit_intent,)), inputs=_approval_inputs(), now_ns=2_000_000_000
+    )
     await asyncio.wait_for(sub.get(), timeout=0.5)
     # 1 ns later — should re-enter immediately.
     reentry = Decision(
         action=Action.ENTER,
-        intents=(OrderIntent(
-            question_idx=42, symbol="@30", side="buy", size=10.0,
-            limit_price=0.95, cloid="hla-router-reentry-3", time_in_force="ioc",
-        ),),
+        intents=(
+            OrderIntent(
+                question_idx=42,
+                symbol="@30",
+                side="buy",
+                size=10.0,
+                limit_price=0.95,
+                cloid="hla-router-reentry-3",
+                time_in_force="ioc",
+            ),
+        ),
     )
     await router.handle(reentry, inputs=_approval_inputs(), now_ns=2_000_000_001)
     ev = await asyncio.wait_for(sub.get(), timeout=0.5)
@@ -599,8 +736,7 @@ def _make_router(tmp_path, cfg=None) -> Router:
     dal.run_migrations()
     bus = EventBus()
     bus.subscribe()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     cfg = cfg or _strategy_cfg()
     return Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
@@ -636,12 +772,19 @@ async def test_close_persists_cooldown_to_file(tmp_path):
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=1_000_000_000)
     close_ts = 2_000_000_000
     exit_intent = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=10.0,
-        limit_price=0.95, cloid="hla-router-close-persist", time_in_force="ioc",
-        reduce_only=True, exit_reason="exit_safety_d",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=10.0,
+        limit_price=0.95,
+        cloid="hla-router-close-persist",
+        time_in_force="ioc",
+        reduce_only=True,
+        exit_reason="exit_safety_d",
     )
-    await router.handle(Decision(action=Action.EXIT, intents=(exit_intent,)),
-                        inputs=_approval_inputs(), now_ns=close_ts)
+    await router.handle(
+        Decision(action=Action.EXIT, intents=(exit_intent,)), inputs=_approval_inputs(), now_ns=close_ts
+    )
     raw = json.loads((tmp_path / "exit_cooldowns.json").read_text())
     assert raw == {"42": close_ts}
 
@@ -655,12 +798,17 @@ async def test_cooldown_roundtrip_across_router_instances(tmp_path):
     await r1.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=1_000_000_000)
     close_ts = 2_000_000_000
     exit_intent = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=10.0,
-        limit_price=0.95, cloid="hla-router-close-rt", time_in_force="ioc",
-        reduce_only=True, exit_reason="exit_safety_d",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=10.0,
+        limit_price=0.95,
+        cloid="hla-router-close-rt",
+        time_in_force="ioc",
+        reduce_only=True,
+        exit_reason="exit_safety_d",
     )
-    await r1.handle(Decision(action=Action.EXIT, intents=(exit_intent,)),
-                    inputs=_approval_inputs(), now_ns=close_ts)
+    await r1.handle(Decision(action=Action.EXIT, intents=(exit_intent,)), inputs=_approval_inputs(), now_ns=close_ts)
 
     r2 = _make_router(tmp_path, cfg=cfg)
     assert r2._last_exit_ts == {42: close_ts}
@@ -671,6 +819,7 @@ async def test_cooldown_veto_uses_persisted_state_after_restart(tmp_path):
     """The persisted cooldown must enforce the post_exit_cooldown veto on a
     freshly-constructed Router (the restart scenario this fix targets)."""
     from hlanalysis.engine.risk_events import RiskVeto as _RiskVeto
+
     cfg = _cfg_with_cooldown(60)
     close_ts = 2_000_000_000
     # Simulate the "previous process" by writing the cooldown file directly.
@@ -681,19 +830,24 @@ async def test_cooldown_veto_uses_persisted_state_after_restart(tmp_path):
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
     reentry = Decision(
         action=Action.ENTER,
-        intents=(OrderIntent(
-            question_idx=42, symbol="@30", side="buy", size=10.0,
-            limit_price=0.95, cloid="hla-router-restart-reentry", time_in_force="ioc",
-        ),),
+        intents=(
+            OrderIntent(
+                question_idx=42,
+                symbol="@30",
+                side="buy",
+                size=10.0,
+                limit_price=0.95,
+                cloid="hla-router-restart-reentry",
+                time_in_force="ioc",
+            ),
+        ),
     )
-    await router.handle(reentry, inputs=_approval_inputs(),
-                        now_ns=close_ts + 5_000_000_000)
+    await router.handle(reentry, inputs=_approval_inputs(), now_ns=close_ts + 5_000_000_000)
     veto = await asyncio.wait_for(sub.get(), timeout=0.5)
     assert isinstance(veto, _RiskVeto)
     assert veto.reason == "post_exit_cooldown"
@@ -707,20 +861,26 @@ async def test_close_settled_hl_books_venue_pnl_and_does_not_persist(tmp_path):
     must NOT persist it — realized_pnl_since already counts the settlement fill,
     so persisting would double-count it in the daily-loss gate."""
     from hlanalysis.engine.risk_events import Exit
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
     cfg = _strategy_cfg()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     client.realized_pnl_for_symbol = lambda sym, *, since_ts_ns=0: 4.0  # venue truth
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
-                    strategy_cfg=cfg)
-    dal.upsert_position(Position(
-        question_idx=42, symbol="@30", qty=10.0, avg_entry=0.6,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=0.0,
-    ))
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
+    dal.upsert_position(
+        Position(
+            question_idx=42,
+            symbol="@30",
+            qty=10.0,
+            avg_entry=0.6,
+            realized_pnl=0.0,
+            last_update_ts_ns=1,
+            stop_loss_price=0.0,
+        )
+    )
     settled_q = replace(_q(), settled=True, settled_symbol="@30")
 
     await router._close_settled(42, now_ns=100, question=settled_q)
@@ -741,24 +901,28 @@ async def test_close_settled_hl_winning_leg_survives_wrong_settled_symbol(tmp_pa
     +$5). Sourcing from the venue must ignore settled_symbol entirely and report
     the real closedPnl."""
     from hlanalysis.engine.risk_events import Exit
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
     cfg = _strategy_cfg()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     # Venue: the leg we hold ("@30") actually won → +5.34. settled_symbol below
     # points at a DIFFERENT leg, which the old derivation would treat as a loss.
-    client.realized_pnl_for_symbol = lambda sym, *, since_ts_ns=0: (
-        5.34 if sym == "@30" else 0.0
+    client.realized_pnl_for_symbol = lambda sym, *, since_ts_ns=0: 5.34 if sym == "@30" else 0.0
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
+    dal.upsert_position(
+        Position(
+            question_idx=42,
+            symbol="@30",
+            qty=305.0,
+            avg_entry=0.98248,
+            realized_pnl=0.0,
+            last_update_ts_ns=1,
+            stop_loss_price=0.0,
+        )
     )
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
-                    strategy_cfg=cfg)
-    dal.upsert_position(Position(
-        question_idx=42, symbol="@30", qty=305.0, avg_entry=0.98248,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=0.0,
-    ))
     settled_q = replace(_q(), settled=True, settled_symbol="@31")  # wrong leg
 
     await router._close_settled(42, now_ns=100, question=settled_q)
@@ -775,25 +939,31 @@ async def test_close_settled_hl_defers_until_settlement_fill_ingested(tmp_path):
     misleading $0 Telegram Exit. Defer the close until venue PnL is non-zero
     (the fill has been ingested), then publish exactly one correct Exit."""
     from hlanalysis.engine.risk_events import Exit
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
     cfg = _strategy_cfg()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     client.realized_pnl_for_symbol = lambda sym, *, since_ts_ns=0: 0.0  # fill not in yet
     client.paper_mode = False  # exercise the LIVE defer path (paper has no venue lag)
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
-                    strategy_cfg=cfg)
-    dal.upsert_position(Position(
-        question_idx=42, symbol="@30", qty=10.0, avg_entry=0.6,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=0.0,
-    ))
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
+    dal.upsert_position(
+        Position(
+            question_idx=42,
+            symbol="@30",
+            qty=10.0,
+            avg_entry=0.6,
+            realized_pnl=0.0,
+            last_update_ts_ns=1,
+            stop_loss_price=0.0,
+        )
+    )
     settled_q = replace(_q(), settled=True, settled_symbol="@30")
     await router._close_settled(42, now_ns=100, question=settled_q)
-    assert dal.get_position(42) is not None     # deferred — NOT closed
-    assert sub.qsize() == 0                       # no $0 Exit published
+    assert dal.get_position(42) is not None  # deferred — NOT closed
+    assert sub.qsize() == 0  # no $0 Exit published
     # settlement fill lands → venue PnL now available
     client.realized_pnl_for_symbol = lambda sym, *, since_ts_ns=0: 4.0
     await router._close_settled(42, now_ns=200, question=settled_q)
@@ -809,24 +979,30 @@ async def test_close_settled_pm_defers_until_winner_known(tmp_path):
     settlement_pnl_usd then falls back to prior_realized (≈$0). Defer until the
     winner (settled_symbol) is known so the Exit carries the real PnL."""
     from hlanalysis.engine.risk_events import Exit
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
     cfg = _strategy_cfg()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     client.settlement_reported_as_fill = False  # PM-like: settle via redeem, not a fill
     client.paper_mode = False  # exercise the LIVE defer path
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
-                    strategy_cfg=cfg)
-    dal.upsert_position(Position(
-        question_idx=42, symbol="@30", qty=50.0, avg_entry=0.98,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
-    ))
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
+    dal.upsert_position(
+        Position(
+            question_idx=42,
+            symbol="@30",
+            qty=50.0,
+            avg_entry=0.98,
+            realized_pnl=0.0,
+            last_update_ts_ns=1,
+            stop_loss_price=-1.0,
+        )
+    )
     settled_no_winner = replace(_q(), settled=True)  # settled, winner unknown
     await router._close_settled(42, now_ns=100, question=settled_no_winner)
-    assert dal.get_position(42) is not None     # deferred
+    assert dal.get_position(42) is not None  # deferred
     assert sub.qsize() == 0
     settled_winner = replace(_q(), settled=True, settled_symbol="@30")  # @30 won
     await router._close_settled(42, now_ns=200, question=settled_winner)
@@ -842,21 +1018,27 @@ async def test_close_settled_defer_times_out_to_avoid_wedge(tmp_path):
     forever — after the defer timeout, close with the best-available PnL."""
     from hlanalysis.engine.risk_events import Exit
     from hlanalysis.engine.router import _SETTLEMENT_DEFER_TIMEOUT_NS
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     bus = EventBus()
     sub = bus.subscribe()
     cfg = _strategy_cfg()
-    client = HLClient(account_address="0x", api_secret_key="0x",
-                      base_url="x", paper_mode=True)
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
     client.settlement_reported_as_fill = False
     client.paper_mode = False  # exercise the LIVE defer path
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
-                    strategy_cfg=cfg)
-    dal.upsert_position(Position(
-        question_idx=42, symbol="@30", qty=50.0, avg_entry=0.98,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
-    ))
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
+    dal.upsert_position(
+        Position(
+            question_idx=42,
+            symbol="@30",
+            qty=50.0,
+            avg_entry=0.98,
+            realized_pnl=0.0,
+            last_update_ts_ns=1,
+            stop_loss_price=-1.0,
+        )
+    )
     settled_no_winner = replace(_q(), settled=True)
     await router._close_settled(42, now_ns=100, question=settled_no_winner)  # defer
     assert dal.get_position(42) is not None
@@ -879,8 +1061,7 @@ class _CountingExec:
 
     def place(self, req: PlaceRequest) -> OrderAck:
         self.placed.append(req)
-        return OrderAck(cloid=req.cloid, venue_oid="v", status="filled",
-                        fill_price=req.price, fill_size=req.size)
+        return OrderAck(cloid=req.cloid, venue_oid="v", status="filled", fill_price=req.price, fill_size=req.size)
 
     def cancel(self, *, cloid: str, symbol: str) -> bool:
         return True
@@ -908,8 +1089,7 @@ async def test_reduce_only_sell_suppressed_when_position_already_flat(tmp_path):
     bus = EventBus()
     client = _CountingExec()
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
-                    strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
     # 1) Open a long (qty +10).
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
@@ -917,33 +1097,40 @@ async def test_reduce_only_sell_suppressed_when_position_already_flat(tmp_path):
 
     # 2) Reduce-only sell closes it (qty -> 0).
     close = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=10.0, limit_price=0.95,
-        cloid="hla-exit-1", time_in_force="ioc", reduce_only=True,
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=10.0,
+        limit_price=0.95,
+        cloid="hla-exit-1",
+        time_in_force="ioc",
+        reduce_only=True,
         exit_reason="stop_loss",
     )
-    await router.handle(Decision(action=Action.EXIT, intents=(close,)),
-                        inputs=_approval_inputs(), now_ns=3)
+    await router.handle(Decision(action=Action.EXIT, intents=(close,)), inputs=_approval_inputs(), now_ns=3)
     pos = dal.get_position(42)
     assert pos is None or abs(pos.qty) < 1e-9
     n_after_close = len(client.placed)
 
     # 3) Re-fire the same reduce-only sell against the now-flat position.
     refire = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=10.0, limit_price=0.95,
-        cloid="hla-exit-2", time_in_force="ioc", reduce_only=True,
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=10.0,
+        limit_price=0.95,
+        cloid="hla-exit-2",
+        time_in_force="ioc",
+        reduce_only=True,
         exit_reason="stop_loss",
     )
-    await router.handle(Decision(action=Action.EXIT, intents=(refire,)),
-                        inputs=_approval_inputs(), now_ns=4)
+    await router.handle(Decision(action=Action.EXIT, intents=(refire,)), inputs=_approval_inputs(), now_ns=4)
 
     assert len(client.placed) == n_after_close, (
-        "re-fired reduce-only order was placed against a flat position — "
-        "oversell into a naked short"
+        "re-fired reduce-only order was placed against a flat position — oversell into a naked short"
     )
     pos = dal.get_position(42)
-    assert pos is None or abs(pos.qty) < 1e-9, (
-        f"reduce-only re-fire created a naked position: {pos}"
-    )
+    assert pos is None or abs(pos.qty) < 1e-9, f"reduce-only re-fire created a naked position: {pos}"
 
 
 @pytest.mark.asyncio
@@ -953,19 +1140,20 @@ async def test_book_fill_emits_position_write_audit_log(tmp_path):
     moved the position and to what — the missing evidence that blocked the #1
     root-cause."""
     from loguru import logger
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     _held(dal, 42, "@30", 10.0)
     client = _CountingExec()
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=EventBus(),
-                    exec_client=client, strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=EventBus(), exec_client=client, strategy_cfg=cfg)
     msgs: list[str] = []
     sink = logger.add(lambda m: msgs.append(str(m)), level="INFO")
     try:
         await router.handle(
             Decision(action=Action.EXIT, intents=(_exit_intent("hla-close"),)),
-            inputs=_approval_inputs(), now_ns=5,
+            inputs=_approval_inputs(),
+            now_ns=5,
         )
     finally:
         logger.remove(sink)
@@ -982,8 +1170,9 @@ class _RejectingExec(_CountingExec):
 
     def place(self, req: PlaceRequest) -> OrderAck:
         self.placed.append(req)
-        return OrderAck(cloid=req.cloid, venue_oid="", status="rejected",
-                        error="invalid price (0.992), min: 0.01 - max: 0.99")
+        return OrderAck(
+            cloid=req.cloid, venue_oid="", status="rejected", error="invalid price (0.992), min: 0.01 - max: 0.99"
+        )
 
 
 class _ScriptedExec(_CountingExec):
@@ -997,23 +1186,34 @@ class _ScriptedExec(_CountingExec):
         self.placed.append(req)
         status = self._statuses.pop(0) if self._statuses else "rejected"
         if status == "filled":
-            return OrderAck(cloid=req.cloid, venue_oid="v", status="filled",
-                            fill_price=req.price, fill_size=req.size)
-        return OrderAck(cloid=req.cloid, venue_oid="", status="rejected",
-                        error="rej")
+            return OrderAck(cloid=req.cloid, venue_oid="v", status="filled", fill_price=req.price, fill_size=req.size)
+        return OrderAck(cloid=req.cloid, venue_oid="", status="rejected", error="rej")
 
 
 def _held(dal: StateDAL, question_idx: int, symbol: str, qty: float) -> None:
-    dal.upsert_position(Position(
-        question_idx=question_idx, symbol=symbol, qty=qty, avg_entry=0.9,
-        realized_pnl=0.0, last_update_ts_ns=1, stop_loss_price=-1.0,
-    ))
+    dal.upsert_position(
+        Position(
+            question_idx=question_idx,
+            symbol=symbol,
+            qty=qty,
+            avg_entry=0.9,
+            realized_pnl=0.0,
+            last_update_ts_ns=1,
+            stop_loss_price=-1.0,
+        )
+    )
 
 
 def _exit_intent(cloid: str, question_idx: int = 42, symbol: str = "@30") -> OrderIntent:
     return OrderIntent(
-        question_idx=question_idx, symbol=symbol, side="sell", size=10.0,
-        limit_price=0.99, cloid=cloid, time_in_force="ioc", reduce_only=True,
+        question_idx=question_idx,
+        symbol=symbol,
+        side="sell",
+        size=10.0,
+        limit_price=0.99,
+        cloid=cloid,
+        time_in_force="ioc",
+        reduce_only=True,
         exit_reason="exit_safety_d",
     )
 
@@ -1030,19 +1230,19 @@ async def test_repeated_rejects_trip_circuit_breaker_and_stop_placing(tmp_path):
     _held(dal, 42, "@30", 10.0)
     client = _RejectingExec()
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=EventBus(),
-                    exec_client=client, strategy_cfg=cfg,
-                    reject_breaker_threshold=3)
+    router = Router(
+        dal=dal, gate=RiskGate(cfg), bus=EventBus(), exec_client=client, strategy_cfg=cfg, reject_breaker_threshold=3
+    )
 
     for i in range(8):
         await router.handle(
             Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-x{i}"),)),
-            inputs=_approval_inputs(), now_ns=10 + i,
+            inputs=_approval_inputs(),
+            now_ns=10 + i,
         )
 
     assert len(client.placed) == 3, (
-        f"breaker (threshold 3) should stop placing after 3 rejects; "
-        f"placed {len(client.placed)}"
+        f"breaker (threshold 3) should stop placing after 3 rejects; placed {len(client.placed)}"
     )
 
 
@@ -1055,17 +1255,17 @@ async def test_circuit_breaker_resets_after_a_successful_fill(tmp_path):
     dal.run_migrations()
     _held(dal, 42, "@30", 100.0)  # large so fills never flatten it
     # reject, reject, FILL, reject, reject, reject, (7th) ...
-    client = _ScriptedExec(["rejected", "rejected", "filled",
-                            "rejected", "rejected", "rejected", "rejected"])
+    client = _ScriptedExec(["rejected", "rejected", "filled", "rejected", "rejected", "rejected", "rejected"])
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=EventBus(),
-                    exec_client=client, strategy_cfg=cfg,
-                    reject_breaker_threshold=3)
+    router = Router(
+        dal=dal, gate=RiskGate(cfg), bus=EventBus(), exec_client=client, strategy_cfg=cfg, reject_breaker_threshold=3
+    )
 
     for i in range(7):
         await router.handle(
             Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-r{i}"),)),
-            inputs=_approval_inputs(), now_ns=10 + i,
+            inputs=_approval_inputs(),
+            now_ns=10 + i,
         )
 
     # Without reset, the 3rd reject (counting the two before the fill) would
@@ -1085,15 +1285,16 @@ async def test_circuit_breaker_is_scoped_per_question(tmp_path):
     _held(dal, 99, "@40", 10.0)
     client = _RejectingExec()
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=EventBus(),
-                    exec_client=client, strategy_cfg=cfg,
-                    reject_breaker_threshold=2)
+    router = Router(
+        dal=dal, gate=RiskGate(cfg), bus=EventBus(), exec_client=client, strategy_cfg=cfg, reject_breaker_threshold=2
+    )
 
     # Trip q=42 (3 attempts → 2 placed, 3rd suppressed).
     for i in range(3):
         await router.handle(
             Decision(action=Action.EXIT, intents=(_exit_intent(f"hla-a{i}", 42, "@30"),)),
-            inputs=_approval_inputs(), now_ns=10 + i,
+            inputs=_approval_inputs(),
+            now_ns=10 + i,
         )
     placed_after_q42 = len(client.placed)
 
@@ -1104,7 +1305,8 @@ async def test_circuit_breaker_is_scoped_per_question(tmp_path):
     )
     await router.handle(
         Decision(action=Action.EXIT, intents=(_exit_intent("hla-b0", 99, "@40"),)),
-        inputs=q99_inputs, now_ns=20,
+        inputs=q99_inputs,
+        now_ns=20,
     )
     assert len(client.placed) == placed_after_q42 + 1, (
         "exit on a different question was wrongly suppressed by q=42's breaker"
@@ -1120,13 +1322,11 @@ class _DustFloorExec(_CountingExec):
     def place(self, req: PlaceRequest) -> OrderAck:
         self.placed.append(req)
         import math as _m
-        filled = (_m.floor(req.size * 100.0) / 100.0
-                  if req.side == "sell" else req.size)
+
+        filled = _m.floor(req.size * 100.0) / 100.0 if req.side == "sell" else req.size
         if filled <= 0:
-            return OrderAck(cloid=req.cloid, venue_oid="", status="rejected",
-                            error="invalid maker amount")
-        return OrderAck(cloid=req.cloid, venue_oid="v", status="filled",
-                        fill_price=req.price, fill_size=filled)
+            return OrderAck(cloid=req.cloid, venue_oid="", status="rejected", error="invalid maker amount")
+        return OrderAck(cloid=req.cloid, venue_oid="v", status="filled", fill_price=req.price, fill_size=filled)
 
 
 @pytest.mark.asyncio
@@ -1138,6 +1338,7 @@ async def test_pm_reduce_only_dust_residual_closes_position(tmp_path):
     open — otherwise the position wedges and the strategy re-fires forever,
     flooding `invalid maker amount` rejects (2026-06-06 v31_pm incident)."""
     from hlanalysis.engine.risk_events import Exit
+
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     _held(dal, 42, "@30", 58.1279)
@@ -1145,22 +1346,24 @@ async def test_pm_reduce_only_dust_residual_closes_position(tmp_path):
     sub = bus.subscribe()
     client = _DustFloorExec()
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
-                    strategy_cfg=cfg, reduce_close_atol=1e-2)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg, reduce_close_atol=1e-2)
 
     exit_full = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=58.1279,
-        limit_price=0.89, cloid="hla-dust-1", time_in_force="ioc",
-        reduce_only=True, exit_reason="exit_safety_d",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=58.1279,
+        limit_price=0.89,
+        cloid="hla-dust-1",
+        time_in_force="ioc",
+        reduce_only=True,
+        exit_reason="exit_safety_d",
     )
-    await router.handle(Decision(action=Action.EXIT, intents=(exit_full,)),
-                        inputs=_approval_inputs(), now_ns=3)
+    await router.handle(Decision(action=Action.EXIT, intents=(exit_full,)), inputs=_approval_inputs(), now_ns=3)
 
     # The floored 58.12 fill leaves 0.0079 — within the PM dust floor, so the
     # position is fully closed, NOT left wedged at dust.
-    assert dal.get_position(42) is None, (
-        f"dust residual left position open: {dal.get_position(42)}"
-    )
+    assert dal.get_position(42) is None, f"dust residual left position open: {dal.get_position(42)}"
     ev = await asyncio.wait_for(sub.get(), timeout=0.5)
     assert isinstance(ev, Exit)
 
@@ -1176,16 +1379,22 @@ async def test_pm_reduce_only_sub_dust_sell_suppressed(tmp_path):
     _held(dal, 42, "@30", 0.0079)
     client = _DustFloorExec()
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=EventBus(), exec_client=client,
-                    strategy_cfg=cfg, reduce_close_atol=1e-2)
+    router = Router(
+        dal=dal, gate=RiskGate(cfg), bus=EventBus(), exec_client=client, strategy_cfg=cfg, reduce_close_atol=1e-2
+    )
 
     dust_exit = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=0.0079,
-        limit_price=0.89, cloid="hla-dust-2", time_in_force="ioc",
-        reduce_only=True, exit_reason="exit_safety_d",
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=0.0079,
+        limit_price=0.89,
+        cloid="hla-dust-2",
+        time_in_force="ioc",
+        reduce_only=True,
+        exit_reason="exit_safety_d",
     )
-    await router.handle(Decision(action=Action.EXIT, intents=(dust_exit,)),
-                        inputs=_approval_inputs(), now_ns=3)
+    await router.handle(Decision(action=Action.EXIT, intents=(dust_exit,)), inputs=_approval_inputs(), now_ns=3)
 
     assert client.placed == [], "sub-dust reduce-only sell was placed (would reject)"
 
@@ -1201,8 +1410,7 @@ class _PartialExec(_CountingExec):
     def place(self, req: PlaceRequest) -> OrderAck:
         self.placed.append(req)
         filled = min(req.size, self.fill_cap)
-        return OrderAck(cloid=req.cloid, venue_oid="v", status="filled",
-                        fill_price=req.price, fill_size=filled)
+        return OrderAck(cloid=req.cloid, venue_oid="v", status="filled", fill_price=req.price, fill_size=filled)
 
 
 @pytest.mark.asyncio
@@ -1215,8 +1423,7 @@ async def test_reduce_only_clamps_to_remaining_qty_after_partial_fill(tmp_path):
     bus = EventBus()
     client = _PartialExec(fill_cap=4.0)
     cfg = _strategy_cfg()
-    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client,
-                    strategy_cfg=cfg)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
 
     # Open long qty +10 (entry isn't reduce-only, fills 4 of 10).
     await router.handle(_decision_enter(), inputs=_approval_inputs(), now_ns=2)
@@ -1226,18 +1433,21 @@ async def test_reduce_only_clamps_to_remaining_qty_after_partial_fill(tmp_path):
     # Fire a full-size (10) reduce-only sell. It must be clamped to held (4),
     # and the resulting placed size must never exceed what we hold.
     stop = OrderIntent(
-        question_idx=42, symbol="@30", side="sell", size=10.0, limit_price=0.95,
-        cloid="hla-stop-1", time_in_force="ioc", reduce_only=True,
+        question_idx=42,
+        symbol="@30",
+        side="sell",
+        size=10.0,
+        limit_price=0.95,
+        cloid="hla-stop-1",
+        time_in_force="ioc",
+        reduce_only=True,
         exit_reason="stop_loss",
     )
-    await router.handle(Decision(action=Action.EXIT, intents=(stop,)),
-                        inputs=_approval_inputs(), now_ns=3)
+    await router.handle(Decision(action=Action.EXIT, intents=(stop,)), inputs=_approval_inputs(), now_ns=3)
 
     sell = client.placed[-1]
     assert sell.side == "sell"
-    assert sell.size <= held0, (
-        f"reduce-only sell size {sell.size} exceeded held {held0}"
-    )
+    assert sell.size <= held0, f"reduce-only sell size {sell.size} exceeded held {held0}"
     assert sell.size == 4.0  # clamped to held, not the requested 10
     # Position never crosses zero into a short.
     pos = dal.get_position(42)

@@ -9,6 +9,7 @@ is empty over the requested window). HIP-4 binaries settle off the HL perp mark,
 so perp is the correct underlying. BBO is denser than mark in the recorded data
 (~2× rows historical), so it's the primary reference.
 """
+
 from __future__ import annotations
 
 import heapq
@@ -48,7 +49,7 @@ log = logging.getLogger(__name__)
 # computes it once per question, not P times. Outcomes are tiny strings, so the
 # dict is unbounded (bounded by #questions per worker). Keyed on data_root too
 # so two sources over different corpora in one process can't collide.
-_PROC_OUTCOME_MEMO: dict[tuple[str, str], Literal['yes', 'no', 'unknown']] = {}
+_PROC_OUTCOME_MEMO: dict[tuple[str, str], Literal["yes", "no", "unknown"]] = {}
 
 
 def _proc_outcome_clear() -> None:
@@ -159,9 +160,7 @@ def _read_parquet_arg(globs: list[str]) -> str:
     return "[" + ",".join(repr(g) for g in globs) + "]"
 
 
-def _fetch_with_retry(
-    con: duckdb.DuckDBPyConnection, sql: str, *, attempts: int = 3
-) -> list[tuple]:
+def _fetch_with_retry(con: duckdb.DuckDBPyConnection, sql: str, *, attempts: int = 3) -> list[tuple]:
     """Run ``con.sql(sql).fetchall()`` with a small bounded retry.
 
     Under heavy spawn-worker concurrency duckdb's parallel parquet glob expansion
@@ -227,18 +226,14 @@ class HLHip4DataSource:
         # Reference resample period must match strategy.vol_sampling_dt_seconds —
         # the CLI threads this from the same param so train/serve stay coupled.
         if reference_resample_seconds <= 0:
-            raise ValueError(
-                f"reference_resample_seconds must be positive, got {reference_resample_seconds}"
-            )
+            raise ValueError(f"reference_resample_seconds must be positive, got {reference_resample_seconds}")
         self.reference_resample_seconds = int(reference_resample_seconds)
         self._reference_resample_ns = int(reference_resample_seconds) * 1_000_000_000
         # Reference warm-up prefix: load reference rows in [start - warmup_ns, start)
         # and feed them to MarketState before the first decision so σ is not cold at
         # market open. 0 = disabled (cold-start legacy behaviour, default).
         if reference_warmup_seconds < 0:
-            raise ValueError(
-                f"reference_warmup_seconds must be >= 0, got {reference_warmup_seconds}"
-            )
+            raise ValueError(f"reference_warmup_seconds must be >= 0, got {reference_warmup_seconds}")
         self.reference_warmup_seconds = int(reference_warmup_seconds)
         self._reference_warmup_ns = int(reference_warmup_seconds) * 1_000_000_000
         # Reference-tick mode (SHR-93). "bars" (default) = pre-bucket raw ticks into
@@ -248,9 +243,7 @@ class HLHip4DataSource:
         # ingest_tick path — making last_mark the instantaneous raw tick price, same
         # as the live engine. Default "bars" keeps all existing results unchanged.
         if reference_ticks not in ("bars", "raw"):
-            raise ValueError(
-                f"reference_ticks must be 'bars' or 'raw', got {reference_ticks!r}"
-            )
+            raise ValueError(f"reference_ticks must be 'bars' or 'raw', got {reference_ticks!r}")
         self.reference_ticks: Literal["bars", "raw"] = reference_ticks
         # Cached per-instance: question_id -> parsed metadata bundle.
         self._meta_cache: dict[str, _QuestionMeta] = {}
@@ -281,7 +274,7 @@ class HLHip4DataSource:
             SELECT symbol, question_idx, named_outcome_idxs, fallback_outcome_idx,
                    keys, values, exchange_ts
             FROM read_parquet('{glob}', hive_partitioning=1)
-            WHERE date IN ({','.join(repr(d) for d in date_list)})
+            WHERE date IN ({",".join(repr(d) for d in date_list)})
             ORDER BY symbol, exchange_ts
             """
         ).to_df()
@@ -381,9 +374,7 @@ class HLHip4DataSource:
             # [start - warmup, start) rows so σ is not cold at market open.
             ref_start_ns = q.start_ts_ns - self._reference_warmup_ns
             ref_date_list = (
-                _date_partitions_in_range(ref_start_ns, q.end_ts_ns)
-                if self._reference_warmup_ns > 0
-                else date_list
+                _date_partitions_in_range(ref_start_ns, q.end_ts_ns) if self._reference_warmup_ns > 0 else date_list
             )
             con = duckdb.connect()
             try:
@@ -391,18 +382,17 @@ class HLHip4DataSource:
                 # raw fetchall tuples so the fast path can build the events list
                 # without going through the gen() generator.
                 evt = self.ref_event
-                ref_rows = self._reference_rows(
-                    con, evt, ref_start_ns, q.end_ts_ns, ref_date_list
-                )
+                ref_rows = self._reference_rows(con, evt, ref_start_ns, q.end_ts_ns, ref_date_list)
                 if not ref_rows:
                     fallback = "mark" if evt == "bbo" else "bbo"
                     log.warning(
                         "HL perp BTC %s yielded 0 rows in [%d, %d); falling back to %s",
-                        evt, ref_start_ns, q.end_ts_ns, fallback,
+                        evt,
+                        ref_start_ns,
+                        q.end_ts_ns,
+                        fallback,
                     )
-                    ref_rows = self._reference_rows(
-                        con, fallback, ref_start_ns, q.end_ts_ns, ref_date_list
-                    )
+                    ref_rows = self._reference_rows(con, fallback, ref_start_ns, q.end_ts_ns, ref_date_list)
                     evt = fallback
                 return build_fast_path_bundle(
                     con=con,
@@ -481,9 +471,7 @@ class HLHip4DataSource:
         # unaffected (they always start at q.start_ts_ns).
         ref_start_ns = q.start_ts_ns - self._reference_warmup_ns
         ref_date_list = (
-            _date_partitions_in_range(ref_start_ns, q.end_ts_ns)
-            if self._reference_warmup_ns > 0
-            else date_list
+            _date_partitions_in_range(ref_start_ns, q.end_ts_ns) if self._reference_warmup_ns > 0 else date_list
         )
         # One shared duckdb connection per question. Previously each per-leg
         # iterator opened its own; that was 14+ connections for an 8-leg bucket.
@@ -497,9 +485,7 @@ class HLHip4DataSource:
             for leg in q.leg_symbols:
                 iters.append(self._book_iter(con, leg, q.start_ts_ns, q.end_ts_ns, date_list))
                 iters.append(self._trade_iter(con, leg, q.start_ts_ns, q.end_ts_ns, date_list))
-            iters.append(
-                self._reference_iter(con, ref_start_ns, q.end_ts_ns, ref_date_list)
-            )
+            iters.append(self._reference_iter(con, ref_start_ns, q.end_ts_ns, ref_date_list))
             iters.append(self._settlement_iter(con, q, q.start_ts_ns, q.end_ts_ns, date_list))
             for _ts, ev in heapq.merge(*iters, key=lambda x: x[0]):
                 yield ev
@@ -579,7 +565,10 @@ class HLHip4DataSource:
             fallback = "mark" if evt == "bbo" else "bbo"
             log.warning(
                 "HL perp BTC %s yielded 0 rows in [%d, %d); falling back to %s",
-                evt, start_ns, end_ns, fallback,
+                evt,
+                start_ns,
+                end_ns,
+                fallback,
             )
             rows = self._reference_rows(con, fallback, start_ns, end_ns, date_list)
             evt = fallback
@@ -595,15 +584,19 @@ class HLHip4DataSource:
         if self.reference_ticks == "raw":
             # Raw mode: one event per tick, H=L=C=mid, no bucketing.
             if evt == "bbo":
+
                 def gen_bbo_raw_ticks() -> Iterator[tuple[int, ReferenceEvent]]:
                     for ts, bid, ask in rows:
                         mid = (float(bid) + float(ask)) / 2.0
                         yield int(ts), ReferenceEvent(int(ts), "BTC", mid, mid, mid)
+
                 return gen_bbo_raw_ticks()
+
             def gen_mark_raw_ticks() -> Iterator[tuple[int, ReferenceEvent]]:
                 for ts, px in rows:
                     p = float(px)
                     yield int(ts), ReferenceEvent(int(ts), "BTC", p, p, p)
+
             return gen_mark_raw_ticks()
 
         # 2026-05-21: resample to OHLC bars of width vol_sampling_dt_seconds.
@@ -619,16 +612,19 @@ class HLHip4DataSource:
         # call sites.
         resample_ns = self._reference_resample_ns
         if evt == "bbo":
+
             def gen_bbo_raw() -> Iterator[tuple[int, ReferenceEvent]]:
                 for ts, bid, ask in rows:
                     mid = (float(bid) + float(ask)) / 2.0
                     yield int(ts), ReferenceEvent(int(ts), "BTC", mid, mid, mid)
+
             return _resample_reference(gen_bbo_raw(), resample_ns=resample_ns)
 
         def gen_mark_raw() -> Iterator[tuple[int, ReferenceEvent]]:
             for ts, px in rows:
                 p = float(px)
                 yield int(ts), ReferenceEvent(int(ts), "BTC", p, p, p)
+
         return _resample_reference(gen_mark_raw(), resample_ns=resample_ns)
 
     def _reference_rows(
@@ -693,9 +689,7 @@ class HLHip4DataSource:
                 log.warning("settlement read failed for %s: %s", leg, e)
                 continue
             for ts, settle_ts, side_idx in rs:
-                outcome: Literal["yes", "no", "unknown"] = (
-                    "yes" if int(side_idx) == 0 else "no"
-                )
+                outcome: Literal["yes", "no", "unknown"] = "yes" if int(side_idx) == 0 else "no"
                 t = int(settle_ts or ts)
                 rows_out.append((t, SettlementEvent(t, q.question_idx, outcome)))
         rows_out.sort(key=lambda x: x[0])
@@ -748,9 +742,7 @@ class HLHip4DataSource:
 
     # ---------------------------- resolved outcome ------------------------
 
-    def resolved_outcome(
-        self, q: QuestionDescriptor
-    ) -> Literal["yes", "no", "unknown"]:
+    def resolved_outcome(self, q: QuestionDescriptor) -> Literal["yes", "no", "unknown"]:
         cached = self._outcome_cache.get(q.question_id)
         if cached is not None:
             return cached
@@ -771,9 +763,7 @@ class HLHip4DataSource:
             _PROC_OUTCOME_MEMO[proc_key] = outcome
         return outcome
 
-    def _resolve_outcome_impl(
-        self, q: QuestionDescriptor
-    ) -> Literal["yes", "no", "unknown"]:
+    def _resolve_outcome_impl(self, q: QuestionDescriptor) -> Literal["yes", "no", "unknown"]:
         # 1) Try real settlement events. Per-leg short-circuit on first hit.
         date_list = _date_partitions_in_range(q.start_ts_ns, q.end_ts_ns)
         con = duckdb.connect()
@@ -895,7 +885,7 @@ class HLHip4DataSource:
                 row = con.sql(
                     f"""
                     SELECT bid_px FROM read_parquet('{glob}', hive_partitioning=1)
-                    WHERE date IN ({','.join(repr(d) for d in date_list)})
+                    WHERE date IN ({",".join(repr(d) for d in date_list)})
                       AND exchange_ts <= {end_ns}
                       AND exchange_ts > {end_ns - 60 * int(1e9)}
                       AND bid_px IS NOT NULL AND len(bid_px) > 0
@@ -925,7 +915,7 @@ class HLHip4DataSource:
                 f"""
                 SELECT keys, values
                 FROM read_parquet('{glob}', hive_partitioning=1)
-                WHERE date IN ({','.join(repr(d) for d in date_list)})
+                WHERE date IN ({",".join(repr(d) for d in date_list)})
                 ORDER BY exchange_ts
                 LIMIT 1
                 """
@@ -993,13 +983,7 @@ class HLHip4DataSource:
 
     def _partition_glob(self, event: str, *, symbol: str) -> str:
         # Hive-partitioned scan path. `symbol` may include `*` (e.g. `Q*`).
-        return str(
-            self.data_root
-            / _HL_PREDICTION_PATH
-            / f"event={event}"
-            / f"symbol={symbol}"
-            / "**" / "*.parquet"
-        )
+        return str(self.data_root / _HL_PREDICTION_PATH / f"event={event}" / f"symbol={symbol}" / "**" / "*.parquet")
 
     def _perp_partition_glob(self, event: str, *, symbol: str) -> str:
         if self.ref_source == "binance_perp":
@@ -1008,15 +992,10 @@ class HLHip4DataSource:
                 / _BINANCE_PERP_PATH
                 / f"event={event}"
                 / f"symbol={_BINANCE_REF_SYMBOL.get(symbol, symbol)}"
-                / "**" / "*.parquet"
+                / "**"
+                / "*.parquet"
             )
-        return str(
-            self.data_root
-            / _HL_PERP_PATH
-            / f"event={event}"
-            / f"symbol={symbol}"
-            / "**" / "*.parquet"
-        )
+        return str(self.data_root / _HL_PERP_PATH / f"event={event}" / f"symbol={symbol}" / "**" / "*.parquet")
 
     def _narrowed_globs(self, base_glob: str, date_list: list[str]) -> list[str]:
         """Narrow a ``.../**/*.parquet`` partition glob to only the ``date=``
@@ -1043,6 +1022,7 @@ class HLHip4DataSource:
     def _partition_has_files(self, glob: str) -> bool:
         # Cheap existence check that avoids duckdb raising on missing paths.
         from glob import glob as _glob
+
         return bool(_glob(glob, recursive=True))
 
 

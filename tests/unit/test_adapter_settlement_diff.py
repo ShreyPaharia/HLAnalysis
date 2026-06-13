@@ -76,15 +76,20 @@ def test_settlement_only_for_matched_template():
     # Template only matches priceBucket; a priceBinary question disappearing
     # should not emit (template filter rejects it).
     tmpl = [_btc_bucket_template()]
-    a._detect_polled_settlements(tmpl, {"questions": [
+    a._detect_polled_settlements(
+        tmpl,
         {
-            "question": 99,
-            "name": "Other",
-            "description": "class:priceBinary|underlying:BTC|targetPrice:80000|expiry:20260509-0600|period:1d",
-            "namedOutcomes": [10],
-            "settledNamedOutcomes": [],
+            "questions": [
+                {
+                    "question": 99,
+                    "name": "Other",
+                    "description": "class:priceBinary|underlying:BTC|targetPrice:80000|expiry:20260509-0600|period:1d",
+                    "namedOutcomes": [10],
+                    "settledNamedOutcomes": [],
+                },
+            ]
         },
-    ]})
+    )
     out = a._detect_polled_settlements(tmpl, {"questions": []})
     assert out == []  # template doesn't match priceBinary
 
@@ -96,9 +101,7 @@ def test_settlement_on_first_poll_emits_already_settled():
     Tagged with source=polled_first_sight so analytics can distinguish."""
     a = _adapter()
     tmpl = [_btc_bucket_template()]
-    out = a._detect_polled_settlements(
-        tmpl, {"questions": [_question(1, [12, 13, 14], [13])]}
-    )
+    out = a._detect_polled_settlements(tmpl, {"questions": [_question(1, [12, 13, 14], [13])]})
     assert len(out) == 1
     assert out[0].symbol == "#130"
     assert dict(zip(out[0].keys, out[0].values)) == {"source": "polled_first_sight"}
@@ -108,7 +111,5 @@ def test_settlement_first_sight_unsettled_primes_only():
     """Unsettled question on first sight just primes the snapshot — no emit."""
     a = _adapter()
     tmpl = [_btc_bucket_template()]
-    out = a._detect_polled_settlements(
-        tmpl, {"questions": [_question(1, [12, 13, 14], [])]}
-    )
+    out = a._detect_polled_settlements(tmpl, {"questions": [_question(1, [12, 13, 14], [])]})
     assert out == []

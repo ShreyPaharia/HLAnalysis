@@ -6,6 +6,7 @@ driver so the reconstruction logic lives in one place. Workers rebuild the data
 source from the picklable ``SourceConfig`` carried in the work tuple, so the
 in-process and subprocess paths share ONE construction path.
 """
+
 from __future__ import annotations
 
 import multiprocessing as mp
@@ -98,14 +99,15 @@ def worker_path_init(package_root: str) -> None:
         sys.path.insert(0, package_root)
 
 
-def build_hedge_source(run_cfg: RunConfig, hedge_data_path: str | None,
-                       hedge_half_spread_bps: float):
+def build_hedge_source(run_cfg: RunConfig, hedge_data_path: str | None, hedge_half_spread_bps: float):
     """Build the hedge source in a worker, or None when hedging is off."""
     if not (run_cfg.hedge_enabled and hedge_data_path):
         return None
     from ..data.binance_perp import BinancePerpKlinesSource
+
     return BinancePerpKlinesSource(
-        path=Path(hedge_data_path), symbol=run_cfg.hedge_symbol,
+        path=Path(hedge_data_path),
+        symbol=run_cfg.hedge_symbol,
         half_spread_bps=hedge_half_spread_bps,
     )
 
@@ -135,15 +137,25 @@ def build_strategy_for_run(strategy_id: str, params: dict):
         return build(strategy_id, params)
     if strategy_id == "_dummy_enter_yes":
         from ..data.synthetic import build_dummy_enter_strategy
+
         return build_dummy_enter_strategy(params)
-    raise ValueError(
-        f"Unknown --strategy: {strategy_id}. Registered: {ids()}."
-    )
+    raise ValueError(f"Unknown --strategy: {strategy_id}. Registered: {ids()}.")
 
 
 def _run_question_worker(args: tuple) -> QResult:
-    (idx, q_id, strike, strategy_id, params, run_cfg_kwargs, source_config,
-     diag_dir, fills_dir, hedge_data_path, hedge_half_spread_bps) = args
+    (
+        idx,
+        q_id,
+        strike,
+        strategy_id,
+        params,
+        run_cfg_kwargs,
+        source_config,
+        diag_dir,
+        fills_dir,
+        hedge_data_path,
+        hedge_half_spread_bps,
+    ) = args
 
     data_source = source_config.build()
     # SHR-91: asdict() serialises SimRiskCaps as a plain dict for pickling.
@@ -151,6 +163,7 @@ def _run_question_worker(args: tuple) -> QResult:
     raw_kw = dict(run_cfg_kwargs)
     if isinstance(raw_kw.get("sim_risk_caps"), dict):
         from ..halt_replay import SimRiskCaps as _SimRiskCaps
+
         raw_kw["sim_risk_caps"] = _SimRiskCaps(**raw_kw["sim_risk_caps"])
     run_cfg = RunConfig(**raw_kw)
     strategy = build_strategy_for_run(strategy_id, params)
@@ -165,8 +178,7 @@ def _run_question_worker(args: tuple) -> QResult:
     hedge_source = build_hedge_source(run_cfg, hedge_data_path, hedge_half_spread_bps)
     hedge_events = None
     if hedge_source is not None:
-        hedge_events = list(hedge_source.book_events(
-            start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns))
+        hedge_events = list(hedge_source.book_events(start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns))
 
     res = run_one_question(
         strategy,
@@ -178,8 +190,7 @@ def _run_question_worker(args: tuple) -> QResult:
         strike=strike,
         hedge_events=hedge_events,
     )
-    return QResult(idx, res.realized_pnl_usd or 0.0, len(res.fills),
-                   data_source.resolved_outcome(q))
+    return QResult(idx, res.realized_pnl_usd or 0.0, len(res.fills), data_source.resolved_outcome(q))
 
 
 def run_questions_parallel(
@@ -219,16 +230,12 @@ def run_questions_parallel(
         # set; default None preserves bit-identical behaviour for existing callers.
         caps = run_cfg.sim_risk_caps
         ledger: SharedInventoryLedger | None = None
-        if caps is not None and (
-            caps.max_total_inventory_usd is not None
-            or caps.max_concurrent_positions is not None
-        ):
+        if caps is not None and (caps.max_total_inventory_usd is not None or caps.max_concurrent_positions is not None):
             ledger = SharedInventoryLedger()
         for i, q in enumerate(descriptors):
             hedge_events = None
             if hedge_source is not None:
-                hedge_events = list(hedge_source.book_events(
-                    start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns))
+                hedge_events = list(hedge_source.book_events(start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns))
             # SHR-91: query the ledger at this question's start to compute how
             # much inventory from prior questions is already "in the market" at
             # the question's open time.
@@ -236,9 +243,14 @@ def run_questions_parallel(
             if ledger is not None:
                 extra_notional, extra_n = ledger.count_at(q.start_ts_ns)
             res = run_one_question(
-                strategy, data_source, q, run_cfg,
-                diagnostics_dir=diagnostics_dir, fills_dir=fills_dir,
-                strike=strike_for(q), hedge_events=hedge_events,
+                strategy,
+                data_source,
+                q,
+                run_cfg,
+                diagnostics_dir=diagnostics_dir,
+                fills_dir=fills_dir,
+                strike=strike_for(q),
+                hedge_events=hedge_events,
                 extra_held_notional=extra_notional,
                 extra_n_held=extra_n,
             )
@@ -247,25 +259,38 @@ def run_questions_parallel(
             if ledger is not None:
                 for open_ts, close_ts, notional in getattr(res, "position_windows", ()):
                     ledger.record(
-                        open_ts_ns=open_ts, close_ts_ns=close_ts, notional=notional,
+                        open_ts_ns=open_ts,
+                        close_ts_ns=close_ts,
+                        notional=notional,
                     )
-            results.append(QResult(i, res.realized_pnl_usd or 0.0, len(res.fills),
-                                   data_source.resolved_outcome(q)))
+            results.append(QResult(i, res.realized_pnl_usd or 0.0, len(res.fills), data_source.resolved_outcome(q)))
         return results
 
     run_cfg_kwargs = asdict(run_cfg)
     work = [
-        (i, q.question_id, strike_for(q), strategy_id, params, run_cfg_kwargs,
-         source_config, str(diagnostics_dir) if diagnostics_dir else None,
-         str(fills_dir) if fills_dir else None, hedge_data_path, hedge_half_spread_bps)
+        (
+            i,
+            q.question_id,
+            strike_for(q),
+            strategy_id,
+            params,
+            run_cfg_kwargs,
+            source_config,
+            str(diagnostics_dir) if diagnostics_dir else None,
+            str(fills_dir) if fills_dir else None,
+            hedge_data_path,
+            hedge_half_spread_bps,
+        )
         for i, q in enumerate(descriptors)
     ]
     if n_workers <= 1:
         return sorted((_run_question_worker(w) for w in work), key=lambda r: r.idx)
-    with ProcessPoolExecutor(max_workers=n_workers,
-                             mp_context=mp.get_context("spawn"),
-                             initializer=worker_path_init,
-                             initargs=(parent_package_root(),)) as ex:
+    with ProcessPoolExecutor(
+        max_workers=n_workers,
+        mp_context=mp.get_context("spawn"),
+        initializer=worker_path_init,
+        initargs=(parent_package_root(),),
+    ) as ex:
         results = list(ex.map(_run_question_worker, work))
     return sorted(results, key=lambda r: r.idx)
 

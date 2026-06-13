@@ -24,6 +24,7 @@ Three invariants enforced here:
    (c) When True, a two-sided quote that passes the threshold still yields
        ENTER → the guard only affects genuinely one-sided quotes.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -43,6 +44,7 @@ from hlanalysis.strategy.types import Action, BookState, QuestionView
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
 
 def _required_params(**overrides) -> dict:
     """Minimal params dict satisfying build_v3_theta_harvester's required keys."""
@@ -78,8 +80,7 @@ def _binary_question(
     )
 
 
-def _book(symbol: str, *, bid: float | None, ask: float | None,
-          sz: float = 100.0) -> BookState:
+def _book(symbol: str, *, bid: float | None, ask: float | None, sz: float = 100.0) -> BookState:
     return BookState(
         symbol=symbol,
         bid_px=bid,
@@ -105,9 +106,7 @@ _OPTIONAL_KNOB_FIELDS = set(ThetaHarvesterParams.model_fields)
 # Fields that resolve to None by default (Optional[...] = None).
 # These need special comparison because params.get() returns None which matches.
 _NONE_DEFAULT_FIELDS = {
-    name
-    for name, field_info in ThetaHarvesterParams.model_fields.items()
-    if field_info.default is None
+    name for name, field_info in ThetaHarvesterParams.model_fields.items() if field_info.default is None
 }
 
 
@@ -136,13 +135,10 @@ def test_builder_optional_fields_match_model_defaults() -> None:
         built_val = getattr(built, name)
         model_default = ThetaHarvesterParams.model_fields[name].default
         if built_val != model_default:
-            mismatches.append(
-                f"{name}: builder produced {built_val!r}, model default is {model_default!r}"
-            )
+            mismatches.append(f"{name}: builder produced {built_val!r}, model default is {model_default!r}")
     assert not mismatches, (
         "Builder defaults do not match ThetaHarvesterParams model defaults "
-        "(literal default still hand-copied in builder):\n"
-        + "\n".join(f"  {m}" for m in mismatches)
+        "(literal default still hand-copied in builder):\n" + "\n".join(f"  {m}" for m in mismatches)
     )
 
 
@@ -162,12 +158,9 @@ def test_builder_derives_from_sentinel_not_literals() -> None:
         built_val = getattr(built, name)
         sentinel_val = getattr(_D, name)
         if built_val != sentinel_val:
-            mismatches.append(
-                f"{name}: built={built_val!r}, _D.{name}={sentinel_val!r}"
-            )
-    assert not mismatches, (
-        "Builder does not derive optional defaults from _D:\n"
-        + "\n".join(f"  {m}" for m in mismatches)
+            mismatches.append(f"{name}: built={built_val!r}, _D.{name}={sentinel_val!r}")
+    assert not mismatches, "Builder does not derive optional defaults from _D:\n" + "\n".join(
+        f"  {m}" for m in mismatches
     )
 
 
@@ -195,6 +188,7 @@ def test_require_two_sided_entry_default_false() -> None:
 # ---------------------------------------------------------------------------
 # Fix 3: require_two_sided_entry guard
 # ---------------------------------------------------------------------------
+
 
 def _entry_strat(
     *,
@@ -262,8 +256,10 @@ class TestRequireTwoSidedEntryOff:
         # Reference 200k >> strike 100k → YES wins → big edge
         action = _evaluate_entry(
             strat,
-            yes_bid=None, yes_ask=0.90,
-            no_bid=0.09, no_ask=0.10,
+            yes_bid=None,
+            yes_ask=0.90,
+            no_bid=0.09,
+            no_ask=0.10,
         )
         assert action == Action.ENTER, (
             "With require_two_sided_entry=False, a one-sided ask-only YES quote "
@@ -275,8 +271,10 @@ class TestRequireTwoSidedEntryOff:
         strat = _entry_strat(require_two_sided=False, favorite_threshold=0.85)
         action = _evaluate_entry(
             strat,
-            yes_bid=0.88, yes_ask=0.92,  # mid=0.90 >= 0.85
-            no_bid=0.08, no_ask=0.12,
+            yes_bid=0.88,
+            yes_ask=0.92,  # mid=0.90 >= 0.85
+            no_bid=0.08,
+            no_ask=0.12,
         )
         assert action == Action.ENTER
 
@@ -295,8 +293,10 @@ class TestRequireTwoSidedEntryOn:
         strat = _entry_strat(require_two_sided=True, favorite_threshold=0.85)
         action = _evaluate_entry(
             strat,
-            yes_bid=None, yes_ask=0.90,
-            no_bid=0.09, no_ask=0.10,
+            yes_bid=None,
+            yes_ask=0.90,
+            no_bid=0.09,
+            no_ask=0.10,
         )
         assert action == Action.HOLD, (
             "With require_two_sided_entry=True, a one-sided ask-only YES quote "
@@ -308,12 +308,13 @@ class TestRequireTwoSidedEntryOn:
         strat = _entry_strat(require_two_sided=True, favorite_threshold=0.85)
         action = _evaluate_entry(
             strat,
-            yes_bid=0.88, yes_ask=0.92,  # mid=0.90 >= 0.85
-            no_bid=0.08, no_ask=0.12,
+            yes_bid=0.88,
+            yes_ask=0.92,  # mid=0.90 >= 0.85
+            no_bid=0.08,
+            no_ask=0.12,
         )
         assert action == Action.ENTER, (
-            "Two-sided quotes must still pass through the favorite gate when "
-            "require_two_sided_entry=True"
+            "Two-sided quotes must still pass through the favorite gate when require_two_sided_entry=True"
         )
 
     def test_both_sides_one_sided_yields_hold(self) -> None:
@@ -321,8 +322,10 @@ class TestRequireTwoSidedEntryOn:
         strat = _entry_strat(require_two_sided=True, favorite_threshold=0.85)
         action = _evaluate_entry(
             strat,
-            yes_bid=None, yes_ask=0.90,
-            no_bid=None, no_ask=0.10,
+            yes_bid=None,
+            yes_ask=0.90,
+            no_bid=None,
+            no_ask=0.10,
         )
         assert action == Action.HOLD
 
@@ -352,10 +355,15 @@ class TestRequireTwoSidedBitIdenticalWhenOff:
 
     def test_default_off_bit_identical_to_explicit_false(self) -> None:
         """build with no require_two_sided_entry key == build with key=False."""
-        default_strat = build_strategy("v3_theta_harvester", _required_params(
-            favorite_threshold=0.85, edge_buffer=0.01,
-            drift_lookback_seconds=0, drift_blend=0.0,
-        ))
+        default_strat = build_strategy(
+            "v3_theta_harvester",
+            _required_params(
+                favorite_threshold=0.85,
+                edge_buffer=0.01,
+                drift_lookback_seconds=0,
+                drift_blend=0.0,
+            ),
+        )
         explicit_false_strat = self._strat(require_two_sided=False)
         for scenario in self._scenarios():
             question = _binary_question()
@@ -364,9 +372,13 @@ class TestRequireTwoSidedBitIdenticalWhenOff:
                 "NO": _book("NO", bid=scenario["no_bid"], ask=scenario["no_ask"]),
             }
             kw = dict(
-                question=question, books=books, reference_price=200_000.0,
-                recent_returns=_RETS, recent_volume_usd=10_000.0,
-                position=None, now_ns=0,
+                question=question,
+                books=books,
+                reference_price=200_000.0,
+                recent_returns=_RETS,
+                recent_volume_usd=10_000.0,
+                position=None,
+                now_ns=0,
             )
             dec_default = default_strat.evaluate(**kw)
             dec_explicit = explicit_false_strat.evaluate(**kw)
@@ -374,6 +386,4 @@ class TestRequireTwoSidedBitIdenticalWhenOff:
                 f"scenario={scenario}: action mismatch: "
                 f"default={dec_default.action}, explicit_false={dec_explicit.action}"
             )
-            assert dec_default.diagnostics == dec_explicit.diagnostics, (
-                f"scenario={scenario}: diagnostics mismatch"
-            )
+            assert dec_default.diagnostics == dec_explicit.diagnostics, f"scenario={scenario}: diagnostics mismatch"

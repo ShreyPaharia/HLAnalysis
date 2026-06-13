@@ -15,6 +15,7 @@ DO NOT autogenerate or "tidy" these statements: byte-for-byte schema parity
 with databases already on disk is the safety contract (see
 tests/unit/test_state_alembic_migrations.py).
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -108,8 +109,14 @@ _UPGRADE_STATEMENTS = [
 ]
 
 _DOWNGRADE_TABLES = [
-    "events", "settlement", "pm_strike", "seen_question",
-    "session", "fill", "position", "openorder",
+    "events",
+    "settlement",
+    "pm_strike",
+    "seen_question",
+    "session",
+    "fill",
+    "position",
+    "openorder",
 ]
 
 

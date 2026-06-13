@@ -5,6 +5,7 @@ deterministic event sequence so the runner + CLI can be exercised end-to-end
 without depending on the PM or HL HIP-4 sources (Tasks B/C). The CLI exposes
 it under ``--data-source synthetic``; see ``hlanalysis/backtest/cli.py``.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -82,9 +83,7 @@ class SyntheticDataSource:
             settled_side=sq.outcome if settled else None,
         )
 
-    def resolved_outcome(
-        self, q: QuestionDescriptor
-    ) -> Literal["yes", "no", "unknown"]:
+    def resolved_outcome(self, q: QuestionDescriptor) -> Literal["yes", "no", "unknown"]:
         return self._find(q).outcome
 
     # ---- helpers ---------------------------------------------------------
@@ -187,9 +186,7 @@ def make_default_binary_question(
             )
         )
 
-    settle: list[SettlementEvent] = [
-        SettlementEvent(ts_ns=end_ts_ns, question_idx=question_idx, outcome=outcome)
-    ]
+    settle: list[SettlementEvent] = [SettlementEvent(ts_ns=end_ts_ns, question_idx=question_idx, outcome=outcome)]
 
     return SyntheticQuestion(
         descriptor=descriptor,
@@ -260,9 +257,7 @@ class _DummyEnterStrategy(Strategy):
                 limit_price=min(1.0, book.ask_px + 0.01),
                 cloid=f"hla-dummy-{now_ns}",
             )
-            return Decision(
-                action=Action.ENTER, intents=(intent,), diagnostics=diag
-            )
+            return Decision(action=Action.ENTER, intents=(intent,), diagnostics=diag)
         return Decision(action=Action.HOLD, diagnostics=diag)
 
 

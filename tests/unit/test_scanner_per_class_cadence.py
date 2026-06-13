@@ -4,6 +4,7 @@ priceBucket theta_override of vol_sampling_dt_seconds=2 must read the dt=2 bar
 series for bucket questions while priceBinary reads the slot default dt=5.
 
 Default path (no dt override) stays bit-identical: dt-less read, legacy n."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,48 +12,72 @@ from pathlib import Path
 import pytest
 
 from hlanalysis.engine.config import (
-    AllowlistEntry, GlobalRiskConfig, StrategyConfig, ThetaParams,
+    AllowlistEntry,
+    GlobalRiskConfig,
+    StrategyConfig,
+    ThetaParams,
 )
 from hlanalysis.engine.market_state import MarketState
 from hlanalysis.engine.scanner import Scanner
 from hlanalysis.engine.state import StateDAL
 from hlanalysis.events import (
-    BboEvent, MarkEvent, Mechanism, ProductType, QuestionMetaEvent,
+    BboEvent,
+    MarkEvent,
+    Mechanism,
+    ProductType,
+    QuestionMetaEvent,
 )
 from hlanalysis.strategy.late_resolution import (
-    LateResolutionConfig, LateResolutionStrategy,
+    LateResolutionConfig,
+    LateResolutionStrategy,
 )
 from hlanalysis.strategy.types import Action, Decision
 
 
 def _global() -> GlobalRiskConfig:
     return GlobalRiskConfig(
-        max_total_inventory_usd=1100, max_concurrent_positions=5,
-        daily_loss_cap_usd=100, max_strike_distance_pct=50,
-        min_recent_volume_usd=0, stale_data_halt_seconds=30,
+        max_total_inventory_usd=1100,
+        max_concurrent_positions=5,
+        daily_loss_cap_usd=100,
+        max_strike_distance_pct=50,
+        min_recent_volume_usd=0,
+        stale_data_halt_seconds=30,
         reconcile_interval_seconds=15,
     )
 
 
 def _entry(klass: str) -> AllowlistEntry:
     return AllowlistEntry(
-        match={"class": klass, "underlying": "BTC"}, max_position_usd=500,
-        stop_loss_pct=None, tte_min_seconds=0, tte_max_seconds=43200,
-        price_extreme_threshold=0.0, distance_from_strike_usd_min=0, vol_max=100,
+        match={"class": klass, "underlying": "BTC"},
+        max_position_usd=500,
+        stop_loss_pct=None,
+        tte_min_seconds=0,
+        tte_max_seconds=43200,
+        price_extreme_threshold=0.0,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
     )
 
 
 def _cfg(theta_overrides: dict | None = None) -> StrategyConfig:
     defaults = AllowlistEntry(
-        match={}, max_position_usd=500, stop_loss_pct=None, tte_min_seconds=0,
-        tte_max_seconds=43200, price_extreme_threshold=0.0,
-        distance_from_strike_usd_min=0, vol_max=100,
+        match={},
+        max_position_usd=500,
+        stop_loss_pct=None,
+        tte_min_seconds=0,
+        tte_max_seconds=43200,
+        price_extreme_threshold=0.0,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
     )
     kwargs: dict = dict(
-        name="theta_harvester", account_alias="v31", paper_mode=False,
+        name="theta_harvester",
+        account_alias="v31",
+        paper_mode=False,
         strategy_type="theta_harvester",
         allowlist=[_entry("priceBinary"), _entry("priceBucket")],
-        blocklist_question_idxs=[], defaults=defaults,
+        blocklist_question_idxs=[],
+        defaults=defaults,
         theta=ThetaParams(vol_lookback_seconds=3600, vol_sampling_dt_seconds=5),
         **{"global": _global()},
     )
@@ -65,7 +90,7 @@ def test_cadence_by_class_only_contains_dt_overriding_classes() -> None:
     cfg = _cfg(theta_overrides={"priceBucket": {"vol_sampling_dt_seconds": 2}})
     m = Scanner.cadence_by_class(cfg)
     assert set(m) == {"priceBucket"}
-    assert m["priceBucket"][0] == 2                       # (dt_seconds, n_bars)
+    assert m["priceBucket"][0] == 2  # (dt_seconds, n_bars)
     assert m["priceBucket"][1] > Scanner._required_returns_n(cfg)
 
 
@@ -92,30 +117,34 @@ def test_cadence_by_class_widens_n_for_per_class_vol_lookback() -> None:
     # Base slot: 3600s lookback at dt=5 → base_secs=3600, base_n=720.
     # priceBucket override: dt=2, vol_lookback_seconds=7200
     # Expected n = ceil(7200/2) = 3600 > base_n=720.
-    cfg = _cfg(theta_overrides={"priceBucket": {
-        "vol_sampling_dt_seconds": 2,
-        "vol_lookback_seconds": 7200,
-    }})
+    cfg = _cfg(
+        theta_overrides={
+            "priceBucket": {
+                "vol_sampling_dt_seconds": 2,
+                "vol_lookback_seconds": 7200,
+            }
+        }
+    )
     m = Scanner.cadence_by_class(cfg)
     assert m["priceBucket"][0] == 2
     # n must cover the 7200s window at dt=2 → 3600 bars
-    assert m["priceBucket"][1] >= 3600, (
-        f"expected n>=3600 to cover 7200s at dt=2, got {m['priceBucket'][1]}"
-    )
+    assert m["priceBucket"][1] >= 3600, f"expected n>=3600 to cover 7200s at dt=2, got {m['priceBucket'][1]}"
 
 
 def test_cadence_by_class_widens_n_for_per_class_drift_lookback() -> None:
     """A class override that sets drift_lookback_seconds beyond the base
     lookback must also widen n so the drift window is not truncated."""
-    cfg = _cfg(theta_overrides={"priceBucket": {
-        "vol_sampling_dt_seconds": 2,
-        "drift_lookback_seconds": 5400,
-    }})
+    cfg = _cfg(
+        theta_overrides={
+            "priceBucket": {
+                "vol_sampling_dt_seconds": 2,
+                "drift_lookback_seconds": 5400,
+            }
+        }
+    )
     m = Scanner.cadence_by_class(cfg)
     # Base secs=3600, drift override=5400 → secs=5400; n=ceil(5400/2)=2700
-    assert m["priceBucket"][1] >= 2700, (
-        f"expected n>=2700 to cover 5400s drift at dt=2, got {m['priceBucket'][1]}"
-    )
+    assert m["priceBucket"][1] >= 2700, f"expected n>=2700 to cover 5400s drift at dt=2, got {m['priceBucket'][1]}"
 
 
 def test_cadence_by_class_base_lookback_not_inflated() -> None:
@@ -123,10 +152,14 @@ def test_cadence_by_class_base_lookback_not_inflated() -> None:
     by per-class vol/drift overrides — the default-path n must stay bit-identical.
     """
     cfg_no_override = _cfg()
-    cfg_with_wide = _cfg(theta_overrides={"priceBucket": {
-        "vol_sampling_dt_seconds": 2,
-        "vol_lookback_seconds": 9000,
-    }})
+    cfg_with_wide = _cfg(
+        theta_overrides={
+            "priceBucket": {
+                "vol_sampling_dt_seconds": 2,
+                "vol_lookback_seconds": 9000,
+            }
+        }
+    )
     assert Scanner._required_returns_n(cfg_no_override) == Scanner._required_returns_n(cfg_with_wide), (
         "per-class override must NOT inflate _required_returns_n (the default-path n)"
     )
@@ -176,62 +209,93 @@ def _seed_two_class_market(now_ns: int, ms: MarketState) -> None:
     into ``ms``, plus enough BTC marks at both dt=5s and dt=2s to produce bars."""
     from datetime import datetime, timezone
 
-    expiry_str = datetime.fromtimestamp(
-        (now_ns + 10 * 60 * 1_000_000_000) / 1e9, tz=timezone.utc
-    ).strftime("%Y%m%d-%H%M")
+    expiry_str = datetime.fromtimestamp((now_ns + 10 * 60 * 1_000_000_000) / 1e9, tz=timezone.utc).strftime(
+        "%Y%m%d-%H%M"
+    )
 
     # priceBinary question — legs #30 / #31
-    ms.apply(QuestionMetaEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-        mechanism=Mechanism.CLOB, symbol="qmeta",
-        exchange_ts=now_ns - 120_000_000_000,
-        local_recv_ts=now_ns - 120_000_000_000,
-        question_idx=1, named_outcome_idxs=[3],
-        keys=["class", "underlying", "period", "expiry", "strike"],
-        values=["priceBinary", "BTC", "1h", expiry_str, "80000"],
-    ))
+    ms.apply(
+        QuestionMetaEvent(
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="qmeta",
+            exchange_ts=now_ns - 120_000_000_000,
+            local_recv_ts=now_ns - 120_000_000_000,
+            question_idx=1,
+            named_outcome_idxs=[3],
+            keys=["class", "underlying", "period", "expiry", "strike"],
+            values=["priceBinary", "BTC", "1h", expiry_str, "80000"],
+        )
+    )
     # priceBucket question — 2 outcomes → legs #00, #01, #10, #11
-    ms.apply(QuestionMetaEvent(
-        venue="hyperliquid", product_type=ProductType.PREDICTION_CATEGORICAL,
-        mechanism=Mechanism.CLOB, symbol="qmeta_bucket",
-        exchange_ts=now_ns - 120_000_000_000,
-        local_recv_ts=now_ns - 120_000_000_000,
-        question_idx=2, named_outcome_idxs=[0, 1],
-        keys=["class", "underlying", "period", "expiry", "strike"],
-        values=["priceBucket", "BTC", "1d", expiry_str, "80000"],
-    ))
+    ms.apply(
+        QuestionMetaEvent(
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_CATEGORICAL,
+            mechanism=Mechanism.CLOB,
+            symbol="qmeta_bucket",
+            exchange_ts=now_ns - 120_000_000_000,
+            local_recv_ts=now_ns - 120_000_000_000,
+            question_idx=2,
+            named_outcome_idxs=[0, 1],
+            keys=["class", "underlying", "period", "expiry", "strike"],
+            values=["priceBucket", "BTC", "1d", expiry_str, "80000"],
+        )
+    )
 
     # BTC marks: 40 ticks spaced 2s apart — covers both dt=5s and dt=2s series
     for i in range(40):
         ts = now_ns - (40 - i) * 2_000_000_000
-        ms.apply(MarkEvent(
-            venue="hyperliquid", product_type=ProductType.PERP,
-            mechanism=Mechanism.CLOB, symbol="BTC",
-            exchange_ts=ts, local_recv_ts=ts,
-            mark_px=80_000.0 + i * 1.0,
-        ))
+        ms.apply(
+            MarkEvent(
+                venue="hyperliquid",
+                product_type=ProductType.PERP,
+                mechanism=Mechanism.CLOB,
+                symbol="BTC",
+                exchange_ts=ts,
+                local_recv_ts=ts,
+                mark_px=80_000.0 + i * 1.0,
+            )
+        )
 
     # Books for priceBinary legs
     for sym, bid, ask in (("#30", 0.94, 0.95), ("#31", 0.04, 0.05)):
-        ms.apply(BboEvent(
-            venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol=sym,
-            exchange_ts=now_ns, local_recv_ts=now_ns,
-            bid_px=bid, bid_sz=10.0, ask_px=ask, ask_sz=10.0,
-        ))
+        ms.apply(
+            BboEvent(
+                venue="hyperliquid",
+                product_type=ProductType.PREDICTION_BINARY,
+                mechanism=Mechanism.CLOB,
+                symbol=sym,
+                exchange_ts=now_ns,
+                local_recv_ts=now_ns,
+                bid_px=bid,
+                bid_sz=10.0,
+                ask_px=ask,
+                ask_sz=10.0,
+            )
+        )
     # Books for priceBucket legs
-    for sym, bid, ask in (("#0", 0.20, 0.21), ("#1", 0.04, 0.05),
-                          ("#10", 0.70, 0.71), ("#11", 0.04, 0.05)):
-        ms.apply(BboEvent(
-            venue="hyperliquid", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol=sym,
-            exchange_ts=now_ns, local_recv_ts=now_ns,
-            bid_px=bid, bid_sz=10.0, ask_px=ask, ask_sz=10.0,
-        ))
+    for sym, bid, ask in (("#0", 0.20, 0.21), ("#1", 0.04, 0.05), ("#10", 0.70, 0.71), ("#11", 0.04, 0.05)):
+        ms.apply(
+            BboEvent(
+                venue="hyperliquid",
+                product_type=ProductType.PREDICTION_BINARY,
+                mechanism=Mechanism.CLOB,
+                symbol=sym,
+                exchange_ts=now_ns,
+                local_recv_ts=now_ns,
+                bid_px=bid,
+                bid_sz=10.0,
+                ask_px=ask,
+                ask_sz=10.0,
+            )
+        )
 
 
 def test_scan_wiring_bucket_uses_dt2_binary_uses_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """scan() must route per-class cadence overrides to the correct dt arg on
     build_decision_inputs calls (R1: scanner now calls build_decision_inputs
@@ -262,16 +326,25 @@ def test_scan_wiring_bucket_uses_dt2_binary_uses_default(
     dal.run_migrations()
 
     rcfg = LateResolutionConfig(
-        tte_min_seconds=0, tte_max_seconds=86400,
-        price_extreme_threshold=0.0, distance_from_strike_usd_min=0.0,
-        vol_max=100.0, max_position_usd=500.0, stop_loss_pct=None,
-        max_strike_distance_pct=100.0, min_recent_volume_usd=0.0,
+        tte_min_seconds=0,
+        tte_max_seconds=86400,
+        price_extreme_threshold=0.0,
+        distance_from_strike_usd_min=0.0,
+        vol_max=100.0,
+        max_position_usd=500.0,
+        stop_loss_pct=None,
+        max_strike_distance_pct=100.0,
+        min_recent_volume_usd=0.0,
         stale_data_halt_seconds=30,
     )
     strat = _ClassRecordingStrategy(rcfg)
     scanner = Scanner(
-        strategy=strat, cfg=cfg, market_state=ms, dal=dal,
-        kill_switch_path=tmp_path / "halt", last_reconcile_ns=now,
+        strategy=strat,
+        cfg=cfg,
+        market_state=ms,
+        dal=dal,
+        kill_switch_path=tmp_path / "halt",
+        last_reconcile_ns=now,
     )
 
     # Confirm _cadence_by_class is wired correctly before running scan()
@@ -286,8 +359,7 @@ def test_scan_wiring_bucket_uses_dt2_binary_uses_default(
 
     def _recording_bdi(core, *, ref_symbol, now_ns, lookback_seconds, dt=None):
         bdi_calls.append(dt)
-        return _real_bdi(core, ref_symbol=ref_symbol, now_ns=now_ns,
-                         lookback_seconds=lookback_seconds, dt=dt)
+        return _real_bdi(core, ref_symbol=ref_symbol, now_ns=now_ns, lookback_seconds=lookback_seconds, dt=dt)
 
     monkeypatch.setattr(_scanner_mod, "build_decision_inputs", _recording_bdi)
 
@@ -296,31 +368,23 @@ def test_scan_wiring_bucket_uses_dt2_binary_uses_default(
     # We must have seen at least one evaluate() call per question class to
     # verify the routing (if both lists are empty the market seeding failed).
     klasses_evaluated = {klass for klass, _, _ in strat.calls}
-    assert "priceBinary" in klasses_evaluated, (
-        "priceBinary question was never evaluated — check market seeding"
-    )
-    assert "priceBucket" in klasses_evaluated, (
-        "priceBucket question was never evaluated — check market seeding"
-    )
+    assert "priceBinary" in klasses_evaluated, "priceBinary question was never evaluated — check market seeding"
+    assert "priceBucket" in klasses_evaluated, "priceBucket question was never evaluated — check market seeding"
 
     # build_decision_inputs is called once per evaluated question.
     # Correlate bdi_calls order with strat.calls order to verify per-class dt.
     assert len(bdi_calls) == len(strat.calls), (
-        f"expected one build_decision_inputs call per evaluate call, "
-        f"got {len(bdi_calls)} vs {len(strat.calls)}"
+        f"expected one build_decision_inputs call per evaluate call, got {len(bdi_calls)} vs {len(strat.calls)}"
     )
     for (klass, _rets, _hl), dt_arg in zip(strat.calls, bdi_calls):
         if klass == "priceBucket":
-            assert dt_arg == 2, (
-                f"priceBucket build_decision_inputs must use dt=2, got dt={dt_arg}"
-            )
+            assert dt_arg == 2, f"priceBucket build_decision_inputs must use dt=2, got dt={dt_arg}"
         elif klass == "priceBinary":
             # R9: the default path now passes the slot's explicit dt (5) rather
             # than dt=None, so reads always land on the correct cadence buffer
             # even when sibling slots have registered a different dt first.
             assert dt_arg == 5, (
-                f"priceBinary build_decision_inputs must use dt=5 (slot's explicit dt), "
-                f"got dt={dt_arg!r}"
+                f"priceBinary build_decision_inputs must use dt=5 (slot's explicit dt), got dt={dt_arg!r}"
             )
 
 
@@ -328,7 +392,8 @@ def test_scan_wiring_bucket_uses_dt2_binary_uses_default(
 
 
 def test_scanner_default_path_passes_explicit_dt_not_none(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """R9 capability: when a slot has a fixed vol_sampling_dt_seconds (say 5),
     the scanner's default path (no per-class override) must call
@@ -365,19 +430,30 @@ def test_scanner_default_path_passes_explicit_dt_not_none(
     dal.run_migrations()
 
     from hlanalysis.strategy.late_resolution import (
-        LateResolutionConfig, LateResolutionStrategy,
+        LateResolutionConfig,
+        LateResolutionStrategy,
     )
+
     rcfg = LateResolutionConfig(
-        tte_min_seconds=0, tte_max_seconds=86400,
-        price_extreme_threshold=0.0, distance_from_strike_usd_min=0.0,
-        vol_max=100.0, max_position_usd=500.0, stop_loss_pct=None,
-        max_strike_distance_pct=100.0, min_recent_volume_usd=0.0,
+        tte_min_seconds=0,
+        tte_max_seconds=86400,
+        price_extreme_threshold=0.0,
+        distance_from_strike_usd_min=0.0,
+        vol_max=100.0,
+        max_position_usd=500.0,
+        stop_loss_pct=None,
+        max_strike_distance_pct=100.0,
+        min_recent_volume_usd=0.0,
         stale_data_halt_seconds=30,
     )
     strat = LateResolutionStrategy(rcfg)
     scanner = Scanner(
-        strategy=strat, cfg=cfg, market_state=ms, dal=dal,
-        kill_switch_path=tmp_path / "halt", last_reconcile_ns=now,
+        strategy=strat,
+        cfg=cfg,
+        market_state=ms,
+        dal=dal,
+        kill_switch_path=tmp_path / "halt",
+        last_reconcile_ns=now,
     )
 
     # Record dt args on build_decision_inputs calls.
@@ -385,8 +461,7 @@ def test_scanner_default_path_passes_explicit_dt_not_none(
 
     def _recording_bdi(core, *, ref_symbol, now_ns, lookback_seconds, dt=None):
         bdi_calls.append(dt)
-        return _real_bdi(core, ref_symbol=ref_symbol, now_ns=now_ns,
-                         lookback_seconds=lookback_seconds, dt=dt)
+        return _real_bdi(core, ref_symbol=ref_symbol, now_ns=now_ns, lookback_seconds=lookback_seconds, dt=dt)
 
     monkeypatch.setattr(_scanner_mod, "build_decision_inputs", _recording_bdi)
 
@@ -415,20 +490,31 @@ def test_late_resolution_scanner_derives_default_dt_from_allowlist(
     (the sim path doesn't use the scanner), so this unit assertion is the guard.
     """
     from hlanalysis.strategy.late_resolution import (
-        LateResolutionConfig, LateResolutionStrategy,
+        LateResolutionConfig,
+        LateResolutionStrategy,
     )
 
     defaults = AllowlistEntry(
-        match={}, max_position_usd=500, stop_loss_pct=None, tte_min_seconds=0,
-        tte_max_seconds=43200, price_extreme_threshold=0.0,
-        distance_from_strike_usd_min=0, vol_max=100,
-        vol_sampling_dt_seconds=5,            # late_res carries dt here, theta=None
+        match={},
+        max_position_usd=500,
+        stop_loss_pct=None,
+        tte_min_seconds=0,
+        tte_max_seconds=43200,
+        price_extreme_threshold=0.0,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
+        vol_sampling_dt_seconds=5,  # late_res carries dt here, theta=None
     )
     cfg = StrategyConfig(
-        name="late_resolution", account_alias="v1", paper_mode=False,
+        name="late_resolution",
+        account_alias="v1",
+        paper_mode=False,
         strategy_type="late_resolution",
-        allowlist=[_entry("priceBinary")], blocklist_question_idxs=[],
-        defaults=defaults, theta=None, **{"global": _global()},
+        allowlist=[_entry("priceBinary")],
+        blocklist_question_idxs=[],
+        defaults=defaults,
+        theta=None,
+        **{"global": _global()},
     )
     assert cfg.theta is None, "test precondition: late_resolution has no theta block"
 
@@ -437,15 +523,24 @@ def test_late_resolution_scanner_derives_default_dt_from_allowlist(
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     rcfg = LateResolutionConfig(
-        tte_min_seconds=0, tte_max_seconds=86400,
-        price_extreme_threshold=0.0, distance_from_strike_usd_min=0.0,
-        vol_max=100.0, max_position_usd=500.0, stop_loss_pct=None,
-        max_strike_distance_pct=100.0, min_recent_volume_usd=0.0,
+        tte_min_seconds=0,
+        tte_max_seconds=86400,
+        price_extreme_threshold=0.0,
+        distance_from_strike_usd_min=0.0,
+        vol_max=100.0,
+        max_position_usd=500.0,
+        stop_loss_pct=None,
+        max_strike_distance_pct=100.0,
+        min_recent_volume_usd=0.0,
         stale_data_halt_seconds=30,
     )
     scanner = Scanner(
-        strategy=LateResolutionStrategy(rcfg), cfg=cfg, market_state=ms, dal=dal,
-        kill_switch_path=tmp_path / "halt", last_reconcile_ns=0,
+        strategy=LateResolutionStrategy(rcfg),
+        cfg=cfg,
+        market_state=ms,
+        dal=dal,
+        kill_switch_path=tmp_path / "halt",
+        last_reconcile_ns=0,
     )
     assert scanner._default_dt_seconds == 5, (
         f"late_resolution scanner must derive dt=5 from allowlist defaults, got "

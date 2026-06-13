@@ -7,6 +7,7 @@ the orchestrator stays thin. Behaviour is identical to the prior instance
 methods — ``EngineRuntime._maybe_capture_pm_strike`` /
 ``_pm_strike_capture_loop`` now delegate here.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -21,8 +22,12 @@ if TYPE_CHECKING:  # avoid a runtime import cycle (EngineRuntime lives in runtim
 
 
 async def maybe_capture_pm_strike(
-    rt: EngineRuntime, qv, slots: list[AccountSlot],
-    fields: dict[str, str], *, now_ns: int,
+    rt: EngineRuntime,
+    qv,
+    slots: list[AccountSlot],
+    fields: dict[str, str],
+    *,
+    now_ns: int,
 ) -> None:
     """Capture a PM up/down strike from the Binance SPOT 1m candle close.
 
@@ -36,6 +41,7 @@ async def maybe_capture_pm_strike(
     # Internal symbol the Binance SPOT reference feed is remapped to (see
     # runtime._remap_reference_symbol). Imported lazily to avoid an import cycle.
     from .runtime import _SPOT_REF_SYMBOL
+
     _ONE_MINUTE_NS = 60 * 1_000_000_000
     _CANDLE_SETTLE_NS = 2 * 1_000_000_000  # let Binance finalize/publish the 1m close
     if qv is None or qv.venue != "polymarket":
@@ -58,10 +64,7 @@ async def maybe_capture_pm_strike(
     # bails on the get_pm_strike check inside.
     lock = rt._pm_strike_locks.setdefault(qidx, asyncio.Lock())
     async with lock:
-        pm_slots = [
-            s for s in slots
-            if match_question(s.cfg, question_idx=qidx, fields=fields) is not None
-        ]
+        pm_slots = [s for s in slots if match_question(s.cfg, question_idx=qidx, fields=fields) is not None]
         if any(s.dal.get_pm_strike(qidx) is not None for s in pm_slots):
             return  # a prior run captured it; scanner reloads from DB
         try:
@@ -72,7 +75,8 @@ async def maybe_capture_pm_strike(
         if strike is None:
             logger.warning(
                 "pm strike capture failed qidx={} ref_ts_ns={} — market skipped",
-                qidx, ref_ts_ns,
+                qidx,
+                ref_ts_ns,
             )
             return
         rt.market_state.set_question_strike(qidx, strike)
@@ -80,7 +84,8 @@ async def maybe_capture_pm_strike(
             s.dal.set_pm_strike(qidx, strike)
         logger.info(
             "pm strike captured qidx={} strike={} (binance spot 1m close)",
-            qidx, strike,
+            qidx,
+            strike,
         )
         _MISMATCH_TOL_BPS = 10.0
         mark = rt.market_state.last_mark(_SPOT_REF_SYMBOL)
@@ -88,19 +93,28 @@ async def maybe_capture_pm_strike(
             bps = abs(strike - mark) / mark * 1e4
             if bps > _MISMATCH_TOL_BPS:
                 from .risk_events import PMStrikeMismatch
-                await rt.bus.publish(PMStrikeMismatch(
-                    ts_ns=now_ns, question_idx=qidx,
-                    captured_strike=strike, reference_mark=mark,
-                    divergence_bps=bps,
-                ))
+
+                await rt.bus.publish(
+                    PMStrikeMismatch(
+                        ts_ns=now_ns,
+                        question_idx=qidx,
+                        captured_strike=strike,
+                        reference_mark=mark,
+                        divergence_bps=bps,
+                    )
+                )
                 logger.warning(
-                    "pm strike/mark divergence qidx={} strike={} mark={} bps={:.1f} "
-                    "(alert only)", qidx, strike, mark, bps,
+                    "pm strike/mark divergence qidx={} strike={} mark={} bps={:.1f} (alert only)",
+                    qidx,
+                    strike,
+                    mark,
+                    bps,
                 )
 
 
 async def pm_strike_capture_loop(
-    rt: EngineRuntime, slots: list[AccountSlot],
+    rt: EngineRuntime,
+    slots: list[AccountSlot],
 ) -> None:
     """Retry PM up/down strike capture each second. First-sight capture in
     _ingest_loop fires at discovery, but PM lists markets ~24h before open,
@@ -115,14 +129,13 @@ async def pm_strike_capture_loop(
                 if qv.venue != "polymarket" or qv.strike == qv.strike:
                     continue
                 fields = {
-                    "class": qv.klass, "underlying": qv.underlying,
-                    "period": qv.period, "venue": qv.venue,
+                    "class": qv.klass,
+                    "underlying": qv.underlying,
+                    "period": qv.period,
+                    "venue": qv.venue,
                     "series_slug": dict(qv.kv).get("series_slug", ""),
                 }
-                if any(
-                    match_question(s.cfg, question_idx=qv.question_idx, fields=fields) is not None
-                    for s in slots
-                ):
+                if any(match_question(s.cfg, question_idx=qv.question_idx, fields=fields) is not None for s in slots):
                     await maybe_capture_pm_strike(rt, qv, slots, fields, now_ns=now_ns)
         except Exception:
             logger.exception("pm strike capture loop tick crashed")

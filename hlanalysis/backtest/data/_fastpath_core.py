@@ -8,6 +8,7 @@ the per-leg containers, and the reference OHLC resampler.
 BUILD_VERSION is bumped whenever the assembly logic changes; it is part of the
 event-array cache key so a logic change invalidates every cached entry.
 """
+
 from __future__ import annotations
 
 # Bump on ANY change to assembly semantics below (cache-invalidation tag).
@@ -156,8 +157,12 @@ class LegArrays:
     book_ts: np.ndarray  # int64 array of snapshot timestamps (for stale-book gate)
     # Per-snapshot top-of-book for the SHR-94 fleeting-level check.
     # Parallel to book_ts; nan when the snapshot had no book data.
-    snap_best_ask: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))  # float64, best ask price at each snapshot
-    snap_best_bid: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))  # float64, best bid price at each snapshot
+    snap_best_ask: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.float64)
+    )  # float64, best ask price at each snapshot
+    snap_best_bid: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.float64)
+    )  # float64, best bid price at each snapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,9 +407,7 @@ def _trades_to_columns(trades: list[TradeEvent]) -> dict[str, np.ndarray]:
     }
 
 
-def build_leg_event_array_from_snapshots(
-    snapshots: list[BookSnapshot], trades: list[TradeEvent]
-) -> np.ndarray:
+def build_leg_event_array_from_snapshots(snapshots: list[BookSnapshot], trades: list[TradeEvent]) -> np.ndarray:
     """Assemble an hftbacktest ``event_dtype`` array from in-memory
     ``BookSnapshot`` / ``TradeEvent`` lists.
 
@@ -424,8 +427,13 @@ def build_leg_event_array_from_snapshots(
 
 
 __all__ = [
-    "BUILD_VERSION", "LegArrays", "FastPathBundle",
-    "build_leg_event_array_from_columns", "build_leg_event_array_from_snapshots",
+    "BUILD_VERSION",
+    "LegArrays",
+    "FastPathBundle",
+    "build_leg_event_array_from_columns",
+    "build_leg_event_array_from_snapshots",
     "snap_best_from_columns",
-    "_diff_clears", "_resample_reference_rows", "event_dtype",
+    "_diff_clears",
+    "_resample_reference_rows",
+    "event_dtype",
 ]

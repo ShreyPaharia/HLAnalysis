@@ -32,6 +32,7 @@ from hlanalysis.strategy.types import BookState
 # Helpers for low-level hftbacktest asset construction tests (SHR-79/56/57)
 # ---------------------------------------------------------------------------
 
+
 def _make_depth_clear_arr(start_ts_ns: int) -> np.ndarray:
     """Two DEPTH_CLEAR events at start_ts_ns (buy + sell sides)."""
     arr = np.zeros(2, dtype=event_dtype)
@@ -68,6 +69,7 @@ def _trade_ev(ts: int, side_flag: int, px: float, qty: float) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Existing integration tests (unchanged)
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="module")
 def synthetic_source() -> tuple[SyntheticDataSource, object]:
@@ -222,6 +224,7 @@ def test_binary_fee_pm_binary_clamps_out_of_range_price():
 # All partial-fill tests use order_latency_ms=0.0 to isolate fill semantics
 # from latency (latency is tested separately in the latency section).
 
+
 def test_build_asset_uses_partial_fill_exchange():
     """_build_asset must use partial_fill_exchange (not no_partial_fill_exchange).
 
@@ -231,16 +234,18 @@ def test_build_asset_uses_partial_fill_exchange():
     """
     from hlanalysis.backtest.runner.hftbt_runner import _build_asset
 
-    T_BOOK = 1_000_000        # 1ms — depth event (before submit)
+    T_BOOK = 1_000_000  # 1ms — depth event (before submit)
     T_SUBMIT = 1_000_000_000  # 1s — submit order here
     T_TRADE = T_SUBMIT + 1_000_000  # 1ms after submit — trade triggers fill
 
     # Book: ask at 0.5 with size 7; trade after order submission triggers fill
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(T_BOOK, SELL_EVENT, 0.5, 7.0),
-        _trade_ev(T_TRADE, BUY_EVENT, 0.5, 7.0),
-    ])
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(T_BOOK, SELL_EVENT, 0.5, 7.0),
+            _trade_ev(T_TRADE, BUY_EVENT, 0.5, 7.0),
+        ]
+    )
     cfg = RunConfig(tick_size=0.001, lot_size=1.0, order_latency_ms=0.0)
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
@@ -255,9 +260,7 @@ def test_build_asset_uses_partial_fill_exchange():
         f"partial_fill_exchange should fill only available depth (7), got {order.exec_qty}"
     )
     # Status is EXPIRED (2) for IOC with leftover remainder cancelled
-    assert order.status in (hb_order.EXPIRED, hb_order.FILLED), (
-        f"unexpected order status {order.status}"
-    )
+    assert order.status in (hb_order.EXPIRED, hb_order.FILLED), f"unexpected order status {order.status}"
     bt.close()
 
 
@@ -274,11 +277,13 @@ def test_partial_fill_ioc_remainder_cancelled():
     T_SUBMIT = 1_000_000_000
     T_TRADE = T_SUBMIT + 1_000_000
 
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(T_BOOK, SELL_EVENT, 0.6, ask_depth),
-        _trade_ev(T_TRADE, BUY_EVENT, 0.6, ask_depth),
-    ])
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(T_BOOK, SELL_EVENT, 0.6, ask_depth),
+            _trade_ev(T_TRADE, BUY_EVENT, 0.6, ask_depth),
+        ]
+    )
     cfg = RunConfig(tick_size=0.001, lot_size=1.0, order_latency_ms=0.0)
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
@@ -287,9 +292,7 @@ def test_partial_fill_ioc_remainder_cancelled():
     order = bt.orders(0).get(1)
 
     assert order is not None
-    assert order.exec_qty == pytest.approx(ask_depth), (
-        f"expected fill == ask_depth ({ask_depth}), got {order.exec_qty}"
-    )
+    assert order.exec_qty == pytest.approx(ask_depth), f"expected fill == ask_depth ({ask_depth}), got {order.exec_qty}"
     assert order.exec_qty < order_size, "IOC remainder must be cancelled (not over-filled)"
     bt.close()
 
@@ -315,16 +318,18 @@ def test_multi_level_walk_vwap_worse_than_touch():
 
     T_BOOK = 1_000_000
     T_SUBMIT = 1_000_000_000
-    T_TRADE = T_SUBMIT + 1_000_000   # single sweep trade at 0.5 that walks to 0.6
+    T_TRADE = T_SUBMIT + 1_000_000  # single sweep trade at 0.5 that walks to 0.6
 
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(T_BOOK, SELL_EVENT, 0.5, 10.0),
-        _depth_ev(T_BOOK, SELL_EVENT, 0.6, 10.0),
-        # A trade of 30 at 0.50: sweeps through 10@0.5 (queue ahead) + 10@0.6 (queue
-        # + fills 10 of my order at the 0.6 level)
-        _trade_ev(T_TRADE, BUY_EVENT, 0.5, 30.0),
-    ])
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(T_BOOK, SELL_EVENT, 0.5, 10.0),
+            _depth_ev(T_BOOK, SELL_EVENT, 0.6, 10.0),
+            # A trade of 30 at 0.50: sweeps through 10@0.5 (queue ahead) + 10@0.6 (queue
+            # + fills 10 of my order at the 0.6 level)
+            _trade_ev(T_TRADE, BUY_EVENT, 0.5, 30.0),
+        ]
+    )
     cfg = RunConfig(tick_size=0.001, lot_size=1.0, order_latency_ms=0.0)
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
@@ -346,6 +351,7 @@ def test_multi_level_walk_vwap_worse_than_touch():
 # SHR-79: record_fill_from_order must accept EXPIRED status (partial IOC fills)
 # ---------------------------------------------------------------------------
 
+
 def test_record_fill_from_order_accepts_expired_status():
     """record_fill_from_order must return a Fill for EXPIRED (status=2) orders.
 
@@ -361,13 +367,14 @@ def test_record_fill_from_order_accepts_expired_status():
     T_TRADE = T_SUBMIT + 1_000_000
     ask_depth = 8.0
 
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(T_BOOK, SELL_EVENT, 0.5, ask_depth),
-        _trade_ev(T_TRADE, BUY_EVENT, 0.5, ask_depth),
-    ])
-    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
-                    order_latency_ms=0.0)
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(T_BOOK, SELL_EVENT, 0.5, ask_depth),
+            _trade_ev(T_TRADE, BUY_EVENT, 0.5, ask_depth),
+        ]
+    )
+    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0)
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
     bt.elapse(T_SUBMIT)
@@ -377,16 +384,18 @@ def test_record_fill_from_order_accepts_expired_status():
     order = bt.orders(0).get(1)
     assert order is not None
     # Must be EXPIRED (status=2) because remainder was cancelled
-    assert order.status == hb_order.EXPIRED, (
-        f"expected EXPIRED(2), got {order.status}; exec_qty={order.exec_qty}"
-    )
+    assert order.status == hb_order.EXPIRED, f"expected EXPIRED(2), got {order.status}; exec_qty={order.exec_qty}"
     assert order.exec_qty == pytest.approx(ask_depth)
 
     # Now verify _RunState.record_fill_from_order returns a Fill (not None)
     q = QuestionDescriptor(
-        question_id="test-q", question_idx=1,
-        start_ts_ns=0, end_ts_ns=10_000_000_000,
-        leg_symbols=("yes", "no"), klass="priceBinary", underlying="BTC",
+        question_id="test-q",
+        question_idx=1,
+        start_ts_ns=0,
+        end_ts_ns=10_000_000_000,
+        leg_symbols=("yes", "no"),
+        klass="priceBinary",
+        underlying="BTC",
     )
     st = _RunState(
         hbt=bt,
@@ -402,9 +411,7 @@ def test_record_fill_from_order_accepts_expired_status():
     fill = st.record_fill_from_order(1, 0, "yes", "buy", "test-cloid", 30.0)
     bt.close()
 
-    assert fill is not None, (
-        "record_fill_from_order must return Fill for EXPIRED IOC with exec_qty > 0"
-    )
+    assert fill is not None, "record_fill_from_order must return Fill for EXPIRED IOC with exec_qty > 0"
     assert fill.size == pytest.approx(ask_depth)
     assert fill.price == pytest.approx(0.5)
 
@@ -412,6 +419,7 @@ def test_record_fill_from_order_accepts_expired_status():
 # ---------------------------------------------------------------------------
 # SHR-79: --depth remains as an optional explicit cap, default = unlimited
 # ---------------------------------------------------------------------------
+
 
 def test_book_depth_assumption_default_is_none():
     """RunConfig.book_depth_assumption defaults to None (unlimited)."""
@@ -431,13 +439,14 @@ def test_book_depth_assumption_explicit_cap():
     T_SUBMIT = 1_000_000_000
     T_TRADE = T_SUBMIT + 1_000_000
 
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(T_BOOK, SELL_EVENT, 0.5, ask_depth),
-        _trade_ev(T_TRADE, BUY_EVENT, 0.5, ask_depth),
-    ])
-    cfg = RunConfig(tick_size=0.001, lot_size=1.0, book_depth_assumption=cap,
-                    order_latency_ms=0.0)
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(T_BOOK, SELL_EVENT, 0.5, ask_depth),
+            _trade_ev(T_TRADE, BUY_EVENT, 0.5, ask_depth),
+        ]
+    )
+    cfg = RunConfig(tick_size=0.001, lot_size=1.0, book_depth_assumption=cap, order_latency_ms=0.0)
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
     bt.elapse(T_SUBMIT)
@@ -445,27 +454,38 @@ def test_book_depth_assumption_explicit_cap():
     bt.elapse(T_TRADE - T_SUBMIT + 1_000_000)
 
     from hlanalysis.backtest.core.data_source import QuestionDescriptor
+
     q = QuestionDescriptor(
-        question_id="test-cap", question_idx=1,
-        start_ts_ns=0, end_ts_ns=10_000_000_000,
-        leg_symbols=("yes", "no"), klass="priceBinary", underlying="BTC",
+        question_id="test-cap",
+        question_idx=1,
+        start_ts_ns=0,
+        end_ts_ns=10_000_000_000,
+        leg_symbols=("yes", "no"),
+        klass="priceBinary",
+        underlying="BTC",
     )
     st = _RunState(
-        hbt=bt, cfg=cfg, q=q, data_source=None, leg_to_asset={},
-        hedge_asset_no=None, stop_pct=None, fills_dir_active=False, result=RunResult(),
+        hbt=bt,
+        cfg=cfg,
+        q=q,
+        data_source=None,
+        leg_to_asset={},
+        hedge_asset_no=None,
+        stop_pct=None,
+        fills_dir_active=False,
+        result=RunResult(),
     )
     fill = st.record_fill_from_order(1, 0, "yes", "buy", "cap-cloid", 100.0)
     bt.close()
 
     assert fill is not None
-    assert fill.size == pytest.approx(cap), (
-        f"explicit book_depth_assumption={cap} should cap fill; got {fill.size}"
-    )
+    assert fill.size == pytest.approx(cap), f"explicit book_depth_assumption={cap} should cap fill; got {fill.size}"
 
 
 # ---------------------------------------------------------------------------
 # Order latency: RunConfig and _build_asset wire latency to hftbacktest
 # ---------------------------------------------------------------------------
+
 
 def test_run_config_has_order_latency_ms():
     """RunConfig must have order_latency_ms defaulting to 50.0."""
@@ -489,11 +509,13 @@ def test_build_asset_wires_latency_to_hftbacktest():
     LATENCY_MS = 50.0
     LATENCY_NS = int(LATENCY_MS * 1_000_000)
 
-    arr = np.concatenate([
-        _make_depth_clear_arr(T),
-        _depth_ev(T + 1_000, SELL_EVENT, 0.5, 100.0),
-        _trade_ev(T + LATENCY_NS + 1_000, BUY_EVENT, 0.5, 100.0),
-    ])
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(T),
+            _depth_ev(T + 1_000, SELL_EVENT, 0.5, 100.0),
+            _trade_ev(T + LATENCY_NS + 1_000, BUY_EVENT, 0.5, 100.0),
+        ]
+    )
     cfg = RunConfig(tick_size=0.001, lot_size=1.0, order_latency_ms=LATENCY_MS)
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
@@ -505,8 +527,7 @@ def test_build_asset_wires_latency_to_hftbacktest():
     assert lat is not None, "order_latency() returned None; order may not have been submitted"
     req_ts, exch_ts, resp_ts = lat
     assert exch_ts == pytest.approx(req_ts + LATENCY_NS, abs=1), (
-        f"exchange timestamp should be req_ts + {LATENCY_NS}ns; "
-        f"got req={req_ts}, exch={exch_ts}"
+        f"exchange timestamp should be req_ts + {LATENCY_NS}ns; got req={req_ts}, exch={exch_ts}"
     )
 
 
@@ -515,11 +536,13 @@ def test_order_latency_zero_in_legacy_mode():
     from hlanalysis.backtest.runner.hftbt_runner import _build_asset
 
     T = 1_000_000_000
-    arr = np.concatenate([
-        _make_depth_clear_arr(T),
-        _depth_ev(T + 1_000, SELL_EVENT, 0.5, 100.0),
-        _trade_ev(T + 2_000, BUY_EVENT, 0.5, 100.0),
-    ])
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(T),
+            _depth_ev(T + 1_000, SELL_EVENT, 0.5, 100.0),
+            _trade_ev(T + 2_000, BUY_EVENT, 0.5, 100.0),
+        ]
+    )
     cfg = RunConfig(tick_size=0.001, lot_size=1.0, order_latency_ms=0.0)
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
@@ -530,14 +553,13 @@ def test_order_latency_zero_in_legacy_mode():
 
     assert lat is not None
     req_ts, exch_ts, _resp_ts = lat
-    assert exch_ts == req_ts, (
-        f"zero latency: exch_ts ({exch_ts}) should equal req_ts ({req_ts})"
-    )
+    assert exch_ts == req_ts, f"zero latency: exch_ts ({exch_ts}) should equal req_ts ({req_ts})"
 
 
 # ---------------------------------------------------------------------------
 # SHR-56: slippage_bps as additive haircut on the recorded fill price
 # ---------------------------------------------------------------------------
+
 
 def test_slippage_bps_applied_as_additive_buy_haircut():
     """slippage_bps must make buy fills MORE expensive (higher price).
@@ -553,14 +575,17 @@ def test_slippage_bps_applied_as_additive_buy_haircut():
     from hlanalysis.strategy.types import BookState
 
     book = BookState(
-        symbol="YES", bid_px=0.49, bid_sz=100.0, ask_px=0.50, ask_sz=100.0,
-        last_trade_ts_ns=0, last_l2_ts_ns=0,
+        symbol="YES",
+        bid_px=0.49,
+        bid_sz=100.0,
+        ask_px=0.50,
+        ask_sz=100.0,
+        last_trade_ts_ns=0,
+        last_l2_ts_ns=0,
     )
     # 100 bps = 1%; slipped buy = 0.50 * 1.01 = 0.505
     slipped = _slipped_buy_price(book, limit_price=0.0, slippage_bps=100.0)
-    assert slipped == pytest.approx(0.505, rel=1e-6), (
-        f"buy slippage haircut incorrect: expected ~0.505, got {slipped}"
-    )
+    assert slipped == pytest.approx(0.505, rel=1e-6), f"buy slippage haircut incorrect: expected ~0.505, got {slipped}"
 
 
 def test_slippage_bps_applied_as_additive_sell_haircut():
@@ -573,13 +598,16 @@ def test_slippage_bps_applied_as_additive_sell_haircut():
     from hlanalysis.strategy.types import BookState
 
     book = BookState(
-        symbol="YES", bid_px=0.60, bid_sz=100.0, ask_px=0.61, ask_sz=100.0,
-        last_trade_ts_ns=0, last_l2_ts_ns=0,
+        symbol="YES",
+        bid_px=0.60,
+        bid_sz=100.0,
+        ask_px=0.61,
+        ask_sz=100.0,
+        last_trade_ts_ns=0,
+        last_l2_ts_ns=0,
     )
     slipped = _slipped_sell_price(book, limit_price=0.0, slippage_bps=100.0)
-    assert slipped == pytest.approx(0.594, rel=1e-6), (
-        f"sell slippage haircut incorrect: expected ~0.594, got {slipped}"
-    )
+    assert slipped == pytest.approx(0.594, rel=1e-6), f"sell slippage haircut incorrect: expected ~0.594, got {slipped}"
 
 
 def test_slippage_zero_gives_exact_book_price():
@@ -588,8 +616,13 @@ def test_slippage_zero_gives_exact_book_price():
     from hlanalysis.strategy.types import BookState
 
     book = BookState(
-        symbol="YES", bid_px=0.45, bid_sz=50.0, ask_px=0.46, ask_sz=50.0,
-        last_trade_ts_ns=0, last_l2_ts_ns=0,
+        symbol="YES",
+        bid_px=0.45,
+        bid_sz=50.0,
+        ask_px=0.46,
+        ask_sz=50.0,
+        last_trade_ts_ns=0,
+        last_l2_ts_ns=0,
     )
     assert _slipped_buy_price(book, 0.0, 0.0) == pytest.approx(0.46)
     assert _slipped_sell_price(book, 0.0, 0.0) == pytest.approx(0.45)
@@ -598,6 +631,7 @@ def test_slippage_zero_gives_exact_book_price():
 # ---------------------------------------------------------------------------
 # SHR-57: fee logging — fee model/rate logged at run start (smoke test)
 # ---------------------------------------------------------------------------
+
 
 def test_fee_model_logged_at_run_start(capsys, synthetic_source):
     """run_one_question must emit a log line about the effective fee model.
@@ -614,8 +648,10 @@ def test_fee_model_logged_at_run_start(capsys, synthetic_source):
 
     # Capture loguru output via caplog at DEBUG level
     import io
+
     log_output = io.StringIO()
     import loguru
+
     handler_id = loguru.logger.add(log_output, level="DEBUG")
     try:
         run_one_question(strat, ds, sq.descriptor, cfg, strike=sq.strike)
@@ -625,14 +661,14 @@ def test_fee_model_logged_at_run_start(capsys, synthetic_source):
 
     # Should mention fee model somewhere in the run start log
     assert "fee" in output.lower(), (
-        "run_one_question must log the effective fee model at run start; "
-        f"got no 'fee' in log output"
+        f"run_one_question must log the effective fee model at run start; got no 'fee' in log output"
     )
 
 
 # ---------------------------------------------------------------------------
 # CLI: --order-latency-ms and --depth=None defaults
 # ---------------------------------------------------------------------------
+
 
 def test_cli_order_latency_ms_arg():
     """--order-latency-ms must default to 50 and parse correctly."""
@@ -645,9 +681,7 @@ def test_cli_order_latency_ms_arg():
     p = argparse.ArgumentParser()
     _add_run_config_args(p)
     args = p.parse_args([])
-    assert hasattr(args, "order_latency_ms"), (
-        "--order-latency-ms not added to run-config args"
-    )
+    assert hasattr(args, "order_latency_ms"), "--order-latency-ms not added to run-config args"
     assert args.order_latency_ms == pytest.approx(50.0), (
         f"--order-latency-ms default should be 50.0, got {args.order_latency_ms}"
     )
@@ -661,9 +695,7 @@ def test_cli_depth_default_is_none():
     p = argparse.ArgumentParser()
     _add_run_config_args(p)
     args = p.parse_args([])
-    assert args.depth is None, (
-        f"--depth default should be None (unlimited), got {args.depth}"
-    )
+    assert args.depth is None, f"--depth default should be None (unlimited), got {args.depth}"
 
 
 def test_run_config_from_args_wires_order_latency_ms():
@@ -711,9 +743,20 @@ class _AlwaysEnterStrategy(Strategy):
     def __init__(self, size: float = 10.0):
         self._size = size
 
-    def evaluate(self, *, question, books, reference_price, recent_returns,
-                 recent_volume_usd, position, now_ns, recent_hl_bars=()):
+    def evaluate(
+        self,
+        *,
+        question,
+        books,
+        reference_price,
+        recent_returns,
+        recent_volume_usd,
+        position,
+        now_ns,
+        recent_hl_bars=(),
+    ):
         from hlanalysis.strategy.types import Action, Decision, OrderIntent
+
         book = books.get(question.yes_symbol)
         if book is None or book.ask_px is None:
             return Decision(action=Action.HOLD)
@@ -749,27 +792,26 @@ def test_injected_halt_window_suppresses_entries_inside_it():
     cfg = RunConfig(scanner_interval_seconds=60, slippage_bps=0.0, fee_taker=0.0)
 
     # Question runs 0..600s; scan ticks at 60,120,...,540s. Halt 150s..330s.
-    halt = HaltWindow(start_ns=150 * 1_000_000_000, end_ns=330 * 1_000_000_000,
-                      reason="stale_data_halt")
+    halt = HaltWindow(start_ns=150 * 1_000_000_000, end_ns=330 * 1_000_000_000, reason="stale_data_halt")
 
     # Run with the halt window. Capture fill timestamps via the fills parquet is
     # overkill; instead run twice (with/without) and compare entry timestamps.
     res = run_one_question(
-        _AlwaysEnterStrategy(size=10.0), ds, sq.descriptor, cfg,
-        strike=sq.strike, halt_windows=[halt],
+        _AlwaysEnterStrategy(size=10.0),
+        ds,
+        sq.descriptor,
+        cfg,
+        strike=sq.strike,
+        halt_windows=[halt],
     )
     # Reconstruct entry timestamps from the run's internal fill_ts is not exposed;
     # assert instead that NO entry fill's recorded ts lands in the window by
     # re-deriving from the fills' cloids which embed now_ns.
-    entered_ns = [
-        int(f.cloid.split("-")[1])
-        for f in res.fills
-        if f.cloid.startswith("always-")
-    ]
+    entered_ns = [int(f.cloid.split("-")[1]) for f in res.fills if f.cloid.startswith("always-")]
     assert entered_ns, "expected at least one entry outside the halt window"
-    assert all(
-        not (halt.start_ns <= ts < halt.end_ns) for ts in entered_ns
-    ), f"entries leaked into the halt window: {entered_ns}"
+    assert all(not (halt.start_ns <= ts < halt.end_ns) for ts in entered_ns), (
+        f"entries leaked into the halt window: {entered_ns}"
+    )
     # And at least one entry on either side of the window (suppression, not a
     # blanket block).
     assert any(ts < halt.start_ns for ts in entered_ns)
@@ -786,13 +828,13 @@ def test_no_halt_window_enters_every_tick():
     ds.add_question(sq)
     cfg = RunConfig(scanner_interval_seconds=60, slippage_bps=0.0, fee_taker=0.0)
     res = run_one_question(
-        _AlwaysEnterStrategy(size=10.0), ds, sq.descriptor, cfg, strike=sq.strike,
+        _AlwaysEnterStrategy(size=10.0),
+        ds,
+        sq.descriptor,
+        cfg,
+        strike=sq.strike,
     )
-    entered_ns = [
-        int(f.cloid.split("-")[1])
-        for f in res.fills
-        if f.cloid.startswith("always-")
-    ]
+    entered_ns = [int(f.cloid.split("-")[1]) for f in res.fills if f.cloid.startswith("always-")]
     assert any(150 * 1_000_000_000 <= ts < 330 * 1_000_000_000 for ts in entered_ns), (
         "control run should fill inside the would-be halt window"
     )
@@ -805,14 +847,26 @@ def _make_run_state(caps=None, halt_windows=()):
     from hlanalysis.backtest.core.data_source import QuestionDescriptor
 
     q = QuestionDescriptor(
-        question_id="gate-q", question_idx=1, start_ts_ns=0,
-        end_ts_ns=10_000_000_000, leg_symbols=("yes", "no"),
-        klass="priceBinary", underlying="BTC",
+        question_id="gate-q",
+        question_idx=1,
+        start_ts_ns=0,
+        end_ts_ns=10_000_000_000,
+        leg_symbols=("yes", "no"),
+        klass="priceBinary",
+        underlying="BTC",
     )
     return _RunState(
-        hbt=None, cfg=RunConfig(), q=q, data_source=None, leg_to_asset={},
-        hedge_asset_no=None, stop_pct=None, fills_dir_active=False,
-        result=RunResult(), sim_risk_caps=caps, halt_windows=tuple(halt_windows),
+        hbt=None,
+        cfg=RunConfig(),
+        q=q,
+        data_source=None,
+        leg_to_asset={},
+        hedge_asset_no=None,
+        stop_pct=None,
+        fills_dir_active=False,
+        result=RunResult(),
+        sim_risk_caps=caps,
+        halt_windows=tuple(halt_windows),
     )
 
 
@@ -833,21 +887,17 @@ def test_runstate_daily_loss_cap_latches_and_resets_next_window():
     st.now_ns = day1_noon
     # Within budget so far.
     st.record_realized(day1_noon, -50.0)
-    assert st.entry_blocked(intent_notional=10.0, is_topup=False,
-                            held_notional=0.0, n_held=0) is None
+    assert st.entry_blocked(intent_notional=10.0, is_topup=False, held_notional=0.0, n_held=0) is None
     # Cross the cap.
     st.record_realized(day1_noon, -60.0)  # cumulative -110 < -100
-    assert st.entry_blocked(intent_notional=10.0, is_topup=False,
-                            held_notional=0.0, n_held=0) == "daily_loss_cap"
+    assert st.entry_blocked(intent_notional=10.0, is_topup=False, held_notional=0.0, n_held=0) == "daily_loss_cap"
     # A later WIN brings running PnL back above -cap, but the window stays halted.
     st.record_realized(day1_noon, +80.0)  # cumulative -30, but floor latched
-    assert st.entry_blocked(intent_notional=10.0, is_topup=False,
-                            held_notional=0.0, n_held=0) == "daily_loss_cap"
+    assert st.entry_blocked(intent_notional=10.0, is_topup=False, held_notional=0.0, n_held=0) == "daily_loss_cap"
     # Next daily window (after 06:00 the following day) resumes.
     day2_noon = ns(2026, 6, 9, 12, 0)
     st.now_ns = day2_noon
-    assert st.entry_blocked(intent_notional=10.0, is_topup=False,
-                            held_notional=0.0, n_held=0) is None
+    assert st.entry_blocked(intent_notional=10.0, is_topup=False, held_notional=0.0, n_held=0) is None
 
 
 def test_runstate_inventory_cap_blocks_n_plus_1():
@@ -860,24 +910,24 @@ def test_runstate_inventory_cap_blocks_n_plus_1():
     st.now_ns = 1_000
 
     # 250 already held; a 40-notional top-up fits (290 ≤ 300).
-    assert st.entry_blocked(intent_notional=40.0, is_topup=True,
-                            held_notional=250.0, n_held=1) is None
+    assert st.entry_blocked(intent_notional=40.0, is_topup=True, held_notional=250.0, n_held=1) is None
     # A 100-notional entry would push to 350 → blocked.
-    assert st.entry_blocked(intent_notional=100.0, is_topup=True,
-                            held_notional=250.0, n_held=1) == "max_total_inventory"
+    assert (
+        st.entry_blocked(intent_notional=100.0, is_topup=True, held_notional=250.0, n_held=1) == "max_total_inventory"
+    )
 
 
 def test_runstate_no_caps_never_blocks():
     """With no caps and no halt windows the gate is a no-op (backward compat)."""
     st = _make_run_state(caps=None, halt_windows=())
     st.now_ns = 42
-    assert st.entry_blocked(intent_notional=1e9, is_topup=False,
-                            held_notional=1e9, n_held=99) is None
+    assert st.entry_blocked(intent_notional=1e9, is_topup=False, held_notional=1e9, n_held=99) is None
 
 
 # ---------------------------------------------------------------------------
 # SHR-89: pluggable latency model (constant default + sampled distribution)
 # ---------------------------------------------------------------------------
+
 
 def test_run_config_latency_model_defaults_none():
     """RunConfig.latency_model defaults to None (use the constant knob)."""
@@ -939,14 +989,17 @@ def test_build_asset_uses_sampled_latency_distribution():
     DELTA_MS = 123.0
     DELTA_NS = int(DELTA_MS * 1_000_000)
     T = 1_000_000_000
-    arr = np.concatenate([
-        _make_depth_clear_arr(T),
-        _depth_ev(T + 1_000, SELL_EVENT, 0.5, 100.0),
-        _trade_ev(T + DELTA_NS + 1_000, BUY_EVENT, 0.5, 100.0),
-    ])
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(T),
+            _depth_ev(T + 1_000, SELL_EVENT, 0.5, 100.0),
+            _trade_ev(T + DELTA_NS + 1_000, BUY_EVENT, 0.5, 100.0),
+        ]
+    )
     # order_latency_ms left at the default 50ms; the model must take precedence.
     cfg = RunConfig(
-        tick_size=0.001, lot_size=1.0,
+        tick_size=0.001,
+        lot_size=1.0,
         latency_model=SampledLatency(samples_ms=(DELTA_MS,), seed=0),
     )
     asset = _build_asset(arr, cfg, start_ts_ns=T, end_ts_ns=T + 5_000_000_000)
@@ -959,8 +1012,7 @@ def test_build_asset_uses_sampled_latency_distribution():
     assert lat is not None
     req_ts, exch_ts, _resp_ts = lat
     assert exch_ts - req_ts == pytest.approx(DELTA_NS, abs=1_000), (
-        f"sampled latency δ={DELTA_NS}ns should drive the exchange arrival; "
-        f"got entry latency {exch_ts - req_ts}ns"
+        f"sampled latency δ={DELTA_NS}ns should drive the exchange arrival; got entry latency {exch_ts - req_ts}ns"
     )
 
 
@@ -972,11 +1024,13 @@ def test_constant_latency_model_matches_legacy_knob():
     LAT_MS = 50.0
     LAT_NS = int(LAT_MS * 1_000_000)
     T = 1_000_000_000
-    arr = np.concatenate([
-        _make_depth_clear_arr(T),
-        _depth_ev(T + 1_000, SELL_EVENT, 0.5, 100.0),
-        _trade_ev(T + LAT_NS + 1_000, BUY_EVENT, 0.5, 100.0),
-    ])
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(T),
+            _depth_ev(T + 1_000, SELL_EVENT, 0.5, 100.0),
+            _trade_ev(T + LAT_NS + 1_000, BUY_EVENT, 0.5, 100.0),
+        ]
+    )
     cfg = RunConfig(tick_size=0.001, lot_size=1.0, order_latency_ms=LAT_MS)
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
@@ -995,13 +1049,15 @@ def test_constant_latency_model_matches_legacy_knob():
 # and re-fire next scan (reproduces live churn)
 # ---------------------------------------------------------------------------
 
+
 def test_classify_reject_buy_crossing_no_fill_is_reject():
     """A buy IOC submitted at/through the decision-time ask that returns no fill
     is a reject (book moved away / queue not swept during latency)."""
     from hlanalysis.backtest.runner.hftbt_runner import _classify_reject
 
-    book = BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.50, ask_sz=10.0,
-                     last_trade_ts_ns=0, last_l2_ts_ns=0)
+    book = BookState(
+        symbol="yes", bid_px=None, bid_sz=None, ask_px=0.50, ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=0
+    )
     assert _classify_reject(book, "buy", submit_px=0.50) is True
     assert _classify_reject(book, "buy", submit_px=0.51) is True
 
@@ -1011,16 +1067,18 @@ def test_classify_reject_buy_non_crossing_is_not_reject():
     plain no-op (resting/cancelled), not a reject."""
     from hlanalysis.backtest.runner.hftbt_runner import _classify_reject
 
-    book = BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.60, ask_sz=10.0,
-                     last_trade_ts_ns=0, last_l2_ts_ns=0)
+    book = BookState(
+        symbol="yes", bid_px=None, bid_sz=None, ask_px=0.60, ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=0
+    )
     assert _classify_reject(book, "buy", submit_px=0.55) is False
 
 
 def test_classify_reject_sell_crossing_no_fill_is_reject():
     from hlanalysis.backtest.runner.hftbt_runner import _classify_reject
 
-    book = BookState(symbol="yes", bid_px=0.50, bid_sz=10.0, ask_px=None, ask_sz=None,
-                     last_trade_ts_ns=0, last_l2_ts_ns=0)
+    book = BookState(
+        symbol="yes", bid_px=0.50, bid_sz=10.0, ask_px=None, ask_sz=None, last_trade_ts_ns=0, last_l2_ts_ns=0
+    )
     assert _classify_reject(book, "sell", submit_px=0.50) is True
     assert _classify_reject(book, "sell", submit_px=0.49) is True
     assert _classify_reject(book, "sell", submit_px=0.55) is False
@@ -1030,31 +1088,45 @@ def test_classify_reject_no_book_is_not_reject():
     """No opposing liquidity at decision → not a reject (nothing to cross)."""
     from hlanalysis.backtest.runner.hftbt_runner import _classify_reject
 
-    book = BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=None, ask_sz=None,
-                     last_trade_ts_ns=0, last_l2_ts_ns=0)
+    book = BookState(
+        symbol="yes", bid_px=None, bid_sz=None, ask_px=None, ask_sz=None, last_trade_ts_ns=0, last_l2_ts_ns=0
+    )
     assert _classify_reject(book, "buy", submit_px=0.50) is False
     assert _classify_reject(book, "sell", submit_px=0.50) is False
 
 
 def _enter_decision(symbol="yes", size=10.0, limit=0.55):
     from hlanalysis.strategy.types import Action, Decision, OrderIntent
+
     return Decision(
         action=Action.ENTER,
-        intents=(OrderIntent(question_idx=1, symbol=symbol, side="buy",
-                             size=size, limit_price=limit, cloid="c1"),),
+        intents=(OrderIntent(question_idx=1, symbol=symbol, side="buy", size=size, limit_price=limit, cloid="c1"),),
     )
 
 
 def _reject_run_state(bt, cfg):
     from hlanalysis.backtest.runner.hftbt_runner import _RunState, RunResult
     from hlanalysis.backtest.core.data_source import QuestionDescriptor
+
     q = QuestionDescriptor(
-        question_id="rej", question_idx=1, start_ts_ns=0, end_ts_ns=10_000_000_000,
-        leg_symbols=("yes", "no"), klass="priceBinary", underlying="BTC",
+        question_id="rej",
+        question_idx=1,
+        start_ts_ns=0,
+        end_ts_ns=10_000_000_000,
+        leg_symbols=("yes", "no"),
+        klass="priceBinary",
+        underlying="BTC",
     )
     return _RunState(
-        hbt=bt, cfg=cfg, q=q, data_source=None, leg_to_asset={"yes": 0},
-        hedge_asset_no=None, stop_pct=None, fills_dir_active=False, result=RunResult(),
+        hbt=bt,
+        cfg=cfg,
+        q=q,
+        data_source=None,
+        leg_to_asset={"yes": 0},
+        hedge_asset_no=None,
+        stop_pct=None,
+        fills_dir_active=False,
+        result=RunResult(),
     )
 
 
@@ -1066,24 +1138,28 @@ def test_route_enter_rejects_when_book_moves_during_latency():
     LAT_NS = 50_000_000  # 50ms
     T_BOOK = 1_000_000
     T_SUBMIT = 1_000_000_000
-    T_MOVE = T_SUBMIT + 1_000_000          # ask raised within the latency window
+    T_MOVE = T_SUBMIT + 1_000_000  # ask raised within the latency window
     T_TRADE = T_SUBMIT + LAT_NS + 5_000_000
 
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(T_BOOK, SELL_EVENT, 0.50, 100.0),
-        _depth_ev(T_MOVE, SELL_EVENT, 0.50, 0.0),     # clear the 0.50 ask
-        _depth_ev(T_MOVE, SELL_EVENT, 0.70, 100.0),   # ask now 0.70 (> limit 0.55)
-        _trade_ev(T_TRADE, BUY_EVENT, 0.70, 100.0),   # trade can't cross 0.55
-    ])
-    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
-                    order_latency_ms=50.0)
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(T_BOOK, SELL_EVENT, 0.50, 100.0),
+            _depth_ev(T_MOVE, SELL_EVENT, 0.50, 0.0),  # clear the 0.50 ask
+            _depth_ev(T_MOVE, SELL_EVENT, 0.70, 100.0),  # ask now 0.70 (> limit 0.55)
+            _trade_ev(T_TRADE, BUY_EVENT, 0.70, 100.0),  # trade can't cross 0.55
+        ]
+    )
+    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0, order_latency_ms=50.0)
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
     bt.elapse(T_SUBMIT)
     st = _reject_run_state(bt, cfg)
-    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.50,
-                                 ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T_BOOK)}
+    st.books = {
+        "yes": BookState(
+            symbol="yes", bid_px=None, bid_sz=None, ask_px=0.50, ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T_BOOK
+        )
+    }
     st.now_ns = T_SUBMIT
 
     _route_enter(st, _enter_decision())
@@ -1100,18 +1176,22 @@ def test_route_enter_no_reject_when_not_marketable():
 
     T_BOOK = 1_000_000
     T_SUBMIT = 1_000_000_000
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(T_BOOK, SELL_EVENT, 0.60, 100.0),   # ask 0.60, above our 0.55 limit
-    ])
-    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
-                    order_latency_ms=50.0)
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(T_BOOK, SELL_EVENT, 0.60, 100.0),  # ask 0.60, above our 0.55 limit
+        ]
+    )
+    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0, order_latency_ms=50.0)
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
     bt.elapse(T_SUBMIT)
     st = _reject_run_state(bt, cfg)
-    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.60,
-                                 ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T_BOOK)}
+    st.books = {
+        "yes": BookState(
+            symbol="yes", bid_px=None, bid_sz=None, ask_px=0.60, ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T_BOOK
+        )
+    }
     st.now_ns = T_SUBMIT
 
     _route_enter(st, _enter_decision(limit=0.55))
@@ -1130,36 +1210,43 @@ def test_reject_then_refire_fills_on_next_scan():
     LAT_NS = 50_000_000
     T_BOOK1 = 1_000_000
     T_SUBMIT1 = 1_000_000_000
-    T_MOVE = T_SUBMIT1 + 1_000_000               # ask jumps away → reject #1
-    T_BOOK2 = 2_000_000_000                       # book recovers to 0.50
+    T_MOVE = T_SUBMIT1 + 1_000_000  # ask jumps away → reject #1
+    T_BOOK2 = 2_000_000_000  # book recovers to 0.50
     T_SUBMIT2 = 2_500_000_000
-    T_TRADE2 = T_SUBMIT2 + LAT_NS + 1_000_000     # trade sweeps after arrival → fill
+    T_TRADE2 = T_SUBMIT2 + LAT_NS + 1_000_000  # trade sweeps after arrival → fill
 
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(T_BOOK1, SELL_EVENT, 0.50, 10.0),
-        _depth_ev(T_MOVE, SELL_EVENT, 0.50, 0.0),
-        _depth_ev(T_MOVE, SELL_EVENT, 0.70, 10.0),
-        _depth_ev(T_BOOK2, SELL_EVENT, 0.70, 0.0),
-        _depth_ev(T_BOOK2, SELL_EVENT, 0.50, 10.0),
-        _trade_ev(T_TRADE2, BUY_EVENT, 0.50, 10.0),
-    ])
-    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
-                    order_latency_ms=50.0)
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(T_BOOK1, SELL_EVENT, 0.50, 10.0),
+            _depth_ev(T_MOVE, SELL_EVENT, 0.50, 0.0),
+            _depth_ev(T_MOVE, SELL_EVENT, 0.70, 10.0),
+            _depth_ev(T_BOOK2, SELL_EVENT, 0.70, 0.0),
+            _depth_ev(T_BOOK2, SELL_EVENT, 0.50, 10.0),
+            _trade_ev(T_TRADE2, BUY_EVENT, 0.50, 10.0),
+        ]
+    )
+    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0, order_latency_ms=50.0)
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
     bt.elapse(T_SUBMIT1)
     st = _reject_run_state(bt, cfg)
-    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.50,
-                                 ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=T_BOOK1)}
+    st.books = {
+        "yes": BookState(
+            symbol="yes", bid_px=None, bid_sz=None, ask_px=0.50, ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=T_BOOK1
+        )
+    }
     st.now_ns = T_SUBMIT1
     _route_enter(st, _enter_decision())
     assert st.pos is None and st.result.n_rejects == 1, "first attempt must reject"
 
     # Re-fire on the next scan once the book has recovered.
     bt.elapse(T_SUBMIT2 - int(bt.current_timestamp))
-    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.50,
-                                 ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=T_BOOK2)}
+    st.books = {
+        "yes": BookState(
+            symbol="yes", bid_px=None, bid_sz=None, ask_px=0.50, ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=T_BOOK2
+        )
+    }
     st.now_ns = T_SUBMIT2
     _route_enter(st, _enter_decision())
     bt.close()
@@ -1185,6 +1272,7 @@ def test_reject_then_refire_fills_on_next_scan():
 # snap_best_bid_per_leg, book_ts_per_leg) into a _RunState directly and call
 # _route_enter / _route_exit to exercise the pre-flight veto logic.
 
+
 def _snap_run_state(
     bt,
     cfg,
@@ -1199,13 +1287,25 @@ def _snap_run_state(
     from hlanalysis.backtest.core.data_source import QuestionDescriptor
 
     q = QuestionDescriptor(
-        question_id="shr94-q", question_idx=1, start_ts_ns=0, end_ts_ns=10_000_000_000,
-        leg_symbols=("yes", "no"), klass="priceBinary", underlying="BTC",
+        question_id="shr94-q",
+        question_idx=1,
+        start_ts_ns=0,
+        end_ts_ns=10_000_000_000,
+        leg_symbols=("yes", "no"),
+        klass="priceBinary",
+        underlying="BTC",
     )
     book_idx = book_idx if book_idx is not None else {"yes": 0}
     return _RunState(
-        hbt=bt, cfg=cfg, q=q, data_source=None, leg_to_asset={"yes": 0},
-        hedge_asset_no=None, stop_pct=None, fills_dir_active=False, result=RunResult(),
+        hbt=bt,
+        cfg=cfg,
+        q=q,
+        data_source=None,
+        leg_to_asset={"yes": 0},
+        hedge_asset_no=None,
+        stop_pct=None,
+        fills_dir_active=False,
+        result=RunResult(),
         snap_best_ask_per_leg=snap_best_ask_per_leg or {},
         snap_best_bid_per_leg=snap_best_bid_per_leg or {},
         book_ts_per_leg=book_ts_per_leg or {},
@@ -1232,13 +1332,19 @@ def test_shr94_fleeting_ask_produces_no_fill():
     T_SNAP_NEXT = T + 2_000_000_000  # next snapshot 2s later, ask=0.98 (level fled)
 
     # Build the event array: ask at 0.90, persists nominally (no explicit clear)
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, 100.0),
-    ])
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, 100.0),
+        ]
+    )
     cfg = RunConfig(
-        tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
-        order_latency_ms=LAT_MS, ioc_marketability_recheck=True,
+        tick_size=0.001,
+        lot_size=1.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=LAT_MS,
+        ioc_marketability_recheck=True,
     )
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
@@ -1251,25 +1357,25 @@ def test_shr94_fleeting_ask_produces_no_fill():
     book_idx = {"yes": 1}
 
     st = _snap_run_state(
-        bt, cfg,
+        bt,
+        cfg,
         snap_best_ask_per_leg={"yes": snap_best_ask},
         book_ts_per_leg={"yes": book_ts},
         book_idx=book_idx,
     )
-    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90,
-                                 ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T)}
+    st.books = {
+        "yes": BookState(
+            symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90, ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T
+        )
+    }
     st.now_ns = T
 
     _route_enter(st, _enter_decision(limit=0.92))
     bt.close()
 
-    assert st.result.fills == [], (
-        "fleeting ask (gone in next snapshot within latency window) must produce no fill"
-    )
+    assert st.result.fills == [], "fleeting ask (gone in next snapshot within latency window) must produce no fill"
     assert st.pos is None, "no position opened on fleeting ask"
-    assert st.result.n_rejects == 1, (
-        "fleeting ask detected → counted as a reject (strategy re-fires next scan)"
-    )
+    assert st.result.n_rejects == 1, "fleeting ask detected → counted as a reject (strategy re-fires next scan)"
 
 
 def test_shr94_stable_ask_fills_normally():
@@ -1283,13 +1389,19 @@ def test_shr94_stable_ask_fills_normally():
     T = 1_000_000_000
     T_SNAP_NEXT = T + 5_000_000_000  # next snapshot 5s later, ask still at 0.90
 
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, 100.0),
-    ])
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, 100.0),
+        ]
+    )
     cfg = RunConfig(
-        tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
-        order_latency_ms=LAT_MS, ioc_marketability_recheck=True,
+        tick_size=0.001,
+        lot_size=1.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=LAT_MS,
+        ioc_marketability_recheck=True,
     )
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
@@ -1301,13 +1413,17 @@ def test_shr94_stable_ask_fills_normally():
     book_idx = {"yes": 1}
 
     st = _snap_run_state(
-        bt, cfg,
+        bt,
+        cfg,
         snap_best_ask_per_leg={"yes": snap_best_ask},
         book_ts_per_leg={"yes": book_ts},
         book_idx=book_idx,
     )
-    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90,
-                                 ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T)}
+    st.books = {
+        "yes": BookState(
+            symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90, ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T
+        )
+    }
     st.now_ns = T
 
     _route_enter(st, _enter_decision(limit=0.92))
@@ -1332,13 +1448,19 @@ def test_shr94_fill_capped_at_displayed_depth():
     T = 1_000_000_000
     ASK_DEPTH = 7.0
 
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, ASK_DEPTH),
-    ])
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, ASK_DEPTH),
+        ]
+    )
     cfg = RunConfig(
-        tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
-        order_latency_ms=LAT_MS, ioc_marketability_recheck=True,
+        tick_size=0.001,
+        lot_size=1.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=LAT_MS,
+        ioc_marketability_recheck=True,
     )
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
@@ -1350,13 +1472,17 @@ def test_shr94_fill_capped_at_displayed_depth():
     book_idx = {"yes": 1}
 
     st = _snap_run_state(
-        bt, cfg,
+        bt,
+        cfg,
         snap_best_ask_per_leg={"yes": snap_best_ask},
         book_ts_per_leg={"yes": book_ts},
         book_idx=book_idx,
     )
-    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90,
-                                 ask_sz=ASK_DEPTH, last_trade_ts_ns=0, last_l2_ts_ns=T)}
+    st.books = {
+        "yes": BookState(
+            symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90, ask_sz=ASK_DEPTH, last_trade_ts_ns=0, last_l2_ts_ns=T
+        )
+    }
     st.now_ns = T
 
     # Request 50 units — book only has 7
@@ -1365,9 +1491,7 @@ def test_shr94_fill_capped_at_displayed_depth():
 
     assert len(st.result.fills) == 1
     fill = st.result.fills[0]
-    assert fill.size <= ASK_DEPTH, (
-        f"fill size must not exceed displayed depth {ASK_DEPTH}; got {fill.size}"
-    )
+    assert fill.size <= ASK_DEPTH, f"fill size must not exceed displayed depth {ASK_DEPTH}; got {fill.size}"
     assert st.pos is not None
 
 
@@ -1380,13 +1504,19 @@ def test_shr94_no_snap_arrays_fills_as_before():
     LAT_MS = 50.0
     T = 1_000_000_000
 
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, 100.0),
-    ])
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, 100.0),
+        ]
+    )
     cfg = RunConfig(
-        tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
-        order_latency_ms=LAT_MS, ioc_marketability_recheck=True,
+        tick_size=0.001,
+        lot_size=1.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=LAT_MS,
+        ioc_marketability_recheck=True,
     )
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
@@ -1394,8 +1524,11 @@ def test_shr94_no_snap_arrays_fills_as_before():
 
     # No snap_best arrays → empty dicts → check skipped
     st = _snap_run_state(bt, cfg)
-    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90,
-                                 ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T)}
+    st.books = {
+        "yes": BookState(
+            symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90, ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T
+        )
+    }
     st.now_ns = T
 
     _route_enter(st, _enter_decision(limit=0.92))
@@ -1415,13 +1548,19 @@ def test_shr94_recheck_disabled_fills_fleeting():
     T = 1_000_000_000
     T_SNAP_NEXT = T + 2_000_000_000
 
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, 100.0),
-    ])
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(T - 5_000_000, SELL_EVENT, 0.90, 100.0),
+        ]
+    )
     cfg = RunConfig(
-        tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
-        order_latency_ms=LAT_MS, ioc_marketability_recheck=False,  # recheck OFF
+        tick_size=0.001,
+        lot_size=1.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=LAT_MS,
+        ioc_marketability_recheck=False,  # recheck OFF
     )
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
@@ -1432,21 +1571,23 @@ def test_shr94_recheck_disabled_fills_fleeting():
     book_idx = {"yes": 1}
 
     st = _snap_run_state(
-        bt, cfg,
+        bt,
+        cfg,
         snap_best_ask_per_leg={"yes": snap_best_ask},
         book_ts_per_leg={"yes": book_ts},
         book_idx=book_idx,
     )
-    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90,
-                                 ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T)}
+    st.books = {
+        "yes": BookState(
+            symbol="yes", bid_px=None, bid_sz=None, ask_px=0.90, ask_sz=100.0, last_trade_ts_ns=0, last_l2_ts_ns=T
+        )
+    }
     st.now_ns = T
 
     _route_enter(st, _enter_decision(limit=0.92))
     bt.close()
 
-    assert st.pos is not None, (
-        "recheck=False: fleeting level must fill (pre-SHR-94 behaviour restored)"
-    )
+    assert st.pos is not None, "recheck=False: fleeting level must fill (pre-SHR-94 behaviour restored)"
     assert st.result.n_rejects == 0
 
 
@@ -1461,9 +1602,11 @@ def test_shr94_snap_best_from_columns_basic():
     bid_off = np.array([0, 1, 2, 3], dtype=np.int64)  # lengths: [1, 1, 1]
     book_cols = {
         "ts": np.array([100, 200, 300], dtype=np.int64),
-        "ask_px": ask_px, "ask_sz": np.ones(3),
+        "ask_px": ask_px,
+        "ask_sz": np.ones(3),
         "ask_offsets": ask_off,
-        "bid_px": bid_px, "bid_sz": np.ones(3),
+        "bid_px": bid_px,
+        "bid_sz": np.ones(3),
         "bid_offsets": bid_off,
     }
     best_ask, best_bid = snap_best_from_columns(book_cols)
@@ -1472,7 +1615,7 @@ def test_shr94_snap_best_from_columns_basic():
     assert best_bid.shape == (3,)
     assert best_ask[0] == pytest.approx(0.5)  # first ask at s0
     assert best_ask[1] == pytest.approx(0.4)  # first ask at s1
-    assert np.isnan(best_ask[2])              # no asks at s2
+    assert np.isnan(best_ask[2])  # no asks at s2
     assert best_bid[0] == pytest.approx(0.3)
     assert best_bid[1] == pytest.approx(0.35)
     assert best_bid[2] == pytest.approx(0.38)
@@ -1535,6 +1678,8 @@ def test_shr94_run_config_has_ioc_marketability_recheck():
     """RunConfig.ioc_marketability_recheck defaults to True."""
     cfg = RunConfig()
     assert cfg.ioc_marketability_recheck is True
+
+
 # SHR-95: event-driven scan mode
 # ---------------------------------------------------------------------------
 #
@@ -1550,15 +1695,27 @@ class _CountingStrategy(Strategy):
     We use this to count scan-tick firings without the fill-path complications.
     The call count is mutated in-place for easy inspection after the run.
     """
+
     name = "_counting_strategy"
 
     def __init__(self):
         self.call_count: int = 0
         self.call_ts_ns: list[int] = []
 
-    def evaluate(self, *, question, books, reference_price, recent_returns,
-                 recent_volume_usd, position, now_ns, recent_hl_bars=()):
+    def evaluate(
+        self,
+        *,
+        question,
+        books,
+        reference_price,
+        recent_returns,
+        recent_volume_usd,
+        position,
+        now_ns,
+        recent_hl_bars=(),
+    ):
         from hlanalysis.strategy.types import Action, Decision
+
         self.call_count += 1
         self.call_ts_ns.append(now_ns)
         return Decision(action=Action.HOLD)
@@ -1583,7 +1740,9 @@ def _make_dense_book_question(
     )
     from hlanalysis.backtest.core.data_source import QuestionDescriptor
     from hlanalysis.backtest.core.events import (
-        BookSnapshot, ReferenceEvent, SettlementEvent,
+        BookSnapshot,
+        ReferenceEvent,
+        SettlementEvent,
     )
 
     start_ns: int = 0
@@ -1592,10 +1751,13 @@ def _make_dense_book_question(
     no_sym = "ev-no"
 
     desc = QuestionDescriptor(
-        question_id="ev-q-0", question_idx=1,
-        start_ts_ns=start_ns, end_ts_ns=end_ns,
+        question_id="ev-q-0",
+        question_idx=1,
+        start_ts_ns=start_ns,
+        end_ts_ns=end_ns,
         leg_symbols=(yes_sym, no_sym),
-        klass="priceBinary", underlying="BTC",
+        klass="priceBinary",
+        underlying="BTC",
     )
 
     if update_stride_ns is None:
@@ -1607,17 +1769,20 @@ def _make_dense_book_question(
         t = start_ns + 1_000_000 + i * update_stride_ns
         bid = 0.40 + 0.10 * (i / max(1, n_book_updates - 1))
         ask = bid + 0.02
-        snaps.append(BookSnapshot(ts_ns=t, symbol=yes_sym,
-                                  bids=((round(bid, 4), 100.0),),
-                                  asks=((round(ask, 4), 100.0),)))
-        snaps.append(BookSnapshot(ts_ns=t, symbol=no_sym,
-                                  bids=((round(1.0 - ask, 4), 100.0),),
-                                  asks=((round(1.0 - bid, 4), 100.0),)))
+        snaps.append(
+            BookSnapshot(ts_ns=t, symbol=yes_sym, bids=((round(bid, 4), 100.0),), asks=((round(ask, 4), 100.0),))
+        )
+        snaps.append(
+            BookSnapshot(
+                ts_ns=t, symbol=no_sym, bids=((round(1.0 - ask, 4), 100.0),), asks=((round(1.0 - bid, 4), 100.0),)
+            )
+        )
 
     # A few reference events spread over the window.
     refs: list[ReferenceEvent] = [
-        ReferenceEvent(ts_ns=start_ns + int(j * duration_ns / 3),
-                       symbol="BTC", high=60_100.0, low=59_900.0, close=60_000.0)
+        ReferenceEvent(
+            ts_ns=start_ns + int(j * duration_ns / 3), symbol="BTC", high=60_100.0, low=59_900.0, close=60_000.0
+        )
         for j in range(4)
     ]
 
@@ -1645,13 +1810,16 @@ def test_event_mode_fires_more_scans_than_fixed_grid():
     Event mode (min=0.2s, max=60s) -> at most one scan per update (30 updates
     in 10m) -- strictly more than 9 at the 60s fixed grid.
     """
-    ds, sq = _make_dense_book_question(n_book_updates=30, duration_ns=10 * 60 * 1_000_000_000,
-                                       update_stride_ns=20 * 1_000_000_000)
+    ds, sq = _make_dense_book_question(
+        n_book_updates=30, duration_ns=10 * 60 * 1_000_000_000, update_stride_ns=20 * 1_000_000_000
+    )
 
     fixed_strat = _CountingStrategy()
     fixed_cfg = RunConfig(
         scanner_interval_seconds=60,
-        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=0.0,
     )
     run_one_question(fixed_strat, ds, sq.descriptor, fixed_cfg, strike=sq.strike)
 
@@ -1660,7 +1828,9 @@ def test_event_mode_fires_more_scans_than_fixed_grid():
         scan_mode="event",
         scan_min_interval_seconds=0.2,
         scan_max_interval_seconds=60.0,
-        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=0.0,
     )
     run_one_question(event_strat, ds, sq.descriptor, event_cfg, strike=sq.strike)
 
@@ -1688,7 +1858,9 @@ def test_event_mode_respects_min_interval_floor():
         scan_mode="event",
         scan_min_interval_seconds=min_s,
         scan_max_interval_seconds=10.0,
-        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=0.0,
     )
     run_one_question(strat, ds, sq.descriptor, cfg, strike=sq.strike)
 
@@ -1697,8 +1869,7 @@ def test_event_mode_respects_min_interval_floor():
     assert len(ts) >= 2, "expected at least two scans"
     gaps = [ts[i + 1] - ts[i] for i in range(len(ts) - 1)]
     assert all(g >= min_ns - 1 for g in gaps), (
-        f"some consecutive scans were closer than scan_min_interval={min_s}s: "
-        f"min gap = {min(gaps) / 1e9:.4f}s"
+        f"some consecutive scans were closer than scan_min_interval={min_s}s: min gap = {min(gaps) / 1e9:.4f}s"
     )
 
 
@@ -1721,16 +1892,17 @@ def test_event_mode_quiet_window_scans_at_max_interval():
     no_sym = "quiet-no"
 
     desc = QuestionDescriptor(
-        question_id="quiet-q-0", question_idx=1,
-        start_ts_ns=start_ns, end_ts_ns=end_ns,
+        question_id="quiet-q-0",
+        question_idx=1,
+        start_ts_ns=start_ns,
+        end_ts_ns=end_ns,
         leg_symbols=(yes_sym, no_sym),
-        klass="priceBinary", underlying="BTC",
+        klass="priceBinary",
+        underlying="BTC",
     )
     # One book snapshot at t=1ms so hftbacktest has non-empty depth.
-    snap = BookSnapshot(ts_ns=1_000_000, symbol=yes_sym,
-                        bids=((0.40, 100.0),), asks=((0.42, 100.0),))
-    snap_no = BookSnapshot(ts_ns=1_000_000, symbol=no_sym,
-                           bids=((0.58, 100.0),), asks=((0.60, 100.0),))
+    snap = BookSnapshot(ts_ns=1_000_000, symbol=yes_sym, bids=((0.40, 100.0),), asks=((0.42, 100.0),))
+    snap_no = BookSnapshot(ts_ns=1_000_000, symbol=no_sym, bids=((0.58, 100.0),), asks=((0.60, 100.0),))
     refs = [ReferenceEvent(ts_ns=0, symbol="BTC", high=60_100.0, low=59_900.0, close=60_000.0)]
     settle = [SettlementEvent(ts_ns=end_ns, question_idx=1, outcome="yes")]
 
@@ -1751,14 +1923,15 @@ def test_event_mode_quiet_window_scans_at_max_interval():
         scan_mode="event",
         scan_min_interval_seconds=0.2,
         scan_max_interval_seconds=max_s,
-        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=0.0,
     )
     run_one_question(strat, ds_quiet, sq.descriptor, cfg, strike=sq.strike)
 
     # With 60s window and 10s max ceiling, expect at least 5 scans.
     assert strat.call_count >= 5, (
-        f"quiet market: expected >=5 scans from 10s max-ceiling in 60s window, "
-        f"got {strat.call_count}"
+        f"quiet market: expected >=5 scans from 10s max-ceiling in 60s window, got {strat.call_count}"
     )
 
 
@@ -1769,18 +1942,18 @@ def test_fixed_mode_is_default_and_unchanged():
     scan_mode='fixed' and once with the current default RunConfig (no scan_mode
     field). Both must produce the same number of strategy evaluations.
     """
-    ds, sq = _make_dense_book_question(n_book_updates=10,
-                                       duration_ns=10 * 60 * 1_000_000_000,
-                                       update_stride_ns=60 * 1_000_000_000)
+    ds, sq = _make_dense_book_question(
+        n_book_updates=10, duration_ns=10 * 60 * 1_000_000_000, update_stride_ns=60 * 1_000_000_000
+    )
 
     strat_a = _CountingStrategy()
-    cfg_default = RunConfig(scanner_interval_seconds=60,
-                            slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0)
+    cfg_default = RunConfig(scanner_interval_seconds=60, slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0)
     run_one_question(strat_a, ds, sq.descriptor, cfg_default, strike=sq.strike)
 
     strat_b = _CountingStrategy()
-    cfg_explicit = RunConfig(scanner_interval_seconds=60, scan_mode="fixed",
-                             slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0)
+    cfg_explicit = RunConfig(
+        scanner_interval_seconds=60, scan_mode="fixed", slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0
+    )
     run_one_question(strat_b, ds, sq.descriptor, cfg_explicit, strike=sq.strike)
 
     assert strat_a.call_count == strat_b.call_count, (
@@ -1794,9 +1967,7 @@ def test_run_config_scan_mode_defaults():
     """RunConfig must have scan_mode='fixed' (default), scan_min_interval_seconds=0.2,
     and scan_max_interval_seconds=2.0 after SHR-95."""
     cfg = RunConfig()
-    assert cfg.scan_mode == "fixed", (
-        f"scan_mode default must be 'fixed', got {cfg.scan_mode!r}"
-    )
+    assert cfg.scan_mode == "fixed", f"scan_mode default must be 'fixed', got {cfg.scan_mode!r}"
     assert cfg.scan_min_interval_seconds == pytest.approx(0.2), (
         f"scan_min_interval_seconds default must be 0.2, got {cfg.scan_min_interval_seconds}"
     )
@@ -1824,9 +1995,9 @@ def test_cli_scan_mode_args_exist():
     assert _run_config_from_args(args, hedge_cfg=None).scan_mode == "fixed"
 
     # Explicit event-mode values propagate into RunConfig.
-    args2 = p.parse_args(["--scan-mode", "event",
-                           "--scan-min-interval-seconds", "0.5",
-                           "--scan-max-interval-seconds", "5.0"])
+    args2 = p.parse_args(
+        ["--scan-mode", "event", "--scan-min-interval-seconds", "0.5", "--scan-max-interval-seconds", "5.0"]
+    )
     cfg = _run_config_from_args(args2, hedge_cfg=None)
     assert cfg.scan_mode == "event"
     assert cfg.scan_min_interval_seconds == pytest.approx(0.5)
@@ -1850,20 +2021,26 @@ def test_cli_scan_mode_args_exist():
 # leg until the floor has elapsed since the last dispatch on that leg. Default
 # 0.0 disables it (back-compat; the legacy no-floor A/B arm).
 
+
 def _exit_decision(symbol="yes", size=100.0, limit=0.50):
     from hlanalysis.strategy.types import Action, Decision, OrderIntent
+
     return Decision(
         action=Action.EXIT,
-        intents=(OrderIntent(question_idx=1, symbol=symbol, side="sell",
-                             size=size, limit_price=limit, cloid="x1"),),
+        intents=(OrderIntent(question_idx=1, symbol=symbol, side="sell", size=size, limit_price=limit, cloid="x1"),),
     )
 
 
 def _held_position(symbol="yes", qty=100.0, avg_entry=0.60):
     from hlanalysis.strategy.types import Position
+
     return Position(
-        question_idx=1, symbol=symbol, qty=qty, avg_entry=avg_entry,
-        stop_loss_price=0.0, last_update_ts_ns=0,
+        question_idx=1,
+        symbol=symbol,
+        qty=qty,
+        avg_entry=avg_entry,
+        stop_loss_price=0.0,
+        last_update_ts_ns=0,
     )
 
 
@@ -1878,34 +2055,34 @@ def test_run_config_min_inter_order_seconds_defaults_zero():
 def test_inter_order_blocked_disabled_when_floor_zero():
     """With the floor at 0, no order is ever throttled (back-compat)."""
     from hlanalysis.backtest.runner.hftbt_runner import _inter_order_blocked
+
     assert _inter_order_blocked(now_ns=1_000, last_order_ns=999, min_inter_order_ns=0) is False
 
 
 def test_inter_order_blocked_first_order_not_blocked():
     """The first order on a leg (no prior dispatch) is never throttled."""
     from hlanalysis.backtest.runner.hftbt_runner import _inter_order_blocked
-    assert _inter_order_blocked(now_ns=1_000, last_order_ns=None,
-                                min_inter_order_ns=750_000_000) is False
+
+    assert _inter_order_blocked(now_ns=1_000, last_order_ns=None, min_inter_order_ns=750_000_000) is False
 
 
 def test_inter_order_blocked_within_floor():
     """A re-fire strictly inside the floor window is throttled."""
     from hlanalysis.backtest.runner.hftbt_runner import _inter_order_blocked
+
     floor = 750_000_000  # 0.75s
     last = 1_000_000_000
-    assert _inter_order_blocked(now_ns=last + 200_000_000, last_order_ns=last,
-                                min_inter_order_ns=floor) is True
+    assert _inter_order_blocked(now_ns=last + 200_000_000, last_order_ns=last, min_inter_order_ns=floor) is True
 
 
 def test_inter_order_blocked_at_or_after_floor():
     """A re-fire at or after the floor boundary is allowed."""
     from hlanalysis.backtest.runner.hftbt_runner import _inter_order_blocked
+
     floor = 750_000_000
     last = 1_000_000_000
-    assert _inter_order_blocked(now_ns=last + floor, last_order_ns=last,
-                                min_inter_order_ns=floor) is False
-    assert _inter_order_blocked(now_ns=last + floor + 1, last_order_ns=last,
-                                min_inter_order_ns=floor) is False
+    assert _inter_order_blocked(now_ns=last + floor, last_order_ns=last, min_inter_order_ns=floor) is False
+    assert _inter_order_blocked(now_ns=last + floor + 1, last_order_ns=last, min_inter_order_ns=floor) is False
 
 
 def test_route_exit_throttled_within_floor_does_not_submit():
@@ -1915,21 +2092,37 @@ def test_route_exit_throttled_within_floor_does_not_submit():
     from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_exit
 
     T0 = 1_000_000_000
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(1_000_000, BUY_EVENT, 0.50, 1000.0),
-    ])
-    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
-                    order_latency_ms=0.0, ioc_marketability_recheck=False,
-                    min_inter_order_seconds=0.75)
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(1_000_000, BUY_EVENT, 0.50, 1000.0),
+        ]
+    )
+    cfg = RunConfig(
+        tick_size=0.001,
+        lot_size=1.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=0.0,
+        ioc_marketability_recheck=False,
+        min_inter_order_seconds=0.75,
+    )
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
     bt.elapse(T0)
     st = _reject_run_state(bt, cfg)
     st.pos = _held_position()
-    st.books = {"yes": BookState(symbol="yes", bid_px=0.50, bid_sz=1000.0,
-                                 ask_px=None, ask_sz=None,
-                                 last_trade_ts_ns=0, last_l2_ts_ns=1_000_000)}
+    st.books = {
+        "yes": BookState(
+            symbol="yes",
+            bid_px=0.50,
+            bid_sz=1000.0,
+            ask_px=None,
+            ask_sz=None,
+            last_trade_ts_ns=0,
+            last_l2_ts_ns=1_000_000,
+        )
+    }
     # A dispatch already happened 0.2s ago (within the 0.75s floor).
     st.last_order_ns = {"yes": T0}
     st.now_ns = T0 + 200_000_000
@@ -1953,30 +2146,46 @@ def test_route_exit_allowed_after_floor_fills_on_replenished_book():
     T_BOOK = 1_000_000
     T1 = 1_000_000_000
     T_TRADE1 = T1 + 1_000_000
-    T2 = T1 + 200_000_000           # 0.2s — within the 0.75s floor
-    T3 = T1 + 800_000_000           # 0.8s — past the floor
+    T2 = T1 + 200_000_000  # 0.2s — within the 0.75s floor
+    T3 = T1 + 800_000_000  # 0.8s — past the floor
     T_REPLENISH = T3 - 1_000_000
     T_TRADE3 = T3 + 1_000_000
 
     # Bid liquidity at 0.50; a SELL sweep of (queue + my size) fills my resting
     # sell. The bid is consumed by trade #1, then replenished before T3.
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(T_BOOK, BUY_EVENT, 0.50, 1000.0),
-        _trade_ev(T_TRADE1, SELL_EVENT, 0.50, 1100.0),
-        _depth_ev(T_REPLENISH, BUY_EVENT, 0.50, 1000.0),
-        _trade_ev(T_TRADE3, SELL_EVENT, 0.50, 1100.0),
-    ])
-    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
-                    order_latency_ms=0.0, ioc_marketability_recheck=False,
-                    min_inter_order_seconds=0.75)
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(T_BOOK, BUY_EVENT, 0.50, 1000.0),
+            _trade_ev(T_TRADE1, SELL_EVENT, 0.50, 1100.0),
+            _depth_ev(T_REPLENISH, BUY_EVENT, 0.50, 1000.0),
+            _trade_ev(T_TRADE3, SELL_EVENT, 0.50, 1100.0),
+        ]
+    )
+    cfg = RunConfig(
+        tick_size=0.001,
+        lot_size=1.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=0.0,
+        ioc_marketability_recheck=False,
+        min_inter_order_seconds=0.75,
+    )
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
 
     def _book():
-        return {"yes": BookState(symbol="yes", bid_px=0.50, bid_sz=1000.0,
-                                 ask_px=None, ask_sz=None,
-                                 last_trade_ts_ns=0, last_l2_ts_ns=T_BOOK)}
+        return {
+            "yes": BookState(
+                symbol="yes",
+                bid_px=0.50,
+                bid_sz=1000.0,
+                ask_px=None,
+                ask_sz=None,
+                last_trade_ts_ns=0,
+                last_l2_ts_ns=T_BOOK,
+            )
+        }
 
     st = _reject_run_state(bt, cfg)
     st.pos = _held_position(qty=300.0)
@@ -1985,14 +2194,16 @@ def test_route_exit_allowed_after_floor_fills_on_replenished_book():
     # First elapse must be absolute: bt.current_timestamp is INT64_MAX until the
     # first elapse, so a relative delta would underflow.
     bt.elapse(T1)
-    st.books = _book(); st.now_ns = T1
+    st.books = _book()
+    st.now_ns = T1
     _route_exit(st, _exit_decision(size=100.0))
     assert len(st.result.fills) == 1, "first exit should fill"
     assert st.result.n_refire_throttled == 0
 
     # Scan 2 — re-fire 0.2s later is throttled by the floor (no new fill).
     bt.elapse(T2 - int(bt.current_timestamp))
-    st.books = _book(); st.now_ns = T2
+    st.books = _book()
+    st.now_ns = T2
     _route_exit(st, _exit_decision(size=100.0))
     assert len(st.result.fills) == 1, "within-floor re-fire must not fill"
     assert st.result.n_refire_throttled == 1
@@ -2000,7 +2211,8 @@ def test_route_exit_allowed_after_floor_fills_on_replenished_book():
     # Scan 3 — 0.8s after the first dispatch the floor has elapsed; re-fire
     # dispatches and fills against the replenished book.
     bt.elapse(T3 - int(bt.current_timestamp))
-    st.books = _book(); st.now_ns = T3
+    st.books = _book()
+    st.now_ns = T3
     _route_exit(st, _exit_decision(size=100.0))
     bt.close()
 
@@ -2014,20 +2226,36 @@ def test_route_enter_throttled_within_floor_does_not_submit():
     from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_enter
 
     T0 = 1_000_000_000
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(1_000_000, SELL_EVENT, 0.50, 1000.0),
-    ])
-    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
-                    order_latency_ms=0.0, ioc_marketability_recheck=False,
-                    min_inter_order_seconds=0.75)
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(1_000_000, SELL_EVENT, 0.50, 1000.0),
+        ]
+    )
+    cfg = RunConfig(
+        tick_size=0.001,
+        lot_size=1.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=0.0,
+        ioc_marketability_recheck=False,
+        min_inter_order_seconds=0.75,
+    )
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
     bt.elapse(T0)
     st = _reject_run_state(bt, cfg)
-    st.books = {"yes": BookState(symbol="yes", bid_px=None, bid_sz=None,
-                                 ask_px=0.50, ask_sz=1000.0,
-                                 last_trade_ts_ns=0, last_l2_ts_ns=1_000_000)}
+    st.books = {
+        "yes": BookState(
+            symbol="yes",
+            bid_px=None,
+            bid_sz=None,
+            ask_px=0.50,
+            ask_sz=1000.0,
+            last_trade_ts_ns=0,
+            last_l2_ts_ns=1_000_000,
+        )
+    }
     st.last_order_ns = {"yes": T0}
     st.now_ns = T0 + 200_000_000
 
@@ -2048,21 +2276,37 @@ def test_route_exit_no_floor_allows_immediate_refire():
     from hlanalysis.backtest.runner.hftbt_runner import _build_asset, _route_exit
 
     T0 = 1_000_000_000
-    arr = np.concatenate([
-        _make_depth_clear_arr(0),
-        _depth_ev(1_000_000, BUY_EVENT, 0.50, 1000.0),
-    ])
-    cfg = RunConfig(tick_size=0.001, lot_size=1.0, slippage_bps=0.0, fee_taker=0.0,
-                    order_latency_ms=0.0, ioc_marketability_recheck=False,
-                    min_inter_order_seconds=0.0)
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(0),
+            _depth_ev(1_000_000, BUY_EVENT, 0.50, 1000.0),
+        ]
+    )
+    cfg = RunConfig(
+        tick_size=0.001,
+        lot_size=1.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=0.0,
+        ioc_marketability_recheck=False,
+        min_inter_order_seconds=0.0,
+    )
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
     bt.elapse(T0)
     st = _reject_run_state(bt, cfg)
     st.pos = _held_position()
-    st.books = {"yes": BookState(symbol="yes", bid_px=0.50, bid_sz=1000.0,
-                                 ask_px=None, ask_sz=None,
-                                 last_trade_ts_ns=0, last_l2_ts_ns=1_000_000)}
+    st.books = {
+        "yes": BookState(
+            symbol="yes",
+            bid_px=0.50,
+            bid_sz=1000.0,
+            ask_px=None,
+            ask_sz=None,
+            last_trade_ts_ns=0,
+            last_l2_ts_ns=1_000_000,
+        )
+    }
     st.last_order_ns = {"yes": T0}
     st.now_ns = T0 + 200_000_000
 
@@ -2129,10 +2373,13 @@ def _make_outcome_book_only_question(
     no_sym = "ob-no"
 
     desc = QuestionDescriptor(
-        question_id="ob-q-0", question_idx=1,
-        start_ts_ns=start_ns, end_ts_ns=end_ns,
+        question_id="ob-q-0",
+        question_idx=1,
+        start_ts_ns=start_ns,
+        end_ts_ns=end_ns,
         leg_symbols=(yes_sym, no_sym),
-        klass="priceBinary", underlying="BTC",
+        klass="priceBinary",
+        underlying="BTC",
     )
 
     snaps: list[BookSnapshot] = []
@@ -2140,12 +2387,12 @@ def _make_outcome_book_only_question(
         t = start_ns + 1_000_000 + i * update_stride_ns
         bid = round(0.40 + 0.10 * (i / max(1, n_book_updates - 1)), 4)
         ask = round(bid + 0.02, 4)
-        snaps.append(BookSnapshot(ts_ns=t, symbol=yes_sym,
-                                  bids=((bid, 100.0),),
-                                  asks=((ask, 100.0),)))
-        snaps.append(BookSnapshot(ts_ns=t, symbol=no_sym,
-                                  bids=((round(1.0 - ask, 4), 100.0),),
-                                  asks=((round(1.0 - bid, 4), 100.0),)))
+        snaps.append(BookSnapshot(ts_ns=t, symbol=yes_sym, bids=((bid, 100.0),), asks=((ask, 100.0),)))
+        snaps.append(
+            BookSnapshot(
+                ts_ns=t, symbol=no_sym, bids=((round(1.0 - ask, 4), 100.0),), asks=((round(1.0 - bid, 4), 100.0),)
+            )
+        )
 
     settle = [SettlementEvent(ts_ns=end_ns, question_idx=1, outcome="yes")]
 
@@ -2153,7 +2400,7 @@ def _make_outcome_book_only_question(
         descriptor=desc,
         book_snapshots=tuple(snaps),
         trades=(),
-        reference_events=(),   # NO reference events — outcome-book only
+        reference_events=(),  # NO reference events — outcome-book only
         settlement_events=tuple(settle),
         outcome="yes",
         strike=60_000.0,
@@ -2175,17 +2422,21 @@ def test_event_mode_triggers_on_outcome_book_updates_not_only_reference():
     Proves book_ts_per_leg IS included in _event_triggers (not just ref_events).
     """
     n = 10
-    duration_ns = 10 * 60 * 1_000_000_000   # 10 min
-    stride_ns   = duration_ns // n            # 1 book update/min
+    duration_ns = 10 * 60 * 1_000_000_000  # 10 min
+    stride_ns = duration_ns // n  # 1 book update/min
     ds, sq = _make_outcome_book_only_question(
-        n_book_updates=n, duration_ns=duration_ns, update_stride_ns=stride_ns,
+        n_book_updates=n,
+        duration_ns=duration_ns,
+        update_stride_ns=stride_ns,
     )
 
     # Fixed grid at 5 min — only fires on the time-based grid, ignores book events.
     fixed_strat = _CountingStrategy()
     fixed_cfg = RunConfig(
         scanner_interval_seconds=300.0,
-        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=0.0,
     )
     run_one_question(fixed_strat, ds, sq.descriptor, fixed_cfg, strike=sq.strike)
 
@@ -2196,7 +2447,9 @@ def test_event_mode_triggers_on_outcome_book_updates_not_only_reference():
         scan_mode="event",
         scan_min_interval_seconds=0.2,
         scan_max_interval_seconds=300.0,
-        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=0.0,
     )
     run_one_question(event_strat, ds, sq.descriptor, event_cfg, strike=sq.strike)
 
@@ -2260,16 +2513,16 @@ def test_is_fleeting_ask_persistence_new_level_is_fleeting():
     book_idx = {sym: 2}
 
     result = _is_fleeting_ask(
-        sym, 0.90, now_ns,
-        latency_ns=50_000_000,   # 50ms latency (standard)
+        sym,
+        0.90,
+        now_ns,
+        latency_ns=50_000_000,  # 50ms latency (standard)
         snap_best_ask_per_leg={sym: snap_ask},
         book_ts_per_leg={sym: ts_arr},
         book_idx=book_idx,
         persistence_ns=2_000_000_000,  # 2s persistence
     )
-    assert result is True, (
-        "ask appeared 1s ago (< 2s persistence): must be flagged as fleeting"
-    )
+    assert result is True, "ask appeared 1s ago (< 2s persistence): must be flagged as fleeting"
 
 
 def test_is_fleeting_ask_persistence_persistent_level_not_fleeting():
@@ -2290,16 +2543,16 @@ def test_is_fleeting_ask_persistence_persistent_level_not_fleeting():
     book_idx = {sym: 2}
 
     result = _is_fleeting_ask(
-        sym, 0.90, now_ns,
+        sym,
+        0.90,
+        now_ns,
         latency_ns=50_000_000,
         snap_best_ask_per_leg={sym: snap_ask},
         book_ts_per_leg={sym: ts_arr},
         book_idx=book_idx,
         persistence_ns=2_000_000_000,
     )
-    assert result is False, (
-        "ask present for 3s (>= 2s persistence): must NOT be flagged as fleeting"
-    )
+    assert result is False, "ask present for 3s (>= 2s persistence): must NOT be flagged as fleeting"
 
 
 def test_is_fleeting_ask_persistence_zero_disables_check():
@@ -2316,16 +2569,16 @@ def test_is_fleeting_ask_persistence_zero_disables_check():
 
     # With persistence disabled (0), the new level is NOT vetoed.
     result = _is_fleeting_ask(
-        sym, 0.90, now_ns,
+        sym,
+        0.90,
+        now_ns,
         latency_ns=50_000_000,
         snap_best_ask_per_leg={sym: snap_ask},
         book_ts_per_leg={sym: ts_arr},
         book_idx=book_idx,
         persistence_ns=0,  # disabled
     )
-    assert result is False, (
-        "persistence=0 must disable the check (legacy SHR-94 latency path only)"
-    )
+    assert result is False, "persistence=0 must disable the check (legacy SHR-94 latency path only)"
 
 
 def test_is_fleeting_ask_persistence_first_snapshot_is_fleeting():
@@ -2340,16 +2593,16 @@ def test_is_fleeting_ask_persistence_first_snapshot_is_fleeting():
     book_idx = {sym: 1}  # one snapshot consumed
 
     result = _is_fleeting_ask(
-        sym, 0.90, now_ns,
+        sym,
+        0.90,
+        now_ns,
         latency_ns=50_000_000,
         snap_best_ask_per_leg={sym: snap_ask},
         book_ts_per_leg={sym: ts_arr},
         book_idx=book_idx,
         persistence_ns=2_000_000_000,
     )
-    assert result is True, (
-        "ask in first snapshot only (no prior reference): must be flagged as fleeting"
-    )
+    assert result is True, "ask in first snapshot only (no prior reference): must be flagged as fleeting"
 
 
 def test_run_config_fleeting_persistence_wires_into_ioc_veto():
@@ -2363,28 +2616,34 @@ def test_run_config_fleeting_persistence_wires_into_ioc_veto():
     T0_NS = 0
     T1_NS = 1_000_000_000  # 1s later
 
-    arr = np.concatenate([
-        _make_depth_clear_arr(T0_NS),
-        _depth_ev(T0_NS + 1_000_000, SELL_EVENT, 0.98, 100.0),  # snap[0]: ask=0.98
-        _depth_ev(T0_NS + 1_000_000, BUY_EVENT,  0.90, 100.0),  # snap[0]: bid=0.90
-        _make_depth_clear_arr(T1_NS),
-        _depth_ev(T1_NS + 1_000_000, SELL_EVENT, 0.90, 200.0),  # snap[1]: ask=0.90 (new!)
-        _depth_ev(T1_NS + 1_000_000, BUY_EVENT,  0.80, 100.0),  # snap[1]: bid=0.80
-    ])
+    arr = np.concatenate(
+        [
+            _make_depth_clear_arr(T0_NS),
+            _depth_ev(T0_NS + 1_000_000, SELL_EVENT, 0.98, 100.0),  # snap[0]: ask=0.98
+            _depth_ev(T0_NS + 1_000_000, BUY_EVENT, 0.90, 100.0),  # snap[0]: bid=0.90
+            _make_depth_clear_arr(T1_NS),
+            _depth_ev(T1_NS + 1_000_000, SELL_EVENT, 0.90, 200.0),  # snap[1]: ask=0.90 (new!)
+            _depth_ev(T1_NS + 1_000_000, BUY_EVENT, 0.80, 100.0),  # snap[1]: bid=0.80
+        ]
+    )
 
     # snap_best_ask arrays: snap[0]=0.98, snap[1]=0.90 (1s gap)
     snap_ask = np.array([0.98, 0.90], dtype=np.float64)
     snap_bid = np.array([0.90, 0.80], dtype=np.float64)
-    ts_arr   = np.array([T0_NS + 1_000_000, T1_NS + 1_000_000], dtype=np.int64)
+    ts_arr = np.array([T0_NS + 1_000_000, T1_NS + 1_000_000], dtype=np.int64)
     sym = "yes"
 
     cfg = RunConfig(
-        tick_size=0.001, lot_size=1.0,
-        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=50.0,
+        tick_size=0.001,
+        lot_size=1.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=50.0,
         ioc_marketability_recheck=True,
-        ioc_fleeting_persistence_seconds=2.0,   # 2s persistence gate
+        ioc_fleeting_persistence_seconds=2.0,  # 2s persistence gate
     )
     from hlanalysis.backtest.runner.hftbt_runner import _build_asset
+
     asset = _build_asset(arr, cfg)
     bt = hb.HashMapMarketDepthBacktest([asset])
 
@@ -2399,28 +2658,41 @@ def test_run_config_fleeting_persistence_wires_into_ioc_veto():
     st.book_ts_per_leg = {sym: ts_arr}
     st._book_idx = book_idx
     st.now_ns = now_ns
-    st.books = {"yes": BookState(
-        symbol="yes", bid_px=0.80, bid_sz=100.0, ask_px=0.90, ask_sz=200.0,
-        last_trade_ts_ns=0, last_l2_ts_ns=T1_NS,
-    )}
+    st.books = {
+        "yes": BookState(
+            symbol="yes",
+            bid_px=0.80,
+            bid_sz=100.0,
+            ask_px=0.90,
+            ask_sz=200.0,
+            last_trade_ts_ns=0,
+            last_l2_ts_ns=T1_NS,
+        )
+    }
 
     from hlanalysis.backtest.runner.hftbt_runner import _route_enter
+
     # Entry at 0.90 ask: without persistence gate this would fill; with 2s gate → vetoed.
     from hlanalysis.strategy.types import OrderIntent
 
     class _FakeDecision:
-        intents = (OrderIntent(
-            question_idx=1, symbol="yes", side="buy",
-            size=50.0, limit_price=0.90, cloid="test-cloid",
-        ),)
+        intents = (
+            OrderIntent(
+                question_idx=1,
+                symbol="yes",
+                side="buy",
+                size=50.0,
+                limit_price=0.90,
+                cloid="test-cloid",
+            ),
+        )
         action = None
 
     _route_enter(st, _FakeDecision())
     bt.close()
 
     assert st.result.n_rejects == 1, (
-        f"fleeting 0.90 ask (appeared 1s ago, persistence=2s) must be vetoed; "
-        f"got n_rejects={st.result.n_rejects}"
+        f"fleeting 0.90 ask (appeared 1s ago, persistence=2s) must be vetoed; got n_rejects={st.result.n_rejects}"
     )
     assert st.pos is None, "no fill must have occurred"
 
@@ -2446,6 +2718,7 @@ def test_cli_ioc_fleeting_persistence_seconds_arg():
 # Fix-2: runner passes tuples (not numpy arrays) to strategy.evaluate
 # ---------------------------------------------------------------------------
 
+
 class _TypeCapturingStrategy(Strategy):
     """Test-only strategy that records the container types passed by the runner."""
 
@@ -2456,9 +2729,20 @@ class _TypeCapturingStrategy(Strategy):
         self.captured_recent_hl_bars_type = None
         self.captured_recent_hl_element_type = None
 
-    def evaluate(self, *, question, books, reference_price, recent_returns,
-                 recent_volume_usd, position, now_ns, recent_hl_bars=()):
+    def evaluate(
+        self,
+        *,
+        question,
+        books,
+        reference_price,
+        recent_returns,
+        recent_volume_usd,
+        position,
+        now_ns,
+        recent_hl_bars=(),
+    ):
         from hlanalysis.strategy.types import Action, Decision
+
         # Capture container types on the first call only (subsequent calls are
         # no-ops so we don't over-record from a multi-tick run).
         if self.captured_recent_returns_type is None:
@@ -2488,12 +2772,10 @@ def test_runner_passes_tuple_not_ndarray_to_strategy(synthetic_source):
     run_one_question(strat, ds, sq.descriptor, cfg, strike=sq.strike)
 
     assert strat.captured_recent_returns_type is tuple, (
-        f"runner must pass tuple for recent_returns; "
-        f"got {strat.captured_recent_returns_type}"
+        f"runner must pass tuple for recent_returns; got {strat.captured_recent_returns_type}"
     )
     assert strat.captured_recent_hl_bars_type is tuple, (
-        f"runner must pass tuple for recent_hl_bars; "
-        f"got {strat.captured_recent_hl_bars_type}"
+        f"runner must pass tuple for recent_hl_bars; got {strat.captured_recent_hl_bars_type}"
     )
 
 
@@ -2527,8 +2809,7 @@ def test_runner_tuple_types_match_engine_contract(synthetic_source):
     # If non-empty, each element must be a plain Python tuple (not np.ndarray).
     if strat.captured_recent_hl_element_type is not None:
         assert strat.captured_recent_hl_element_type is tuple, (
-            f"each (high, low) element in recent_hl_bars must be a tuple; "
-            f"got {strat.captured_recent_hl_element_type}"
+            f"each (high, low) element in recent_hl_bars must be a tuple; got {strat.captured_recent_hl_element_type}"
         )
         assert not isinstance(strat.captured_recent_hl_element_type, np.ndarray), (
             "recent_hl_bars elements must not be numpy arrays"
@@ -2553,10 +2834,7 @@ def test_runner_tuple_values_unchanged_after_fix(synthetic_source):
     res_b = run_one_question(strat_b, ds, sq.descriptor, cfg, strike=sq.strike)
 
     # Deterministic synthetic source → bit-identical PnL across two runs.
-    assert res_a.realized_pnl_usd == pytest.approx(
-        res_b.realized_pnl_usd, abs=1e-9
-    ), (
-        f"PnL should be bit-identical; got {res_a.realized_pnl_usd} vs "
-        f"{res_b.realized_pnl_usd}"
+    assert res_a.realized_pnl_usd == pytest.approx(res_b.realized_pnl_usd, abs=1e-9), (
+        f"PnL should be bit-identical; got {res_a.realized_pnl_usd} vs {res_b.realized_pnl_usd}"
     )
     assert len(res_a.fills) == len(res_b.fills), "fill counts must match"

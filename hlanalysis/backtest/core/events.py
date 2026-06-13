@@ -5,6 +5,7 @@ Additive vs the original §3.1: ``SettlementEvent.symbol: str = ""`` is added
 the leg symbol, as required by §3.4. Binary sources may leave it as the empty
 string; the runner falls back to ``q.leg_symbols`` ordering in that case.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

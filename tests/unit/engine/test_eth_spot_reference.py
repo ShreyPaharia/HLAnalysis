@@ -10,6 +10,7 @@ Verifies that:
 The _make_spot_bbo helper constructs a real BboEvent (same event type used by
 the existing BTC remap test in tests/unit/test_engine_ingest_remap.py).
 """
+
 from __future__ import annotations
 
 from hlanalysis.engine.main import binance_spot_reference_subscription, build_engine_subscriptions
@@ -65,6 +66,7 @@ def test_both_spot_reference_feeds_present():
 
 def test_build_engine_subscriptions_includes_both_spot_references():
     from hlanalysis.config import RecorderConfig
+
     cfg = RecorderConfig(subscriptions=[])
     subs = build_engine_subscriptions(cfg)
     binance = [(s.product_type, s.symbol) for s in subs if s.venue == "binance"]

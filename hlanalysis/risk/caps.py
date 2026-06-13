@@ -12,6 +12,7 @@ Comparison operators (all match the live engine):
 - concurrent:  n_held  >=  cap  AND NOT top-up              (>=, top-up exempt)
 - daily loss:  realized_pnl_window  <  -cap                 (strict <, cap is positive)
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta

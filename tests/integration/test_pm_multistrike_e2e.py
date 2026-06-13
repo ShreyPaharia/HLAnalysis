@@ -7,6 +7,7 @@ above_ladder region map yields the right winning intervals per leg, and the
 settlement-PnL path books the held leg correctly even when other legs' settle
 events arrive first.
 """
+
 from __future__ import annotations
 
 import json
@@ -28,6 +29,7 @@ def _event():
             "outcomePrices": json.dumps(["0", "0"]),
             "endDate": "2026-06-12T16:00:00Z",
         }
+
     return {
         "slug": "btc-ms-x",
         "startDate": "2026-06-08T16:00:00Z",
@@ -39,8 +41,10 @@ def _event():
 
 def test_bucket_question_legs_and_regions_consistent():
     qm = parse_gamma_event_to_bucket_question_meta(
-        _event(), series_slug="btc-multi-strikes-weekly",
-        local_recv_ts=1, underlying="BTC",
+        _event(),
+        series_slug="btc-multi-strikes-weekly",
+        local_recv_ts=1,
+        underlying="BTC",
     )
     ms = MarketState()
     ms.apply(qm)
@@ -54,8 +58,10 @@ def test_bucket_question_legs_and_regions_consistent():
 
 def test_held_leg_settlement_pnl_robust_to_arrival_order():
     qm = parse_gamma_event_to_bucket_question_meta(
-        _event(), series_slug="btc-multi-strikes-weekly",
-        local_recv_ts=1, underlying="BTC",
+        _event(),
+        series_slug="btc-multi-strikes-weekly",
+        local_recv_ts=1,
+        underlying="BTC",
     )
     ms = MarketState()
     ms.apply(qm)
@@ -66,11 +72,19 @@ def test_held_leg_settlement_pnl_robust_to_arrival_order():
 
     def _settle(sym):
         return SettlementEvent(
-            venue="polymarket", product_type=ProductType.PREDICTION_BINARY,
-            mechanism=Mechanism.CLOB, symbol=sym, exchange_ts=2, local_recv_ts=2,
-            settled_side_idx=0, settle_price=1.0, settle_ts=2,
-            keys=[], values=[],
+            venue="polymarket",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol=sym,
+            exchange_ts=2,
+            local_recv_ts=2,
+            settled_side_idx=0,
+            settle_price=1.0,
+            settle_ts=2,
+            keys=[],
+            values=[],
         )
+
     ms.apply(_settle("n90"))
     ms.apply(_settle("y80"))
     q = ms.question(qidx)

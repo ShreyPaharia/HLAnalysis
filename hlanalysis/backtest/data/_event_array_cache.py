@@ -10,6 +10,7 @@ key→file indexing) is delegated to :mod:`diskcache`; this module keeps only th
 domain-specific serializer — the column-split, delta-encoded npz, a ~5.7x
 compression no generic cache offers — plugged in as a custom ``Disk`` subclass.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -75,6 +76,7 @@ def cache_key(question_id: str, source_files: list[Path], config_sig: str = "") 
     can override it and verify version changes produce different keys.
     """
     import hlanalysis.backtest.data._event_array_cache as _self
+
     h = hashlib.sha256()
     h.update(question_id.encode())
     h.update(str(_self._BUILD_VERSION).encode())
@@ -98,17 +100,11 @@ def _save(path: Path, b: FastPathBundle) -> None:
     payload: dict[str, np.ndarray] = {
         "__legs__": np.array(legs, dtype=object),
         "__ref__": np.array(
-            [
-                (e.ts_ns, e.symbol, e.high, e.low, e.close, e.open)
-                for e in b.reference_events
-            ],
+            [(e.ts_ns, e.symbol, e.high, e.low, e.close, e.open) for e in b.reference_events],
             dtype=object,
         ),
         "__settle__": np.array(
-            [
-                (e.ts_ns, e.question_idx, e.outcome, e.symbol)
-                for e in b.settlement_events
-            ],
+            [(e.ts_ns, e.question_idx, e.outcome, e.symbol) for e in b.settlement_events],
             dtype=object,
         ),
         # SHR-97: persist the reference_events_are_raw_ticks flag so a cache hit
@@ -142,9 +138,7 @@ def _save(path: Path, b: FastPathBundle) -> None:
         payload[f"tr_{i}__ts"] = _delta(tr_ts)
         payload[f"tr_{i}__px"] = np.array([t.price for t in trades], dtype=np.float64)
         payload[f"tr_{i}__sz"] = np.array([t.size for t in trades], dtype=np.float64)
-        payload[f"tr_{i}__side"] = np.array(
-            [1 if t.side == "sell" else 0 for t in trades], dtype=np.int8
-        )
+        payload[f"tr_{i}__side"] = np.array([1 if t.side == "sell" else 0 for t in trades], dtype=np.int8)
     # np.savez_compressed appends ".npz" to the path if not already present.
     # Use a tmp file that already ends in ".npz" so the written file
     # matches the tmp variable name, then atomically rename to final path.
@@ -288,6 +282,7 @@ def _prune_stale_versions(root: Path, version: int) -> None:
     Cache handle for a pruned shard is closed first. Best-effort.
     """
     import shutil
+
     for child in root.glob("v*"):
         if not child.is_dir() or child.name == f"v{version}":
             continue
@@ -308,6 +303,7 @@ def _get_cache(cache_dir: Path) -> diskcache.Cache:
     """Return the (reused) ``diskcache.Cache`` for ``cache_dir`` at the current
     BUILD_VERSION, pruning stale-version shards and re-applying the size cap."""
     import hlanalysis.backtest.data._event_array_cache as _self
+
     version = _self._BUILD_VERSION
     root = Path(cache_dir)
     ckey = (str(root), version)
@@ -346,6 +342,7 @@ def caching_enabled() -> bool:
         suite sets this for hermeticity). Any other value, or unset, is ON.
     """
     import os
+
     if os.environ.get("HLBT_NO_CACHE"):
         return False
     v = os.environ.get("HLBT_CACHE_EVENT_ARRAYS")
@@ -358,11 +355,12 @@ def _cache_max_bytes() -> int:
     """Cache size cap in bytes. Override via ``HLBT_CACHE_MAX_BYTES`` (exact) or
     ``HLBT_CACHE_MAX_GB``; default 20 GiB — a backstop, not a tight budget."""
     import os
+
     b = os.environ.get("HLBT_CACHE_MAX_BYTES")
     if b is not None:
         return int(b)
     gb = float(os.environ.get("HLBT_CACHE_MAX_GB", "20"))
-    return int(gb * 1024 ** 3)
+    return int(gb * 1024**3)
 
 
 # --- Opt-in process-level bundle memo --------------------------------------
@@ -420,7 +418,7 @@ def _inproc_max_bytes() -> int:
     if b is not None:
         return int(b)
     gb = float(os.environ.get("HLBT_INPROC_BUNDLE_MEMO_MAX_GB", "4"))
-    total = int(gb * 1024 ** 3)
+    total = int(gb * 1024**3)
     workers = max(1, int(os.environ.get("HLBT_INPROC_BUNDLE_MEMO_WORKERS", "1")))
     return total // workers
 
@@ -432,8 +430,7 @@ def _bundle_nbytes(b: FastPathBundle) -> int:
     total = 0
     for la in b.leg_arrays.values():
         total += (
-            int(la.events.nbytes) + int(la.book_ts.nbytes)
-            + int(la.snap_best_ask.nbytes) + int(la.snap_best_bid.nbytes)
+            int(la.events.nbytes) + int(la.book_ts.nbytes) + int(la.snap_best_ask.nbytes) + int(la.snap_best_bid.nbytes)
         )
     total += (len(b.reference_events) + len(b.settlement_events)) * 64
     return total
@@ -464,9 +461,7 @@ def _inproc_store(key: tuple[str, str], bundle: FastPathBundle) -> None:
         retained -= _INPROC_SIZES.pop(oldest, 0)
 
 
-def inproc_lookup(
-    question_id: str, config_sig: str = "", *, force_rebuild: bool = False
-) -> FastPathBundle | None:
+def inproc_lookup(question_id: str, config_sig: str = "", *, force_rebuild: bool = False) -> FastPathBundle | None:
     """Peek the process memo for (question_id, config_sig) without touching disk.
 
     Returns the memoized bundle if the memo is enabled and populated, else None.
@@ -511,8 +506,12 @@ def cached_bundle(
         return _INPROC_MEMO[memo_key]
 
     bundle = _cached_bundle_disk(
-        cache_dir, question_id, source_files, build_fn,
-        force_rebuild=force_rebuild, config_sig=config_sig,
+        cache_dir,
+        question_id,
+        source_files,
+        build_fn,
+        force_rebuild=force_rebuild,
+        config_sig=config_sig,
     )
 
     if memo_on:

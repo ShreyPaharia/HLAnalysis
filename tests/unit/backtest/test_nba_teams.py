@@ -1,5 +1,7 @@
 from hlanalysis.backtest.data._nba_teams import (
-    normalize_team, team_key, NBA_TEAMS,
+    normalize_team,
+    team_key,
+    NBA_TEAMS,
 )
 
 

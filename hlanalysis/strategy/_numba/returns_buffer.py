@@ -25,6 +25,7 @@ single biggest perf win identified in the 2026-05-11 profile — building
 the tuple of Python floats per tick is ~4× slower than the buffer's
 indexing work itself.
 """
+
 from __future__ import annotations
 
 import math
@@ -61,9 +62,7 @@ class KlineRingBuffer:
     def __len__(self) -> int:
         return self._len
 
-    def append(
-        self, *, ts_ns: int, high: float, low: float, close: float
-    ) -> None:
+    def append(self, *, ts_ns: int, high: float, low: float, close: float) -> None:
         if self._len == self._cap:
             self._grow()
         i = self._len
@@ -86,9 +85,7 @@ class KlineRingBuffer:
             return None
         return float(self._close[self._len - 1])
 
-    def slice_window(
-        self, *, now_ns: int, lookback_seconds: int
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def slice_window(self, *, now_ns: int, lookback_seconds: int) -> tuple[np.ndarray, np.ndarray]:
         """Return ``(returns_1d, hl_2d)`` views into the kept-bar window.
 
         Returns are emitted only when BOTH endpoints (i-1 and i) are in

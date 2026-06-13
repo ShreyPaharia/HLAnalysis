@@ -21,13 +21,12 @@ def test_evict_settled_questions_removes_old_settled_only():
     ms = MarketState()
     ms.apply(_meta(1, expiry_ns=1_000))
     ms.apply(_meta(2, expiry_ns=10_000))
-    ms.mark_question_settled(1)                 # settled, old
+    ms.mark_question_settled(1)  # settled, old
     # qidx 2 not settled
-    n = ms.evict_settled_questions(now_ns=1_000 + 7 * 3600 * 1_000_000_000,
-                                   retain_after_settle_ns=3600 * 1_000_000_000)
+    n = ms.evict_settled_questions(now_ns=1_000 + 7 * 3600 * 1_000_000_000, retain_after_settle_ns=3600 * 1_000_000_000)
     idxs = {q.question_idx for q in ms.all_questions()}
     assert n == 1
-    assert idxs == {2}                          # settled+old gone, unsettled kept
+    assert idxs == {2}  # settled+old gone, unsettled kept
 
 
 def test_evict_keeps_recently_settled():
@@ -35,8 +34,7 @@ def test_evict_keeps_recently_settled():
     ms.apply(_meta(1, expiry_ns=1_000))
     ms.mark_question_settled(1)
     # now only 1 minute after expiry -> within retain window -> kept
-    n = ms.evict_settled_questions(now_ns=1_000 + 60 * 1_000_000_000,
-                                   retain_after_settle_ns=3600 * 1_000_000_000)
+    n = ms.evict_settled_questions(now_ns=1_000 + 60 * 1_000_000_000, retain_after_settle_ns=3600 * 1_000_000_000)
     assert n == 0
     assert {q.question_idx for q in ms.all_questions()} == {1}
 
@@ -63,7 +61,7 @@ def test_evict_invalidates_symbol_cache():
     evicted legs no longer appear in the next symbol_to_question_map() call."""
     ms = MarketState()
     # outcome_idx=0 → legs #00, #01; outcome_idx=1 → legs #10, #11
-    ms.apply(_meta_outcome(1, expiry_ns=1_000, outcome_idx=0))   # settled+old
+    ms.apply(_meta_outcome(1, expiry_ns=1_000, outcome_idx=0))  # settled+old
     ms.apply(_meta_outcome(2, expiry_ns=10_000, outcome_idx=1))  # live
 
     # outcome_idx=0 → f"#{10*0+s}" → "#0" (YES) and "#1" (NO)

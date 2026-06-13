@@ -20,6 +20,7 @@ no live trade journal):
    from the Spec-3 trade journal so the suppression core stays testable with
    injected windows; the runner consumes a plain ``list[HaltWindow]``.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -59,9 +60,7 @@ class HaltWindow:
         return self.start_ns <= ts_ns < self.end_ns
 
 
-def in_halt_window(
-    windows: Sequence[HaltWindow], now_ns: int
-) -> HaltWindow | None:
+def in_halt_window(windows: Sequence[HaltWindow], now_ns: int) -> HaltWindow | None:
     """Return the first window containing ``now_ns``, or ``None``."""
     for w in windows:
         if w.contains(now_ns):
@@ -112,10 +111,10 @@ class EntryGateInputs:
     the live kill-switch latch does)."""
 
     now_ns: int
-    intent_notional: float          # size * limit_price of the proposed entry
-    held_inventory_usd: float       # sum |qty|*avg_entry across held positions
+    intent_notional: float  # size * limit_price of the proposed entry
+    held_inventory_usd: float  # sum |qty|*avg_entry across held positions
     n_held_positions: int
-    is_topup: bool                  # entry targets an already-held position
+    is_topup: bool  # entry targets an already-held position
     realized_pnl_window: float
 
 
@@ -142,16 +141,12 @@ def entry_veto(
         return "daily_loss_cap"
 
     # Global inventory cap: held notional + this entry must stay under the cap.
-    if _inventory_cap_exceeded(
-        inp.held_inventory_usd, inp.intent_notional, caps.max_total_inventory_usd
-    ):
+    if _inventory_cap_exceeded(inp.held_inventory_usd, inp.intent_notional, caps.max_total_inventory_usd):
         return "max_total_inventory"
 
     # Concurrent-positions cap: a NEW position past the cap is blocked; a top-up
     # to an already-held slot is allowed (matches the live gate).
-    if _concurrent_cap_exceeded(
-        inp.n_held_positions, inp.is_topup, caps.max_concurrent_positions
-    ):
+    if _concurrent_cap_exceeded(inp.n_held_positions, inp.is_topup, caps.max_concurrent_positions):
         return "max_concurrent_positions"
 
     return None
@@ -170,9 +165,7 @@ _DAILY_HALT_KINDS = frozenset({"daily_loss_halt"})
 # Halt-start kinds with no explicit clear event in the log — reject circuit
 # breaker, dust-block, restart_blocked, OOM restart gaps — use a fixed fallback
 # duration so the sim still sits out a plausible window.
-_FALLBACK_HALT_KINDS = frozenset(
-    {"memory_halt", "risk_halt", "kill_switch_activated"}
-)
+_FALLBACK_HALT_KINDS = frozenset({"memory_halt", "risk_halt", "kill_switch_activated"})
 
 
 def _ev_field(ev: object, name: str):
@@ -207,8 +200,7 @@ def load_halt_windows(
         (
             (int(_ev_field(ev, "ts_ns")), str(_ev_field(ev, "kind")))
             for ev in events
-            if _ev_field(ev, "ts_ns") is not None
-            and _ev_field(ev, "kind") is not None
+            if _ev_field(ev, "ts_ns") is not None and _ev_field(ev, "kind") is not None
         ),
         key=lambda r: r[0],
     )
@@ -217,21 +209,17 @@ def load_halt_windows(
     for i, (ts_ns, kind) in enumerate(rows):
         if kind in _FEED_HALT_KINDS:
             end_ns = ts_ns + fallback_duration_ns
-            for ts2, kind2 in rows[i + 1:]:
+            for ts2, kind2 in rows[i + 1 :]:
                 if kind2 == _FEED_CLEAR_KIND:
                     end_ns = ts2
                     break
             windows.append(HaltWindow(ts_ns, end_ns, kind))
         elif kind in _DAILY_HALT_KINDS:
-            window_start = daily_window_start_ns(
-                ts_ns, hour=daily_window_start_hour_utc
-            )
+            window_start = daily_window_start_ns(ts_ns, hour=daily_window_start_hour_utc)
             next_boundary = window_start + 86_400 * 1_000_000_000
             windows.append(HaltWindow(ts_ns, next_boundary, kind))
         elif kind in _FALLBACK_HALT_KINDS:
-            windows.append(
-                HaltWindow(ts_ns, ts_ns + fallback_duration_ns, kind)
-            )
+            windows.append(HaltWindow(ts_ns, ts_ns + fallback_duration_ns, kind))
         # else: non-halt event — ignored.
 
     windows.sort(key=lambda w: w.start_ns)

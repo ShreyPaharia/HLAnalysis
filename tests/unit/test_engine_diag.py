@@ -12,6 +12,7 @@ Tests written before implementation, exercising:
 - Config fingerprint is stable and includes key inline params.
 - --alias filter returns only the requested slot.
 """
+
 from __future__ import annotations
 
 import json
@@ -35,6 +36,7 @@ from hlanalysis.engine.config import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _minimal_allowlist_entry(**kwargs) -> AllowlistEntry:
     defaults = dict(
@@ -119,14 +121,17 @@ def _flag_dir(deploy_cfg: DeployConfig, alias: str) -> Path:
 # Import helper (avoids top-level import failing before implementation exists)
 # ---------------------------------------------------------------------------
 
+
 def _import_diag():
     from hlanalysis.engine import diag  # noqa: PLC0415
+
     return diag
 
 
 # ---------------------------------------------------------------------------
 # 1. Top-level snapshot structure
 # ---------------------------------------------------------------------------
+
 
 def test_snapshot_top_level_keys(tmp_path):
     diag = _import_diag()
@@ -160,6 +165,7 @@ def test_snapshot_generated_at_is_recent(tmp_path):
 # 2. Per-slot structure: expected keys present
 # ---------------------------------------------------------------------------
 
+
 def test_slot_has_required_keys(tmp_path):
     diag = _import_diag()
     deploy_cfg = _make_deploy_config(tmp_path, ["v1"])
@@ -169,16 +175,14 @@ def test_slot_has_required_keys(tmp_path):
     snapshot = diag.build_snapshot(deploy_cfg, strategies)
     slot = snapshot["slots"]["v1"]
 
-    required = {"status", "positions", "open_orders", "feed", "flags",
-                "rejects", "last_decision", "config_fingerprint"}
-    assert required.issubset(set(slot.keys())), (
-        f"Missing keys: {required - set(slot.keys())}"
-    )
+    required = {"status", "positions", "open_orders", "feed", "flags", "rejects", "last_decision", "config_fingerprint"}
+    assert required.issubset(set(slot.keys())), f"Missing keys: {required - set(slot.keys())}"
 
 
 # ---------------------------------------------------------------------------
 # 3. true_pnl = fills_realized + settlement
 # ---------------------------------------------------------------------------
+
 
 def test_true_pnl_equals_fills_plus_settlement(tmp_path):
     """Seed fills + settlement; verify snapshot true_pnl = fills_closed_pnl + settle."""
@@ -189,11 +193,20 @@ def test_true_pnl_equals_fills_plus_settlement(tmp_path):
     dal = _seed_dal(deploy_cfg, "v1")
 
     # Insert a fill with positive closed_pnl
-    dal.append_fill(Fill(
-        fill_id="f-1", cloid="hla-v1-1", question_idx=42, symbol="@30",
-        side="buy", price=0.95, size=10.0, fee=0.05, ts_ns=1000,
-        closed_pnl=5.0,
-    ))
+    dal.append_fill(
+        Fill(
+            fill_id="f-1",
+            cloid="hla-v1-1",
+            question_idx=42,
+            symbol="@30",
+            side="buy",
+            price=0.95,
+            size=10.0,
+            fee=0.05,
+            ts_ns=1000,
+            closed_pnl=5.0,
+        )
+    )
     # Insert settlement
     dal.record_settlement(question_idx=99, symbol="@40", realized_pnl=15.0, ts_ns=2000)
 
@@ -215,14 +228,17 @@ def test_true_pnl_equals_fills_plus_settlement(tmp_path):
 # 4. Rejects filtered by alias (no cross-slot double-counting)
 # ---------------------------------------------------------------------------
 
+
 def test_rejects_filtered_by_alias(tmp_path):
     """Events for alias v31 must NOT appear in v1's rejects section."""
     diag = _import_diag()
     deploy_cfg = _make_deploy_config(tmp_path, ["v1", "v31"])
-    strategies = StrategiesConfig(strategies=[
-        _make_strategy_config("v1"),
-        _make_strategy_config("v31", strategy_type="theta_harvester"),
-    ])
+    strategies = StrategiesConfig(
+        strategies=[
+            _make_strategy_config("v1"),
+            _make_strategy_config("v31", strategy_type="theta_harvester"),
+        ]
+    )
 
     # Seed each alias's DB at its own path
     dal_v1 = _seed_dal(deploy_cfg, "v1")
@@ -232,14 +248,21 @@ def test_rejects_filtered_by_alias(tmp_path):
     # v1: 3 order_rejected events
     for i in range(3):
         dal_v1.append_event(
-            ts_ns=now - i * 1000, alias="v1", kind="order_rejected",
-            question_idx=i, reason="bad_token", payload_json=f'{{"cloid":"c{i}"}}',
+            ts_ns=now - i * 1000,
+            alias="v1",
+            kind="order_rejected",
+            question_idx=i,
+            reason="bad_token",
+            payload_json=f'{{"cloid":"c{i}"}}',
         )
     # v31: 2 order_rejected events with different reason
     for i in range(2):
         dal_v31.append_event(
-            ts_ns=now - i * 1000, alias="v31", kind="order_rejected",
-            question_idx=100 + i, reason="min_notional",
+            ts_ns=now - i * 1000,
+            alias="v31",
+            kind="order_rejected",
+            question_idx=100 + i,
+            reason="min_notional",
             payload_json=f'{{"cloid":"c31-{i}"}}',
         )
 
@@ -268,6 +291,7 @@ def test_rejects_filtered_by_alias(tmp_path):
 # 5. Graceful degradation: empty events table
 # ---------------------------------------------------------------------------
 
+
 def test_degrades_gracefully_empty_events_table(tmp_path):
     """Empty events table → rejects=[], last_decision=None, feed has no heartbeat."""
     diag = _import_diag()
@@ -290,6 +314,7 @@ def test_degrades_gracefully_empty_events_table(tmp_path):
 # 6. Graceful degradation: missing state.db
 # ---------------------------------------------------------------------------
 
+
 def test_degrades_gracefully_missing_db(tmp_path):
     """Missing state.db → slot sections are empty/null, no crash."""
     diag = _import_diag()
@@ -309,6 +334,7 @@ def test_degrades_gracefully_missing_db(tmp_path):
 # ---------------------------------------------------------------------------
 # 7. Flags: presence + mtime
 # ---------------------------------------------------------------------------
+
 
 def test_flags_restart_blocked_detected(tmp_path):
     diag = _import_diag()
@@ -367,6 +393,7 @@ def test_flags_missing_returns_null_mtime(tmp_path):
 # 8. Feed: heartbeat event
 # ---------------------------------------------------------------------------
 
+
 def test_feed_last_heartbeat_populated(tmp_path):
     diag = _import_diag()
     deploy_cfg = _make_deploy_config(tmp_path, ["v1"])
@@ -377,8 +404,11 @@ def test_feed_last_heartbeat_populated(tmp_path):
 
     # Heartbeat events carry alias="" (cross-slot); stored with alias=None in the DB
     dal.append_event(
-        ts_ns=hb_ts, alias=None, kind="engine_heartbeat",
-        question_idx=None, reason=None,
+        ts_ns=hb_ts,
+        alias=None,
+        kind="engine_heartbeat",
+        question_idx=None,
+        reason=None,
         payload_json=json.dumps({"events_ingested": 500, "d_events": 10, "n_questions": 3}),
     )
 
@@ -398,13 +428,20 @@ def test_feed_stale_state_populated(tmp_path):
     now = time.time_ns()
 
     dal.append_event(
-        ts_ns=now - 2_000_000_000, alias=None, kind="feed_stale",
-        question_idx=None, reason=None,
+        ts_ns=now - 2_000_000_000,
+        alias=None,
+        kind="feed_stale",
+        question_idx=None,
+        reason=None,
         payload_json=json.dumps({"d_events": 0, "interval_seconds": 30.0}),
     )
     dal.append_event(
-        ts_ns=now - 1_000_000_000, alias=None, kind="feed_recovered",
-        question_idx=None, reason=None, payload_json=None,
+        ts_ns=now - 1_000_000_000,
+        alias=None,
+        kind="feed_recovered",
+        question_idx=None,
+        reason=None,
+        payload_json=None,
     )
 
     snapshot = diag.build_snapshot(deploy_cfg, strategies)
@@ -420,6 +457,7 @@ def test_feed_stale_state_populated(tmp_path):
 # 9. Open orders with age
 # ---------------------------------------------------------------------------
 
+
 def test_open_orders_with_age(tmp_path):
     diag = _import_diag()
     deploy_cfg = _make_deploy_config(tmp_path, ["v1"])
@@ -429,12 +467,21 @@ def test_open_orders_with_age(tmp_path):
     now_ns = time.time_ns()
     placed_ns = now_ns - 30_000_000_000  # 30 seconds ago
 
-    dal.upsert_order(OpenOrder(
-        cloid="hla-v1-1", venue_oid=None, question_idx=42, symbol="@30",
-        side="buy", price=0.95, size=10.0, status="open",
-        placed_ts_ns=placed_ns, last_update_ts_ns=placed_ns,
-        strategy_id="late_resolution",
-    ))
+    dal.upsert_order(
+        OpenOrder(
+            cloid="hla-v1-1",
+            venue_oid=None,
+            question_idx=42,
+            symbol="@30",
+            side="buy",
+            price=0.95,
+            size=10.0,
+            status="open",
+            placed_ts_ns=placed_ns,
+            last_update_ts_ns=placed_ns,
+            strategy_id="late_resolution",
+        )
+    )
 
     snapshot = diag.build_snapshot(deploy_cfg, strategies)
     orders = snapshot["slots"]["v1"]["open_orders"]
@@ -443,12 +490,13 @@ def test_open_orders_with_age(tmp_path):
     order = orders[0]
     assert order["cloid"] == "hla-v1-1"
     assert order["age_seconds"] >= 29.0  # at least 29s
-    assert order["age_seconds"] < 60.0   # not unreasonably old
+    assert order["age_seconds"] < 60.0  # not unreasonably old
 
 
 # ---------------------------------------------------------------------------
 # 10. Status: paper / halted / blocked from flags
 # ---------------------------------------------------------------------------
+
 
 def test_status_paper_mode(tmp_path):
     diag = _import_diag()
@@ -480,7 +528,9 @@ def test_status_halted_when_halt_flag_present(tmp_path):
     deploy_cfg = _make_deploy_config(tmp_path, ["v1"])
     # paper_mode=False for this test
     strat = StrategyConfig(
-        name="late_resolution", paper_mode=False, account_alias="v1",
+        name="late_resolution",
+        paper_mode=False,
+        account_alias="v1",
         strategy_type="late_resolution",
         allowlist=[_minimal_allowlist_entry()],
         defaults=_minimal_allowlist_entry(),
@@ -501,6 +551,7 @@ def test_status_halted_when_halt_flag_present(tmp_path):
 # 11. Config fingerprint: stable hash + inline params
 # ---------------------------------------------------------------------------
 
+
 def test_config_fingerprint_stable(tmp_path):
     diag = _import_diag()
     deploy_cfg = _make_deploy_config(tmp_path, ["v1"])
@@ -510,8 +561,7 @@ def test_config_fingerprint_stable(tmp_path):
     snap1 = diag.build_snapshot(deploy_cfg, strategies)
     snap2 = diag.build_snapshot(deploy_cfg, strategies)
 
-    assert snap1["slots"]["v1"]["config_fingerprint"]["hash"] == \
-           snap2["slots"]["v1"]["config_fingerprint"]["hash"]
+    assert snap1["slots"]["v1"]["config_fingerprint"]["hash"] == snap2["slots"]["v1"]["config_fingerprint"]["hash"]
 
 
 def test_config_fingerprint_has_inline_params(tmp_path):
@@ -536,7 +586,9 @@ def test_config_fingerprint_changes_with_params(tmp_path):
 
     strat_a = _make_strategy_config("v1")
     strat_b = StrategyConfig(
-        name="late_resolution", paper_mode=True, account_alias="v1",
+        name="late_resolution",
+        paper_mode=True,
+        account_alias="v1",
         strategy_type="late_resolution",
         allowlist=[_minimal_allowlist_entry()],
         defaults=_minimal_allowlist_entry(exit_safety_d=2.0),  # different exit_safety_d
@@ -548,13 +600,13 @@ def test_config_fingerprint_changes_with_params(tmp_path):
     snap_a = diag.build_snapshot(deploy_cfg, StrategiesConfig(strategies=[strat_a]))
     snap_b = diag.build_snapshot(deploy_cfg, StrategiesConfig(strategies=[strat_b]))
 
-    assert snap_a["slots"]["v1"]["config_fingerprint"]["hash"] != \
-           snap_b["slots"]["v1"]["config_fingerprint"]["hash"]
+    assert snap_a["slots"]["v1"]["config_fingerprint"]["hash"] != snap_b["slots"]["v1"]["config_fingerprint"]["hash"]
 
 
 # ---------------------------------------------------------------------------
 # 12. last_decision: most recent decision/terminal event per slot
 # ---------------------------------------------------------------------------
+
 
 def test_last_decision_populated(tmp_path):
     diag = _import_diag()
@@ -565,12 +617,20 @@ def test_last_decision_populated(tmp_path):
     now = time.time_ns()
 
     dal.append_event(
-        ts_ns=now - 1_000_000_000, alias="v1", kind="entry",
-        question_idx=42, reason=None, payload_json='{"symbol":"@30"}',
+        ts_ns=now - 1_000_000_000,
+        alias="v1",
+        kind="entry",
+        question_idx=42,
+        reason=None,
+        payload_json='{"symbol":"@30"}',
     )
     dal.append_event(
-        ts_ns=now - 500_000_000, alias="v1", kind="exit",
-        question_idx=42, reason="exit_safety_d", payload_json='{"realized_pnl":5.0}',
+        ts_ns=now - 500_000_000,
+        alias="v1",
+        kind="exit",
+        question_idx=42,
+        reason="exit_safety_d",
+        payload_json='{"realized_pnl":5.0}',
     )
 
     snapshot = diag.build_snapshot(deploy_cfg, strategies)
@@ -586,13 +646,16 @@ def test_last_decision_populated(tmp_path):
 # 13. --alias filter
 # ---------------------------------------------------------------------------
 
+
 def test_alias_filter_returns_only_requested_slot(tmp_path):
     diag = _import_diag()
     deploy_cfg = _make_deploy_config(tmp_path, ["v1", "v31"])
-    strategies = StrategiesConfig(strategies=[
-        _make_strategy_config("v1"),
-        _make_strategy_config("v31", strategy_type="theta_harvester"),
-    ])
+    strategies = StrategiesConfig(
+        strategies=[
+            _make_strategy_config("v1"),
+            _make_strategy_config("v31", strategy_type="theta_harvester"),
+        ]
+    )
 
     _seed_dal(deploy_cfg, "v1")
     _seed_dal(deploy_cfg, "v31")
@@ -605,6 +668,7 @@ def test_alias_filter_returns_only_requested_slot(tmp_path):
 # ---------------------------------------------------------------------------
 # 14. JSON output: build_snapshot result is JSON-serialisable
 # ---------------------------------------------------------------------------
+
 
 def test_snapshot_is_json_serialisable(tmp_path):
     diag = _import_diag()
@@ -623,13 +687,16 @@ def test_snapshot_is_json_serialisable(tmp_path):
 # 15. Multi-slot: both slots present
 # ---------------------------------------------------------------------------
 
+
 def test_multi_slot_both_present(tmp_path):
     diag = _import_diag()
     deploy_cfg = _make_deploy_config(tmp_path, ["v1", "v31"])
-    strategies = StrategiesConfig(strategies=[
-        _make_strategy_config("v1"),
-        _make_strategy_config("v31", strategy_type="theta_harvester"),
-    ])
+    strategies = StrategiesConfig(
+        strategies=[
+            _make_strategy_config("v1"),
+            _make_strategy_config("v31", strategy_type="theta_harvester"),
+        ]
+    )
 
     _seed_dal(deploy_cfg, "v1")
     _seed_dal(deploy_cfg, "v31")

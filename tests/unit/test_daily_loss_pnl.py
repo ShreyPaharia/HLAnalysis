@@ -14,6 +14,7 @@ Venue settlement semantics differ:
 On a sustained venue-read outage the gate must fail safe (halt the slot)
 rather than trade on an understated number.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -30,8 +31,7 @@ async def test_daily_pnl_hl_uses_venue_only(tmp_path):
     rt, slot = _build_runtime_with_recording(tmp_path)
     assert slot.is_pm is False  # default builder is an HL slot
     slot.exec_client.realized_pnl_since = lambda ns, **_kw: -10.0  # venue (incl. settle)
-    slot.dal.record_settlement(question_idx=1, symbol="@30",
-                               realized_pnl=-50.0, ts_ns=_NOW)
+    slot.dal.record_settlement(question_idx=1, symbol="@30", realized_pnl=-50.0, ts_ns=_NOW)
 
     pnl = await rt._realized_pnl_today(slot, now_ns=_NOW)
 
@@ -44,8 +44,7 @@ async def test_daily_pnl_pm_adds_persisted_settlement(tmp_path):
     rt, slot = _build_runtime_with_recording(tmp_path)
     slot.venue = "polymarket"  # flip the single venue predicate → PM path
     slot.exec_client.realized_pnl_since = lambda ns, **_kw: -10.0  # venue fills only
-    slot.dal.record_settlement(question_idx=1, symbol="@30",
-                               realized_pnl=-50.0, ts_ns=_NOW)
+    slot.dal.record_settlement(question_idx=1, symbol="@30", realized_pnl=-50.0, ts_ns=_NOW)
 
     pnl = await rt._realized_pnl_today(slot, now_ns=_NOW)
 
@@ -61,8 +60,7 @@ async def test_venue_failure_uses_settlement_inclusive_dal_then_halts(tmp_path):
         raise RuntimeError("HL down")
 
     slot.exec_client.realized_pnl_since = _boom
-    slot.dal.record_settlement(question_idx=1, symbol="@30",
-                               realized_pnl=-7.0, ts_ns=_NOW)
+    slot.dal.record_settlement(question_idx=1, symbol="@30", realized_pnl=-7.0, ts_ns=_NOW)
 
     # 1st failure: fall back to the settlement-inclusive DAL value (NOT zero),
     # don't halt yet.

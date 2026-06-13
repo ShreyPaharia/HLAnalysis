@@ -11,6 +11,7 @@ Two tests:
    Previously this always produced 0 entries because recent_volume_usd was
    hardcoded 0.0 in run_one_question.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -208,9 +209,7 @@ def test_volume_gated_strategy_blocked_when_no_trades():
     res = run_one_question(strat, ds, sq_no_trades.descriptor, cfg, strike=sq_with_trades.strike)
 
     non_settle_fills = [f for f in res.fills if f.cloid != "settle"]
-    assert len(non_settle_fills) == 0, (
-        f"Expected 0 entries when no trades, got {len(non_settle_fills)}"
-    )
+    assert len(non_settle_fills) == 0, f"Expected 0 entries when no trades, got {len(non_settle_fills)}"
     assert strat.last_volume_seen == pytest.approx(0.0), (
         f"Expected 0 volume with no trades, got {strat.last_volume_seen}"
     )

@@ -52,10 +52,7 @@ def build_engine_subscriptions(sym_cfg: RecorderConfig) -> list[Subscription]:
 
     PM slots reference ``BTCUSDT_SPOT`` or ``ETHUSDT_SPOT`` (no perp/spot basis
     in price, σ, or strike). The perp BTCUSDT feed was removed 2026-06-01."""
-    subs = [
-        s for s in sym_cfg.subscriptions
-        if s.venue in _ENGINE_VENUES_FROM_SYMBOLS
-    ]
+    subs = [s for s in sym_cfg.subscriptions if s.venue in _ENGINE_VENUES_FROM_SYMBOLS]
     subs.append(binance_spot_reference_subscription("BTCUSDT"))
     subs.append(binance_spot_reference_subscription("ETHUSDT"))
     return subs
@@ -65,9 +62,7 @@ def build_engine_adapter() -> CompositeAdapter:
     """One merged stream over HL + PM + the binance reference feed. Each child
     adapter only receives its own venue's subs (CompositeAdapter filters by
     `venue`), so the BinanceAdapter sees only the bbo reference sub."""
-    return CompositeAdapter(
-        [HyperliquidAdapter(), PolymarketAdapter(), BinanceAdapter()]
-    )
+    return CompositeAdapter([HyperliquidAdapter(), PolymarketAdapter(), BinanceAdapter()])
 
 
 class _InterceptHandler(logging.Handler):
@@ -91,12 +86,16 @@ def main() -> None:
     p.add_argument("--strategy-config", type=Path, default=Path("config/strategy.yaml"))
     p.add_argument("--deploy-config", type=Path, default=Path("config/deploy.yaml"))
     p.add_argument(
-        "--symbols-config", type=Path, default=Path("config/symbols.yaml"),
+        "--symbols-config",
+        type=Path,
+        default=Path("config/symbols.yaml"),
         help="Subscriptions feeding MarketState (HIP-4 binaries + BTC spot bbo reference).",
     )
     p.add_argument("--log-level", default="INFO")
     p.add_argument(
-        "--log-format", choices=["json", "pretty"], default="json",
+        "--log-format",
+        choices=["json", "pretty"],
+        default="json",
         help=(
             "Log output format. 'json' (default) emits one JSON object per line, "
             "suitable for journald / SSM / jq pipelines. "
@@ -146,16 +145,17 @@ def main() -> None:
         if s.paper_mode:
             logger.warning(
                 "PAPER MODE alias={} ({}) — no real orders will be placed",
-                s.account_alias, s.strategy_type,
+                s.account_alias,
+                s.strategy_type,
             )
         else:
             # warning, not error: this is a startup banner, not a failure
             # condition. Logging at ERROR pollutes journalctl ERROR filters
             # and any alerting hooked off the loguru level.
             logger.warning(
-                "LIVE MODE alias={} ({}) — real money at stake; "
-                "ensure caps in strategy.yaml are correct",
-                s.account_alias, s.strategy_type,
+                "LIVE MODE alias={} ({}) — real money at stake; ensure caps in strategy.yaml are correct",
+                s.account_alias,
+                s.strategy_type,
             )
 
     asyncio.run(runtime.run())

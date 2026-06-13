@@ -6,6 +6,7 @@ produce exactly the payoff the runner booked before the routing change, and that
 payoff must equal ``settlement_payoff_price(position_side_idx, settled_side_idx)``
 where the winner is supplied by the venue/recorded resolved outcome.
 """
+
 import pytest
 
 from hlanalysis.backtest.core.data_source import QuestionDescriptor
@@ -15,15 +16,24 @@ from hlanalysis.marketdata.position_math import settlement_payoff_price
 
 def _q(legs: tuple[str, ...]) -> QuestionDescriptor:
     return QuestionDescriptor(
-        question_id="q1", question_idx=1, start_ts_ns=0, end_ts_ns=10,
-        leg_symbols=legs, klass="priceBinary", underlying="BTC",
+        question_id="q1",
+        question_idx=1,
+        start_ts_ns=0,
+        end_ts_ns=10,
+        leg_symbols=legs,
+        klass="priceBinary",
+        underlying="BTC",
     )
 
 
 def _pos(symbol: str) -> Position:
     return Position(
-        question_idx=1, symbol=symbol, qty=10.0, avg_entry=0.4,
-        stop_loss_price=-1.0, last_update_ts_ns=0,
+        question_idx=1,
+        symbol=symbol,
+        qty=10.0,
+        avg_entry=0.4,
+        stop_loss_price=-1.0,
+        last_update_ts_ns=0,
     )
 
 
@@ -32,10 +42,10 @@ def _pos(symbol: str) -> Position:
 @pytest.mark.parametrize(
     "outcome, held_idx, expected",
     [
-        ("yes", 0, 1.0),   # hold YES, YES won  -> win
-        ("yes", 1, 0.0),   # hold NO,  YES won  -> loss
-        ("no", 1, 1.0),    # hold NO,  NO won   -> win
-        ("no", 0, 0.0),    # hold YES, NO won   -> loss
+        ("yes", 0, 1.0),  # hold YES, YES won  -> win
+        ("yes", 1, 0.0),  # hold NO,  YES won  -> loss
+        ("no", 1, 1.0),  # hold NO,  NO won   -> win
+        ("no", 0, 0.0),  # hold YES, NO won   -> loss
         ("unknown", 0, 0.0),  # unresolved -> worthless
         ("unknown", 1, 0.0),
     ],

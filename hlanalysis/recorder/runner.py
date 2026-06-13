@@ -50,9 +50,7 @@ async def _flusher(writer: ParquetWriter, stop: asyncio.Event) -> None:
         writer.maybe_flush()
 
 
-async def _supervise(
-    stop: asyncio.Event, adapter_tasks: list[asyncio.Task]
-) -> None:
+async def _supervise(stop: asyncio.Event, adapter_tasks: list[asyncio.Task]) -> None:
     """Return when the operator signals stop OR any adapter task ends (SHR-42).
 
     `_run_adapter` swallows exceptions and returns, so a crashed venue task just
@@ -72,8 +70,8 @@ async def _supervise(
     if not stop.is_set():
         n_dead = sum(1 for t in adapter_tasks if t.done())
         log.error(
-            "recorder adapter task exited unexpectedly (%d done); shutting down "
-            "for supervisor restart", n_dead,
+            "recorder adapter task exited unexpectedly (%d done); shutting down for supervisor restart",
+            n_dead,
         )
         stop.set()
 
@@ -111,9 +109,7 @@ async def run(config_path: Path, data_root: Path) -> None:
             log.error("no adapter registered for venue=%s; skipping %d subs", venue, len(subs))
             continue
         adapter = adapter_cls()
-        unsupported = [
-            s for s in subs if not adapter.supports(s.product_type, s.mechanism)
-        ]
+        unsupported = [s for s in subs if not adapter.supports(s.product_type, s.mechanism)]
         if unsupported:
             log.error(
                 "%s does not support %d subs; skipping: %s",

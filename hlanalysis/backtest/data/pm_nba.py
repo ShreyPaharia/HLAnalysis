@@ -12,6 +12,7 @@ backtester reads pure parquet (no network) at run time. The data source emits
 This module currently contains only the discovery helpers. The
 `PolymarketNBADataSource` class (Tasks 7-8) lives in the same file.
 """
+
 from __future__ import annotations
 
 import heapq
@@ -189,7 +190,11 @@ class PolymarketNBADataSource:
     # ---- DataSource protocol ---------------------------------------------
 
     def discover(
-        self, *, start: str, end: str, **_filters: object,
+        self,
+        *,
+        start: str,
+        end: str,
+        **_filters: object,
     ) -> list[QuestionDescriptor]:
         manifest = self._load_manifest()
         out: list[QuestionDescriptor] = []
@@ -233,32 +238,44 @@ class PolymarketNBADataSource:
         leg_events: list[MarketEvent] = []
         for t in sorted(trades, key=lambda r: r.ts_ns):
             snap = trade_to_l2(
-                ts_ns=t.ts_ns, token_id=t.token_id, price=t.price,
-                half_spread=self._half_spread, depth=self._depth,
+                ts_ns=t.ts_ns,
+                token_id=t.token_id,
+                price=t.price,
+                half_spread=self._half_spread,
+                depth=self._depth,
             )
             leg_events.append(_book_from_l2(snap))
-            leg_events.append(TradeEvent(
-                ts_ns=t.ts_ns, symbol=t.token_id,
-                side=t.side, price=t.price, size=t.size,
-            ))
-            # Parity: emit complementary BookSnapshot at 1−p on the other leg.
-            other = away_tok if t.token_id == home_tok else (
-                home_tok if t.token_id == away_tok else None
+            leg_events.append(
+                TradeEvent(
+                    ts_ns=t.ts_ns,
+                    symbol=t.token_id,
+                    side=t.side,
+                    price=t.price,
+                    size=t.size,
+                )
             )
+            # Parity: emit complementary BookSnapshot at 1−p on the other leg.
+            other = away_tok if t.token_id == home_tok else (home_tok if t.token_id == away_tok else None)
             if other is not None:
                 comp_price = max(_P_CLIP_LO, min(_P_CLIP_HI, 1.0 - t.price))
                 comp_snap = trade_to_l2(
-                    ts_ns=t.ts_ns, token_id=other, price=comp_price,
-                    half_spread=self._half_spread, depth=self._depth,
+                    ts_ns=t.ts_ns,
+                    token_id=other,
+                    price=comp_price,
+                    half_spread=self._half_spread,
+                    depth=self._depth,
                 )
                 leg_events.append(_book_from_l2(comp_snap))
 
         ref_events = [
             ReferenceEvent(
-                ts_ns=int(r["ts_ns"]), symbol="NBA_WP",
+                ts_ns=int(r["ts_ns"]),
+                symbol="NBA_WP",
                 # `close` carries p_yes_home; high/low/open mirror it.
-                high=float(r["p_yes_home"]), low=float(r["p_yes_home"]),
-                close=float(r["p_yes_home"]), open=float(r["p_yes_home"]),
+                high=float(r["p_yes_home"]),
+                low=float(r["p_yes_home"]),
+                close=float(r["p_yes_home"]),
+                open=float(r["p_yes_home"]),
             )
             for r in wp_series
         ]
@@ -274,12 +291,18 @@ class PolymarketNBADataSource:
         ]
 
         yield from heapq.merge(
-            iter(leg_events), iter(ref_events), iter(settle_events),
+            iter(leg_events),
+            iter(ref_events),
+            iter(settle_events),
             key=lambda e: e.ts_ns,
         )
 
     def question_view(
-        self, q: QuestionDescriptor, *, now_ns: int, settled: bool,
+        self,
+        q: QuestionDescriptor,
+        *,
+        now_ns: int,
+        settled: bool,
     ) -> QuestionView:
         manifest = self._load_manifest()
         entry = manifest.get(q.question_id) or {}
@@ -307,8 +330,7 @@ class PolymarketNBADataSource:
             settled=is_settled,
             settled_side=side,
             leg_symbols=q.leg_symbols,
-            kv=(("home_team", str(mk.get("home_team", ""))),
-                ("away_team", str(mk.get("away_team", "")))),
+            kv=(("home_team", str(mk.get("home_team", ""))), ("away_team", str(mk.get("away_team", "")))),
         )
 
     def resolved_outcome(self, q: QuestionDescriptor) -> Literal["yes", "no", "unknown"]:
@@ -340,10 +362,16 @@ class PolymarketNBADataSource:
         if not path.exists():
             return []
         rows = pq.read_table(path).to_pylist()
-        return [_RawTrade(
-            ts_ns=int(r["ts_ns"]), token_id=str(r["token_id"]),
-            side=str(r["side"]), price=float(r["price"]), size=float(r["size"]),
-        ) for r in rows]
+        return [
+            _RawTrade(
+                ts_ns=int(r["ts_ns"]),
+                token_id=str(r["token_id"]),
+                side=str(r["side"]),
+                price=float(r["price"]),
+                size=float(r["size"]),
+            )
+            for r in rows
+        ]
 
     def _read_wp_series(self, espn_game_id: str) -> list[dict]:
         if not espn_game_id:
@@ -409,10 +437,7 @@ def _fetch_nba_gamma_events(start_iso: str, end_iso: str) -> list[dict]:
         if len(page) < _PAGE_LIMIT:
             break
         offset += len(page)
-    return [
-        ev for ev in out
-        if start_iso <= (ev.get("endDate") or "")[:10] < end_iso
-    ]
+    return [ev for ev in out if start_iso <= (ev.get("endDate") or "")[:10] < end_iso]
 
 
 def _fetch_pm_trades_raw(condition_id: str) -> list[dict]:
@@ -448,6 +473,7 @@ def _fetch_pm_trades_raw(condition_id: str) -> list[dict]:
 
 def _load_wp_model(path: Path):
     import joblib
+
     return joblib.load(path)
 
 
@@ -466,11 +492,13 @@ def _build_wp_series_rows(pbp_rows: list[dict], model) -> list[dict]:
             period=int(r["period"]),
             seconds_remaining_in_period=int(r["seconds_remaining_in_period"]),
         )
-        feature_matrix.append(wp_features(
-            score_diff_home=int(r["score_diff_home"]),
-            total_seconds_remaining=total,
-            period=int(r["period"]),
-        ))
+        feature_matrix.append(
+            wp_features(
+                score_diff_home=int(r["score_diff_home"]),
+                total_seconds_remaining=total,
+                period=int(r["period"]),
+            )
+        )
         keep_idx.append(i)
         keep_total.append(total)
     if not feature_matrix:
@@ -480,14 +508,16 @@ def _build_wp_series_rows(pbp_rows: list[dict], model) -> list[dict]:
     out: list[dict] = []
     for p, i, total in zip(probs, keep_idx, keep_total):
         r = pbp_rows[i]
-        out.append({
-            "ts_ns": int(r["ts_ns"]),
-            "p_yes_home": float(p),
-            "score_diff_home": int(r["score_diff_home"]),
-            "total_seconds_remaining": int(total),
-            "period": int(r["period"]),
-            "is_overtime": False,
-        })
+        out.append(
+            {
+                "ts_ns": int(r["ts_ns"]),
+                "p_yes_home": float(p),
+                "score_diff_home": int(r["score_diff_home"]),
+                "total_seconds_remaining": int(total),
+                "period": int(r["period"]),
+                "is_overtime": False,
+            }
+        )
     return out
 
 
@@ -495,14 +525,19 @@ def _write_wp_series_parquet(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
         return
-    pq.write_table(pa.table({
-        "ts_ns": [int(r["ts_ns"]) for r in rows],
-        "p_yes_home": [float(r["p_yes_home"]) for r in rows],
-        "score_diff_home": [int(r["score_diff_home"]) for r in rows],
-        "total_seconds_remaining": [int(r["total_seconds_remaining"]) for r in rows],
-        "period": [int(r["period"]) for r in rows],
-        "is_overtime": [bool(r["is_overtime"]) for r in rows],
-    }), path)
+    pq.write_table(
+        pa.table(
+            {
+                "ts_ns": [int(r["ts_ns"]) for r in rows],
+                "p_yes_home": [float(r["p_yes_home"]) for r in rows],
+                "score_diff_home": [int(r["score_diff_home"]) for r in rows],
+                "total_seconds_remaining": [int(r["total_seconds_remaining"]) for r in rows],
+                "period": [int(r["period"]) for r in rows],
+                "is_overtime": [bool(r["is_overtime"]) for r in rows],
+            }
+        ),
+        path,
+    )
 
 
 def _write_pm_trades_parquet(path: Path, raw_trades: list[dict]) -> None:
@@ -517,9 +552,18 @@ def _write_pm_trades_parquet(path: Path, raw_trades: list[dict]) -> None:
             sizes.append(float(row["size"]))
         except (KeyError, ValueError, TypeError):
             continue
-    pq.write_table(pa.table({
-        "ts_ns": ts, "token_id": toks, "side": sides, "price": prices, "size": sizes,
-    }), path)
+    pq.write_table(
+        pa.table(
+            {
+                "ts_ns": ts,
+                "token_id": toks,
+                "side": sides,
+                "price": prices,
+                "size": sizes,
+            }
+        ),
+        path,
+    )
 
 
 def _parse_iso_ns_local(iso: str) -> int:
@@ -651,9 +695,7 @@ def _fetch_and_cache(
 
         # PM trades
         pm_trades = _fetch_pm_trades_raw(cond_id)
-        _write_pm_trades_parquet(
-            self._cache_root / "pm_trades" / f"{cond_id}.parquet", pm_trades
-        )
+        _write_pm_trades_parquet(self._cache_root / "pm_trades" / f"{cond_id}.parquet", pm_trades)
 
         # ESPN PBP
         try:
@@ -662,15 +704,11 @@ def _fetch_and_cache(
             logger.warning(f"ESPN summary {espn_game['id']} failed: {e}")
             continue
         pbp_rows = pbp_to_rows(summary)
-        write_pbp_parquet(
-            self._cache_root / "pbp" / f"{espn_game['id']}.parquet", pbp_rows
-        )
+        write_pbp_parquet(self._cache_root / "pbp" / f"{espn_game['id']}.parquet", pbp_rows)
 
         # WP series
         wp_rows = _build_wp_series_rows(pbp_rows, model)
-        _write_wp_series_parquet(
-            self._cache_root / "wp_series" / f"{espn_game['id']}.parquet", wp_rows
-        )
+        _write_wp_series_parquet(self._cache_root / "wp_series" / f"{espn_game['id']}.parquet", wp_rows)
 
         # end_ts_ns = actual game-end time (last WP row), not PM resolution
         # cutoff. PM's endDate is when the market stops accepting bets; the game

@@ -22,6 +22,7 @@ of the previous snapshot's price set (no price is ever removed), so the
 path are always empty — no clear events are emitted.  Both paths then produce
 identical DEPTH_EVENT / TRADE_EVENT sequences after the stable sort.
 """
+
 from __future__ import annotations
 
 import json
@@ -34,6 +35,7 @@ import pytest
 
 from hlanalysis.backtest.core.events import BookSnapshot, TradeEvent
 from hlanalysis.backtest.data.polymarket import PolymarketDataSource
+
 # The legacy runner helper ``_build_leg_event_array`` was collapsed into the
 # shared assembler; the in-memory snapshot→column adapter is its drop-in
 # replacement and the legacy reference these equivalence tests compare against.
@@ -43,11 +45,8 @@ from hlanalysis.backtest.data._fastpath_core import (
 
 # ── shared constants ─────────────────────────────────────────────────────────
 
-_BOOK_SUBPATH = (
-    "venue=polymarket/product_type=prediction_binary"
-    "/mechanism=clob/event=book_snapshot"
-)
-_START = 1_780_000_000_000_000_000   # ≈ 2026-05-28 UTC
+_BOOK_SUBPATH = "venue=polymarket/product_type=prediction_binary/mechanism=clob/event=book_snapshot"
+_START = 1_780_000_000_000_000_000  # ≈ 2026-05-28 UTC
 _END = _START + 7200 * 1_000_000_000  # +2h
 _COND = "equiv_cond_001"
 _YES = "yes_token_equiv"
@@ -56,8 +55,9 @@ _NO = "no_token_equiv"
 # ── fixture helpers ───────────────────────────────────────────────────────────
 
 
-def _write_manifest(cache_root: Path, *, cond: str, yes_t: str, no_t: str,
-                    start: int, end: int, outcome: str = "yes") -> None:
+def _write_manifest(
+    cache_root: Path, *, cond: str, yes_t: str, no_t: str, start: int, end: int, outcome: str = "yes"
+) -> None:
     cache_root.mkdir(parents=True, exist_ok=True)
     manifest = {
         cond: {
@@ -82,13 +82,15 @@ def _write_manifest(cache_root: Path, *, cond: str, yes_t: str, no_t: str,
 def _write_trades(cache_root: Path, cond_id: str, rows: list[dict]) -> None:
     pm_trades = cache_root / "pm_trades"
     pm_trades.mkdir(parents=True, exist_ok=True)
-    table = pa.table({
-        "ts_ns":    pa.array([int(r["ts_ns"]) for r in rows], pa.int64()),
-        "token_id": [str(r["token_id"]) for r in rows],
-        "side":     [str(r["side"]) for r in rows],
-        "price":    pa.array([float(r["price"]) for r in rows], pa.float64()),
-        "size":     pa.array([float(r["size"]) for r in rows], pa.float64()),
-    })
+    table = pa.table(
+        {
+            "ts_ns": pa.array([int(r["ts_ns"]) for r in rows], pa.int64()),
+            "token_id": [str(r["token_id"]) for r in rows],
+            "side": [str(r["side"]) for r in rows],
+            "price": pa.array([float(r["price"]) for r in rows], pa.float64()),
+            "size": pa.array([float(r["size"]) for r in rows], pa.float64()),
+        }
+    )
     pq.write_table(table, pm_trades / f"{cond_id}.parquet")
 
 
@@ -98,33 +100,31 @@ def _write_klines(cache_root: Path, klines: list[dict]) -> None:
     (klines_dir / "fixture.json").write_text(json.dumps(klines))
 
 
-def _write_recorded_book(book_root: Path, token_id: str, date: str, hour: str,
-                         rows: list[dict]) -> None:
+def _write_recorded_book(book_root: Path, token_id: str, date: str, hour: str, rows: list[dict]) -> None:
     """Write recorded book_snapshot parquet for one token leg."""
-    d = (
-        book_root / _BOOK_SUBPATH
-        / f"symbol={token_id}" / f"date={date}" / f"hour={hour}"
-    )
+    d = book_root / _BOOK_SUBPATH / f"symbol={token_id}" / f"date={date}" / f"hour={hour}"
     d.mkdir(parents=True, exist_ok=True)
-    table = pa.table({
-        "exchange_ts": pa.array([int(r["exchange_ts"]) for r in rows], pa.int64()),
-        "bid_px": pa.array(
-            [[float(x) for x in r["bid_px"]] for r in rows],
-            pa.list_(pa.float64()),
-        ),
-        "bid_sz": pa.array(
-            [[float(x) for x in r["bid_sz"]] for r in rows],
-            pa.list_(pa.float64()),
-        ),
-        "ask_px": pa.array(
-            [[float(x) for x in r["ask_px"]] for r in rows],
-            pa.list_(pa.float64()),
-        ),
-        "ask_sz": pa.array(
-            [[float(x) for x in r["ask_sz"]] for r in rows],
-            pa.list_(pa.float64()),
-        ),
-    })
+    table = pa.table(
+        {
+            "exchange_ts": pa.array([int(r["exchange_ts"]) for r in rows], pa.int64()),
+            "bid_px": pa.array(
+                [[float(x) for x in r["bid_px"]] for r in rows],
+                pa.list_(pa.float64()),
+            ),
+            "bid_sz": pa.array(
+                [[float(x) for x in r["bid_sz"]] for r in rows],
+                pa.list_(pa.float64()),
+            ),
+            "ask_px": pa.array(
+                [[float(x) for x in r["ask_px"]] for r in rows],
+                pa.list_(pa.float64()),
+            ),
+            "ask_sz": pa.array(
+                [[float(x) for x in r["ask_sz"]] for r in rows],
+                pa.list_(pa.float64()),
+            ),
+        }
+    )
     pq.write_table(table, d / "data.parquet")
 
 
@@ -144,64 +144,80 @@ def _build_fixture(tmp_path: Path) -> tuple[Path, Path]:
     cache = tmp_path / "cache"
     book_root = tmp_path / "bookroot"
 
-    _write_manifest(cache, cond=_COND, yes_t=_YES, no_t=_NO,
-                    start=_START, end=_END, outcome="yes")
+    _write_manifest(cache, cond=_COND, yes_t=_YES, no_t=_NO, start=_START, end=_END, outcome="yes")
 
     # Trades: 2 for YES leg, 2 for NO leg. Mixed sides.
-    _write_trades(cache, _COND, [
-        {"ts_ns": _START + 200,  "token_id": _YES, "side": "buy",  "price": 0.60, "size": 50.0},
-        {"ts_ns": _START + 400,  "token_id": _YES, "side": "sell", "price": 0.61, "size": 30.0},
-        {"ts_ns": _START + 300,  "token_id": _NO,  "side": "buy",  "price": 0.39, "size": 40.0},
-        {"ts_ns": _START + 600,  "token_id": _NO,  "side": "sell", "price": 0.38, "size": 20.0},
-    ])
+    _write_trades(
+        cache,
+        _COND,
+        [
+            {"ts_ns": _START + 200, "token_id": _YES, "side": "buy", "price": 0.60, "size": 50.0},
+            {"ts_ns": _START + 400, "token_id": _YES, "side": "sell", "price": 0.61, "size": 30.0},
+            {"ts_ns": _START + 300, "token_id": _NO, "side": "buy", "price": 0.39, "size": 40.0},
+            {"ts_ns": _START + 600, "token_id": _NO, "side": "sell", "price": 0.38, "size": 20.0},
+        ],
+    )
 
-    _write_klines(cache, [
-        {"ts_ns": _START + 50,  "open": 80000.0, "high": 80100.0,
-         "low": 79900.0, "close": 80050.0},
-        {"ts_ns": _START + 110, "open": 80050.0, "high": 80200.0,
-         "low": 80000.0, "close": 80150.0},
-    ])
+    _write_klines(
+        cache,
+        [
+            {"ts_ns": _START + 50, "open": 80000.0, "high": 80100.0, "low": 79900.0, "close": 80050.0},
+            {"ts_ns": _START + 110, "open": 80050.0, "high": 80200.0, "low": 80000.0, "close": 80150.0},
+        ],
+    )
 
     # YES leg: 2 snapshots. Written in NON-STANDARD order (bids ASC, asks DESC)
     # to exercise the normalisation. Second snapshot has STRICTLY MORE price
     # levels than the first (superset) → no stale-level clears.
-    _write_recorded_book(book_root, _YES, "2026-05-28", "12", [
-        {
-            "exchange_ts": _START + 500,
-            # Bids written ASC (ascending price) — normalised to DESC by both paths.
-            "bid_px": [0.57, 0.58, 0.59],
-            "bid_sz": [300.0, 200.0, 100.0],
-            # Asks written DESC — normalised to ASC by both paths.
-            "ask_px": [0.63, 0.62, 0.61],
-            "ask_sz": [350.0, 400.0, 450.0],
-        },
-        {
-            # Superset snapshot: adds price levels 0.56 (bid) and 0.64 (ask).
-            "exchange_ts": _START + 1000,
-            "bid_px": [0.56, 0.57, 0.58, 0.59],
-            "bid_sz": [400.0, 310.0, 210.0, 110.0],
-            "ask_px": [0.64, 0.63, 0.62, 0.61],
-            "ask_sz": [500.0, 360.0, 410.0, 460.0],
-        },
-    ])
+    _write_recorded_book(
+        book_root,
+        _YES,
+        "2026-05-28",
+        "12",
+        [
+            {
+                "exchange_ts": _START + 500,
+                # Bids written ASC (ascending price) — normalised to DESC by both paths.
+                "bid_px": [0.57, 0.58, 0.59],
+                "bid_sz": [300.0, 200.0, 100.0],
+                # Asks written DESC — normalised to ASC by both paths.
+                "ask_px": [0.63, 0.62, 0.61],
+                "ask_sz": [350.0, 400.0, 450.0],
+            },
+            {
+                # Superset snapshot: adds price levels 0.56 (bid) and 0.64 (ask).
+                "exchange_ts": _START + 1000,
+                "bid_px": [0.56, 0.57, 0.58, 0.59],
+                "bid_sz": [400.0, 310.0, 210.0, 110.0],
+                "ask_px": [0.64, 0.63, 0.62, 0.61],
+                "ask_sz": [500.0, 360.0, 410.0, 460.0],
+            },
+        ],
+    )
 
     # NO leg: 2 snapshots, same superset constraint.
-    _write_recorded_book(book_root, _NO, "2026-05-28", "12", [
-        {
-            "exchange_ts": _START + 550,
-            "bid_px": [0.38, 0.39, 0.40],
-            "bid_sz": [120.0, 130.0, 140.0],
-            "ask_px": [0.42, 0.41],
-            "ask_sz": [150.0, 160.0],
-        },
-        {
-            "exchange_ts": _START + 1100,
-            "bid_px": [0.37, 0.38, 0.39, 0.40],
-            "bid_sz": [110.0, 125.0, 135.0, 145.0],
-            "ask_px": [0.43, 0.42, 0.41],
-            "ask_sz": [165.0, 155.0, 165.0],
-        },
-    ])
+    _write_recorded_book(
+        book_root,
+        _NO,
+        "2026-05-28",
+        "12",
+        [
+            {
+                "exchange_ts": _START + 550,
+                "bid_px": [0.38, 0.39, 0.40],
+                "bid_sz": [120.0, 130.0, 140.0],
+                "ask_px": [0.42, 0.41],
+                "ask_sz": [150.0, 160.0],
+            },
+            {
+                "exchange_ts": _START + 1100,
+                "bid_px": [0.37, 0.38, 0.39, 0.40],
+                "bid_sz": [110.0, 125.0, 135.0, 145.0],
+                "ask_px": [0.43, 0.42, 0.41],
+                "ask_sz": [165.0, 155.0, 165.0],
+            },
+        ],
+    )
 
     return cache, book_root
 
@@ -222,14 +238,10 @@ def _legacy_leg_arrays(src: PolymarketDataSource, q) -> dict[str, np.ndarray]:
         elif isinstance(ev, TradeEvent):
             trades[ev.symbol].append(ev)
 
-    return {
-        sym: _build_leg_event_array(books[sym], trades[sym])
-        for sym in q.leg_symbols
-    }
+    return {sym: _build_leg_event_array(books[sym], trades[sym]) for sym in q.leg_symbols}
 
 
 # ── tests ─────────────────────────────────────────────────────────────────────
-
 
 
 def test_pm_fastpath_leg_arrays_bit_equivalent(tmp_path: Path) -> None:
@@ -240,9 +252,7 @@ def test_pm_fastpath_leg_arrays_bit_equivalent(tmp_path: Path) -> None:
     (each snapshot extends the prior price set), making both paths deterministic.
     """
     cache, book_root = _build_fixture(tmp_path)
-    src = PolymarketDataSource(
-        cache_root=cache, book_source="recorded", pm_book_root=book_root
-    )
+    src = PolymarketDataSource(cache_root=cache, book_source="recorded", pm_book_root=book_root)
     q = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
 
     legacy = _legacy_leg_arrays(src, q)
@@ -254,22 +264,11 @@ def test_pm_fastpath_leg_arrays_bit_equivalent(tmp_path: Path) -> None:
     for sym in q.leg_symbols:
         leg_fast = fast[sym]
         leg_leg = legacy[sym]
-        assert len(leg_fast) == len(leg_leg), (
-            f"{sym}: fast path has {len(leg_fast)} events, "
-            f"legacy has {len(leg_leg)}"
-        )
-        assert np.array_equal(leg_fast["exch_ts"], leg_leg["exch_ts"]), (
-            f"{sym}: exch_ts mismatch"
-        )
-        assert np.array_equal(leg_fast["ev"], leg_leg["ev"]), (
-            f"{sym}: ev (event type flag) mismatch"
-        )
-        assert np.allclose(leg_fast["px"], leg_leg["px"]), (
-            f"{sym}: px mismatch"
-        )
-        assert np.allclose(leg_fast["qty"], leg_leg["qty"]), (
-            f"{sym}: qty mismatch"
-        )
+        assert len(leg_fast) == len(leg_leg), f"{sym}: fast path has {len(leg_fast)} events, legacy has {len(leg_leg)}"
+        assert np.array_equal(leg_fast["exch_ts"], leg_leg["exch_ts"]), f"{sym}: exch_ts mismatch"
+        assert np.array_equal(leg_fast["ev"], leg_leg["ev"]), f"{sym}: ev (event type flag) mismatch"
+        assert np.allclose(leg_fast["px"], leg_leg["px"]), f"{sym}: px mismatch"
+        assert np.allclose(leg_fast["qty"], leg_leg["qty"]), f"{sym}: qty mismatch"
 
 
 def _multiset_sorted(arr: np.ndarray) -> np.ndarray:
@@ -299,38 +298,63 @@ def test_pm_fastpath_multiset_equiv_with_clears(tmp_path: Path) -> None:
     """
     cache = tmp_path / "cache"
     book_root = tmp_path / "bookroot"
-    _write_manifest(cache, cond=_COND, yes_t=_YES, no_t=_NO,
-                    start=_START, end=_END, outcome="yes")
-    _write_trades(cache, _COND, [
-        {"ts_ns": _START + 200, "token_id": _YES, "side": "buy", "price": 0.60, "size": 50.0},
-        {"ts_ns": _START + 300, "token_id": _NO, "side": "buy", "price": 0.39, "size": 40.0},
-    ])
-    _write_klines(cache, [
-        {"ts_ns": _START + 50, "open": 80000.0, "high": 80100.0,
-         "low": 79900.0, "close": 80050.0},
-    ])
+    _write_manifest(cache, cond=_COND, yes_t=_YES, no_t=_NO, start=_START, end=_END, outcome="yes")
+    _write_trades(
+        cache,
+        _COND,
+        [
+            {"ts_ns": _START + 200, "token_id": _YES, "side": "buy", "price": 0.60, "size": 50.0},
+            {"ts_ns": _START + 300, "token_id": _NO, "side": "buy", "price": 0.39, "size": 40.0},
+        ],
+    )
+    _write_klines(
+        cache,
+        [
+            {"ts_ns": _START + 50, "open": 80000.0, "high": 80100.0, "low": 79900.0, "close": 80050.0},
+        ],
+    )
     # YES leg: snapshot 2 REMOVES levels 0.59 (bid) and 0.61 (ask) present in
     # snapshot 1 → stale-level clears fire in both paths.
-    _write_recorded_book(book_root, _YES, "2026-05-28", "12", [
-        {"exchange_ts": _START + 500,
-         "bid_px": [0.57, 0.58, 0.59], "bid_sz": [300.0, 200.0, 100.0],
-         "ask_px": [0.63, 0.62, 0.61], "ask_sz": [350.0, 400.0, 450.0]},
-        {"exchange_ts": _START + 1000,
-         "bid_px": [0.57, 0.58], "bid_sz": [300.0, 200.0],
-         "ask_px": [0.63, 0.62], "ask_sz": [350.0, 400.0]},
-    ])
-    _write_recorded_book(book_root, _NO, "2026-05-28", "12", [
-        {"exchange_ts": _START + 550,
-         "bid_px": [0.38, 0.39, 0.40], "bid_sz": [120.0, 130.0, 140.0],
-         "ask_px": [0.42, 0.41], "ask_sz": [150.0, 160.0]},
-        {"exchange_ts": _START + 1100,
-         "bid_px": [0.38], "bid_sz": [120.0],
-         "ask_px": [0.41], "ask_sz": [160.0]},
-    ])
-
-    src = PolymarketDataSource(
-        cache_root=cache, book_source="recorded", pm_book_root=book_root
+    _write_recorded_book(
+        book_root,
+        _YES,
+        "2026-05-28",
+        "12",
+        [
+            {
+                "exchange_ts": _START + 500,
+                "bid_px": [0.57, 0.58, 0.59],
+                "bid_sz": [300.0, 200.0, 100.0],
+                "ask_px": [0.63, 0.62, 0.61],
+                "ask_sz": [350.0, 400.0, 450.0],
+            },
+            {
+                "exchange_ts": _START + 1000,
+                "bid_px": [0.57, 0.58],
+                "bid_sz": [300.0, 200.0],
+                "ask_px": [0.63, 0.62],
+                "ask_sz": [350.0, 400.0],
+            },
+        ],
     )
+    _write_recorded_book(
+        book_root,
+        _NO,
+        "2026-05-28",
+        "12",
+        [
+            {
+                "exchange_ts": _START + 550,
+                "bid_px": [0.38, 0.39, 0.40],
+                "bid_sz": [120.0, 130.0, 140.0],
+                "ask_px": [0.42, 0.41],
+                "ask_sz": [150.0, 160.0],
+            },
+            {"exchange_ts": _START + 1100, "bid_px": [0.38], "bid_sz": [120.0], "ask_px": [0.41], "ask_sz": [160.0]},
+        ],
+    )
+
+    src = PolymarketDataSource(cache_root=cache, book_source="recorded", pm_book_root=book_root)
     q = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
     legacy = _legacy_leg_arrays(src, q)
     fast = {sym: la.events for sym, la in src.events_arrays(q).leg_arrays.items()}
@@ -350,9 +374,7 @@ def test_pm_fastpath_multiset_equiv_with_clears(tmp_path: Path) -> None:
 def test_pm_fastpath_book_ts_matches_snapshot_timestamps(tmp_path: Path) -> None:
     """LegArrays.book_ts must equal the sorted snapshot exchange timestamps."""
     cache, book_root = _build_fixture(tmp_path)
-    src = PolymarketDataSource(
-        cache_root=cache, book_source="recorded", pm_book_root=book_root
-    )
+    src = PolymarketDataSource(cache_root=cache, book_source="recorded", pm_book_root=book_root)
     q = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
 
     bundle = src.events_arrays(q)
@@ -373,9 +395,7 @@ def test_pm_fastpath_reference_and_settlement_events(tmp_path: Path) -> None:
     from hlanalysis.backtest.core.events import ReferenceEvent, SettlementEvent
 
     cache, book_root = _build_fixture(tmp_path)
-    src = PolymarketDataSource(
-        cache_root=cache, book_source="recorded", pm_book_root=book_root
-    )
+    src = PolymarketDataSource(cache_root=cache, book_source="recorded", pm_book_root=book_root)
     q = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
 
     bundle = src.events_arrays(q)
@@ -398,27 +418,28 @@ def test_pm_fastpath_no_coverage_returns_empty_arrays(tmp_path: Path) -> None:
     cache = tmp_path / "cache"
     book_root = tmp_path / "bookroot_empty"  # nothing written here
 
-    _write_manifest(cache, cond=_COND, yes_t=_YES, no_t=_NO,
-                    start=_START, end=_END)
-    _write_trades(cache, _COND, [
-        {"ts_ns": _START + 100, "token_id": _YES, "side": "buy", "price": 0.6, "size": 10.0},
-    ])
-    _write_klines(cache, [
-        {"ts_ns": _START + 50, "open": 80000.0, "high": 80100.0,
-         "low": 79900.0, "close": 80050.0},
-    ])
-
-    src = PolymarketDataSource(
-        cache_root=cache, book_source="recorded", pm_book_root=book_root
+    _write_manifest(cache, cond=_COND, yes_t=_YES, no_t=_NO, start=_START, end=_END)
+    _write_trades(
+        cache,
+        _COND,
+        [
+            {"ts_ns": _START + 100, "token_id": _YES, "side": "buy", "price": 0.6, "size": 10.0},
+        ],
     )
+    _write_klines(
+        cache,
+        [
+            {"ts_ns": _START + 50, "open": 80000.0, "high": 80100.0, "low": 79900.0, "close": 80050.0},
+        ],
+    )
+
+    src = PolymarketDataSource(cache_root=cache, book_source="recorded", pm_book_root=book_root)
     q = src.discover(start="2026-01-01", end="2026-12-31", kind="binary")[0]
     bundle = src.events_arrays(q)
 
     # No book → only trade events; book_ts is empty.
     for sym in q.leg_symbols:
-        assert len(bundle.leg_arrays[sym].book_ts) == 0, (
-            f"{sym}: expected empty book_ts when no recorded book"
-        )
+        assert len(bundle.leg_arrays[sym].book_ts) == 0, f"{sym}: expected empty book_ts when no recorded book"
 
 
 # ── synthetic-mode equivalence tests ─────────────────────────────────────────
@@ -434,22 +455,26 @@ def _build_synthetic_fixture(tmp_path: Path) -> Path:
     - 2 legs (YES / NO), 3 trades each.
     """
     cache = tmp_path / "cache"
-    _write_manifest(cache, cond=_COND, yes_t=_YES, no_t=_NO,
-                    start=_START, end=_END, outcome="yes")
-    _write_trades(cache, _COND, [
-        {"ts_ns": _START + 200, "token_id": _YES, "side": "buy",  "price": 0.60, "size": 50.0},
-        {"ts_ns": _START + 400, "token_id": _YES, "side": "sell", "price": 0.61, "size": 30.0},
-        {"ts_ns": _START + 600, "token_id": _YES, "side": "buy",  "price": 0.59, "size": 20.0},
-        {"ts_ns": _START + 300, "token_id": _NO,  "side": "buy",  "price": 0.39, "size": 40.0},
-        {"ts_ns": _START + 500, "token_id": _NO,  "side": "sell", "price": 0.38, "size": 25.0},
-        {"ts_ns": _START + 700, "token_id": _NO,  "side": "buy",  "price": 0.40, "size": 15.0},
-    ])
-    _write_klines(cache, [
-        {"ts_ns": _START + 50,  "open": 80000.0, "high": 80100.0,
-         "low": 79900.0, "close": 80050.0},
-        {"ts_ns": _START + 110, "open": 80050.0, "high": 80200.0,
-         "low": 80000.0, "close": 80150.0},
-    ])
+    _write_manifest(cache, cond=_COND, yes_t=_YES, no_t=_NO, start=_START, end=_END, outcome="yes")
+    _write_trades(
+        cache,
+        _COND,
+        [
+            {"ts_ns": _START + 200, "token_id": _YES, "side": "buy", "price": 0.60, "size": 50.0},
+            {"ts_ns": _START + 400, "token_id": _YES, "side": "sell", "price": 0.61, "size": 30.0},
+            {"ts_ns": _START + 600, "token_id": _YES, "side": "buy", "price": 0.59, "size": 20.0},
+            {"ts_ns": _START + 300, "token_id": _NO, "side": "buy", "price": 0.39, "size": 40.0},
+            {"ts_ns": _START + 500, "token_id": _NO, "side": "sell", "price": 0.38, "size": 25.0},
+            {"ts_ns": _START + 700, "token_id": _NO, "side": "buy", "price": 0.40, "size": 15.0},
+        ],
+    )
+    _write_klines(
+        cache,
+        [
+            {"ts_ns": _START + 50, "open": 80000.0, "high": 80100.0, "low": 79900.0, "close": 80050.0},
+            {"ts_ns": _START + 110, "open": 80050.0, "high": 80200.0, "low": 80000.0, "close": 80150.0},
+        ],
+    )
     return cache
 
 
@@ -468,9 +493,7 @@ def test_synthetic_events_arrays_bit_equivalent_to_legacy(tmp_path: Path) -> Non
 
     for sym in q.leg_symbols:
         lf, ll = fast[sym], legacy[sym]
-        assert len(lf) == len(ll), (
-            f"{sym}: fast={len(lf)} events, legacy={len(ll)}"
-        )
+        assert len(lf) == len(ll), f"{sym}: fast={len(lf)} events, legacy={len(ll)}"
         assert np.array_equal(lf["exch_ts"], ll["exch_ts"]), f"{sym}: exch_ts mismatch"
         assert np.array_equal(lf["ev"], ll["ev"]), f"{sym}: ev mismatch"
         assert np.allclose(lf["px"], ll["px"]), f"{sym}: px mismatch"
@@ -490,10 +513,8 @@ def test_synthetic_events_arrays_bit_equivalent_with_liquidity_profile(
     # Write a minimal liquidity profile JSON so we can test the profile path.
     profile_data = {
         "bucket_width": 0.1,
-        "half_spread": [0.004, 0.005, 0.006, 0.005, 0.004,
-                        0.004, 0.005, 0.006, 0.005, 0.004],
-        "depth": [8000.0, 9000.0, 10000.0, 9000.0, 8000.0,
-                  8000.0, 9000.0, 10000.0, 9000.0, 8000.0],
+        "half_spread": [0.004, 0.005, 0.006, 0.005, 0.004, 0.004, 0.005, 0.006, 0.005, 0.004],
+        "depth": [8000.0, 9000.0, 10000.0, 9000.0, 8000.0, 8000.0, 9000.0, 10000.0, 9000.0, 8000.0],
         "global_half_spread": 0.005,
         "global_depth": 10000.0,
     }
@@ -515,9 +536,7 @@ def test_synthetic_events_arrays_bit_equivalent_with_liquidity_profile(
 
     for sym in q.leg_symbols:
         lf, ll = fast[sym], legacy[sym]
-        assert len(lf) == len(ll), (
-            f"{sym}: fast={len(lf)} events, legacy={len(ll)}"
-        )
+        assert len(lf) == len(ll), f"{sym}: fast={len(lf)} events, legacy={len(ll)}"
         assert np.array_equal(lf["exch_ts"], ll["exch_ts"]), f"{sym}: exch_ts mismatch"
         assert np.array_equal(lf["ev"], ll["ev"]), f"{sym}: ev mismatch"
         assert np.allclose(lf["px"], ll["px"]), f"{sym}: px mismatch"
@@ -525,21 +544,11 @@ def test_synthetic_events_arrays_bit_equivalent_with_liquidity_profile(
 
     # With a profile, spreads differ from the flat default — verify events are
     # actually different from the no-profile run (the profile is exercised).
-    src_no_profile = PolymarketDataSource(
-        cache_root=cache, book_source="synthetic"
-    )
-    fast_no_profile = {
-        sym: la.events
-        for sym, la in src_no_profile.events_arrays(q).leg_arrays.items()
-    }
+    src_no_profile = PolymarketDataSource(cache_root=cache, book_source="synthetic")
+    fast_no_profile = {sym: la.events for sym, la in src_no_profile.events_arrays(q).leg_arrays.items()}
     # At least one leg should differ (profile changes spread ≠ default 0.005).
-    any_differ = any(
-        not np.array_equal(fast[sym]["px"], fast_no_profile[sym]["px"])
-        for sym in q.leg_symbols
-    )
-    assert any_differ, (
-        "liquidity profile had no effect on event px — profile not exercised"
-    )
+    any_differ = any(not np.array_equal(fast[sym]["px"], fast_no_profile[sym]["px"]) for sym in q.leg_symbols)
+    assert any_differ, "liquidity profile had no effect on event px — profile not exercised"
 
 
 def test_synthetic_events_arrays_reference_and_settlement(tmp_path: Path) -> None:
@@ -580,9 +589,7 @@ def test_bundle_config_sig_differs_by_liquidity_profile(tmp_path: Path) -> None:
     profile_path = tmp_path / "profile.json"
     profile_path.write_text(_json.dumps(profile_data))
 
-    src_no_profile = PolymarketDataSource(
-        cache_root=cache, book_source="synthetic"
-    )
+    src_no_profile = PolymarketDataSource(cache_root=cache, book_source="synthetic")
     src_with_profile = PolymarketDataSource(
         cache_root=cache,
         book_source="synthetic",
@@ -591,9 +598,7 @@ def test_bundle_config_sig_differs_by_liquidity_profile(tmp_path: Path) -> None:
 
     sig_none = src_no_profile._bundle_config_sig()
     sig_prof = src_with_profile._bundle_config_sig()
-    assert sig_none != sig_prof, (
-        f"Expected different sigs but both were: {sig_none!r}"
-    )
+    assert sig_none != sig_prof, f"Expected different sigs but both were: {sig_none!r}"
 
 
 def test_bundle_config_sig_identical_for_same_profile(tmp_path: Path) -> None:
@@ -625,6 +630,4 @@ def test_bundle_config_sig_identical_for_same_profile(tmp_path: Path) -> None:
         liquidity_profile_path=profile_path,
     )
 
-    assert src_a._bundle_config_sig() == src_b._bundle_config_sig(), (
-        "Same profile should produce identical config sig"
-    )
+    assert src_a._bundle_config_sig() == src_b._bundle_config_sig(), "Same profile should produce identical config sig"

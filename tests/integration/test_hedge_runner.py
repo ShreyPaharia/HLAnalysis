@@ -1,5 +1,6 @@
 """Smoke test: runner with hedge_enabled fills both binary and hedge intents
 emitted by a stub strategy."""
+
 from __future__ import annotations
 
 import json
@@ -161,9 +162,7 @@ def test_runner_fills_both_binary_and_hedge_intents(tmp_path: Path) -> None:
         symbol=HEDGE_SYMBOL,
         half_spread_bps=1.0,
     )
-    hedge_events = list(
-        hedge_source.book_events(start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns)
-    )
+    hedge_events = list(hedge_source.book_events(start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns))
     assert len(hedge_events) > 0, "Expected hedge events from synthetic klines"
 
     # --- Build stub strategy and RunConfig ---
@@ -196,12 +195,8 @@ def test_runner_fills_both_binary_and_hedge_intents(tmp_path: Path) -> None:
     hedge_fills = [f for f in result.fills if f.is_hedge]
     binary_fills = [f for f in result.fills if not f.is_hedge]
 
-    assert len(hedge_fills) >= 1, (
-        f"Expected at least one hedge fill; got fills: {result.fills}"
-    )
-    assert len(binary_fills) >= 1, (
-        f"Expected at least one binary fill; got fills: {result.fills}"
-    )
+    assert len(hedge_fills) >= 1, f"Expected at least one hedge fill; got fills: {result.fills}"
+    assert len(binary_fills) >= 1, f"Expected at least one binary fill; got fills: {result.fills}"
 
     # Verify hedge fill properties.
     hf = hedge_fills[0]
@@ -212,9 +207,7 @@ def test_runner_fills_both_binary_and_hedge_intents(tmp_path: Path) -> None:
     # SHR-55: the hedge SELL is held to expiry, so end-of-data must mark it to
     # the last hedge mid with a closing BUY fill — otherwise realized PnL only
     # books the opening leg. Expect exactly two hedge fills (open + MTM close).
-    assert len(hedge_fills) == 2, (
-        f"Expected open + MTM-close hedge fills; got {hedge_fills}"
-    )
+    assert len(hedge_fills) == 2, f"Expected open + MTM-close hedge fills; got {hedge_fills}"
     open_fill, close_fill = hedge_fills[0], hedge_fills[1]
     assert open_fill.side == "sell" and close_fill.side == "buy"
     assert close_fill.cloid.startswith("hedge_settle")

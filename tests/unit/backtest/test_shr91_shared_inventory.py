@@ -13,6 +13,7 @@ These tests verify:
 4. run_questions_parallel in-process path threads the ledger: Q2's entry gate
    sees Q1's held position window when they overlap in real time.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -24,6 +25,7 @@ from hlanalysis.backtest.runner.parallel import SharedInventoryLedger
 # ---------------------------------------------------------------------------
 # Unit: SharedInventoryLedger.count_at
 # ---------------------------------------------------------------------------
+
 
 def test_shared_inventory_ledger_no_windows_returns_zero():
     """An empty ledger returns 0 notional and 0 positions at any timestamp."""
@@ -96,6 +98,7 @@ def test_shared_inventory_ledger_boundary_at_close():
 # Unit: RunResult.position_windows populated by run_one_question
 # ---------------------------------------------------------------------------
 
+
 def test_run_result_position_windows_populated_on_enter_and_exit():
     """After run_one_question, result.position_windows has one entry for each
     completed position: (open_ts_ns, close_ts_ns, notional). Verifies the runner
@@ -109,7 +112,8 @@ def test_run_result_position_windows_populated_on_enter_and_exit():
     from hlanalysis.backtest.runner.hftbt_runner import RunConfig, run_one_question
 
     sq = make_default_binary_question(
-        question_id="pw-q", question_idx=1,
+        question_id="pw-q",
+        question_idx=1,
         start_ts_ns=0,
         duration_ns=10 * 60 * 1_000_000_000,  # 10 min
         outcome="yes",
@@ -119,7 +123,9 @@ def test_run_result_position_windows_populated_on_enter_and_exit():
 
     strategy = build_dummy_enter_strategy({"size": 50.0})
     cfg = RunConfig(
-        slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0,
+        slippage_bps=0.0,
+        fee_taker=0.0,
+        order_latency_ms=0.0,
         ioc_marketability_recheck=False,
     )
     result = run_one_question(strategy, ds, sq.descriptor, cfg, strike=sq.strike)
@@ -140,6 +146,7 @@ def test_run_result_position_windows_populated_on_enter_and_exit():
 # Integration: _RunState.entry_blocked respects extra_n_held
 # ---------------------------------------------------------------------------
 
+
 def test_entry_blocked_respects_extra_n_held():
     """_RunState.entry_blocked must block entry when extra_n_held causes the
     concurrent cap to be hit even though the current question has no position.
@@ -149,7 +156,9 @@ def test_entry_blocked_respects_extra_n_held():
     """
     import hftbacktest as hb
     from hlanalysis.backtest.runner.hftbt_runner import (
-        RunConfig, RunResult, _RunState,
+        RunConfig,
+        RunResult,
+        _RunState,
     )
 
     cfg = RunConfig(slippage_bps=0.0, fee_taker=0.0, order_latency_ms=0.0)
@@ -168,19 +177,27 @@ def test_entry_blocked_respects_extra_n_held():
         pass
 
     st = _RunState(
-        hbt=_FakeHbt(), cfg=cfg, q=_FakeQ(), data_source=_FakeDS(),
-        leg_to_asset={}, hedge_asset_no=None, stop_pct=None,
-        fills_dir_active=False, result=RunResult(),
+        hbt=_FakeHbt(),
+        cfg=cfg,
+        q=_FakeQ(),
+        data_source=_FakeDS(),
+        leg_to_asset={},
+        hedge_asset_no=None,
+        stop_pct=None,
+        fills_dir_active=False,
+        result=RunResult(),
         pos=None,  # no current position
         sim_risk_caps=caps,
-        extra_n_held=1,         # cross-question position from shared ledger
+        extra_n_held=1,  # cross-question position from shared ledger
         extra_held_notional=300.0,
     )
     st.now_ns = 500_000_000
 
     veto = st.entry_blocked(
-        intent_notional=100.0, is_topup=False,
-        held_notional=0.0, n_held=0,
+        intent_notional=100.0,
+        is_topup=False,
+        held_notional=0.0,
+        n_held=0,
     )
     assert veto == "max_concurrent_positions", (
         f"entry must be blocked by concurrent cap when extra_n_held=1; got {veto!r}"
@@ -206,9 +223,15 @@ def test_entry_blocked_not_blocked_without_extra():
         pass
 
     st = _RunState(
-        hbt=_FakeHbt(), cfg=cfg, q=_FakeQ(), data_source=_FakeDS(),
-        leg_to_asset={}, hedge_asset_no=None, stop_pct=None,
-        fills_dir_active=False, result=RunResult(),
+        hbt=_FakeHbt(),
+        cfg=cfg,
+        q=_FakeQ(),
+        data_source=_FakeDS(),
+        leg_to_asset={},
+        hedge_asset_no=None,
+        stop_pct=None,
+        fills_dir_active=False,
+        result=RunResult(),
         pos=None,
         sim_risk_caps=caps,
         extra_n_held=0,
@@ -217,7 +240,9 @@ def test_entry_blocked_not_blocked_without_extra():
     st.now_ns = 500_000_000
 
     veto = st.entry_blocked(
-        intent_notional=100.0, is_topup=False,
-        held_notional=0.0, n_held=0,
+        intent_notional=100.0,
+        is_topup=False,
+        held_notional=0.0,
+        n_held=0,
     )
     assert veto is None, f"no extra inventory → no block; got {veto!r}"

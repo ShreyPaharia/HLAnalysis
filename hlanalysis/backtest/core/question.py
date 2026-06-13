@@ -5,6 +5,7 @@ strategy package because strategies consume it. The builder here is the seam
 each `DataSource` uses to construct a view from a `QuestionDescriptor` plus
 runtime context (now_ns, settlement state, klass-specific kv).
 """
+
 from __future__ import annotations
 
 from typing import Literal

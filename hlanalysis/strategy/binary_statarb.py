@@ -35,6 +35,7 @@ class BinaryStatArbConfig:
 @dataclass(slots=True)
 class _State:
     """Per-question rolling state. Resets between questions (one instance per question)."""
+
     last_sample_ns: int = 0
     sample_count: int = 0
     ewma_mean: float = 0.0
@@ -68,7 +69,14 @@ class BinaryStatArbStrategy(Strategy):
 
         yes = books.get(question.yes_symbol)
         no_ = books.get(question.no_symbol)
-        if yes is None or yes.bid_px is None or yes.ask_px is None or no_ is None or no_.bid_px is None or no_.ask_px is None:
+        if (
+            yes is None
+            or yes.bid_px is None
+            or yes.ask_px is None
+            or no_ is None
+            or no_.bid_px is None
+            or no_.ask_px is None
+        ):
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_book"),))
 
         yes_mid = (yes.bid_px + yes.ask_px) / 2.0
@@ -82,9 +90,10 @@ class BinaryStatArbStrategy(Strategy):
 
         warmup_needed = max(2, self.cfg.lookback_seconds // self.cfg.sampling_dt_seconds)
         if self._state.sample_count < warmup_needed:
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "warmup", (("count", str(self._state.sample_count)),)),
-            ))
+            return Decision(
+                action=Action.HOLD,
+                diagnostics=(Diagnostic("info", "warmup", (("count", str(self._state.sample_count)),)),),
+            )
 
         std = math.sqrt(max(self._state.ewma_var, 1e-12))
         z = (yes_mid - self._state.ewma_mean) / std
@@ -101,9 +110,7 @@ class BinaryStatArbStrategy(Strategy):
             # Reversion captured
             if abs(z) <= self.cfg.z_exit:
                 return self._exit_intent(question, position, held, reason="exit_reversion")
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "hold_in_pos", (("z", f"{z:.3f}"),)),
-            ))
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "hold_in_pos", (("z", f"{z:.3f}"),)),))
 
         # No position: entry logic
         if not (self.cfg.mid_lo <= yes_mid <= self.cfg.mid_hi):
@@ -114,26 +121,32 @@ class BinaryStatArbStrategy(Strategy):
         elif z >= self.cfg.z_entry:
             target_book, target_symbol = no_, question.no_symbol
         else:
-            return Decision(action=Action.HOLD, diagnostics=(
-                Diagnostic("info", "no_signal", (("z", f"{z:.3f}"),)),
-            ))
+            return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_signal", (("z", f"{z:.3f}"),)),))
 
         size = max(0.0, round_size(self.cfg.max_position_usd, target_book.ask_px))
         if size <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"),))
 
         intent = make_entry_intent(
-            question, symbol=target_symbol, size=size, limit_price=target_book.ask_px,
+            question,
+            symbol=target_symbol,
+            size=size,
+            limit_price=target_book.ask_px,
         )
         return Decision(
-            action=Action.ENTER, intents=(intent,),
+            action=Action.ENTER,
+            intents=(intent,),
             diagnostics=(
                 Diagnostic("info", "entry"),
-                Diagnostic("info", "z", (
-                    ("z", f"{z:.3f}"),
-                    ("mean", f"{self._state.ewma_mean:.4f}"),
-                    ("std", f"{std:.4f}"),
-                )),
+                Diagnostic(
+                    "info",
+                    "z",
+                    (
+                        ("z", f"{z:.3f}"),
+                        ("mean", f"{self._state.ewma_mean:.4f}"),
+                        ("std", f"{std:.4f}"),
+                    ),
+                ),
             ),
         )
 
@@ -154,7 +167,8 @@ class BinaryStatArbStrategy(Strategy):
         # empty ``exit_reason`` (this strategy predates intent-level reasons).
         intent = make_exit_intent(question, position, limit_price=held.bid_px)
         return Decision(
-            action=Action.EXIT, intents=(intent,),
+            action=Action.EXIT,
+            intents=(intent,),
             diagnostics=(Diagnostic("info", reason),),
         )
 

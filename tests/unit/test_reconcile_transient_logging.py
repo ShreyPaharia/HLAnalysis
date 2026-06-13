@@ -3,6 +3,7 @@
 and retrying next cycle — rather than emitting a full `reconcile crashed`
 traceback that reads like a bug. `_is_transient_venue_error` is the classifier
 that distinguishes the two; this pins its behaviour for both venues."""
+
 from __future__ import annotations
 
 import requests

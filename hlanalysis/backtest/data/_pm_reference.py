@@ -6,6 +6,7 @@ Covers:
 
 Extracted verbatim from polymarket.py — no logic changes.
 """
+
 from __future__ import annotations
 
 from hlanalysis.marketdata.ohlc import resample_ohlc
@@ -64,10 +65,12 @@ def _bucket_to_ref_events(
             bucket_opens[b] = open_val
 
     # resample_ohlc consumes (ts, high, low, close) and yields (last_ts, h, l, c).
-    ohlc_bars = list(resample_ohlc(
-        ((ts, high, low, close) for ts, high, low, close, _open in samples),
-        bucket_ns=bucket_ns,
-    ))
+    ohlc_bars = list(
+        resample_ohlc(
+            ((ts, high, low, close) for ts, high, low, close, _open in samples),
+            bucket_ns=bucket_ns,
+        )
+    )
 
     # Pair each bar with its bucket open.  Bars are emitted in bucket order so
     # the i-th bar corresponds to the i-th distinct bucket key.

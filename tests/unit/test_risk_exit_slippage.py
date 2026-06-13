@@ -13,6 +13,7 @@ Three scenarios are tested:
   3. No-usable-levels veto: a sell exit where no bid level is at or above the
      limit price should return depth_walk_no_fill, not approved_exit.
 """
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -31,6 +32,7 @@ from hlanalysis.strategy.types import BookState, OrderIntent, QuestionView
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _mk_cfg(*, max_slip_pct: float, min_order_notional: float = 0.0) -> StrategyConfig:
     entry = AllowlistEntry(
@@ -112,6 +114,7 @@ def _exit_sell(size: float, limit: float) -> OrderIntent:
 # Test 1: PM slot — exit sell CLAMPED to at-budget depth (SHR-48 core)
 # ---------------------------------------------------------------------------
 
+
 def test_exit_sell_clamped_to_at_budget_depth():
     """Exit whose size > inside-bid depth on a PM book is approved with
     clamped_size equal to the available depth at-or-above the limit price.
@@ -139,15 +142,14 @@ def test_exit_sell_clamped_to_at_budget_depth():
 
     assert v.approved, f"Expected approved; got reason={v.reason!r}"
     assert v.clamped_size is not None, "Expected clamped_size to be set for thin-book exit"
-    assert v.clamped_size < intent.size, (
-        f"clamped_size={v.clamped_size} should be < intent.size={intent.size}"
-    )
+    assert v.clamped_size < intent.size, f"clamped_size={v.clamped_size} should be < intent.size={intent.size}"
     assert v.clamped_size == 10.0
 
 
 # ---------------------------------------------------------------------------
 # Test 2: PM slot — exit sell APPROVED at full size (enough depth)
 # ---------------------------------------------------------------------------
+
 
 def test_exit_sell_approved_unclamped_when_depth_sufficient():
     """Exit whose full size is covered by a single bid level at-or-above limit
@@ -175,6 +177,7 @@ def test_exit_sell_approved_unclamped_when_depth_sufficient():
 # Test 3: HL slot — no levels, slip cap = 0 → exit passes unclamped (no regression)
 # ---------------------------------------------------------------------------
 
+
 def test_exit_hl_slot_no_levels_approved_unclamped():
     """HL slots leave max_slippage_pct=0 and don't populate bid/ask levels.
     Exit must be approved unconditionally (no regression for HL)."""
@@ -200,6 +203,7 @@ def test_exit_hl_slot_no_levels_approved_unclamped():
 # ---------------------------------------------------------------------------
 # Test 4: PM slot — exit with NO usable levels (all bids below limit) → veto
 # ---------------------------------------------------------------------------
+
 
 def test_exit_vetoed_when_no_usable_bid_levels():
     """If all bid levels are below the limit price (no at-or-above level),
@@ -230,6 +234,7 @@ def test_exit_vetoed_when_no_usable_bid_levels():
 # Test 5: PM slot — exit ENTRY gates are still skipped (daily loss / inventory)
 # ---------------------------------------------------------------------------
 
+
 def test_exit_skips_daily_loss_gate():
     """Exits must still skip entry-only gates. An exit on a daily-loss-breached
     slot should be approved (modulo slippage), not rejected by the daily_loss_cap."""
@@ -256,6 +261,7 @@ def test_exit_skips_daily_loss_gate():
 # ---------------------------------------------------------------------------
 # Test 6: Regression — existing entry-side depth-walk behavior unchanged
 # ---------------------------------------------------------------------------
+
 
 def test_entry_buy_clamped_when_insufficient_ask_depth():
     """Regression: entry buys are still clamped by the depth-walk block."""

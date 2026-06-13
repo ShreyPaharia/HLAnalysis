@@ -10,6 +10,7 @@ net for "numerically equivalent within float tolerance".
 The DuckDB-backed functions are exercised through small synthetic parquet
 fixtures laid out in the recorder's hive-partition structure.
 """
+
 from __future__ import annotations
 
 import math
@@ -176,9 +177,7 @@ def _old_quoted_spread_bps(con, *, start_ns, end_ns, resample_s) -> pd.DataFrame
     try:
         raw = con.execute(sql, [end_ns]).df()
     except duckdb.IOException:
-        raw = pd.DataFrame(
-            {"ts_ns": pd.Series([], dtype="int64"), "spread_bps": pd.Series([], dtype="float64")}
-        )
+        raw = pd.DataFrame({"ts_ns": pd.Series([], dtype="int64"), "spread_bps": pd.Series([], dtype="float64")})
 
     raw["ts_ns"] = raw["ts_ns"].astype("int64")
     raw["spread_bps"] = raw["spread_bps"].astype("float64")
@@ -227,14 +226,10 @@ def _old_book_imbalance(con, *, start_ns, end_ns, levels) -> pd.DataFrame:
     try:
         raw = con.execute(sql, [start_ns, end_ns]).df()
     except duckdb.IOException:
-        return pd.DataFrame(
-            {"ts_ns": pd.Series([], dtype="int64"), "imbalance": pd.Series([], dtype="float64")}
-        )
+        return pd.DataFrame({"ts_ns": pd.Series([], dtype="int64"), "imbalance": pd.Series([], dtype="float64")})
 
     if raw.empty:
-        return pd.DataFrame(
-            {"ts_ns": pd.Series([], dtype="int64"), "imbalance": pd.Series([], dtype="float64")}
-        )
+        return pd.DataFrame({"ts_ns": pd.Series([], dtype="int64"), "imbalance": pd.Series([], dtype="float64")})
 
     ts_list: list[int] = []
     imb_list: list[float] = []
@@ -279,9 +274,7 @@ def _old_cross_correlation(x: pd.Series, y: pd.Series, max_lag: int) -> pd.DataF
     for lag in range(-max_lag, max_lag + 1):
         lags.append(lag)
         ccfs.append(float(x_arr.corr(y_arr.shift(lag))))
-    return pd.DataFrame(
-        {"lag": pd.array(lags, dtype="int64"), "ccf": pd.array(ccfs, dtype="float64")}
-    )
+    return pd.DataFrame({"lag": pd.array(lags, dtype="int64"), "ccf": pd.array(ccfs, dtype="float64")})
 
 
 # ---------------------------------------------------------------------------
@@ -365,14 +358,28 @@ class TestMidPathEquivalence:
         rows.sort(key=lambda r: r[0])
         _write_bbo(data_root, rows)
         for resample_ms in (100, 250, 1000):
-            new = mid_path(con, venue="hyperliquid", product_type="perp", symbol="BTC",
-                           start_ns=BASE_NS, end_ns=BASE_NS + 30 * NS_PER_S, resample_ms=resample_ms)
+            new = mid_path(
+                con,
+                venue="hyperliquid",
+                product_type="perp",
+                symbol="BTC",
+                start_ns=BASE_NS,
+                end_ns=BASE_NS + 30 * NS_PER_S,
+                resample_ms=resample_ms,
+            )
             old = _old_mid_path(con, start_ns=BASE_NS, end_ns=BASE_NS + 30 * NS_PER_S, resample_ms=resample_ms)
             _assert_close(new, old, "mid")
 
     def test_matches_reference_no_data(self, con, data_root):
-        new = mid_path(con, venue="hyperliquid", product_type="perp", symbol="BTC",
-                       start_ns=BASE_NS, end_ns=BASE_NS + 5 * NS_PER_S, resample_ms=1000)
+        new = mid_path(
+            con,
+            venue="hyperliquid",
+            product_type="perp",
+            symbol="BTC",
+            start_ns=BASE_NS,
+            end_ns=BASE_NS + 5 * NS_PER_S,
+            resample_ms=1000,
+        )
         old = _old_mid_path(con, start_ns=BASE_NS, end_ns=BASE_NS + 5 * NS_PER_S, resample_ms=1000)
         _assert_close(new, old, "mid")
 
@@ -387,14 +394,28 @@ class TestQuotedSpreadEquivalence:
             rows.append((BASE_NS + i * 13 * 10**8, mid - half, mid + half))
         _write_bbo(data_root, rows)
         for resample_s in (1, 2, 5):
-            new = quoted_spread_bps(con, venue="hyperliquid", product_type="perp", symbol="BTC",
-                                    start_ns=BASE_NS, end_ns=BASE_NS + 40 * NS_PER_S, resample_s=resample_s)
+            new = quoted_spread_bps(
+                con,
+                venue="hyperliquid",
+                product_type="perp",
+                symbol="BTC",
+                start_ns=BASE_NS,
+                end_ns=BASE_NS + 40 * NS_PER_S,
+                resample_s=resample_s,
+            )
             old = _old_quoted_spread_bps(con, start_ns=BASE_NS, end_ns=BASE_NS + 40 * NS_PER_S, resample_s=resample_s)
             _assert_close(new, old, "spread_bps")
 
     def test_matches_reference_no_data(self, con, data_root):
-        new = quoted_spread_bps(con, venue="hyperliquid", product_type="perp", symbol="BTC",
-                                start_ns=BASE_NS, end_ns=BASE_NS + 5 * NS_PER_S, resample_s=1)
+        new = quoted_spread_bps(
+            con,
+            venue="hyperliquid",
+            product_type="perp",
+            symbol="BTC",
+            start_ns=BASE_NS,
+            end_ns=BASE_NS + 5 * NS_PER_S,
+            resample_s=1,
+        )
         old = _old_quoted_spread_bps(con, start_ns=BASE_NS, end_ns=BASE_NS + 5 * NS_PER_S, resample_s=1)
         _assert_close(new, old, "spread_bps")
 
@@ -419,14 +440,28 @@ class TestBookImbalanceEquivalence:
         rows.append((BASE_NS + 30 * NS_PER_S, [50000.0], [0.0], [50010.0], [0.0]))
         _write_book_snapshot(data_root, rows)
         for levels in (1, 2, 3):
-            new = book_imbalance(con, venue="hyperliquid", product_type="perp", symbol="BTC",
-                                 start_ns=BASE_NS, end_ns=BASE_NS + 60 * NS_PER_S, levels=levels)
+            new = book_imbalance(
+                con,
+                venue="hyperliquid",
+                product_type="perp",
+                symbol="BTC",
+                start_ns=BASE_NS,
+                end_ns=BASE_NS + 60 * NS_PER_S,
+                levels=levels,
+            )
             old = _old_book_imbalance(con, start_ns=BASE_NS, end_ns=BASE_NS + 60 * NS_PER_S, levels=levels)
             _assert_close(new, old, "imbalance")
 
     def test_matches_reference_no_data(self, con, data_root):
-        new = book_imbalance(con, venue="hyperliquid", product_type="perp", symbol="BTC",
-                             start_ns=BASE_NS, end_ns=BASE_NS + 5 * NS_PER_S, levels=1)
+        new = book_imbalance(
+            con,
+            venue="hyperliquid",
+            product_type="perp",
+            symbol="BTC",
+            start_ns=BASE_NS,
+            end_ns=BASE_NS + 5 * NS_PER_S,
+            levels=1,
+        )
         old = _old_book_imbalance(con, start_ns=BASE_NS, end_ns=BASE_NS + 5 * NS_PER_S, levels=1)
         _assert_close(new, old, "imbalance")
 
@@ -444,11 +479,25 @@ class TestReturnsResampledEquivalence:
             mid = 100.0 + np.cumsum(rng.normal(size=1))[0]
             rows.append((BASE_NS + i * NS_PER_S, mid - 0.5, mid + 0.5))
         _write_bbo(data_root, rows)
-        df = returns_resampled(con, venue="hyperliquid", product_type="perp", symbol="BTC",
-                               start_ns=BASE_NS, end_ns=BASE_NS + 49 * NS_PER_S, dt_ms=1000)
+        df = returns_resampled(
+            con,
+            venue="hyperliquid",
+            product_type="perp",
+            symbol="BTC",
+            start_ns=BASE_NS,
+            end_ns=BASE_NS + 49 * NS_PER_S,
+            dt_ms=1000,
+        )
         # Reference: recompute log-returns from the same resampled mids.
-        mids = mid_path(con, venue="hyperliquid", product_type="perp", symbol="BTC",
-                        start_ns=BASE_NS, end_ns=BASE_NS + 49 * NS_PER_S, resample_ms=1000)
+        mids = mid_path(
+            con,
+            venue="hyperliquid",
+            product_type="perp",
+            symbol="BTC",
+            start_ns=BASE_NS,
+            end_ns=BASE_NS + 49 * NS_PER_S,
+            resample_ms=1000,
+        )
         expected = _old_log_return_loop(mids["mid"].to_numpy(dtype="float64"))
         np.testing.assert_allclose(
             df["log_return"].to_numpy(dtype="float64"), expected, rtol=1e-12, atol=1e-12, equal_nan=True
@@ -458,10 +507,24 @@ class TestReturnsResampledEquivalence:
         # first BBO only at t=3s -> grid points 0,1,2 have NaN mid (LOCF gap).
         rows = [(BASE_NS + (i + 3) * NS_PER_S, 99.5 + i, 100.5 + i) for i in range(6)]
         _write_bbo(data_root, rows)
-        df = returns_resampled(con, venue="hyperliquid", product_type="perp", symbol="BTC",
-                               start_ns=BASE_NS, end_ns=BASE_NS + 8 * NS_PER_S, dt_ms=1000)
-        mids = mid_path(con, venue="hyperliquid", product_type="perp", symbol="BTC",
-                        start_ns=BASE_NS, end_ns=BASE_NS + 8 * NS_PER_S, resample_ms=1000)
+        df = returns_resampled(
+            con,
+            venue="hyperliquid",
+            product_type="perp",
+            symbol="BTC",
+            start_ns=BASE_NS,
+            end_ns=BASE_NS + 8 * NS_PER_S,
+            dt_ms=1000,
+        )
+        mids = mid_path(
+            con,
+            venue="hyperliquid",
+            product_type="perp",
+            symbol="BTC",
+            start_ns=BASE_NS,
+            end_ns=BASE_NS + 8 * NS_PER_S,
+            resample_ms=1000,
+        )
         expected = _old_log_return_loop(mids["mid"].to_numpy(dtype="float64"))
         np.testing.assert_allclose(
             df["log_return"].to_numpy(dtype="float64"), expected, rtol=1e-12, atol=1e-12, equal_nan=True
@@ -487,7 +550,9 @@ class TestCrossCorrelationEquivalence:
             np.testing.assert_allclose(
                 new["ccf"].to_numpy(dtype="float64"),
                 old["ccf"].to_numpy(dtype="float64"),
-                rtol=1e-9, atol=1e-9, equal_nan=True,
+                rtol=1e-9,
+                atol=1e-9,
+                equal_nan=True,
             )
 
     def test_matches_reference_with_nans(self):
@@ -505,7 +570,9 @@ class TestCrossCorrelationEquivalence:
             np.testing.assert_allclose(
                 new["ccf"].to_numpy(dtype="float64"),
                 old["ccf"].to_numpy(dtype="float64"),
-                rtol=1e-9, atol=1e-9, equal_nan=True,
+                rtol=1e-9,
+                atol=1e-9,
+                equal_nan=True,
             )
 
     def test_matches_reference_autocorrelation(self):
@@ -521,5 +588,7 @@ class TestCrossCorrelationEquivalence:
         np.testing.assert_allclose(
             new["ccf"].to_numpy(dtype="float64"),
             old["ccf"].to_numpy(dtype="float64"),
-            rtol=1e-9, atol=1e-9, equal_nan=True,
+            rtol=1e-9,
+            atol=1e-9,
+            equal_nan=True,
         )

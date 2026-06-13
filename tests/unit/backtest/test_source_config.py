@@ -9,6 +9,7 @@ silently revert to defaults. This closes the documented config-drop bug class
 The pickle round-trip in each test simulates the spawn process boundary: the
 config is serialised in the parent and rebuilt in the worker.
 """
+
 from __future__ import annotations
 
 import pickle

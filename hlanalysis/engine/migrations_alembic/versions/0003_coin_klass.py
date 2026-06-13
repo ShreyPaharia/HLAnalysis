@@ -14,6 +14,7 @@ A fresh DB creates the table here; pre-existing (baseline-stamped) DBs gain it o
 upgrade. Existing rows: none to backfill — the map populates forward as questions
 are (re-)ingested; historical unmapped fills show as "unknown" in the report.
 """
+
 from __future__ import annotations
 
 from alembic import op

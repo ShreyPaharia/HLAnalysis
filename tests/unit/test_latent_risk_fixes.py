@@ -5,6 +5,7 @@ Fix 2 — engine/market_state.py one-sided BBO None guard.
 Fix 3 — exec_types.py add "cancelled" to OrderAck.status Literal.
 Fix 4 — unbounded _books / per-question cache eviction.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -44,17 +45,24 @@ def _mk_cfg_slip(max_slip_pct: float = 0.01) -> StrategyConfig:
         max_slippage_pct=max_slip_pct,
     )
     return StrategyConfig(
-        name="t", paper_mode=True,
-        allowlist=[entry], defaults=entry,
+        name="t",
+        paper_mode=True,
+        allowlist=[entry],
+        defaults=entry,
         **{"global": g},
     )
 
 
 def _q1() -> QuestionView:
     return QuestionView(
-        question_idx=1, yes_symbol="tok", no_symbol="n",
-        strike=110_000.0, expiry_ns=200 + 3600 * 1_000_000_000,
-        underlying="BTC", klass="priceBinary", period="24h",
+        question_idx=1,
+        yes_symbol="tok",
+        no_symbol="n",
+        strike=110_000.0,
+        expiry_ns=200 + 3600 * 1_000_000_000,
+        underlying="BTC",
+        klass="priceBinary",
+        period="24h",
     )
 
 
@@ -84,15 +92,22 @@ def test_depth_walk_zero_size_level_no_zerodivision():
     # that publish a level entry with zero quantity before the size comes in.
     book = BookState(
         symbol="tok",
-        bid_px=0.88, bid_sz=10.0,
-        ask_px=0.90, ask_sz=0.0,
-        last_l2_ts_ns=100, last_trade_ts_ns=100,
+        bid_px=0.88,
+        bid_sz=10.0,
+        ask_px=0.90,
+        ask_sz=0.0,
+        last_l2_ts_ns=100,
+        last_trade_ts_ns=100,
         ask_levels=((0.90, 0.0),),  # sz=0, the problematic case
     )
     intent = OrderIntent(
-        question_idx=1, symbol="tok", side="buy",
-        size=10.0, limit_price=0.90,
-        cloid="c", time_in_force="ioc",
+        question_idx=1,
+        symbol="tok",
+        side="buy",
+        size=10.0,
+        limit_price=0.90,
+        cloid="c",
+        time_in_force="ioc",
     )
     # Must not raise ZeroDivisionError.
     v = gate.check_pre_trade(intent, _base_risk_inputs(book))
@@ -109,15 +124,23 @@ def test_depth_walk_zero_size_exit_no_zerodivision():
     gate = RiskGate(cfg)
     book = BookState(
         symbol="tok",
-        bid_px=0.88, bid_sz=0.0,
-        ask_px=0.90, ask_sz=10.0,
-        last_l2_ts_ns=100, last_trade_ts_ns=100,
+        bid_px=0.88,
+        bid_sz=0.0,
+        ask_px=0.90,
+        ask_sz=10.0,
+        last_l2_ts_ns=100,
+        last_trade_ts_ns=100,
         bid_levels=((0.88, 0.0),),
     )
     intent = OrderIntent(
-        question_idx=1, symbol="tok", side="sell",
-        size=5.0, limit_price=0.88,
-        cloid="c", time_in_force="ioc", reduce_only=True,
+        question_idx=1,
+        symbol="tok",
+        side="sell",
+        size=5.0,
+        limit_price=0.88,
+        cloid="c",
+        time_in_force="ioc",
+        reduce_only=True,
     )
     v = gate.check_pre_trade(intent, _base_risk_inputs(book))
     assert not v.approved
@@ -168,8 +191,7 @@ def test_bbo_none_ask_does_not_raise_type_error():
     # last_mark must be UNCHANGED (mid update was skipped).
     after_mark = ms.last_mark("BTC_SPOT")
     assert after_mark == first_mark, (
-        f"last_mark changed from {first_mark} to {after_mark} on a partial BBO — "
-        "mid update should have been skipped."
+        f"last_mark changed from {first_mark} to {after_mark} on a partial BBO — mid update should have been skipped."
     )
 
 
@@ -214,6 +236,7 @@ def test_order_ack_status_cancelled_in_literal():
     expansion fix.
     """
     import typing
+
     hints = typing.get_type_hints(OrderAck)
     status_literal = hints.get("status")
     assert status_literal is not None
@@ -240,6 +263,7 @@ def test_order_ack_status_cancelled_constructs():
 def test_order_ack_existing_statuses_still_work():
     """Regression: existing statuses remain valid after adding 'cancelled'."""
     import typing
+
     hints = typing.get_type_hints(OrderAck)
     allowed = typing.get_args(hints["status"])
     for status in ("pending", "open", "filled", "rejected"):
@@ -263,6 +287,7 @@ def _make_question_meta(
     ts: int,
 ) -> QuestionMetaEvent:
     from datetime import datetime, timezone
+
     expiry_str = datetime.fromtimestamp(expiry_ns / 1e9, tz=timezone.utc).strftime("%Y%m%d-%H%M")
     return QuestionMetaEvent(
         venue="hyperliquid",
@@ -273,10 +298,15 @@ def _make_question_meta(
         local_recv_ts=ts,
         question_idx=question_idx,
         named_outcome_idxs=[0],
-        keys=["class", "underlying", "period", "expiry", "strike",
-              "yes_token_id" if False else "class"],  # build via kv
-        values=["priceBinary", "BTC", "24h", expiry_str, "80000",
-                "priceBinary"],
+        keys=[
+            "class",
+            "underlying",
+            "period",
+            "expiry",
+            "strike",
+            "yes_token_id" if False else "class",
+        ],  # build via kv
+        values=["priceBinary", "BTC", "24h", expiry_str, "80000", "priceBinary"],
     )
 
 
@@ -289,6 +319,7 @@ def _q_meta_hl(
 ) -> QuestionMetaEvent:
     """Helper that produces a valid HL QuestionMetaEvent."""
     from datetime import datetime, timezone
+
     expiry_str = datetime.fromtimestamp(expiry_ns / 1e9, tz=timezone.utc).strftime("%Y%m%d-%H%M")
     return QuestionMetaEvent(
         venue="hyperliquid",
@@ -310,20 +341,25 @@ def test_evict_settled_question_removes_books():
     """
     NOW_NS = 10_000_000_000_000_000
     EXPIRY_NS = NOW_NS - 2 * 3600 * 1_000_000_000  # 2h ago (already expired)
-    RETAIN_NS = 1 * 3600 * 1_000_000_000           # retain 1h after settlement
+    RETAIN_NS = 1 * 3600 * 1_000_000_000  # retain 1h after settlement
 
     ms = EngineMarketState()
     # Register a question — HL uses #<N> symbols derived from named_outcome_idxs=[0]
-    ms.apply(_q_meta_hl(
-        question_idx=99, yes_symbol="#0", no_symbol="#1",
-        expiry_ns=EXPIRY_NS, ts=EXPIRY_NS - 3600_000_000_000,
-    ))
+    ms.apply(
+        _q_meta_hl(
+            question_idx=99,
+            yes_symbol="#0",
+            no_symbol="#1",
+            expiry_ns=EXPIRY_NS,
+            ts=EXPIRY_NS - 3600_000_000_000,
+        )
+    )
     q = ms.question(99)
     assert q is not None
 
     # Feed BBO events for the question's leg symbols to populate _books
     yes_sym = q.yes_symbol  # "#0"
-    no_sym = q.no_symbol    # "#1"
+    no_sym = q.no_symbol  # "#1"
     for sym in (yes_sym, no_sym):
         if sym:
             ms.apply(_bbo(sym, bid_px=0.5, ask_px=0.6, ts=EXPIRY_NS - 1000))
@@ -341,9 +377,7 @@ def test_evict_settled_question_removes_books():
     assert ms.question(99) is None
 
     # The _books entries for the evicted question's leg symbols must be gone
-    assert ms.book(yes_sym) is None, (
-        f"_books[{yes_sym!r}] still present after question 99 was evicted"
-    )
+    assert ms.book(yes_sym) is None, f"_books[{yes_sym!r}] still present after question 99 was evicted"
 
 
 def test_evict_does_not_remove_shared_symbol_books():
@@ -355,18 +389,28 @@ def test_evict_does_not_remove_shared_symbol_books():
     """
     NOW_NS = 10_000_000_000_000_000
     EXPIRY_OLD_NS = NOW_NS - 2 * 3600 * 1_000_000_000  # 2h ago
-    EXPIRY_NEW_NS = NOW_NS + 3600 * 1_000_000_000       # 1h from now (live)
+    EXPIRY_NEW_NS = NOW_NS + 3600 * 1_000_000_000  # 1h from now (live)
     RETAIN_NS = 1 * 3600 * 1_000_000_000
 
     ms = EngineMarketState()
-    ms.apply(_q_meta_hl(
-        question_idx=100, yes_symbol="#0", no_symbol="#1",
-        expiry_ns=EXPIRY_OLD_NS, ts=EXPIRY_OLD_NS - 3600_000_000_000,
-    ))
-    ms.apply(_q_meta_hl(
-        question_idx=101, yes_symbol="#0", no_symbol="#2",
-        expiry_ns=EXPIRY_NEW_NS, ts=NOW_NS - 1000,
-    ))
+    ms.apply(
+        _q_meta_hl(
+            question_idx=100,
+            yes_symbol="#0",
+            no_symbol="#1",
+            expiry_ns=EXPIRY_OLD_NS,
+            ts=EXPIRY_OLD_NS - 3600_000_000_000,
+        )
+    )
+    ms.apply(
+        _q_meta_hl(
+            question_idx=101,
+            yes_symbol="#0",
+            no_symbol="#2",
+            expiry_ns=EXPIRY_NEW_NS,
+            ts=NOW_NS - 1000,
+        )
+    )
 
     q100 = ms.question(100)
     shared_sym = q100.yes_symbol  # "#0" - shared between 100 and 101
@@ -389,20 +433,31 @@ def test_evict_does_not_remove_shared_symbol_books():
 def _mk_scanner_cfg() -> StrategyConfig:
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC"},
-        max_position_usd=100, stop_loss_pct=10, tte_min_seconds=0,
-        tte_max_seconds=86400, price_extreme_threshold=0.95,
-        distance_from_strike_usd_min=0, vol_max=0.5,
+        max_position_usd=100,
+        stop_loss_pct=10,
+        tte_min_seconds=0,
+        tte_max_seconds=86400,
+        price_extreme_threshold=0.95,
+        distance_from_strike_usd_min=0,
+        vol_max=0.5,
     )
     return StrategyConfig(
-        name="late_resolution", paper_mode=True,
-        allowlist=[entry], blocklist_question_idxs=[],
+        name="late_resolution",
+        paper_mode=True,
+        allowlist=[entry],
+        blocklist_question_idxs=[],
         defaults=entry,
-        **{"global": GlobalRiskConfig(
-            max_total_inventory_usd=500, max_concurrent_positions=5,
-            daily_loss_cap_usd=200, max_strike_distance_pct=50,
-            min_recent_volume_usd=0, stale_data_halt_seconds=999,
-            reconcile_interval_seconds=60,
-        )},
+        **{
+            "global": GlobalRiskConfig(
+                max_total_inventory_usd=500,
+                max_concurrent_positions=5,
+                daily_loss_cap_usd=200,
+                max_strike_distance_pct=50,
+                min_recent_volume_usd=0,
+                stale_data_halt_seconds=999,
+                reconcile_interval_seconds=60,
+            )
+        },
     )
 
 
@@ -419,7 +474,8 @@ def test_scanner_caches_pruned_on_eviction(tmp_path):
     from hlanalysis.engine.scanner import Scanner
     from hlanalysis.engine.state import StateDAL
     from hlanalysis.strategy.late_resolution import (
-        LateResolutionConfig, LateResolutionStrategy,
+        LateResolutionConfig,
+        LateResolutionStrategy,
     )
     from hlanalysis.events import MarkEvent
 
@@ -432,16 +488,27 @@ def test_scanner_caches_pruned_on_eviction(tmp_path):
     # Feed some mark events so the scanner can get a reference price
     for i in range(5):
         ts = NOW_NS - (5 - i) * 60_000_000_000
-        ms.apply(MarkEvent(
-            venue="hyperliquid", product_type=ProductType.PERP,
-            mechanism=Mechanism.CLOB, symbol="BTC",
-            exchange_ts=ts, local_recv_ts=ts, mark_px=80_000.0,
-        ))
+        ms.apply(
+            MarkEvent(
+                venue="hyperliquid",
+                product_type=ProductType.PERP,
+                mechanism=Mechanism.CLOB,
+                symbol="BTC",
+                exchange_ts=ts,
+                local_recv_ts=ts,
+                mark_px=80_000.0,
+            )
+        )
 
-    ms.apply(_q_meta_hl(
-        question_idx=200, yes_symbol="#0", no_symbol="#1",
-        expiry_ns=EXPIRY_NS, ts=EXPIRY_NS - 3600_000_000_000,
-    ))
+    ms.apply(
+        _q_meta_hl(
+            question_idx=200,
+            yes_symbol="#0",
+            no_symbol="#1",
+            expiry_ns=EXPIRY_NS,
+            ts=EXPIRY_NS - 3600_000_000_000,
+        )
+    )
     q200 = ms.question(200)
     for sym in (q200.yes_symbol, q200.no_symbol):
         if sym:
@@ -450,16 +517,27 @@ def test_scanner_caches_pruned_on_eviction(tmp_path):
     cfg = _mk_scanner_cfg()
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
-    strategy = LateResolutionStrategy(LateResolutionConfig(
-        tte_min_seconds=0, tte_max_seconds=86400,
-        price_extreme_threshold=0.0, distance_from_strike_usd_min=0.0,
-        vol_max=100.0, max_position_usd=100.0, stop_loss_pct=10.0,
-        max_strike_distance_pct=50.0, min_recent_volume_usd=0.0,
-        stale_data_halt_seconds=999,
-    ))
+    strategy = LateResolutionStrategy(
+        LateResolutionConfig(
+            tte_min_seconds=0,
+            tte_max_seconds=86400,
+            price_extreme_threshold=0.0,
+            distance_from_strike_usd_min=0.0,
+            vol_max=100.0,
+            max_position_usd=100.0,
+            stop_loss_pct=10.0,
+            max_strike_distance_pct=50.0,
+            min_recent_volume_usd=0.0,
+            stale_data_halt_seconds=999,
+        )
+    )
     scanner = Scanner(
-        strategy=strategy, cfg=cfg, market_state=ms, dal=dal,
-        kill_switch_path=tmp_path / "kill", last_reconcile_ns=NOW_NS,
+        strategy=strategy,
+        cfg=cfg,
+        market_state=ms,
+        dal=dal,
+        kill_switch_path=tmp_path / "kill",
+        last_reconcile_ns=NOW_NS,
         reference_symbol="BTC",
     )
 
@@ -507,7 +585,10 @@ def test_router_cache_pruned_on_eviction(tmp_path):
     exec_client = MagicMock()
 
     router = Router(
-        dal=dal, gate=gate, bus=bus, exec_client=exec_client,
+        dal=dal,
+        gate=gate,
+        bus=bus,
+        exec_client=exec_client,
         strategy_cfg=cfg,
     )
 

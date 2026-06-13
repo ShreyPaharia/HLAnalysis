@@ -7,6 +7,7 @@ TDD: written BEFORE the implementation. Covers:
   2. StateDAL integration — after backfill_from_questions() the coin_klass_map()
      on a real (tmp_path) StateDAL returns every expected mapping.
 """
+
 from __future__ import annotations
 
 import sys
@@ -30,6 +31,7 @@ from hlanalysis.engine.state import StateDAL
 # Minimal question-like object (same field names used by coin_klass_rows)
 # ---------------------------------------------------------------------------
 
+
 class _Q(NamedTuple):
     question_idx: int
     named_outcome_idxs: list[int]
@@ -39,6 +41,7 @@ class _Q(NamedTuple):
 # ---------------------------------------------------------------------------
 # coin_klass_rows — pure expansion tests
 # ---------------------------------------------------------------------------
+
 
 def test_binary_two_coins():
     """priceBinary with one outcome → 2 coins: #{10o+0} and #{10o+1}."""
@@ -76,7 +79,7 @@ def test_bucket_six_coins():
 def test_outcome_idxs_sorted():
     """named_outcome_idxs order must not matter — results sorted ascending."""
     q_unsorted = _Q(question_idx=99, named_outcome_idxs=[5, 2], klass="priceBucket")
-    q_sorted   = _Q(question_idx=99, named_outcome_idxs=[2, 5], klass="priceBucket")
+    q_sorted = _Q(question_idx=99, named_outcome_idxs=[2, 5], klass="priceBucket")
     assert set(coin_klass_rows([q_unsorted])) == set(coin_klass_rows([q_sorted]))
 
 
@@ -114,6 +117,7 @@ def test_multiple_questions():
 # StateDAL integration — backfill_from_questions writes to the DB
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def dal(tmp_path):
     db = tmp_path / "state.db"
@@ -133,8 +137,8 @@ def test_backfill_populates_coin_klass_map(dal):
     m = dal.coin_klass_map()
     assert m["#150"] == "priceBinary"
     assert m["#151"] == "priceBinary"
-    assert m["#0"]  == "priceBucket"
-    assert m["#1"]  == "priceBucket"
+    assert m["#0"] == "priceBucket"
+    assert m["#1"] == "priceBucket"
     assert m["#10"] == "priceBucket"
     assert m["#11"] == "priceBucket"
     assert len(m) == 6
@@ -158,6 +162,7 @@ def test_backfill_empty_does_nothing(dal):
 # Parquet source reader — parse_question_meta_parquet
 # ---------------------------------------------------------------------------
 
+
 def test_parse_binary_from_parquet(tmp_path):
     """parse_question_meta_parquet reads a real parquet file and returns
     questions with correct klass/named_outcome_idxs."""
@@ -179,26 +184,28 @@ def test_parse_binary_from_parquet(tmp_path):
             "named_outcome_idxs": [15],
             "fallback_outcome_idx": None,
             "settled_named_outcome_idxs": [],
-            "keys":   ["question_name", "class", "underlying"],
-            "values": ["Recurring",     "priceBinary", "BTC"],
+            "keys": ["question_name", "class", "underlying"],
+            "values": ["Recurring", "priceBinary", "BTC"],
         },
     ]
-    schema = pa.schema([
-        pa.field("venue", pa.string()),
-        pa.field("product_type", pa.string()),
-        pa.field("mechanism", pa.string()),
-        pa.field("symbol", pa.string()),
-        pa.field("exchange_ts", pa.int64()),
-        pa.field("local_recv_ts", pa.int64()),
-        pa.field("seq", pa.int32()),
-        pa.field("event_type", pa.string()),
-        pa.field("question_idx", pa.int64()),
-        pa.field("named_outcome_idxs", pa.list_(pa.int64())),
-        pa.field("fallback_outcome_idx", pa.int32()),
-        pa.field("settled_named_outcome_idxs", pa.list_(pa.int32())),
-        pa.field("keys",   pa.list_(pa.string())),
-        pa.field("values", pa.list_(pa.string())),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("venue", pa.string()),
+            pa.field("product_type", pa.string()),
+            pa.field("mechanism", pa.string()),
+            pa.field("symbol", pa.string()),
+            pa.field("exchange_ts", pa.int64()),
+            pa.field("local_recv_ts", pa.int64()),
+            pa.field("seq", pa.int32()),
+            pa.field("event_type", pa.string()),
+            pa.field("question_idx", pa.int64()),
+            pa.field("named_outcome_idxs", pa.list_(pa.int64())),
+            pa.field("fallback_outcome_idx", pa.int32()),
+            pa.field("settled_named_outcome_idxs", pa.list_(pa.int32())),
+            pa.field("keys", pa.list_(pa.string())),
+            pa.field("values", pa.list_(pa.string())),
+        ]
+    )
     table = pa.Table.from_pylist(rows, schema=schema)
     f = tmp_path / "fixture.parquet"
     pq.write_table(table, str(f), compression="zstd")
@@ -228,25 +235,27 @@ def test_parse_deduplicates_same_question(tmp_path):
         "named_outcome_idxs": [15],
         "fallback_outcome_idx": None,
         "settled_named_outcome_idxs": [],
-        "keys":   ["class"],
+        "keys": ["class"],
         "values": ["priceBinary"],
     }
-    schema = pa.schema([
-        pa.field("venue", pa.string()),
-        pa.field("product_type", pa.string()),
-        pa.field("mechanism", pa.string()),
-        pa.field("symbol", pa.string()),
-        pa.field("exchange_ts", pa.int64()),
-        pa.field("local_recv_ts", pa.int64()),
-        pa.field("seq", pa.int32()),
-        pa.field("event_type", pa.string()),
-        pa.field("question_idx", pa.int64()),
-        pa.field("named_outcome_idxs", pa.list_(pa.int64())),
-        pa.field("fallback_outcome_idx", pa.int32()),
-        pa.field("settled_named_outcome_idxs", pa.list_(pa.int32())),
-        pa.field("keys",   pa.list_(pa.string())),
-        pa.field("values", pa.list_(pa.string())),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("venue", pa.string()),
+            pa.field("product_type", pa.string()),
+            pa.field("mechanism", pa.string()),
+            pa.field("symbol", pa.string()),
+            pa.field("exchange_ts", pa.int64()),
+            pa.field("local_recv_ts", pa.int64()),
+            pa.field("seq", pa.int32()),
+            pa.field("event_type", pa.string()),
+            pa.field("question_idx", pa.int64()),
+            pa.field("named_outcome_idxs", pa.list_(pa.int64())),
+            pa.field("fallback_outcome_idx", pa.int32()),
+            pa.field("settled_named_outcome_idxs", pa.list_(pa.int32())),
+            pa.field("keys", pa.list_(pa.string())),
+            pa.field("values", pa.list_(pa.string())),
+        ]
+    )
     # Write the same row twice (simulates two parquet flushes of the same question)
     table = pa.Table.from_pylist([row, row], schema=schema)
     f = tmp_path / "dup.parquet"
@@ -273,25 +282,27 @@ def test_parse_skips_rows_without_class(tmp_path):
         "named_outcome_idxs": [9],
         "fallback_outcome_idx": None,
         "settled_named_outcome_idxs": [],
-        "keys":   ["underlying"],  # no "class" key
+        "keys": ["underlying"],  # no "class" key
         "values": ["BTC"],
     }
-    schema = pa.schema([
-        pa.field("venue", pa.string()),
-        pa.field("product_type", pa.string()),
-        pa.field("mechanism", pa.string()),
-        pa.field("symbol", pa.string()),
-        pa.field("exchange_ts", pa.int64()),
-        pa.field("local_recv_ts", pa.int64()),
-        pa.field("seq", pa.int32()),
-        pa.field("event_type", pa.string()),
-        pa.field("question_idx", pa.int64()),
-        pa.field("named_outcome_idxs", pa.list_(pa.int64())),
-        pa.field("fallback_outcome_idx", pa.int32()),
-        pa.field("settled_named_outcome_idxs", pa.list_(pa.int32())),
-        pa.field("keys",   pa.list_(pa.string())),
-        pa.field("values", pa.list_(pa.string())),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("venue", pa.string()),
+            pa.field("product_type", pa.string()),
+            pa.field("mechanism", pa.string()),
+            pa.field("symbol", pa.string()),
+            pa.field("exchange_ts", pa.int64()),
+            pa.field("local_recv_ts", pa.int64()),
+            pa.field("seq", pa.int32()),
+            pa.field("event_type", pa.string()),
+            pa.field("question_idx", pa.int64()),
+            pa.field("named_outcome_idxs", pa.list_(pa.int64())),
+            pa.field("fallback_outcome_idx", pa.int32()),
+            pa.field("settled_named_outcome_idxs", pa.list_(pa.int32())),
+            pa.field("keys", pa.list_(pa.string())),
+            pa.field("values", pa.list_(pa.string())),
+        ]
+    )
     table = pa.Table.from_pylist([row], schema=schema)
     f = tmp_path / "noclass.parquet"
     pq.write_table(table, str(f), compression="zstd")

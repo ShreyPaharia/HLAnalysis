@@ -8,6 +8,7 @@ the refactor routed even serial runs through run_questions_parallel ->
 source_config.build(), which would drop reference_resample_seconds (reverting to
 60s) -> inflated sigma -> every tick gated -> 0 trades.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -49,9 +50,7 @@ def test_in_process_path_uses_provided_source_and_strategy(monkeypatch):
         n_workers=1,
     )
 
-    assert captured["source"] is sentinel_source, (
-        "in-process path must use the provided source, not reconstruct it"
-    )
+    assert captured["source"] is sentinel_source, "in-process path must use the provided source, not reconstruct it"
     assert captured["strategy"] is sentinel_strategy
     assert results[0].n_fills == 2
     assert results[0].outcome == "yes"

@@ -3,6 +3,7 @@
 `pm: PmSlotState | None` sub-object instead of five loose fields plus three
 ad-hoc "is this PM?" checks.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -14,37 +15,61 @@ def _build_runtime(tmp_path, *, polymarket: bool):
     """Build a real EngineRuntime with a single slot of the requested venue,
     using a stub exec_client_factory so neither venue touches the network."""
     from hlanalysis.engine.config import (
-        AlertsConfig, AllowlistEntry, DeployConfig, GlobalRiskConfig,
-        HyperliquidAccount, PolymarketAccount, StrategyConfig, TelegramConfig,
+        AlertsConfig,
+        AllowlistEntry,
+        DeployConfig,
+        GlobalRiskConfig,
+        HyperliquidAccount,
+        PolymarketAccount,
+        StrategyConfig,
+        TelegramConfig,
     )
 
     entry = AllowlistEntry(
         match={"class": "priceBinary", "underlying": "BTC"},
-        max_position_usd=100, stop_loss_pct=None, tte_min_seconds=0,
-        tte_max_seconds=7200, price_extreme_threshold=0.85,
-        distance_from_strike_usd_min=0, vol_max=100,
-        vol_lookback_seconds=3600, vol_sampling_dt_seconds=60,
+        max_position_usd=100,
+        stop_loss_pct=None,
+        tte_min_seconds=0,
+        tte_max_seconds=7200,
+        price_extreme_threshold=0.85,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
+        vol_lookback_seconds=3600,
+        vol_sampling_dt_seconds=60,
     )
     alias = "v31_pm" if polymarket else "v1"
     strat = StrategyConfig(
-        name="late_resolution", account_alias=alias, paper_mode=True,
-        strategy_type="late_resolution", reference_symbol="BTC",
-        allowlist=[entry], blocklist_question_idxs=[], defaults=entry,
-        **{"global": GlobalRiskConfig(
-            max_total_inventory_usd=500, max_concurrent_positions=5,
-            daily_loss_cap_usd=200, max_strike_distance_pct=50,
-            min_recent_volume_usd=100, stale_data_halt_seconds=30,
-            reconcile_interval_seconds=60,
-        )},
+        name="late_resolution",
+        account_alias=alias,
+        paper_mode=True,
+        strategy_type="late_resolution",
+        reference_symbol="BTC",
+        allowlist=[entry],
+        blocklist_question_idxs=[],
+        defaults=entry,
+        **{
+            "global": GlobalRiskConfig(
+                max_total_inventory_usd=500,
+                max_concurrent_positions=5,
+                daily_loss_cap_usd=200,
+                max_strike_distance_pct=50,
+                min_recent_volume_usd=100,
+                stale_data_halt_seconds=30,
+                reconcile_interval_seconds=60,
+            )
+        },
     )
     if polymarket:
         acct = PolymarketAccount(
-            private_key="0x0", clob_api_key="k",
-            clob_api_secret="s", clob_api_passphrase="p",
+            private_key="0x0",
+            clob_api_key="k",
+            clob_api_secret="s",
+            clob_api_passphrase="p",
         )
     else:
         acct = HyperliquidAccount(
-            account_address="0x0", api_secret_key="0x0",
+            account_address="0x0",
+            api_secret_key="0x0",
             base_url="https://api.hyperliquid.xyz",
         )
     deploy = DeployConfig(
@@ -60,8 +85,10 @@ def _build_runtime(tmp_path, *, polymarket: bool):
             return 0.0
 
     rt = EngineRuntime(
-        strategies=[strat], deploy_cfg=deploy,
-        adapter_factory=lambda: None, subscriptions=[],
+        strategies=[strat],
+        deploy_cfg=deploy,
+        adapter_factory=lambda: None,
+        subscriptions=[],
         exec_client_factory=lambda _a, _c, _p: _StubExec(),
     )
     return rt, rt._build_slot(strat)

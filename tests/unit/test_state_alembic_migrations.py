@@ -16,6 +16,7 @@ schema (the six hand-written SQL migrations, applied in order — note the
 stored CREATE TABLE text). DO NOT EDIT it to match new code; it is the contract
 with databases already on disk in production.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -102,8 +103,12 @@ CREATE INDEX idx_events_question_ts
 """
 
 LEGACY_VERSIONS = [
-    "0001_initial", "0002_seen_question", "0003_fill_closed_pnl",
-    "0004_pm_strike", "0005_settlement", "0006_events",
+    "0001_initial",
+    "0002_seen_question",
+    "0003_fill_closed_pnl",
+    "0004_pm_strike",
+    "0005_settlement",
+    "0006_events",
 ]
 
 
@@ -141,11 +146,7 @@ def _app_schema(path) -> dict[str, str]:
 def _table_names(path) -> set[str]:
     conn = sqlite3.connect(path)
     try:
-        return {
-            r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
+        return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     finally:
         conn.close()
 
@@ -177,8 +178,7 @@ def test_existing_db_upgrades_without_data_loss_and_backfills_closed_qty(tmp_pat
 
     seed = StateDAL(db)
     seed.set_pm_strike(1000126, 73_500.0)
-    seed.record_settlement(question_idx=42, symbol="@30",
-                           realized_pnl=-5.0, ts_ns=333)
+    seed.record_settlement(question_idx=42, symbol="@30", realized_pnl=-5.0, ts_ns=333)
 
     schema_before = _app_schema(db)
 
@@ -193,7 +193,9 @@ def test_existing_db_upgrades_without_data_loss_and_backfills_closed_qty(tmp_pat
     #    CREATE text is byte-unchanged; the only new objects are these.
     schema_after = _app_schema(db)
     assert set(schema_after) - set(schema_before) == {
-        "coin_klass", "trade_journal", "idx_trade_journal_decision_ts",
+        "coin_klass",
+        "trade_journal",
+        "idx_trade_journal_decision_ts",
     }
     for name, sql in schema_before.items():
         if name in ("position", "fill"):

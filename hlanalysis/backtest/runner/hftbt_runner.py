@@ -54,6 +54,7 @@ Logic extracted from this 1755-LOC file into cohesive sub-modules:
 
 All moved names are re-exported here so the public import surface is unchanged.
 """
+
 from __future__ import annotations
 
 import os
@@ -153,6 +154,7 @@ def _stop_price(fill_price: float, stop_pct: float | None) -> float:
     """Thin alias over the shared ``position_math.stop_price`` (single source of
     truth shared with the live router)."""
     from hlanalysis.marketdata.position_math import stop_price
+
     return stop_price(fill_price, stop_pct)
 
 
@@ -346,10 +348,7 @@ def run_one_question(
     ref_events: list[ReferenceEvent]
     settle_events: list[SettlementEvent]
 
-    fast_path_fn = (
-        None if os.environ.get("HLBT_DISABLE_FASTPATH")
-        else getattr(data_source, "events_arrays", None)
-    )
+    fast_path_fn = None if os.environ.get("HLBT_DISABLE_FASTPATH") else getattr(data_source, "events_arrays", None)
     bundle = None
     if fast_path_fn is not None:
         try:
@@ -409,12 +408,8 @@ def run_one_question(
         leg_event_arrays = {}
         book_ts_per_leg = {}
         for sym in q.leg_symbols:
-            leg_event_arrays[sym] = build_leg_event_array_from_snapshots(
-                book_events[sym], trade_events[sym]
-            )
-            book_ts_per_leg[sym] = np.asarray(
-                [b.ts_ns for b in book_events[sym]], dtype=np.int64
-            )
+            leg_event_arrays[sym] = build_leg_event_array_from_snapshots(book_events[sym], trade_events[sym])
+            book_ts_per_leg[sym] = np.asarray([b.ts_ns for b in book_events[sym]], dtype=np.int64)
         # Legacy path: merge and sort all per-leg trade events (SHR-78).
         raw_legacy: list[TradeEvent] = []
         for evs in trade_events.values():
@@ -423,9 +418,7 @@ def run_one_question(
         all_trade_events = raw_legacy
         # SHR-93: propagate the data source's reference_ticks mode to the scan loop
         # so the slow events() path also uses apply_reference_tick for raw ticks.
-        ref_events_are_raw_ticks = (
-            getattr(data_source, "reference_ticks", "bars") == "raw"
-        )
+        ref_events_are_raw_ticks = getattr(data_source, "reference_ticks", "bars") == "raw"
 
     # Binary HIP-4 / PM markets settle relative to the reference price at
     # question start ("BTC > day_open"). When the caller hasn't supplied a
@@ -448,11 +441,7 @@ def run_one_question(
     # end so max-interval ceiling scans can fire over quiet windows — without this,
     # hbt.elapse() returns rc=1 (end-of-data) as soon as the last real event is
     # consumed. Fixed-mode is unaffected (sentinel is not appended).
-    _event_mode_sentinel = (
-        _sentinel_event_array(q.end_ts_ns)
-        if cfg.scan_mode == "event"
-        else None
-    )
+    _event_mode_sentinel = _sentinel_event_array(q.end_ts_ns) if cfg.scan_mode == "event" else None
 
     assets = []
     leg_to_asset: dict[str, int] = {}
@@ -467,9 +456,7 @@ def run_one_question(
             parts.append(_event_mode_sentinel)
         full = np.concatenate(parts) if len(parts) > 1 else parts[0]
         _data_keepalive.append(full)
-        assets.append(
-            _build_asset(full, cfg, start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns)
-        )
+        assets.append(_build_asset(full, cfg, start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns))
         leg_to_asset[sym] = i
 
     # Hedge leg: build a third BacktestAsset when hedge_enabled and events provided.
@@ -477,16 +464,10 @@ def run_one_question(
     if cfg.hedge_enabled and hedge_events is not None:
         hedge_arr = build_leg_event_array_from_snapshots(hedge_events, [])
         hedge_clear = _initial_clear_array(q.start_ts_ns)
-        hedge_full = (
-            np.concatenate([hedge_clear, hedge_arr]) if len(hedge_arr) > 0 else hedge_clear
-        )
+        hedge_full = np.concatenate([hedge_clear, hedge_arr]) if len(hedge_arr) > 0 else hedge_clear
         _data_keepalive.append(hedge_full)
         hedge_asset_no = len(assets)
-        assets.append(
-            _build_hedge_asset(
-                hedge_full, cfg, start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns
-            )
-        )
+        assets.append(_build_hedge_asset(hedge_full, cfg, start_ts_ns=q.start_ts_ns, end_ts_ns=q.end_ts_ns))
 
     hbt = hb.HashMapMarketDepthBacktest(assets)
 
@@ -697,16 +678,12 @@ def run_one_question(
             qv = build_question_view(q, now_ns=now_ns, strike=strike, settled=False)
         else:
             qv = data_source.question_view(q, now_ns=now_ns, settled=False)
-        _rets_arr, _hl_arr = state.recent_returns_and_hl(
-            now_ns=now_ns, lookback_seconds=cfg.vol_lookback_seconds
-        )
+        _rets_arr, _hl_arr = state.recent_returns_and_hl(now_ns=now_ns, lookback_seconds=cfg.vol_lookback_seconds)
         # Match the live engine's tuple contract (scanner.py:428-430): convert
         # numpy arrays to tuples so sim and live pass the identical container
         # type to strategy.evaluate.
         recent_returns: tuple[float, ...] = tuple(_rets_arr.tolist())
-        recent_hl_bars: tuple[tuple[float, float], ...] = tuple(
-            (float(h), float(lo)) for h, lo in _hl_arr
-        )
+        recent_hl_bars: tuple[tuple[float, float], ...] = tuple((float(h), float(lo)) for h, lo in _hl_arr)
         ref_close = state.latest_btc_close() or qv.strike
 
         decision = strategy.evaluate(

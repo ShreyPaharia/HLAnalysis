@@ -5,6 +5,7 @@ Synthetic sim/live decision pairs exercise the three attribution buckets
 (input-skew / execution / unmodeled-halt) and the invariant that the buckets
 PARTITION the per-market PnL residual exactly.
 """
+
 from __future__ import annotations
 
 import json
@@ -75,16 +76,14 @@ def test_one_sided_no_halt_no_divergence_falls_back_to_execution():
 
 def test_buckets_partition_total_residual_exactly():
     pairs = [
-        DecisionPair(key="a", sim=_leg(10.0), live=_leg(7.0)),               # exec +3
+        DecisionPair(key="a", sim=_leg(10.0), live=_leg(7.0)),  # exec +3
         DecisionPair(key="b", sim=_leg(5.0), live=None, live_halt_active=True),  # halt +5
-        DecisionPair(key="c", sim=None, live=_leg(8.0), inputs_diverged=True),   # skew -8
-        DecisionPair(key="d", sim=None, live=_leg(4.0)),                     # exec -4
+        DecisionPair(key="c", sim=None, live=_leg(8.0), inputs_diverged=True),  # skew -8
+        DecisionPair(key="d", sim=None, live=_leg(4.0)),  # exec -4
     ]
     a = attribute_residual(pairs)
     total_residual = sum(
-        (p.sim.realized_pnl if p.sim else 0.0)
-        - (p.live.realized_pnl if p.live else 0.0)
-        for p in pairs
+        (p.sim.realized_pnl if p.sim else 0.0) - (p.live.realized_pnl if p.live else 0.0) for p in pairs
     )
     assert a.total == pytest.approx(total_residual)
     assert a.input_skew + a.execution + a.unmodeled_halt == pytest.approx(a.total)
@@ -96,8 +95,11 @@ def test_halt_takes_precedence_over_input_divergence():
     # halt (the gate is the proximate cause — live could not have traded).
     pairs = [
         DecisionPair(
-            key="q1", sim=_leg(6.0), live=None,
-            live_halt_active=True, inputs_diverged=True,
+            key="q1",
+            sim=_leg(6.0),
+            live=None,
+            live_halt_active=True,
+            inputs_diverged=True,
         )
     ]
     a = attribute_residual(pairs)

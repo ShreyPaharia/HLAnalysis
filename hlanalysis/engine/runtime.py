@@ -102,7 +102,11 @@ from .trade_journal import HaltSnapshot, TradeJournal
 # don't trigger an immediate re-scan (the idle max-interval floor still covers
 # their time-based effects).
 _PRICE_EVENT_TYPES = (
-    BboEvent, BookSnapshotEvent, BookDeltaEvent, MarkEvent, TradeEvent,
+    BboEvent,
+    BookSnapshotEvent,
+    BookDeltaEvent,
+    MarkEvent,
+    TradeEvent,
 )
 
 # Map of Binance SPOT symbols → internal remapped symbols used in MarketState.
@@ -116,7 +120,6 @@ _PRICE_EVENT_TYPES = (
 _SPOT_REF_SYMBOL = _SPOT_REF_SYMBOLS["BTCUSDT"]
 
 
-
 @dataclass
 class PmSlotState:
     """Polymarket-only mutable slot state. Present (non-None) on a slot iff its
@@ -124,6 +127,7 @@ class PmSlotState:
     these here keeps the PM-specific bookkeeping out of HL slots' way and gives
     the PM watchdogs/loops a single object to read and mutate.
     """
+
     # cloids that have already triggered an OrderUnconfirmed alert. Cleared when
     # the cloid drops out of live_orders (status flipped to
     # filled/cancelled/rejected) so a future stall on a re-placed order with the
@@ -151,6 +155,7 @@ class AccountSlot:
     router, reconciler, and strategy instance. The only thing shared with
     sibling slots is the engine's MarketState + WS feed.
     """
+
     cfg: StrategyConfig
     account_cfg: HyperliquidAccount | PolymarketAccount
     # Venue discriminator, set once at build time from account_cfg.venue
@@ -160,7 +165,7 @@ class AccountSlot:
     venue: str
     state_db_path: Path
     kill_switch_path: Path
-    cloid_prefix: str           # e.g. "hla-v1-" or "hla-v31-"
+    cloid_prefix: str  # e.g. "hla-v1-" or "hla-v31-"
     dal: StateDAL
     exec_client: ExecutionClient
     risk: RiskGate
@@ -177,7 +182,7 @@ class AccountSlot:
     last_reconcile_ns: int = 0
     scans_completed: int = 0
     decisions_emitted: int = 0
-    halted: bool = False         # daily-loss / kill-switch latched
+    halted: bool = False  # daily-loss / kill-switch latched
     # PM-only mutable state. Non-None iff this is a Polymarket slot (set at build
     # time); HL slots leave it None. Populated/mutated by the PM watchdogs and
     # `_continuous_checks_loop`.
@@ -280,8 +285,10 @@ class EngineRuntime:
         """
         wrapped_factory: Callable[[str, AccountConfig, bool], ExecutionClient] | None = None
         if exec_client_factory is not None:
+
             def wrapped_factory(_alias: str, _acct: AccountConfig, paper: bool) -> ExecutionClient:
                 return exec_client_factory(paper)
+
         return cls(
             strategies=[strategy_cfg],
             deploy_cfg=deploy_cfg,
@@ -302,8 +309,7 @@ class EngineRuntime:
         slots = self.slots
         if len({s.alias for s in slots}) != len(slots):
             raise ValueError(
-                "Duplicate account_alias across slots — each (strategy, account) "
-                "pair must use a distinct alias",
+                "Duplicate account_alias across slots — each (strategy, account) pair must use a distinct alias",
             )
         # Couple the shared MarketState's per-symbol mark-bucket period to each
         # slot's vol_sampling_dt_seconds before the ingest loop streams marks.
@@ -315,11 +321,11 @@ class EngineRuntime:
             # are visually distinct on Telegram (e.g. `[HL:v31]` vs
             # `[PM:v31_pm]`). Tag picked off the venue-typed AccountConfig
             # discriminator so adding a new venue requires no rules.py edit.
-            venue_by_alias: dict[str, str] = {
-                s.alias: ("PM" if s.is_pm else "HL") for s in slots
-            }
+            venue_by_alias: dict[str, str] = {s.alias: ("PM" if s.is_pm else "HL") for s in slots}
             rules = AlertRules(
-                bus=self.bus, telegram=tg, venue_by_alias=venue_by_alias,
+                bus=self.bus,
+                telegram=tg,
+                venue_by_alias=venue_by_alias,
             )
 
             # 2) Per-slot restart-drift gate
@@ -344,12 +350,10 @@ class EngineRuntime:
                     slot.blocked = True
                     logger.warning(
                         "RESTART BLOCKED alias={} — scanner suspended\n{}",
-                        slot.alias, drift_res.summary,
+                        slot.alias,
+                        drift_res.summary,
                     )
-                    await tg.send(
-                        f"*RESTART BLOCKED* (alias={slot.alias})\n"
-                        f"```\n{drift_res.summary[:3500]}\n```"
-                    )
+                    await tg.send(f"*RESTART BLOCKED* (alias={slot.alias})\n```\n{drift_res.summary[:3500]}\n```")
 
             # 3) Wire signal handlers
             loop = asyncio.get_running_loop()
@@ -452,14 +456,16 @@ class EngineRuntime:
             consecutive_failures += 1
             if not feed_down:
                 feed_down = True
-                await self.bus.publish(FeedDown(
-                    ts_ns=self._now_ns(),
-                    consecutive_failures=consecutive_failures,
-                ))
+                await self.bus.publish(
+                    FeedDown(
+                        ts_ns=self._now_ns(),
+                        consecutive_failures=consecutive_failures,
+                    )
+                )
             if consecutive_failures >= self.ingest_halt_after_failures:
                 logger.error(
-                    "feed down for {} consecutive reconnects; latching all "
-                    "slots halted and stopping", consecutive_failures,
+                    "feed down for {} consecutive reconnects; latching all slots halted and stopping",
+                    consecutive_failures,
                 )
                 for slot in slots:
                     slot.halted = True
@@ -469,9 +475,13 @@ class EngineRuntime:
             backoff = min(backoff * 2, self.ingest_reconnect_max_s)
 
     async def _handle_ingest_event(
-        self, ev, slots: list[AccountSlot], seen_questions: set[int],
+        self,
+        ev,
+        slots: list[AccountSlot],
+        seen_questions: set[int],
     ) -> None:
         from ..events import QuestionMetaEvent
+
         ev = _remap_reference_symbol(ev)
         self.market_state.apply(ev)
         self.events_ingested += 1
@@ -488,6 +498,7 @@ class EngineRuntime:
         if qv is None:
             return
         from ..strategy.render import question_description
+
         now_ns = self._now_ns()
         new_q_event = NewQuestion(
             ts_ns=now_ns,
@@ -526,14 +537,21 @@ class EngineRuntime:
             if not slot.dal.has_seen_question(qidx):
                 slot.dal.mark_question_seen(qidx, now_ns=now_ns)
                 any_unseen = True
-            if match_question(
-                slot.cfg, question_idx=qidx, fields=fields,
-            ) is not None:
+            if (
+                match_question(
+                    slot.cfg,
+                    question_idx=qidx,
+                    fields=fields,
+                )
+                is not None
+            ):
                 any_tradeable = True
                 if persist_klass:
                     for leg in qv.leg_symbols:
                         slot.dal.set_coin_klass(
-                            coin=leg, klass=qv.klass, question_idx=qidx,
+                            coin=leg,
+                            klass=qv.klass,
+                            question_idx=qidx,
                         )
         # PM up/down open-strike: single capture path. Fires once the reference
         # 1m candle has closed (now >= ref_ts + 60s) by fetching the Binance
@@ -543,13 +561,21 @@ class EngineRuntime:
         # live mark — it only reloads a persisted strike.
         if any_tradeable:
             await self._maybe_capture_pm_strike(
-                qv, slots, fields, now_ns=now_ns,
+                qv,
+                slots,
+                fields,
+                now_ns=now_ns,
             )
         if any_unseen and any_tradeable:
             await self.bus.publish(new_q_event)
 
     async def _maybe_capture_pm_strike(
-        self, qv, slots: list[AccountSlot], fields: dict[str, str], *, now_ns: int,
+        self,
+        qv,
+        slots: list[AccountSlot],
+        fields: dict[str, str],
+        *,
+        now_ns: int,
     ) -> None:
         """Thin delegator to ``pm_strike.maybe_capture_pm_strike`` (the capture
         logic lives there; this preserves the method API)."""
@@ -584,12 +610,16 @@ class EngineRuntime:
                     daily_loss_cap_usd=slot.cfg.global_.daily_loss_cap_usd,
                 )
                 for sd in slot.scanner.scan(
-                    now_ns=now, realized_pnl_today=realized_today,
+                    now_ns=now,
+                    realized_pnl_today=realized_today,
                 ):
                     slot.decisions_emitted += 1
                     await slot.router.handle(
-                        sd.decision, inputs=sd.inputs, now_ns=now,
-                        recent_returns=sd.recent_returns, halt=halt,
+                        sd.decision,
+                        inputs=sd.inputs,
+                        now_ns=now,
+                        recent_returns=sd.recent_returns,
+                        halt=halt,
                     )
                 slot.scans_completed += 1
             except Exception:
@@ -625,11 +655,15 @@ class EngineRuntime:
                         "decisions={} | btc={} questions={} positions={} live_orders={}"
                         "{}",
                         slot.alias,
-                        self.events_ingested, d_events,
-                        slot.scans_completed, d_scans,
+                        self.events_ingested,
+                        d_events,
+                        slot.scans_completed,
+                        d_scans,
                         slot.decisions_emitted,
                         f"${btc_mark:.2f}" if btc_mark else "none",
-                        n_questions, n_positions, n_live,
+                        n_questions,
+                        n_positions,
+                        n_live,
                         " HALTED" if slot.halted else "",
                     )
                 # W1.9: RSS self-halt guard — check on every heartbeat so an
@@ -637,7 +671,8 @@ class EngineRuntime:
                 # AFTER the info log so the log line is always emitted.
                 await self._check_rss_halt(slots)
                 await self._publish_heartbeat(
-                    d_events=d_events, n_questions=n_questions,
+                    d_events=d_events,
+                    n_questions=n_questions,
                 )
             except Exception:
                 logger.exception("heartbeat crashed")
@@ -661,8 +696,10 @@ class EngineRuntime:
         max_age_ns = self.deploy_cfg.events_retention_days * 24 * 3600 * 10**9
         max_rows = self.deploy_cfg.events_retention_max_rows
         await events_persist_loop(
-            sub, [s.dal for s in self.slots],
-            max_age_ns=max_age_ns, max_rows=max_rows,
+            sub,
+            [s.dal for s in self.slots],
+            max_age_ns=max_age_ns,
+            max_rows=max_rows,
         )
 
     # ---- liveness / dead-man's-switch (SHR-43) -----------------------------
@@ -687,16 +724,23 @@ class EngineRuntime:
         active subscriptions means the feed/ingest is dead — not a calm market.
         EngineHeartbeat is alert-silent; FeedStale drives a Telegram alert."""
         now = self._now_ns()
-        await self.bus.publish(EngineHeartbeat(
-            ts_ns=now, events_ingested=self.events_ingested,
-            d_events=d_events, n_questions=n_questions,
-        ))
+        await self.bus.publish(
+            EngineHeartbeat(
+                ts_ns=now,
+                events_ingested=self.events_ingested,
+                d_events=d_events,
+                n_questions=n_questions,
+            )
+        )
         self._touch_heartbeat_file(now)
         if d_events == 0 and self.subscriptions:
-            await self.bus.publish(FeedStale(
-                ts_ns=now, d_events=d_events,
-                interval_seconds=self.heartbeat_interval_s,
-            ))
+            await self.bus.publish(
+                FeedStale(
+                    ts_ns=now,
+                    d_events=d_events,
+                    interval_seconds=self.heartbeat_interval_s,
+                )
+            )
 
     # ---- venue IO offload (SHR-41) -----------------------------------------
     # Every ExecutionClient method is a synchronous, requests-backed SDK call
@@ -710,7 +754,8 @@ class EngineRuntime:
     # ingest loop and must stay on the loop thread.
 
     async def _venue_snapshot(
-        self, slot: AccountSlot,
+        self,
+        slot: AccountSlot,
     ) -> tuple[list[OpenOrderRow], ClearinghouseState, list[UserFillRow]]:
         """Thin delegator — logic lives in ``_venue_io.venue_snapshot``."""
         return await _venue_snapshot_fn(slot)
@@ -754,9 +799,7 @@ class EngineRuntime:
                     cloid_prefix=slot.cloid_prefix,
                     account_alias=slot.alias,
                     apply_position_changes=apply_positions,
-                    venue_fill_source=(
-                        FILL_SOURCE_ROUTER if is_pm else FILL_SOURCE_VENUE
-                    ),
+                    venue_fill_source=(FILL_SOURCE_ROUTER if is_pm else FILL_SOURCE_VENUE),
                     # Suppress venue_orphan/venue_absent drift for settled
                     # questions: PM auto-redeems ~15 min post-settle, and the
                     # venue keeps showing the winning shares until then — that
@@ -780,13 +823,15 @@ class EngineRuntime:
                 # local fill ledger is authoritative; PM redeems aren't fills).
                 if not is_pm:
                     mirrored = await asyncio.to_thread(
-                        slot.dal.mirror_venue_fills, all_fills,
+                        slot.dal.mirror_venue_fills,
+                        all_fills,
                         symbol_to_question=sym_to_q,
                     )
                     if mirrored:
                         logger.debug(
                             "venue_fill_mirror alias={} booked={}",
-                            slot.alias, mirrored,
+                            slot.alias,
+                            mirrored,
                         )
                 # Mark the PM startup sync done only once we've had an
                 # authoritative (positions_known) pass — so a data-api outage at
@@ -807,9 +852,11 @@ class EngineRuntime:
                     question_description,
                     settlement_pnl_usd,
                 )
+
                 is_pm = slot.is_pm
                 window_start_ns = Scanner._daily_window_start_ns(
-                    now, hour=slot.cfg.global_.daily_window_start_hour_utc,
+                    now,
+                    hour=slot.cfg.global_.daily_window_start_hour_utc,
                 )
                 for qidx, sym, lp in res.vanished_positions:
                     self.market_state.mark_question_settled(qidx)
@@ -824,9 +871,7 @@ class EngineRuntime:
                         # bucket legs as total losses. Not persisted:
                         # realized_pnl_since already counts these fills.
                         realized = sum(
-                            f.closed_pnl - f.fee
-                            for f in all_fills
-                            if f.symbol == sym and f.ts_ns >= window_start_ns
+                            f.closed_pnl - f.fee for f in all_fills if f.symbol == sym and f.ts_ns >= window_start_ns
                         )
                     else:
                         # PM: the redeem is not a CLOB fill, so re-derive from
@@ -837,26 +882,38 @@ class EngineRuntime:
                         # lp.realized_pnl; the later authoritative re-emit on the
                         # same qidx overwrites it.
                         realized = settlement_pnl_usd(
-                            qv, sym, lp.qty, lp.avg_entry,
+                            qv,
+                            sym,
+                            lp.qty,
+                            lp.avg_entry,
                             prior_realized=lp.realized_pnl,
                         )
                         slot.dal.record_settlement(
-                            question_idx=qidx, symbol=sym,
-                            realized_pnl=realized, ts_ns=now,
+                            question_idx=qidx,
+                            symbol=sym,
+                            realized_pnl=realized,
+                            ts_ns=now,
                         )
-                    await self.bus.publish(Exit(
-                        ts_ns=now, account_alias=slot.alias,
-                        question_idx=qidx, symbol=sym,
-                        qty=lp.closed_qty + lp.qty, realized_pnl=realized,
-                        reason="settlement",
-                        question_description=question_description(qv) if qv else "",
-                        outcome_description=outcome_description(qv, sym) if qv else "",
-                    ))
+                    await self.bus.publish(
+                        Exit(
+                            ts_ns=now,
+                            account_alias=slot.alias,
+                            question_idx=qidx,
+                            symbol=sym,
+                            qty=lp.closed_qty + lp.qty,
+                            realized_pnl=realized,
+                            reason="settlement",
+                            question_description=question_description(qv) if qv else "",
+                            outcome_description=outcome_description(qv, sym) if qv else "",
+                        )
+                    )
                 for ev in res.drift_events:
                     await self.bus.publish(ev)
                 for cloid, symbol in res.orphans_to_cancel:
                     await asyncio.to_thread(
-                        slot.exec_client.cancel, cloid=cloid, symbol=symbol,
+                        slot.exec_client.cancel,
+                        cloid=cloid,
+                        symbol=symbol,
                     )
                 # SHR-44: bound the question set on the 1 GB box. Retain a
                 # generous window after settlement so late reconciles / settlement
@@ -880,8 +937,9 @@ class EngineRuntime:
                 # traceback that reads like a bug and buries real ones.
                 if _is_transient_venue_error(exc):
                     logger.warning(
-                        "reconcile skipped alias={} — transient venue error "
-                        "(retried next cycle): {}", slot.alias, exc,
+                        "reconcile skipped alias={} — transient venue error (retried next cycle): {}",
+                        slot.alias,
+                        exc,
                     )
                 else:
                     logger.exception("reconcile crashed alias={}", slot.alias)
@@ -912,9 +970,13 @@ class EngineRuntime:
                 # without killing the other; we only set self.stop_event if
                 # ALL slots are halted (handled below in the loop).
                 if slot.risk.kill_switch_active(kill_path):
-                    await self.bus.publish(KillSwitchActivated(
-                        ts_ns=now, account_alias=slot.alias, path=str(kill_path),
-                    ))
+                    await self.bus.publish(
+                        KillSwitchActivated(
+                            ts_ns=now,
+                            account_alias=slot.alias,
+                            path=str(kill_path),
+                        )
+                    )
                     slot.halted = True
                     self._maybe_stop_all_halted(slot)
                     continue
@@ -945,11 +1007,14 @@ class EngineRuntime:
                 # fallback on venue outage.
                 pnl = await self._realized_pnl_today(slot, now_ns=now)
                 if pnl < -slot.cfg.global_.daily_loss_cap_usd:
-                    await self.bus.publish(DailyLossHalt(
-                        ts_ns=now, account_alias=slot.alias,
-                        realized_pnl=pnl,
-                        cap=slot.cfg.global_.daily_loss_cap_usd,
-                    ))
+                    await self.bus.publish(
+                        DailyLossHalt(
+                            ts_ns=now,
+                            account_alias=slot.alias,
+                            realized_pnl=pnl,
+                            cap=slot.cfg.global_.daily_loss_cap_usd,
+                        )
+                    )
                     # W1.9: latch persistently — writes flag file so a restart
                     # re-reads it and stays halted (operator-clearable only).
                     self._latch_kill_switch(slot)
@@ -968,11 +1033,7 @@ class EngineRuntime:
                             ev = pm_bus_sub.get_nowait()
                         except asyncio.QueueEmpty:
                             break
-                        if (
-                            isinstance(ev, Exit)
-                            and ev.reason == "settlement"
-                            and ev.account_alias == slot.alias
-                        ):
+                        if isinstance(ev, Exit) and ev.reason == "settlement" and ev.account_alias == slot.alias:
                             slot.pm.settlements.setdefault(
                                 ev.question_idx,
                                 (ev.ts_ns, ev.symbol, ev.qty, ev.realized_pnl),
@@ -997,13 +1058,8 @@ class EngineRuntime:
                 # slot holding a position (a forbidden safety-gate regression).
                 positions_db = slot.dal.all_positions()
                 if positions_db:
-                    settled_qidxs = {
-                        q.question_idx for q in self.market_state.all_questions() if q.settled
-                    }
-                    held_symbols = {
-                        p.symbol for p in positions_db
-                        if p.question_idx not in settled_qidxs
-                    }
+                    settled_qidxs = {q.question_idx for q in self.market_state.all_questions() if q.settled}
+                    held_symbols = {p.symbol for p in positions_db if p.question_idx not in settled_qidxs}
                     books_only_held = {sym: self.market_state.book(sym) for sym in held_symbols}
                     books_only_held = {s: b for s, b in books_only_held.items() if b is not None}
                     # A single held book going quiet while the rest of the feed is
@@ -1016,14 +1072,8 @@ class EngineRuntime:
                     # alert flood while preserving the dead-feed alarm. The idle
                     # window reuses the slot's stale_data_halt_seconds.
                     stale_ns = slot.cfg.global_.stale_data_halt_seconds * 1_000_000_000
-                    global_silent = (
-                        self._last_ingest_ns > 0
-                        and (now - self._last_ingest_ns) > stale_ns
-                    )
-                    stale_now = (
-                        set(slot.risk.stale_books(books_only_held, now_ns=now))
-                        if global_silent else set()
-                    )
+                    global_silent = self._last_ingest_ns > 0 and (now - self._last_ingest_ns) > stale_ns
+                    stale_now = set(slot.risk.stale_books(books_only_held, now_ns=now)) if global_silent else set()
                     # Evict recovered symbols so a future stale episode re-alerts.
                     slot.stale_alerted_symbols &= stale_now
                     for sym in stale_now:
@@ -1031,10 +1081,14 @@ class EngineRuntime:
                             continue  # already alerted this episode — don't spam every 1s
                         slot.stale_alerted_symbols.add(sym)
                         b = books_only_held[sym]
-                        await self.bus.publish(StaleDataHalt(
-                            ts_ns=now, account_alias=slot.alias, symbol=sym,
-                            age_seconds=(now - b.last_l2_ts_ns) / 1e9,
-                        ))
+                        await self.bus.publish(
+                            StaleDataHalt(
+                                ts_ns=now,
+                                account_alias=slot.alias,
+                                symbol=sym,
+                                age_seconds=(now - b.last_l2_ts_ns) / 1e9,
+                            )
+                        )
             except Exception:
                 logger.exception("continuous checks crashed alias={}", slot.alias)
             await self._sleep_or_stop(1.0)
@@ -1052,14 +1106,20 @@ class EngineRuntime:
             return
         books = {}
         from ..strategy.types import Position as SPos
+
         for p in positions_db:
             b = self.market_state.book(p.symbol)
             if b is not None:
                 books[p.symbol] = b
         sps = [
-            SPos(question_idx=p.question_idx, symbol=p.symbol, qty=p.qty,
-                 avg_entry=p.avg_entry, stop_loss_price=p.stop_loss_price,
-                 last_update_ts_ns=p.last_update_ts_ns)
+            SPos(
+                question_idx=p.question_idx,
+                symbol=p.symbol,
+                qty=p.qty,
+                avg_entry=p.avg_entry,
+                stop_loss_price=p.stop_loss_price,
+                last_update_ts_ns=p.last_update_ts_ns,
+            )
             for p in positions_db
         ]
         breached = slot.risk.breached_stops(sps, books)
@@ -1072,33 +1132,51 @@ class EngineRuntime:
         for sp in breached:
             if sp.question_idx in live_question_idxs:
                 continue  # exit already in flight; skip until ACK clears it
-            await self.bus.publish(StopLossTriggered(
-                ts_ns=now, account_alias=slot.alias,
-                question_idx=sp.question_idx, symbol=sp.symbol, qty=sp.qty,
-                trigger_px=sp.stop_loss_price,
-            ))
+            await self.bus.publish(
+                StopLossTriggered(
+                    ts_ns=now,
+                    account_alias=slot.alias,
+                    question_idx=sp.question_idx,
+                    symbol=sp.symbol,
+                    qty=sp.qty,
+                    trigger_px=sp.stop_loss_price,
+                )
+            )
             from ..strategy.types import Action, Decision, OrderIntent
+
             b = books.get(sp.symbol)
             if b is None or b.bid_px is None:
                 continue
             intent = OrderIntent(
-                question_idx=sp.question_idx, symbol=sp.symbol,
+                question_idx=sp.question_idx,
+                symbol=sp.symbol,
                 side="sell" if sp.qty > 0 else "buy",
-                size=abs(sp.qty), limit_price=b.bid_px,
+                size=abs(sp.qty),
+                limit_price=b.bid_px,
                 cloid=f"{slot.cloid_prefix}{uuid.uuid4().hex}",
-                time_in_force="ioc", reduce_only=True, exit_reason="stop_loss",
+                time_in_force="ioc",
+                reduce_only=True,
+                exit_reason="stop_loss",
             )
             from .risk import RiskInputs
+
             inp = RiskInputs(
                 question=self.market_state.question(sp.question_idx) or _stub_question(sp),
-                question_fields={}, reference_price=0.0, book=b,
-                recent_volume_usd=0.0, positions=sps,
-                live_orders_total_notional=0.0, realized_pnl_today=0.0,
-                kill_switch_active=False, last_reconcile_ns=slot.last_reconcile_ns,
+                question_fields={},
+                reference_price=0.0,
+                book=b,
+                recent_volume_usd=0.0,
+                positions=sps,
+                live_orders_total_notional=0.0,
+                realized_pnl_today=0.0,
+                kill_switch_active=False,
+                last_reconcile_ns=slot.last_reconcile_ns,
                 now_ns=now,
             )
             await slot.router.handle(
-                Decision(action=Action.EXIT, intents=(intent,)), inputs=inp, now_ns=now,
+                Decision(action=Action.EXIT, intents=(intent,)),
+                inputs=inp,
+                now_ns=now,
             )
 
     async def _stop_loss_loop(self, slot: AccountSlot) -> None:
@@ -1142,7 +1220,9 @@ class EngineRuntime:
             logger.error(
                 "failed to write kill-switch flag alias={} path={}; slot is "
                 "halted in memory but will NOT survive a restart — investigate "
-                "immediately", slot.alias, slot.kill_switch_path,
+                "immediately",
+                slot.alias,
+                slot.kill_switch_path,
             )
 
     @staticmethod
@@ -1167,6 +1247,7 @@ class EngineRuntime:
         caring about platform units.
         """
         import sys
+
         if sys.platform == "linux":
             try:
                 with open("/proc/self/status") as f:
@@ -1177,6 +1258,7 @@ class EngineRuntime:
                 pass
             try:
                 import os
+
                 with open("/proc/self/statm") as _statm:
                     pages = int(_statm.read().split()[1])
                 return pages * os.sysconf("SC_PAGE_SIZE") // 1024
@@ -1215,20 +1297,22 @@ class EngineRuntime:
         if rss_kb <= self.rss_halt_kb:
             return
         logger.error(
-            "RSS {}KB exceeds ceiling {}KB — self-halting all slots to prevent "
-            "OOM kill mid-position (W1.9)",
-            rss_kb, self.rss_halt_kb,
+            "RSS {}KB exceeds ceiling {}KB — self-halting all slots to prevent OOM kill mid-position (W1.9)",
+            rss_kb,
+            self.rss_halt_kb,
         )
         for slot in slots:
             self._latch_kill_switch(slot)
         # Publish once so AlertRules fires a Telegram alert. account_alias=""
         # keeps the event cross-slot (no per-slot prefix) — RSS is a
         # process-wide condition, not per-slot.
-        await self.bus.publish(MemoryHalt(
-            ts_ns=self._now_ns(),
-            rss_kb=rss_kb,
-            ceiling_kb=self.rss_halt_kb,
-        ))
+        await self.bus.publish(
+            MemoryHalt(
+                ts_ns=self._now_ns(),
+                rss_kb=rss_kb,
+                ceiling_kb=self.rss_halt_kb,
+            )
+        )
 
     def _maybe_stop_all_halted(self, just_halted: AccountSlot) -> None:
         """If every slot has latched halted, drop the global stop event so
@@ -1254,7 +1338,8 @@ class EngineRuntime:
         stop = asyncio.ensure_future(self.stop_event.wait())
         try:
             await asyncio.wait(
-                {dirty, stop}, timeout=max_interval,
+                {dirty, stop},
+                timeout=max_interval,
                 return_when=asyncio.FIRST_COMPLETED,
             )
         finally:
@@ -1283,6 +1368,5 @@ class EngineRuntime:
     @staticmethod
     def _now_ns() -> int:
         import time as _t
+
         return _t.time_ns()
-
-

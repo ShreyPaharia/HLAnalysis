@@ -10,6 +10,7 @@ The real ``v1_late_resolution`` won't be in the registry until Task E wires
 ``@register(...)`` on the strategy modules. We use the dummy enter strategy
 shipped with the synthetic data source as the substitute.
 """
+
 from __future__ import annotations
 
 import json
@@ -65,6 +66,4 @@ def test_strategies_subcommand_lists_registry(capsys):
     # Registry may be empty until Task E wires @register decorators. Either
     # the empty marker or one-or-more ids is acceptable.
     out = captured.out.strip()
-    assert out == "(no strategies registered)" or all(
-        line and " " not in line for line in out.splitlines()
-    )
+    assert out == "(no strategies registered)" or all(line and " " not in line for line in out.splitlines())

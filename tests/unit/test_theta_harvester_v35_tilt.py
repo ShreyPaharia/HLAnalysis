@@ -1,11 +1,15 @@
 """v3.5 tilt mode: edge_buffer is scaled by (1 - alpha_tilt * score)."""
+
 from __future__ import annotations
 
 from hlanalysis.strategy.theta_harvester import (
-    ThetaHarvesterConfig, ThetaHarvesterStrategy,
+    ThetaHarvesterConfig,
+    ThetaHarvesterStrategy,
 )
 from hlanalysis.strategy.types import (
-    Action, BookState, QuestionView,
+    Action,
+    BookState,
+    QuestionView,
 )
 
 # 4-hour expiry relative to now_ns=10**17. Keeps tau small so p_yes stays
@@ -33,7 +37,7 @@ def _cfg(**over) -> ThetaHarvesterConfig:
         vol_sampling_dt_seconds=60,
         vol_clip_min=0.0,
         vol_clip_max=5.0,
-        edge_buffer=0.05,            # high baseline bar
+        edge_buffer=0.05,  # high baseline bar
         fee_taker=0.0,
         half_spread_assumption=0.0,
         drift_lookback_seconds=0,
@@ -54,10 +58,12 @@ def _cfg(**over) -> ThetaHarvesterConfig:
 def _books_yes_fav() -> dict:
     """YES at ~0.95 mid (bid=ask=0.94). Edge vs ask ≈ p_yes - 0.94."""
     return {
-        "YES": BookState(symbol="YES", bid_px=0.94, bid_sz=10.0, ask_px=0.94, ask_sz=10.0,
-                         last_trade_ts_ns=0, last_l2_ts_ns=0),
-        "NO":  BookState(symbol="NO",  bid_px=0.05, bid_sz=10.0, ask_px=0.06, ask_sz=10.0,
-                         last_trade_ts_ns=0, last_l2_ts_ns=0),
+        "YES": BookState(
+            symbol="YES", bid_px=0.94, bid_sz=10.0, ask_px=0.94, ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=0
+        ),
+        "NO": BookState(
+            symbol="NO", bid_px=0.05, bid_sz=10.0, ask_px=0.06, ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=0
+        ),
     }
 
 
@@ -78,8 +84,12 @@ def test_tilt_loosens_buffer_when_momentum_aligned() -> None:
     )
     strat = ThetaHarvesterStrategy(cfg)
     dec = strat.evaluate(
-        question=_qv(), books=_books_yes_fav(), reference_price=110.0,
-        recent_returns=rets, recent_volume_usd=0.0, position=None,
+        question=_qv(),
+        books=_books_yes_fav(),
+        reference_price=110.0,
+        recent_returns=rets,
+        recent_volume_usd=0.0,
+        position=None,
         now_ns=_NOW_NS,
     )
     assert dec.action == Action.ENTER
@@ -94,7 +104,7 @@ def test_tilt_tightens_buffer_when_mr_against_favorite() -> None:
     # 0.06 > 0.04 (would enter raw) but 0.06 <= 0.08 (blocked by tilt).
     rets = tuple([-0.0007 if i % 2 == 0 else -0.0006 for i in range(90)])
     cfg = _cfg(
-        edge_buffer=0.04,           # raw edge ~0.06 > 0.04, enters without tilt
+        edge_buffer=0.04,  # raw edge ~0.06 > 0.04, enters without tilt
         momentum_mr_enabled=True,
         momentum_mr_indicator="z_ret",
         momentum_mr_lookback_min=60,
@@ -103,8 +113,12 @@ def test_tilt_tightens_buffer_when_mr_against_favorite() -> None:
     )
     strat = ThetaHarvesterStrategy(cfg)
     dec = strat.evaluate(
-        question=_qv(), books=_books_yes_fav(), reference_price=110.0,
-        recent_returns=rets, recent_volume_usd=0.0, position=None,
+        question=_qv(),
+        books=_books_yes_fav(),
+        reference_price=110.0,
+        recent_returns=rets,
+        recent_volume_usd=0.0,
+        position=None,
         now_ns=_NOW_NS,
     )
     assert dec.action == Action.HOLD

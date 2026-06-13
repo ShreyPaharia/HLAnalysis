@@ -17,6 +17,7 @@ caller stamps its own stop after calling ``apply_fill``. The shared stop FORMULA
 lives in ``stop_price`` and the shared disabled-stop sentinel in
 ``STOP_DISABLED_SENTINEL``.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -116,9 +117,7 @@ def apply_fill(
     signed = size if side == "buy" else -size
 
     realized_this_fill = 0.0
-    if pos is not None and (
-        (pos.qty > 0 and side == "sell") or (pos.qty < 0 and side == "buy")
-    ):
+    if pos is not None and ((pos.qty > 0 and side == "sell") or (pos.qty < 0 and side == "buy")):
         closed_lot = min(size, abs(pos.qty))
         if pos.qty > 0:
             realized_this_fill = (price - pos.avg_entry) * closed_lot
@@ -189,7 +188,10 @@ def settle(
     payoff = settlement_payoff_price(position_side_idx, settled_side_idx)
     close_side = "sell" if pos.qty > 0 else "buy"
     return apply_fill(
-        pos, close_side, abs(pos.qty), payoff,
+        pos,
+        close_side,
+        abs(pos.qty),
+        payoff,
         venue_closed_pnl=venue_closed_pnl,
     )
 
@@ -208,7 +210,12 @@ def open_mtm(pos: PositionState | None, mark_price: float) -> float:
 
 
 __all__ = [
-    "STOP_DISABLED_SENTINEL", "DUST_QTY_ABS_TOL",
-    "PositionState", "stop_price", "apply_fill",
-    "settlement_payoff_price", "settle", "open_mtm",
+    "STOP_DISABLED_SENTINEL",
+    "DUST_QTY_ABS_TOL",
+    "PositionState",
+    "stop_price",
+    "apply_fill",
+    "settlement_payoff_price",
+    "settle",
+    "open_mtm",
 ]

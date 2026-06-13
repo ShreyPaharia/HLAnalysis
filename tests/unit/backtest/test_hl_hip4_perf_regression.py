@@ -7,6 +7,7 @@ equivalence.
 The fixture is the 2-hour committed slice of Q1000015 — see
 ``tests/fixtures/hl_hip4/README.md``.
 """
+
 from __future__ import annotations
 
 import duckdb
@@ -20,6 +21,7 @@ from hlanalysis.backtest.data.hl_hip4 import HLHip4DataSource
 from hlanalysis.backtest.data._hl_hip4_fastpath import (
     build_leg_event_array_from_columns,
 )
+
 # The legacy runner helper ``_build_leg_event_array`` was collapsed into the
 # shared assembler; the in-memory snapshot→column adapter is its drop-in
 # replacement and is what these equivalence tests now exercise.
@@ -133,16 +135,17 @@ def test_build_leg_event_array_matches_naive_reference() -> None:
     for ts in range(100, 200, 5):
         n_bids = int(rng.integers(0, 4))
         n_asks = int(rng.integers(0, 4))
-        bids = tuple(
-            (float(0.4 - 0.001 * i), float(rng.uniform(1, 100))) for i in range(n_bids)
-        )
-        asks = tuple(
-            (float(0.5 + 0.001 * i), float(rng.uniform(1, 100))) for i in range(n_asks)
-        )
+        bids = tuple((float(0.4 - 0.001 * i), float(rng.uniform(1, 100))) for i in range(n_bids))
+        asks = tuple((float(0.5 + 0.001 * i), float(rng.uniform(1, 100))) for i in range(n_asks))
         snaps.append(BookSnapshot(ts_ns=ts, symbol="#150", bids=bids, asks=asks))
     trades = [
-        TradeEvent(ts_ns=int(ts), symbol="#150", side="buy" if i % 2 else "sell",
-                   price=float(rng.uniform(0.3, 0.6)), size=float(rng.uniform(1, 50)))
+        TradeEvent(
+            ts_ns=int(ts),
+            symbol="#150",
+            side="buy" if i % 2 else "sell",
+            price=float(rng.uniform(0.3, 0.6)),
+            size=float(rng.uniform(1, 50)),
+        )
         for i, ts in enumerate(rng.integers(100, 200, size=20))
     ]
 
@@ -151,14 +154,8 @@ def test_build_leg_event_array_matches_naive_reference() -> None:
     # Compare per-field after re-sorting (stable sort on identical keys can
     # interleave bid vs ask qty-0 clears in either order; compare as a sorted
     # multiset of records).
-    arr_recs = sorted(
-        (int(r["ev"]), int(r["exch_ts"]), float(r["px"]), float(r["qty"]))
-        for r in arr
-    )
-    naive_recs = sorted(
-        (int(r["ev"]), int(r["exch_ts"]), float(r["px"]), float(r["qty"]))
-        for r in naive
-    )
+    arr_recs = sorted((int(r["ev"]), int(r["exch_ts"]), float(r["px"]), float(r["qty"])) for r in arr)
+    naive_recs = sorted((int(r["ev"]), int(r["exch_ts"]), float(r["px"]), float(r["qty"])) for r in naive)
     assert arr_recs == naive_recs
 
 
@@ -175,9 +172,12 @@ def test_events_arrays_present_and_matches_legacy(source: HLHip4DataSource) -> N
     ref_events = []
     settle_events = []
     from hlanalysis.backtest.core.events import (
-        BookSnapshot as BS, TradeEvent as TE, ReferenceEvent as RE,
+        BookSnapshot as BS,
+        TradeEvent as TE,
+        ReferenceEvent as RE,
         SettlementEvent as SE,
     )
+
     for ev in source.events(q):
         if isinstance(ev, BS):
             if ev.symbol in book_events:
@@ -189,10 +189,7 @@ def test_events_arrays_present_and_matches_legacy(source: HLHip4DataSource) -> N
             ref_events.append(ev)
         elif isinstance(ev, SE):
             settle_events.append(ev)
-    legacy_arrays = {
-        sym: _build_leg_event_array(book_events[sym], trade_events[sym])
-        for sym in q.leg_symbols
-    }
+    legacy_arrays = {sym: _build_leg_event_array(book_events[sym], trade_events[sym]) for sym in q.leg_symbols}
 
     bundle = source.events_arrays(q)
 
@@ -208,14 +205,8 @@ def test_events_arrays_present_and_matches_legacy(source: HLHip4DataSource) -> N
         fast = bundle.leg_arrays[sym].events
         legacy = legacy_arrays[sym]
         assert fast.shape == legacy.shape, (sym, fast.shape, legacy.shape)
-        fast_recs = sorted(
-            (int(r["exch_ts"]), int(r["ev"]), float(r["px"]), float(r["qty"]))
-            for r in fast
-        )
-        legacy_recs = sorted(
-            (int(r["exch_ts"]), int(r["ev"]), float(r["px"]), float(r["qty"]))
-            for r in legacy
-        )
+        fast_recs = sorted((int(r["exch_ts"]), int(r["ev"]), float(r["px"]), float(r["qty"])) for r in fast)
+        legacy_recs = sorted((int(r["exch_ts"]), int(r["ev"]), float(r["px"]), float(r["qty"])) for r in legacy)
         assert fast_recs == legacy_recs, sym
 
 
@@ -253,8 +244,13 @@ def test_build_leg_event_array_from_columns_matches_legacy_on_random_input() -> 
     trade_side = np.where(rng.integers(0, 2, size=n_trades) == 0, "buy", "sell").astype(object)
 
     book_cols = dict(
-        ts=ts, bid_px=bid_px, bid_sz=bid_sz, bid_offsets=bid_off,
-        ask_px=ask_px, ask_sz=ask_sz, ask_offsets=ask_off,
+        ts=ts,
+        bid_px=bid_px,
+        bid_sz=bid_sz,
+        bid_offsets=bid_off,
+        ask_px=ask_px,
+        ask_sz=ask_sz,
+        ask_offsets=ask_off,
     )
     trade_cols = dict(ts=trade_ts, px=trade_px, sz=trade_sz, side=trade_side)
 
@@ -267,19 +263,14 @@ def test_build_leg_event_array_from_columns_matches_legacy_on_random_input() -> 
         asks = tuple((float(ask_px[j]), float(ask_sz[j])) for j in range(ask_off[i], ask_off[i + 1]))
         snaps.append(BookSnapshot(int(ts[i]), "#150", bids, asks))
     trades = [
-        TradeEvent(int(trade_ts[i]), "#150", str(trade_side[i]),
-                   float(trade_px[i]), float(trade_sz[i]))
+        TradeEvent(int(trade_ts[i]), "#150", str(trade_side[i]), float(trade_px[i]), float(trade_sz[i]))
         for i in range(n_trades)
     ]
     legacy = _build_leg_event_array(snaps, trades)
 
     assert fast.shape == legacy.shape
-    fast_recs = sorted(
-        (int(r["exch_ts"]), int(r["ev"]), float(r["px"]), float(r["qty"])) for r in fast
-    )
-    legacy_recs = sorted(
-        (int(r["exch_ts"]), int(r["ev"]), float(r["px"]), float(r["qty"])) for r in legacy
-    )
+    fast_recs = sorted((int(r["exch_ts"]), int(r["ev"]), float(r["px"]), float(r["qty"])) for r in fast)
+    legacy_recs = sorted((int(r["exch_ts"]), int(r["ev"]), float(r["px"]), float(r["qty"])) for r in legacy)
     assert fast_recs == legacy_recs
 
 
@@ -296,8 +287,11 @@ def test_events_emits_consistent_order_with_shared_connection(source: HLHip4Data
         assert ev.ts_ns >= prev_ts, (prev_ts, ev)
         prev_ts = ev.ts_ns
         from hlanalysis.backtest.core.events import (
-            BookSnapshot as BS, TradeEvent as TE, ReferenceEvent as RE,
+            BookSnapshot as BS,
+            TradeEvent as TE,
+            ReferenceEvent as RE,
         )
+
         if isinstance(ev, BS):
             n_book += 1
         elif isinstance(ev, TE):
@@ -318,8 +312,13 @@ def test_events_emits_consistent_order_with_shared_connection(source: HLHip4Data
 
 def _naive_build_leg_event_array(snapshots, trades):
     from hftbacktest.types import (
-        BUY_EVENT, DEPTH_EVENT, EXCH_EVENT, LOCAL_EVENT,
-        SELL_EVENT, TRADE_EVENT, event_dtype,
+        BUY_EVENT,
+        DEPTH_EVENT,
+        EXCH_EVENT,
+        LOCAL_EVENT,
+        SELL_EVENT,
+        TRADE_EVENT,
+        event_dtype,
     )
 
     n_events = 0

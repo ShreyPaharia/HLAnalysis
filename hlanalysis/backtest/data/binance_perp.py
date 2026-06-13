@@ -6,6 +6,7 @@ Note: BookSnapshot uses bids/asks as tuple[tuple[float, float], ...] where each
 inner tuple is (price, size). The plan's spec used bid_px/ask_px as separate
 fields, but the real dataclass uses tuple-of-levels. Semantics are identical.
 """
+
 from __future__ import annotations
 
 import json

@@ -1,6 +1,7 @@
 import json
 from hlanalysis.adapters.polymarket_normalize import (
-    parse_bucket_event, parse_gamma_event_to_bucket_question_meta,
+    parse_bucket_event,
+    parse_gamma_event_to_bucket_question_meta,
 )
 
 
@@ -34,8 +35,10 @@ def test_parse_bucket_event_sorts_by_strike_and_flattens_legs():
 
 def test_bucket_question_meta_has_ladder_kv_and_all_legs():
     qm = parse_gamma_event_to_bucket_question_meta(
-        _event(), series_slug="btc-multi-strikes-weekly",
-        local_recv_ts=123, underlying="BTC",
+        _event(),
+        series_slug="btc-multi-strikes-weekly",
+        local_recv_ts=123,
+        underlying="BTC",
     )
     kv = dict(zip(qm.keys, qm.values))
     assert kv["class"] == "priceBucket"

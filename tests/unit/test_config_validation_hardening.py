@@ -6,6 +6,7 @@ Covers:
 - Range bounds on numeric risk knobs
 - Production config/strategy.yaml still loads cleanly (regression check)
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -39,6 +40,7 @@ _VALID_GLOBAL = dict(
 # A) Valid existing config still loads
 # ---------------------------------------------------------------------------
 
+
 def test_global_risk_config_valid_loads():
     """A well-formed GlobalRiskConfig (matching prod shape) must still load."""
     cfg = GlobalRiskConfig(**_VALID_GLOBAL)
@@ -50,6 +52,7 @@ def test_global_risk_config_valid_loads():
 # B) Unknown key raises on forbid-models
 # ---------------------------------------------------------------------------
 
+
 def test_global_risk_config_unknown_key_raises():
     """A typo'd key must raise ValidationError with extra='forbid'."""
     bad = {**_VALID_GLOBAL, "max_total_inventory_uusd": 999.0}  # typo: double 'u'
@@ -60,6 +63,7 @@ def test_global_risk_config_unknown_key_raises():
 # ---------------------------------------------------------------------------
 # C) Out-of-range values raise
 # ---------------------------------------------------------------------------
+
 
 def test_global_risk_daily_window_hour_too_high():
     """daily_window_start_hour_utc must be in [0, 23]."""
@@ -112,6 +116,7 @@ def test_global_risk_stale_data_halt_negative():
 # ---------------------------------------------------------------------------
 # D) Production config/strategy.yaml still loads (CRITICAL regression check)
 # ---------------------------------------------------------------------------
+
 
 def test_production_strategy_yaml_still_loads():
     """The real production config must load without error after adding extra='forbid'.

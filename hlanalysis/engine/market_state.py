@@ -38,6 +38,7 @@ Bit-identity is proven against the pre-refactor engine on a real-engine replay
 of the recorded HL corpus in
 ``tests/unit/test_market_state_shr87_replay_parity.py`` (the SHR-87 gate).
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -155,9 +156,7 @@ class MarketState:
         the reference-tick stream fans into it.
         """
         if sampling_dt_seconds <= 0:
-            raise ValueError(
-                f"sampling_dt_seconds must be positive, got {sampling_dt_seconds!r}"
-            )
+            raise ValueError(f"sampling_dt_seconds must be positive, got {sampling_dt_seconds!r}")
         ns = int(sampling_dt_seconds) * 1_000_000_000
         cadences = self._cadences_by_symbol.setdefault(symbol, [])
         if ns not in cadences:
@@ -222,9 +221,7 @@ class MarketState:
         and bucketed independently.
         """
         if source not in ("mark", "bbo"):
-            raise ValueError(
-                f"reference source must be 'mark' or 'bbo', got {source!r}"
-            )
+            raise ValueError(f"reference source must be 'mark' or 'bbo', got {source!r}")
         prev = self._reference_source_by_symbol.get(symbol)
         if prev is not None and prev != source:
             raise ValueError(
@@ -265,7 +262,9 @@ class MarketState:
                 ):
                     mid = (ev.bid_px + ev.ask_px) / 2.0
                     self._core.apply_reference_tick(
-                        ev.symbol, ts_ns=ev.exchange_ts or ev.local_recv_ts, price=mid,
+                        ev.symbol,
+                        ts_ns=ev.exchange_ts or ev.local_recv_ts,
+                        price=mid,
                     )
             case BookSnapshotEvent():
                 b = self._books.setdefault(ev.symbol, _MutableBook())
@@ -293,7 +292,8 @@ class MarketState:
                 # a symbol must NOT touch the reference price or bars.
                 if self._reference_source_by_symbol.get(ev.symbol) != "bbo":
                     self._core.apply_reference_tick(
-                        ev.symbol, ts_ns=ev.exchange_ts or ev.local_recv_ts,
+                        ev.symbol,
+                        ts_ns=ev.exchange_ts or ev.local_recv_ts,
                         price=ev.mark_px,
                     )
             case QuestionMetaEvent():
@@ -330,18 +330,14 @@ class MarketState:
         #     priceBinary: 1 outcome × 2 sides → 2 legs; priceBucket: N×2 legs.
         if ev.venue == "polymarket":
             if kv.get("class") == "priceBucket":
-                leg_symbols = tuple(
-                    t for t in kv.get("leg_token_ids", "").split(",") if t
-                )
+                leg_symbols = tuple(t for t in kv.get("leg_token_ids", "").split(",") if t)
             else:
                 yes_t = kv.get("yes_token_id", "")
                 no_t = kv.get("no_token_id", "")
                 leg_symbols = tuple(t for t in (yes_t, no_t) if t)
         else:
             outcomes = sorted(ev.named_outcome_idxs)
-            leg_symbols = tuple(
-                f"#{10 * o + s}" for o in outcomes for s in (0, 1)
-            )
+            leg_symbols = tuple(f"#{10 * o + s}" for o in outcomes for s in (0, 1))
         yes_symbol = leg_symbols[0] if leg_symbols else ""
         no_symbol = leg_symbols[1] if len(leg_symbols) >= 2 else ""
         existing = self._questions.get(ev.question_idx)
@@ -352,10 +348,7 @@ class MarketState:
         # Mirror keys/values pairs onto QuestionView for downstream rendering
         # (alerts, reports). Skip the bulky question_description so the tuple
         # stays compact.
-        kv_pairs = tuple(
-            (k, v) for k, v in zip(ev.keys, ev.values, strict=False)
-            if k != "question_description"
-        )
+        kv_pairs = tuple((k, v) for k, v in zip(ev.keys, ev.values, strict=False) if k != "question_description")
         question_name = kv.get("question_name", "")
         # leg_symbols can change between QuestionMetaEvent emissions (e.g. on
         # outcomeCreated rolls), so invalidate the cache on every meta update.
@@ -415,7 +408,10 @@ class MarketState:
         return True
 
     def evict_settled_questions(
-        self, *, now_ns: int, retain_after_settle_ns: int,
+        self,
+        *,
+        now_ns: int,
+        retain_after_settle_ns: int,
     ) -> int:
         """Drop questions that are settled AND whose expiry is older than the
         retain window. Bounds _questions on the 1 GB box (SHR-44) and shrinks
@@ -427,10 +423,9 @@ class MarketState:
         retained so its book stays live for the questions still trading it.
         """
         victims = [
-            idx for idx, q in self._questions.items()
-            if q.settled
-            and q.expiry_ns
-            and (now_ns - q.expiry_ns) > retain_after_settle_ns
+            idx
+            for idx, q in self._questions.items()
+            if q.settled and q.expiry_ns and (now_ns - q.expiry_ns) > retain_after_settle_ns
         ]
         if not victims:
             return 0
@@ -439,9 +434,7 @@ class MarketState:
         evicted_syms: set[str] = set()
         for idx in victims:
             q = self._questions[idx]
-            legs = q.leg_symbols or (
-                (q.yes_symbol, q.no_symbol) if q.yes_symbol else ()
-            )
+            legs = q.leg_symbols or ((q.yes_symbol, q.no_symbol) if q.yes_symbol else ())
             evicted_syms.update(s for s in legs if s)
 
         # Remove the evicted questions.
@@ -453,9 +446,7 @@ class MarketState:
         # don't evict a shared book that another question is still trading.
         retained_syms: set[str] = set()
         for q in self._questions.values():
-            legs = q.leg_symbols or (
-                (q.yes_symbol, q.no_symbol) if q.yes_symbol else ()
-            )
+            legs = q.leg_symbols or ((q.yes_symbol, q.no_symbol) if q.yes_symbol else ())
             retained_syms.update(s for s in legs if s)
 
         # Evict only the symbols that are exclusively owned by the victims.
@@ -469,9 +460,7 @@ class MarketState:
         # contains it and mark it settled. Multi-outcome (priceBucket) has up to
         # 6 legs; the binary 2-leg shorthand fails for those.
         for idx, q in list(self._questions.items()):
-            legs = q.leg_symbols or (
-                (q.yes_symbol, q.no_symbol) if q.yes_symbol else ()
-            )
+            legs = q.leg_symbols or ((q.yes_symbol, q.no_symbol) if q.yes_symbol else ())
             if ev.symbol not in legs:
                 continue
             leg_idx = legs.index(ev.symbol)
@@ -484,14 +473,18 @@ class MarketState:
             prev = q.settled_symbols
             winners = prev if ev.symbol in prev else prev + (ev.symbol,)
             self._questions[idx] = dataclasses.replace(
-                q, settled=True, settled_side=side,
-                settled_symbol=ev.symbol, settled_symbols=winners,
+                q,
+                settled=True,
+                settled_side=side,
+                settled_symbol=ev.symbol,
+                settled_symbols=winners,
             )
 
     @staticmethod
     def _parse_expiry_ns(expiry: str) -> int:
         # YYYYMMDD-HHMM -> ns since epoch (UTC). Returns 0 if unparseable.
         from datetime import datetime
+
         try:
             dt = datetime.strptime(expiry, "%Y%m%d-%H%M").replace(tzinfo=UTC)
             return int(dt.timestamp() * 1_000_000_000)
@@ -541,9 +534,7 @@ class MarketState:
             return self._sym_to_q_cache
         m: dict[str, int] = {}
         for q in self._questions.values():
-            legs = q.leg_symbols or (
-                (q.yes_symbol, q.no_symbol) if q.yes_symbol else ()
-            )
+            legs = q.leg_symbols or ((q.yes_symbol, q.no_symbol) if q.yes_symbol else ())
             for sym in legs:
                 if sym:
                     m[sym] = q.question_idx
@@ -582,13 +573,18 @@ class MarketState:
         maxlen = self._history_maxlen(symbol, dt_s * 1_000_000_000)
         if now_ns is not None and lookback_seconds is not None:
             arr = self._core.recent_returns(
-                symbol, now_ns=now_ns, lookback_seconds=lookback_seconds, dt=dt_s,
+                symbol,
+                now_ns=now_ns,
+                lookback_seconds=lookback_seconds,
+                dt=dt_s,
             )
             # The old deque held ≤ maxlen bars → ≤ maxlen-1 windowed returns.
             cap = maxlen - 1
         else:
             arr = self._core.recent_returns(
-                symbol, now_ns=_COUNT_NOW_NS, lookback_seconds=_COUNT_LOOKBACK_S,
+                symbol,
+                now_ns=_COUNT_NOW_NS,
+                lookback_seconds=_COUNT_LOOKBACK_S,
                 dt=dt_s,
             )
             # Legacy COUNT path: old read `[-(n+1):]` bars off a ≤ maxlen deque.
@@ -619,12 +615,17 @@ class MarketState:
         maxlen = self._history_maxlen(symbol, dt_s * 1_000_000_000)
         if now_ns is not None and lookback_seconds is not None:
             arr = self._core.recent_hl_bars(
-                symbol, now_ns=now_ns, lookback_seconds=lookback_seconds, dt=dt_s,
+                symbol,
+                now_ns=now_ns,
+                lookback_seconds=lookback_seconds,
+                dt=dt_s,
             )
             cap = maxlen  # old deque held ≤ maxlen (high, low) bars
         else:
             arr = self._core.recent_hl_bars(
-                symbol, now_ns=_COUNT_NOW_NS, lookback_seconds=_COUNT_LOOKBACK_S,
+                symbol,
+                now_ns=_COUNT_NOW_NS,
+                lookback_seconds=_COUNT_LOOKBACK_S,
                 dt=dt_s,
             )
             cap = min(n, maxlen)

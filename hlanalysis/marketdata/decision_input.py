@@ -25,6 +25,7 @@ Backtest (``_source_config_from_args`` / ``cmd_run`` / ``cmd_tune``)::
         reference_resample_seconds=dic.sampling_dt_seconds,
     )
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -55,10 +56,10 @@ class DecisionInputConfig:
                             had a non-live default of ``"bars"`` (SHR-93).
     """
 
-    reference_source: str        # "mark" | "bbo"
-    sampling_dt_seconds: int     # OHLC bucket width == vol_sampling_dt_seconds
-    vol_lookback_seconds: int    # σ window (history sizing / warm-up)
-    reference_ticks: str         # "raw" (live) | "bars" (legacy override)
+    reference_source: str  # "mark" | "bbo"
+    sampling_dt_seconds: int  # OHLC bucket width == vol_sampling_dt_seconds
+    vol_lookback_seconds: int  # σ window (history sizing / warm-up)
+    reference_ticks: str  # "raw" (live) | "bars" (legacy override)
 
 
 def from_engine(cfg: StrategyConfig) -> DecisionInputConfig:
@@ -102,9 +103,7 @@ def from_backtest_params(
     """
     # Source: explicit params override > track default.
     reference_source = (
-        str(params["reference_sigma_source"])
-        if "reference_sigma_source" in params
-        else track_default_source
+        str(params["reference_sigma_source"]) if "reference_sigma_source" in params else track_default_source
     )
 
     # Collect all vol_sampling_dt_seconds and vol_lookback_seconds values,

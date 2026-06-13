@@ -109,7 +109,10 @@ def outcome_description(qv: QuestionView, symbol: str) -> str:
 
 
 def settlement_pnl_usd(
-    qv: QuestionView | None, symbol: str, qty: float, avg_entry: float,
+    qv: QuestionView | None,
+    symbol: str,
+    qty: float,
+    avg_entry: float,
     prior_realized: float = 0.0,
 ) -> float:
     """Expected PnL at settlement for a held position on a binary-payout

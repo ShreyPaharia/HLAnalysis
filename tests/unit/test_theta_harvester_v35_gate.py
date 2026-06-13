@@ -1,12 +1,16 @@
 """v3.5 gate mode: skip entry when momentum_mr regime is 'mr' and
 score < -tau_gate (i.e. strong MR signal against the favorite)."""
+
 from __future__ import annotations
 
 from hlanalysis.strategy.theta_harvester import (
-    ThetaHarvesterConfig, ThetaHarvesterStrategy,
+    ThetaHarvesterConfig,
+    ThetaHarvesterStrategy,
 )
 from hlanalysis.strategy.types import (
-    Action, BookState, QuestionView,
+    Action,
+    BookState,
+    QuestionView,
 )
 
 
@@ -65,16 +69,22 @@ def test_gate_mode_blocks_entry_when_mr_against_favorite() -> None:
     strat = ThetaHarvesterStrategy(cfg)
     # Construct a binary where YES is favorite at 0.95: bid 0.94, ask 0.96.
     books = {
-        "YES": BookState(symbol="YES", bid_px=0.94, bid_sz=10.0, ask_px=0.96, ask_sz=10.0,
-                         last_trade_ts_ns=0, last_l2_ts_ns=0),
-        "NO":  BookState(symbol="NO",  bid_px=0.04, bid_sz=10.0, ask_px=0.06, ask_sz=10.0,
-                         last_trade_ts_ns=0, last_l2_ts_ns=0),
+        "YES": BookState(
+            symbol="YES", bid_px=0.94, bid_sz=10.0, ask_px=0.96, ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=0
+        ),
+        "NO": BookState(
+            symbol="NO", bid_px=0.04, bid_sz=10.0, ask_px=0.06, ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=0
+        ),
     }
     qv = _qv(strike=100.0)
     # reference_price below strike + sustained down drift → MR against YES favorite
     dec = strat.evaluate(
-        question=qv, books=books, reference_price=99.0,
-        recent_returns=rets, recent_volume_usd=0.0, position=None,
+        question=qv,
+        books=books,
+        reference_price=99.0,
+        recent_returns=rets,
+        recent_volume_usd=0.0,
+        position=None,
         now_ns=10**17,
     )
     assert dec.action == Action.HOLD
@@ -93,15 +103,21 @@ def test_gate_mode_allows_entry_when_momentum_aligned() -> None:
     )
     strat = ThetaHarvesterStrategy(cfg)
     books = {
-        "YES": BookState(symbol="YES", bid_px=0.94, bid_sz=10.0, ask_px=0.96, ask_sz=10.0,
-                         last_trade_ts_ns=0, last_l2_ts_ns=0),
-        "NO":  BookState(symbol="NO",  bid_px=0.04, bid_sz=10.0, ask_px=0.06, ask_sz=10.0,
-                         last_trade_ts_ns=0, last_l2_ts_ns=0),
+        "YES": BookState(
+            symbol="YES", bid_px=0.94, bid_sz=10.0, ask_px=0.96, ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=0
+        ),
+        "NO": BookState(
+            symbol="NO", bid_px=0.04, bid_sz=10.0, ask_px=0.06, ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=0
+        ),
     }
     qv = _qv(strike=100.0)
     dec = strat.evaluate(
-        question=qv, books=books, reference_price=101.0,
-        recent_returns=rets, recent_volume_usd=0.0, position=None,
+        question=qv,
+        books=books,
+        reference_price=101.0,
+        recent_returns=rets,
+        recent_volume_usd=0.0,
+        position=None,
         now_ns=10**17,
     )
     # When edge_buffer is loose and momentum aligns, we expect ENTER (or at
@@ -114,15 +130,21 @@ def test_disabled_gate_does_not_fire() -> None:
     cfg = _cfg(momentum_mr_enabled=False)  # the default
     strat = ThetaHarvesterStrategy(cfg)
     books = {
-        "YES": BookState(symbol="YES", bid_px=0.94, bid_sz=10.0, ask_px=0.96, ask_sz=10.0,
-                         last_trade_ts_ns=0, last_l2_ts_ns=0),
-        "NO":  BookState(symbol="NO",  bid_px=0.04, bid_sz=10.0, ask_px=0.06, ask_sz=10.0,
-                         last_trade_ts_ns=0, last_l2_ts_ns=0),
+        "YES": BookState(
+            symbol="YES", bid_px=0.94, bid_sz=10.0, ask_px=0.96, ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=0
+        ),
+        "NO": BookState(
+            symbol="NO", bid_px=0.04, bid_sz=10.0, ask_px=0.06, ask_sz=10.0, last_trade_ts_ns=0, last_l2_ts_ns=0
+        ),
     }
     qv = _qv(strike=100.0)
     dec = strat.evaluate(
-        question=qv, books=books, reference_price=99.0,
-        recent_returns=rets, recent_volume_usd=0.0, position=None,
+        question=qv,
+        books=books,
+        reference_price=99.0,
+        recent_returns=rets,
+        recent_volume_usd=0.0,
+        position=None,
         now_ns=10**17,
     )
     assert not any(d.message == "momentum_mr_gate" for d in dec.diagnostics)

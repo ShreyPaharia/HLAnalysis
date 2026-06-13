@@ -8,6 +8,7 @@ Covers:
 
 Extracted verbatim from polymarket.py — no logic changes.
 """
+
 from __future__ import annotations
 
 import json
@@ -91,8 +92,7 @@ def _fetch_trades_raw(condition_id: str) -> list[dict]:
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 400 and offset > 0:
                 logger.warning(
-                    f"PM trades pagination capped at offset={offset} for {condition_id}; "
-                    f"returning partial result."
+                    f"PM trades pagination capped at offset={offset} for {condition_id}; returning partial result."
                 )
                 break
             raise
@@ -111,8 +111,20 @@ _BTC_UPDOWN_STRIKE_RULE = re.compile(
     r"Binance 1 minute candle for BTC/USDT\s+(\w+)\s+(\d+)\s+'(\d{2})\s+(\d{1,2}):(\d{2})\s+in the ET timezone",
     re.IGNORECASE,
 )
-_MONTHS = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
-           "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
+_MONTHS = {
+    "Jan": 1,
+    "Feb": 2,
+    "Mar": 3,
+    "Apr": 4,
+    "May": 5,
+    "Jun": 6,
+    "Jul": 7,
+    "Aug": 8,
+    "Sep": 9,
+    "Oct": 10,
+    "Nov": 11,
+    "Dec": 12,
+}
 
 
 def _parse_strike_ref_ts_ns(description: str) -> int | None:
@@ -129,6 +141,7 @@ def _parse_strike_ref_ts_ns(description: str) -> int | None:
         return None
     try:
         from zoneinfo import ZoneInfo
+
         et = ZoneInfo("America/New_York")
     except Exception:
         return None

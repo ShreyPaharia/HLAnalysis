@@ -6,6 +6,7 @@ slot-halt, the inventory caps, and the loader that turns engine halt/event-log
 records into halt windows. None of these tests touch hftbacktest or the runner —
 the suppression logic is exercised with fully injected inputs.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -128,24 +129,15 @@ def test_entry_veto_daily_loss_cap_disabled_when_none():
 def test_entry_veto_total_inventory_blocks_over_cap():
     caps = SimRiskCaps(max_total_inventory_usd=300.0)
     # 250 held + 100 new = 350 > 300 → block
-    assert (
-        entry_veto(caps, [], _inp(held_inventory_usd=250.0, intent_notional=100.0))
-        == "max_total_inventory"
-    )
+    assert entry_veto(caps, [], _inp(held_inventory_usd=250.0, intent_notional=100.0)) == "max_total_inventory"
     # 250 held + 40 new = 290 ≤ 300 → allowed
-    assert (
-        entry_veto(caps, [], _inp(held_inventory_usd=250.0, intent_notional=40.0))
-        is None
-    )
+    assert entry_veto(caps, [], _inp(held_inventory_usd=250.0, intent_notional=40.0)) is None
 
 
 def test_entry_veto_concurrent_positions_blocks_n_plus_1():
     caps = SimRiskCaps(max_concurrent_positions=3)
     # Holding 3 already, a NEW position (not a top-up) is the 4th → blocked
-    assert (
-        entry_veto(caps, [], _inp(n_held_positions=3, is_topup=False))
-        == "max_concurrent_positions"
-    )
+    assert entry_veto(caps, [], _inp(n_held_positions=3, is_topup=False)) == "max_concurrent_positions"
     # Holding 2 → a 3rd new position is allowed
     assert entry_veto(caps, [], _inp(n_held_positions=2, is_topup=False)) is None
 
@@ -193,9 +185,7 @@ def test_load_daily_loss_halt_clears_at_next_window_boundary():
     """A daily_loss_halt suppresses entries to the end of its daily window."""
     halt_ts = _ns(datetime(2026, 6, 8, 14, 0, tzinfo=timezone.utc))
     events = [{"ts_ns": halt_ts, "kind": "daily_loss_halt"}]
-    windows = load_halt_windows(
-        events, fallback_duration_ns=1, daily_window_start_hour_utc=6
-    )
+    windows = load_halt_windows(events, fallback_duration_ns=1, daily_window_start_hour_utc=6)
     assert len(windows) == 1
     assert windows[0].start_ns == halt_ts
     # window started today 06:00 → next boundary is tomorrow 06:00

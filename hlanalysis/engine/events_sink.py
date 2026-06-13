@@ -8,6 +8,7 @@ a list of DALs — the instance method passes ``[s.dal for s in self.slots]``,
 tests pass a single-element list. One loop = no drift hazard between the column
 extraction / prune cadence of the two copies.
 """
+
 from __future__ import annotations
 
 import asyncio

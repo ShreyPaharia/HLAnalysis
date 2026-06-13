@@ -17,6 +17,7 @@ the strategy-facing reads must agree. This test feeds one synthetic tick stream
 through both and asserts equality — the guard against the σ-sampling train/serve
 skew that recurred historically.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -116,8 +117,6 @@ def test_close_sequence_matches_resampled_bars() -> None:
     bars = _resample_reference_rows(raw, resample_ns=_DT_NS)
     # Engine returns are close-to-close; reconstruct expected returns from bars.
     closes = [b.close for b in bars]
-    expected = [
-        np.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))
-    ]
+    expected = [np.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
     engine_rets = engine.recent_returns("BTC", n=1000, dt=_DT_SECONDS)
     np.testing.assert_allclose(np.asarray(engine_rets), np.asarray(expected), rtol=0, atol=1e-12)

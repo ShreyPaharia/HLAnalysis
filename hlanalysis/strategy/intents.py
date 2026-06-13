@@ -12,6 +12,7 @@ keeps the cloid scheme and reduce-only/exit-reason wiring in one place. The 2-dp
 size rounding (``floor(usd/px * 100) / 100``) is also shared here as
 ``round_size``.
 """
+
 from __future__ import annotations
 
 import math
@@ -31,9 +32,7 @@ def round_size(usd: float, px: float) -> float:
     return math.floor((usd / px) * 100) / 100
 
 
-def make_entry_intent(
-    question: QuestionView, *, symbol: str, size: float, limit_price: float
-) -> OrderIntent:
+def make_entry_intent(question: QuestionView, *, symbol: str, size: float, limit_price: float) -> OrderIntent:
     """Build a buy IOC entry intent with a fresh cloid."""
     return OrderIntent(
         question_idx=question.question_idx,

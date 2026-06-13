@@ -109,9 +109,7 @@ class HyperliquidAdapter(BaseWsAdapter):
             ProductType.PREDICTION_BINARY,
         }
 
-    async def stream(
-        self, subscriptions: list[Subscription]
-    ) -> AsyncIterator[NormalizedEvent]:
+    async def stream(self, subscriptions: list[Subscription]) -> AsyncIterator[NormalizedEvent]:
         # Separate wildcard prediction_binary subs (symbol="*") — these auto-discover
         # via outcomeMeta and dynamically subscribe to active HIP-4 markets.
         wildcard_templates: list[Subscription] = []
@@ -124,9 +122,7 @@ class HyperliquidAdapter(BaseWsAdapter):
 
         # Health events on this (single, multiplexed) connection should reflect
         # what this run is actually subscribed to rather than a hardcoded PERP.
-        self.health_product_type = self._connection_product_type(
-            subscriptions, wildcard_templates
-        )
+        self.health_product_type = self._connection_product_type(subscriptions, wildcard_templates)
 
         meta_seen: set[str] = set()
         last_meta_refresh = 0.0  # force expansion on first iteration
@@ -144,9 +140,7 @@ class HyperliquidAdapter(BaseWsAdapter):
             # dead outcome may starve the loop entirely.
             nonlocal last_meta_refresh
             if wildcard_templates:
-                async for ev in self._sync_wildcards(
-                    wildcard_templates, sym_to_sub, meta_seen
-                ):
+                async for ev in self._sync_wildcards(wildcard_templates, sym_to_sub, meta_seen):
                     await queue.put(ev)
                 last_meta_refresh = time.monotonic()
 
@@ -158,33 +152,22 @@ class HyperliquidAdapter(BaseWsAdapter):
             # creation/settlement events. The _before_connect snapshot sync still
             # runs to cover events missed during the disconnect.
             if wildcard_templates:
-                await ws.send(
-                    json.dumps({"method": "subscribe", "subscription": {"type": "outcomeMetaUpdates"}})
-                )
+                await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "outcomeMetaUpdates"}}))
 
         def _handle(msg: dict, recv_ns: int) -> list[NormalizedEvent]:
             return self._handle(msg, recv_ns, sym_to_sub)
 
         async def _after_message(ws, msg: dict) -> None:
             nonlocal last_meta_refresh
-            if (
-                wildcard_templates
-                and msg.get("channel") == "outcomeMetaUpdates"
-                and isinstance(msg.get("data"), dict)
-            ):
+            if wildcard_templates and msg.get("channel") == "outcomeMetaUpdates" and isinstance(msg.get("data"), dict):
                 async for ev in self._apply_outcome_update(
                     ws, msg["data"], wildcard_templates, sym_to_sub, ws_subscribed, meta_seen
                 ):
                     await queue.put(ev)
             # Keep the periodic poll as a safety net.
-            if (
-                wildcard_templates
-                and time.monotonic() - last_meta_refresh > OUTCOME_REFRESH_INTERVAL_S
-            ):
+            if wildcard_templates and time.monotonic() - last_meta_refresh > OUTCOME_REFRESH_INTERVAL_S:
                 last_meta_refresh = time.monotonic()
-                async for ev in self._refresh_wildcards(
-                    ws, wildcard_templates, sym_to_sub, ws_subscribed, meta_seen
-                ):
+                async for ev in self._refresh_wildcards(ws, wildcard_templates, sym_to_sub, ws_subscribed, meta_seen):
                     await queue.put(ev)
 
         # BaseWsAdapter owns connect/backoff/circuit-breaker and — NEW for HL —
@@ -264,9 +247,7 @@ class HyperliquidAdapter(BaseWsAdapter):
         if not active_now:
             return  # outcomeMeta fetch failed; keep prior state
 
-        prev_outcome_syms = {
-            s for s, sub in sym_to_sub.items() if sub.product_type == ProductType.PREDICTION_BINARY
-        }
+        prev_outcome_syms = {s for s, sub in sym_to_sub.items() if sub.product_type == ProductType.PREDICTION_BINARY}
         new_syms = set(active_now.keys()) - prev_outcome_syms
         rolled_syms = prev_outcome_syms - set(active_now.keys())
 
@@ -291,9 +272,7 @@ class HyperliquidAdapter(BaseWsAdapter):
         # Re-fetch once and reuse for both meta + settlement diffing to avoid
         # double-fetching against HL's info endpoint.
         payload = await self._fetch_outcome_meta()
-        for ev in await self._fetch_question_meta_events(
-            templates, self._meta_seen_questions, meta_payload=payload
-        ):
+        for ev in await self._fetch_question_meta_events(templates, self._meta_seen_questions, meta_payload=payload):
             yield ev
         if payload is not None:
             for ev in self._detect_polled_settlements(templates, payload):
@@ -315,9 +294,7 @@ class HyperliquidAdapter(BaseWsAdapter):
         if not active_now:
             return  # outcomeMeta fetch failed; keep prior state
 
-        prev_outcome_syms = {
-            s for s, sub in sym_to_sub.items() if sub.product_type == ProductType.PREDICTION_BINARY
-        }
+        prev_outcome_syms = {s for s, sub in sym_to_sub.items() if sub.product_type == ProductType.PREDICTION_BINARY}
         new_syms = set(active_now.keys()) - prev_outcome_syms
         rolled_syms = prev_outcome_syms - set(active_now.keys())
 
@@ -339,9 +316,7 @@ class HyperliquidAdapter(BaseWsAdapter):
         if not hasattr(self, "_meta_seen_questions"):
             self._meta_seen_questions: dict[int, tuple[int, ...]] = {}
         payload = await self._fetch_outcome_meta()
-        for ev in await self._fetch_question_meta_events(
-            templates, self._meta_seen_questions, meta_payload=payload
-        ):
+        for ev in await self._fetch_question_meta_events(templates, self._meta_seen_questions, meta_payload=payload):
             yield ev
         if payload is not None:
             for ev in self._detect_polled_settlements(templates, payload):
@@ -356,6 +331,7 @@ class HyperliquidAdapter(BaseWsAdapter):
         event-loop thread, so there are no data races. Returns ``None`` on any
         network error so callers keep their prior state. Each poll cycle awaits
         these sequentially (no concurrent fan-out at the HL info endpoint)."""
+
         def _post() -> dict:
             r = requests.post(HL_INFO_URL, json={"type": "outcomeMeta"}, timeout=(5, 10))
             r.raise_for_status()
@@ -435,7 +411,9 @@ class HyperliquidAdapter(BaseWsAdapter):
                     key = (coin, native)
                     if key in ws_subscribed:
                         try:
-                            await ws.send(json.dumps({"method": "unsubscribe", "subscription": {"type": native, "coin": coin}}))
+                            await ws.send(
+                                json.dumps({"method": "unsubscribe", "subscription": {"type": native, "coin": coin}})
+                            )
                         except Exception as e:
                             log.warning("hyperliquid: unsubscribe %s/%s failed: %s", coin, native, e)
                         ws_subscribed.discard(key)
@@ -701,10 +679,11 @@ class HyperliquidAdapter(BaseWsAdapter):
             fields = _parse_description(q.get("description") or "")
             current[int(qidx)] = (named, settled, fields)
 
-        def _settlement_for(outcome_idx: int, fields: dict[str, str], *, first_sight: bool = False) -> SettlementEvent | None:
+        def _settlement_for(
+            outcome_idx: int, fields: dict[str, str], *, first_sight: bool = False
+        ) -> SettlementEvent | None:
             matching_tmpl = next(
-                (t for t in templates
-                 if not getattr(t, "match", None) or _matches(t.match, fields)),
+                (t for t in templates if not getattr(t, "match", None) or _matches(t.match, fields)),
                 None,
             )
             if matching_tmpl is None:
@@ -800,7 +779,7 @@ class HyperliquidAdapter(BaseWsAdapter):
         # (named or fallback) so we don't double-emit when synthesizing.
         covered_outcomes: set[int] = set()
         for q in meta_payload.get("questions", []) or []:
-            for x in (q.get("namedOutcomes") or []):
+            for x in q.get("namedOutcomes") or []:
                 covered_outcomes.add(int(x))
             if q.get("fallbackOutcome") is not None:
                 covered_outcomes.add(int(q["fallbackOutcome"]))
@@ -814,10 +793,7 @@ class HyperliquidAdapter(BaseWsAdapter):
             # no match accept everything). Filter check happens BEFORE the dedup
             # state update, so a filter miss doesn't poison future emits.
             matching_tmpl = next(
-                (
-                    t for t in templates
-                    if not getattr(t, "match", None) or _matches(t.match, fields)
-                ),
+                (t for t in templates if not getattr(t, "match", None) or _matches(t.match, fields)),
                 None,
             )
             if matching_tmpl is None:
@@ -867,15 +843,14 @@ class HyperliquidAdapter(BaseWsAdapter):
             if fields.get("class") != "priceBinary":
                 continue
             matching_tmpl = next(
-                (t for t in templates
-                 if not getattr(t, "match", None) or _matches(t.match, fields)),
+                (t for t in templates if not getattr(t, "match", None) or _matches(t.match, fields)),
                 None,
             )
             if matching_tmpl is None:
                 continue
             synth_qidx = SYNTH_QIDX_OFFSET + int(outcome_idx)
             settled = ()  # outcomeMeta doesn't expose per-outcome settled here;
-                          # SettlementEvents come through outcomeSettled updates.
+            # SettlementEvents come through outcomeSettled updates.
             prev = meta_seen_questions.get(synth_qidx)
             if prev == settled:
                 continue

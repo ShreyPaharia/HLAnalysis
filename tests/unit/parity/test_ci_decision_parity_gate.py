@@ -69,6 +69,7 @@ If future fixtures or code changes reduce the match rate, the floor (0.90)
 provides a 10% buffer to absorb small fixture-level jitter without masking real
 regressions.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -108,18 +109,18 @@ _TS_TOL_NS = 5_000_000_000  # 5 s matching tolerance (engine fires per-event, si
 # Measured 2026-06-12: 1.0000 (100%).  Floor at 0.90 allows ±10% fixture jitter.
 # The rate is 1.0 because every engine event decision falls within a sim action's
 # ±5s window (78 engine decisions across 3 sim action windows).
-_BASELINE_MATCH_RATE = 0.90   # measured 1.0000; floor at 90% catches regressions
+_BASELINE_MATCH_RATE = 0.90  # measured 1.0000; floor at 90% catches regressions
 
 # Measured 2026-06-12: 0.00 (bit-identical at all 33 comparable points).
 # p90 = 0.004 is non-zero only at a few ticks before the σ lookback is fully warm.
-_BASELINE_SIGMA_REL  = 0.05   # measured 0.00; ceiling allows small warm-up drift
+_BASELINE_SIGMA_REL = 0.05  # measured 0.00; ceiling allows small warm-up drift
 
 # Measured 2026-06-12: n_sim_actions=3. Floor catches "sim never enters" regressions.
-_BASELINE_N_SIM_MIN  = 2      # measured 3; floor is conservative
+_BASELINE_N_SIM_MIN = 2  # measured 3; floor is conservative
 
 # Measured 2026-06-12: 0. With positions fed, every sim action had an engine
 # counterpart in the ±5s window. Ceiling=0 asserts perfect phantom elimination.
-_BASELINE_N_SIM_PHANTOM_MAX = 0   # measured 0; exact equality catches any regression
+_BASELINE_N_SIM_PHANTOM_MAX = 0  # measured 0; exact equality catches any regression
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +167,7 @@ def _parse_decision_diag(
 # Load the v31 slot StrategyConfig from the live config/strategy.yaml
 # ---------------------------------------------------------------------------
 
+
 def _load_v31_config():
     from hlanalysis.engine.config import load_strategies_config
 
@@ -180,6 +182,7 @@ def _load_v31_config():
 # Engine path: corpus NormalizedEvents
 # ---------------------------------------------------------------------------
 
+
 def _load_corpus_events():
     """Load the hl_hip4 fixture as a sorted list of NormalizedEvents.
 
@@ -190,19 +193,36 @@ def _load_corpus_events():
     import msgspec
 
     from hlanalysis.events import (
-        BboEvent, BookDeltaEvent, BookSnapshotEvent, FundingEvent,
-        HealthEvent, LiquidationEvent, MarketMetaEvent, MarkEvent,
-        NormalizedEvent, OpenInterestEvent, OracleEvent,
-        QuestionMetaEvent, SettlementEvent, TradeEvent,
+        BboEvent,
+        BookDeltaEvent,
+        BookSnapshotEvent,
+        FundingEvent,
+        HealthEvent,
+        LiquidationEvent,
+        MarketMetaEvent,
+        MarkEvent,
+        NormalizedEvent,
+        OpenInterestEvent,
+        OracleEvent,
+        QuestionMetaEvent,
+        SettlementEvent,
+        TradeEvent,
     )
 
     _TYPE_MAP = {
-        "trade": TradeEvent, "book_snapshot": BookSnapshotEvent,
-        "book_delta": BookDeltaEvent, "bbo": BboEvent, "mark": MarkEvent,
-        "oracle": OracleEvent, "open_interest": OpenInterestEvent,
-        "funding": FundingEvent, "liquidation": LiquidationEvent,
-        "market_meta": MarketMetaEvent, "question_meta": QuestionMetaEvent,
-        "settlement": SettlementEvent, "health": HealthEvent,
+        "trade": TradeEvent,
+        "book_snapshot": BookSnapshotEvent,
+        "book_delta": BookDeltaEvent,
+        "bbo": BboEvent,
+        "mark": MarkEvent,
+        "oracle": OracleEvent,
+        "open_interest": OpenInterestEvent,
+        "funding": FundingEvent,
+        "liquidation": LiquidationEvent,
+        "market_meta": MarketMetaEvent,
+        "question_meta": QuestionMetaEvent,
+        "settlement": SettlementEvent,
+        "health": HealthEvent,
     }
 
     base = _FIXTURE_ROOT
@@ -216,9 +236,7 @@ def _load_corpus_events():
         if cls is None:
             continue
         glob = str(event_dir / "**" / "*.parquet")
-        rows = con.execute(
-            f"SELECT * FROM read_parquet('{glob}', union_by_name=true)"
-        ).fetchall()
+        rows = con.execute(f"SELECT * FROM read_parquet('{glob}', union_by_name=true)").fetchall()
         cols = [d[0] for d in con.description]
         accepted = {f.name for f in msgspec.structs.fields(cls)}
         for row in rows:
@@ -235,6 +253,7 @@ def _load_corpus_events():
 # ---------------------------------------------------------------------------
 # Sim path: run_one_question → fills_dir + diagnostics_dir
 # ---------------------------------------------------------------------------
+
 
 def _run_sim_with_fills(v31_cfg, tmp_fills_dir: Path, tmp_diag_dir: Path):
     """Run the sim over the hl_hip4 fixture question with fills_dir and diagnostics_dir.
@@ -253,8 +272,8 @@ def _run_sim_with_fills(v31_cfg, tmp_fills_dir: Path, tmp_diag_dir: Path):
     src_cfg = SourceConfig(
         kind="hl_hip4",
         cache_root=str(_FIXTURE_ROOT),
-        hl_ref_event="mark",       # match engine reference_sigma_source="mark"
-        hl_ref_ticks="raw",        # live-parity: raw ticks → shared MarketState buckets them
+        hl_ref_event="mark",  # match engine reference_sigma_source="mark"
+        hl_ref_ticks="raw",  # live-parity: raw ticks → shared MarketState buckets them
         reference_resample_seconds=dt,
         reference_warmup_seconds=0,
     )
@@ -304,31 +323,38 @@ def _build_sim_ticks_from_diag(diag_dir: Path) -> list[SimTick]:
         return []
     parquet = parquets[0]
 
-    df = duckdb.connect().execute(
-        f"SELECT ts_ns, question_idx, action, sigma, ref_price, p_model, edge_yes, edge_no "
-        f"FROM read_parquet('{parquet}') ORDER BY ts_ns"
-    ).df()
+    df = (
+        duckdb.connect()
+        .execute(
+            f"SELECT ts_ns, question_idx, action, sigma, ref_price, p_model, edge_yes, edge_no "
+            f"FROM read_parquet('{parquet}') ORDER BY ts_ns"
+        )
+        .df()
+    )
 
     def _n(x):
         return None if x is None or x != x else float(x)
 
     ticks: list[SimTick] = []
     for r in df.itertuples(index=False):
-        ticks.append(SimTick(
-            question_idx=int(r.question_idx),
-            ts_ns=int(r.ts_ns),
-            action=str(r.action),
-            sigma=_n(r.sigma),
-            reference_price=_n(r.ref_price),
-            p_model=_n(r.p_model),
-            edge=_favorite_edge(_n(r.edge_yes), _n(r.edge_no)),
-        ))
+        ticks.append(
+            SimTick(
+                question_idx=int(r.question_idx),
+                ts_ns=int(r.ts_ns),
+                action=str(r.action),
+                sigma=_n(r.sigma),
+                reference_price=_n(r.ref_price),
+                p_model=_n(r.p_model),
+                edge=_favorite_edge(_n(r.edge_yes), _n(r.edge_no)),
+            )
+        )
     return ticks
 
 
 # ---------------------------------------------------------------------------
 # R3 v2: Position-aware engine path
 # ---------------------------------------------------------------------------
+
 
 def _build_engine_live_decisions_position_aware(
     v31_cfg,
@@ -396,11 +422,15 @@ def _build_engine_live_decisions_position_aware(
                 books=books,
                 reference_price=ref,
                 recent_returns=market.recent_returns(
-                    ref_sym, n=n_returns, now_ns=now_ns,
+                    ref_sym,
+                    n=n_returns,
+                    now_ns=now_ns,
                     lookback_seconds=n_returns * dt,
                 ),
                 recent_hl_bars=market.recent_hl_bars(
-                    ref_sym, n=n_returns, now_ns=now_ns,
+                    ref_sym,
+                    n=n_returns,
+                    now_ns=now_ns,
                     lookback_seconds=n_returns * dt,
                 ),
                 recent_volume_usd=(
@@ -413,16 +443,18 @@ def _build_engine_live_decisions_position_aware(
             if decision.action == Action.HOLD:
                 continue
             sigma, ref_px, p_model, edge = _parse_decision_diag(decision)
-            out.append(LiveDecision(
-                question_idx=q.question_idx,
-                ts_ns=now_ns,
-                action=decision.action.value,
-                symbol=q.yes_symbol or q.no_symbol or "",
-                sigma=sigma,
-                reference_price=ref_px,
-                p_model=p_model,
-                edge=edge,
-            ))
+            out.append(
+                LiveDecision(
+                    question_idx=q.question_idx,
+                    ts_ns=now_ns,
+                    action=decision.action.value,
+                    symbol=q.yes_symbol or q.no_symbol or "",
+                    sigma=sigma,
+                    reference_price=ref_px,
+                    p_model=p_model,
+                    edge=edge,
+                )
+            )
     return out
 
 
@@ -430,19 +462,23 @@ def _build_engine_live_decisions_position_aware(
 # Config-sig helpers
 # ---------------------------------------------------------------------------
 
+
 def _sim_config_sig(v31_cfg) -> str:
     from hlanalysis.engine.config import strategy_config_sig
+
     return strategy_config_sig(v31_cfg)
 
 
 def _engine_config_sig(v31_cfg) -> str:
     from hlanalysis.engine.config import strategy_config_sig
+
     return strategy_config_sig(v31_cfg)
 
 
 # ---------------------------------------------------------------------------
 # Main CI gate test
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("run_index", [0, 1])
 def test_ci_decision_parity_gate(run_index: int, tmp_path: Path) -> None:
@@ -458,9 +494,7 @@ def test_ci_decision_parity_gate(run_index: int, tmp_path: Path) -> None:
 def _run_and_assert(tmp_path: Path) -> None:
     # --- 1. Load config -------------------------------------------------------
     v31_cfg = _load_v31_config()
-    assert v31_cfg.strategy_type == "theta_harvester", (
-        f"expected theta_harvester, got {v31_cfg.strategy_type!r}"
-    )
+    assert v31_cfg.strategy_type == "theta_harvester", f"expected theta_harvester, got {v31_cfg.strategy_type!r}"
 
     # --- 2. Config-sig guard --------------------------------------------------
     # Engine and sim are built from the SAME StrategyConfig object, so their sigs
@@ -504,18 +538,17 @@ def _run_and_assert(tmp_path: Path) -> None:
     )
 
     # --- 4. Engine path (R3 v2: position-aware) -------------------------------
-    live_decisions = _build_engine_live_decisions_position_aware(
-        v31_cfg, position_timelines
-    )
+    live_decisions = _build_engine_live_decisions_position_aware(v31_cfg, position_timelines)
 
     # Print position timeline summary for CI diagnostics.
     for qi, tl in position_timelines.items():
         print(f"\nPosition timeline qi={qi}: {len(tl.changes)} change-points")
         for c in tl.changes:
             pos_str = (
-                f"qty={c.position.qty:.2f} sym={c.position.symbol} "
-                f"avg={c.position.avg_entry:.4f}"
-            ) if c.position is not None else "None (flat)"
+                (f"qty={c.position.qty:.2f} sym={c.position.symbol} avg={c.position.avg_entry:.4f}")
+                if c.position is not None
+                else "None (flat)"
+            )
             print(f"  ts={c.ts_ns}  {pos_str}")
 
     # --- 5. Call replay() and assess parity ----------------------------------
@@ -531,8 +564,10 @@ def _run_and_assert(tmp_path: Path) -> None:
     print(f"decision_match_rate={report.decision_match_rate():.4f}")
     for f_name, sk in report.field_skews.items():
         rel = f"  median_rel={sk.median_rel:.4f}" if sk.median_rel is not None else ""
-        print(f"  {f_name:16}  n={sk.n}  median_abs={sk.median_abs:.5g}  "
-              f"p90_abs={sk.p90_abs:.5g}  max_abs={sk.max_abs:.5g}{rel}")
+        print(
+            f"  {f_name:16}  n={sk.n}  median_abs={sk.median_abs:.5g}  "
+            f"p90_abs={sk.p90_abs:.5g}  max_abs={sk.max_abs:.5g}{rel}"
+        )
 
     # --- 6. Pinned regression assertions -------------------------------------
 
@@ -582,6 +617,7 @@ def _run_and_assert(tmp_path: Path) -> None:
 # Determinism gate (separate from the parametrized test above)
 # ---------------------------------------------------------------------------
 
+
 def test_sim_determinism_on_hl_hip4(tmp_path: Path) -> None:
     """Run the sim twice, assert identical SimTick outputs.
 
@@ -608,9 +644,6 @@ def test_sim_determinism_on_hl_hip4(tmp_path: Path) -> None:
         "Non-determinism in the sim path."
     )
     for i, (t1, t2) in enumerate(zip(ticks1, ticks2)):
-        assert t1 == t2, (
-            f"sim tick #{i} differs between runs: {t1!r} != {t2!r}. "
-            "Non-determinism in the sim path."
-        )
+        assert t1 == t2, f"sim tick #{i} differs between runs: {t1!r} != {t2!r}. Non-determinism in the sim path."
 
     print(f"\n--- sim determinism confirmed: {len(ticks1)} ticks, 2 runs identical ---")

@@ -10,6 +10,7 @@ harness is a stand-in for the real runner — both consume the same §3 interfac
 so the test won't need behavioural changes once A merges; only the harness
 swaps out for ``hl-bt run`` invocation.
 """
+
 from __future__ import annotations
 
 from collections import Counter
