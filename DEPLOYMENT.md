@@ -133,6 +133,13 @@ The deploy script will:
 
 ## Monitoring
 
+> **Access is SSM, not SSH.** Plain SSH to the box is blocked and an interactive
+> shell should never be *assumed* (especially from automation/agents). The reliable,
+> scriptable path is the non-interactive `make` targets below — each runs one
+> `aws ssm send-command`. `make ssh-ec2` opens an `ssm start-session` for hands-on
+> debugging only; don't depend on it in scripts. See CLAUDE.md → "Deploy is SSM-only"
+> and "Ops & monitoring".
+
 View recorder status and logs:
 
 ```bash

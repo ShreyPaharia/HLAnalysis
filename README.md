@@ -38,7 +38,12 @@ on a shared `hlanalysis` Python package.
   produce the parameters that ship in `config/strategy.yaml`.
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for the full operational runbook and
-[docs/](docs/) for design specs, research write-ups, and analysis notebooks.
+[docs/](docs/) for design specs, research write-ups, and analysis notebooks. Two
+standalone HTML overviews: [docs/architecture.html](docs/architecture.html) (system
+architecture + the shared sim/live spine) and
+[docs/code-review.html](docs/code-review.html) (a code-quality review snapshot). For
+a concise, navigation-first **code map** (what every file does, per subsystem), see
+[docs/architecture/](docs/architecture/README.md).
 
 ## The four CLIs
 

@@ -1,8 +1,25 @@
 # CLAUDE.md — conventions for working in HLAnalysis
 
 Start with [README.md](README.md) for the architecture overview and repo map, and
-[DEPLOYMENT.md](DEPLOYMENT.md) for the operational runbook. This file captures the
-load-bearing conventions that aren't obvious from the code.
+[DEPLOYMENT.md](DEPLOYMENT.md) for the operational runbook. For a visual deep-dive,
+open [docs/architecture.html](docs/architecture.html) (system architecture + the
+shared sim/live spine). This file captures the load-bearing conventions that aren't
+obvious from the code.
+
+## Navigating the code (read before grepping)
+
+[`docs/architecture/`](docs/architecture/README.md) is a concise, agent-oriented code
+map — what every file is responsible for, entry points, and gotchas, per subsystem.
+Open the one for the area you're touching first:
+
+| Working on… | Read |
+|-------------|------|
+| Orientation, the 4 CLIs, data flow, HL/PM tracks, glossary | [docs/architecture/overview.md](docs/architecture/overview.md) |
+| Live runtime (loops, slots, routing, risk, reconcile) | [docs/architecture/engine.md](docs/architecture/engine.md) |
+| Backtesting / tuning (data sources, caches, fills, walk-forward) | [docs/architecture/backtest.md](docs/architecture/backtest.md) |
+| Strategy logic / adding a strategy | [docs/architecture/strategy.md](docs/architecture/strategy.md) |
+| Code that must stay sim≡live identical (MarketState, parity) | [docs/architecture/shared-spine.md](docs/architecture/shared-spine.md) |
+| Recorder, adapters, events, on-disk layout, config files | [docs/architecture/recorder-data.md](docs/architecture/recorder-data.md) |
 
 ## Strategy naming
 
@@ -47,6 +64,28 @@ against synthetic or stale kline data: PM strike klines silently *freeze* (not
 error) when a cache is stale, and synthetic books don't reflect live
 microstructure. A "passing" backtest on the wrong inputs is worse than none.
 
+## Git worktrees & data reuse
+
+Agent work usually happens in a worktree under `.worktrees/<name>/`. The ~18 GB of
+recorded market data lives **only in the main checkout** (`data/` is gitignored and
+is *not* copied into worktrees).
+
+- **Never run `make pull-data` from a worktree.** It re-syncs gigabytes from S3 for
+  no reason. The data is already on disk in the main checkout — reuse it. Point the
+  backtester at it (from a `.worktrees/<name>/` checkout, main's data is `../../data`):
+  ```bash
+  export HLBT_HL_DATA_ROOT=../../data        # HL recorded venue data
+  export HLBT_PM_CACHE_ROOT=../../data/sim   # PM sim caches
+  # …or pass `--data-root ../../data` to hl-bt
+  ```
+  `make pull-data` is **only** for topping up the *main* checkout with newly-recorded
+  days.
+- **Rebase on local `main` before benchmarking.** Baselines drift fast as perf/fixes
+  land; rebase the worktree onto local `main` first or you'll compare against a stale
+  baseline.
+- **Never `git checkout` a tracked file to "see" an old version** — that silently
+  overwrites the working tree. Use `git show <ref>:<path>` / `git diff` instead.
+
 ## Deploy is SSM-only
 
 Production deploys go through `scripts/deploy.sh`, which runs `git pull` + service
@@ -55,6 +94,57 @@ restart on the EC2 box via **AWS SSM `send-command`** (`make deploy` /
 an interactive shell. Pushing config to SSM is `make push-engine-secrets`. The
 engine has a drift gate (`restart_blocked`) that can suspend the scanner after a
 deploy; check `make engine-status`.
+
+## Ops & monitoring (all via SSM `send-command`, no SSH)
+
+`make help` lists everything. SSH/interactive shells to the box are blocked — these
+read-only diagnostics each run one `aws ssm send-command` and print the result:
+
+| Command | What it does |
+|---------|--------------|
+| `make engine-status` | systemd state + per-slot `restart_blocked`/`halt` flags + last 30 journal lines |
+| `make engine-diag [ALIAS=v1] [WINDOW=48] [PRETTY=1]` | JSON snapshot: positions, true PnL, rejects, config fingerprint, feed health |
+| `make reconcile-report [JSON=1]` | per-slot realized + open-MTM **true PnL** vs venue truth; flags position drift |
+| `make engine-events Q=<idx>` | full event trace (entry/exit/veto/reject) for one question across slots |
+| `make engine-logs` / `make logs` | tail engine / recorder journal |
+| `make data-summary` / `make query Q="…"` | DuckDB over recorded parquet on the box |
+| `make parity-gate` | hermetic engine↔sim decision-parity gate (run before merging engine/sim changes) |
+
+Gotchas:
+- The box has **no `sqlite3` CLI** — use `/opt/hl-recorder/.venv/bin/python` for
+  ad-hoc DB reads.
+- Anything touching the live engine env runs via `.venv/bin/python` with
+  `set -a; . /etc/hl-engine/env` — **not** `uv run` (uv isn't on the engine's PATH
+  under that env).
+- HL positions/PnL are **venue-authoritative** (the local HL ledger can drift —
+  trust the venue); PM PnL is local-ledger. `reconcile-report` reflects this.
+
+## Toolchain & CI
+
+`ruff` (lint + format) and `mypy` are configured in `pyproject.toml`;
+`.pre-commit-config.yaml` runs ruff on commit; `.github/workflows/ci.yml` **blocks**
+on `ruff check`, `ruff format --check`, and `pytest` (mypy runs informationally).
+Before pushing:
+
+```bash
+uvx ruff check hlanalysis && uvx ruff format --check hlanalysis tests
+uv run pytest -q
+```
+
+## Working conventions
+
+- **Don't kill defensive gates** (`min_bid_notional`, `stop_loss`, `stale_data_halt`,
+  reject circuit-breakers, …) just because they never fire in a backtest. Backtests
+  don't replay live adversarial microstructure; these gates earned their place from
+  real incidents.
+- **Triage tickets before coding.** For each ticket state *Problem* → *does it still
+  exist in the current code (verified, with `file:line`)* → *Solution*, **before**
+  implementing.
+- **Re-baseline after any sim-infra change.** Parallel `run`/`tune` workers rebuild
+  data sources from `HLBT_*` env, not the in-memory config, so config-derived knobs
+  (`reference_resample_seconds`, `book_source`, dt, …) can silently revert to
+  defaults — surfacing as "0 trades" or sigma-inflation. Always re-run a known
+  baseline after touching the backtest data/worker path.
 
 ## Don't break the surface area
 
