@@ -60,8 +60,10 @@ favorite = −87pp), so out-of-sample it went negative on the 8-trade holdout. <
 desk only through breadth</b> — running favorite-capture across many markets simultaneously (ETH
 binaries, bucket bands, and the already-recorded Polymarket multi-strike/multi-asset series).
 Market-making is independently <b>+EV on paper</b> (makers keep ~80% of a 128bp spread net of
-adverse selection) but is <b>blocked on infrastructure</b>: the binary tracks perp sub-second, so an
-MM must re-quote in &lt;1s, while the live engine scans at 1 Hz. Two candidates (static Yes+No arb,
+adverse selection). The binary tracks perp sub-second (1–2s half-life), so a passive MM must
+cancel/replace in &lt;~1s — and the <b>live engine already runs event-driven at ~5 Hz</b>
+(<code>scan_min_interval_seconds 0.2</code>), so MM is <b>viable on current infra</b> pending a
+one-time end-to-end cancel-replace latency check, not blocked. Two candidates (static Yes+No arb,
 perp-momentum taking) were <b>killed on the evidence</b>.
 </div>
 
@@ -81,15 +83,19 @@ BTC binary cannot).
 </div>
 
 <div class="rec b">
-<b>② BUILD THEN GATE ON INFRA: Outcome-market making + perp hedge</b> &nbsp;<span class="pill cond">+EV, infra-blocked</span><br>
+<b>② VIABLE ON CURRENT ENGINE (pending latency check): Outcome-market making + perp hedge</b> &nbsp;<span class="pill cond">+EV, measure latency first</span><br>
 Maker economics are positive (Card B: 0.95pp realized spread at 5m, ~80% of the quoted spread kept
 net of adverse selection, profitable on 55% of trades; books are WIDE_SPARSE — 128bp median spread,
 ~100% two-sided uptime). The HL-perp delta hedge is clean (hedge ratio ≈0.50, stable) and effectively
-unlimited in size. <b>The blocker is latency:</b> perp→binary is sub-second (half-life 1–2s), so a
-naive MM is picked off unless it re-quotes in &lt;1s — the live engine is 1 Hz. <b>Recommendation:</b>
-finish the passive-fill sim (<code>strategy_mm.py</code>) to quantify the 1 Hz penalty, and treat MM
-as a Phase-2 item contingent on an event-driven sub-second quoting path (the engine-execution-speed
-work already prototyped) — not a 1 Hz deploy.
+unlimited in size. <b>Latency requirement (Card C):</b> perp→binary reprices with a 1–2s half-life,
+so a passive quote must be cancel/replaced in &lt;~1s (ideally &lt;500ms) or it gets picked off.
+<b>The live engine already meets the scan side</b> — it runs event-driven at
+<code>scan_min_interval_seconds: 0.2</code> (~5 Hz in active markets, since 2026-06-05), well inside
+the repricing window. <b>The one thing to confirm before quoting passively</b> is the
+<i>end-to-end cancel-replace ack RTT under load</i> (scan cadence ≠ full round-trip; HL RTT
+~100–500ms puts the total at ~300–700ms — likely fine, at the edge). <b>Recommendation:</b> finish the
+passive-fill sim (<code>strategy_mm.py</code>) for a queue-position-honest return estimate, measure
+the live cancel-replace RTT, then pilot MM at small size — it is NOT infra-blocked.
 </div>
 
 <div class="rec c">
@@ -99,6 +105,20 @@ buy-arb (Card D). <b>Perp-momentum taking on the binary</b> — perp move predic
 R²=0.08 and net edge −0.36pp, swamped by the binary half-spread (Card C). Neither warrants further
 work.
 </div>
+
+<h3>Prod-strategy verdict — continue &amp; scale? (live v1/v31 baselines via <code>hl-bt</code>)</h3>
+<table class="kpi">
+<tr><th>Slot</th><th>IS PnL (25 mkt)</th><th>IS trades</th><th>OOS PnL (7 mkt)</th><th>OOS trades</th><th>OOS Sharpe</th><th>Verdict</th></tr>
+<tr><td><b>v31 (theta)</b></td><td class="green">+$449</td><td>293</td><td class="green">+$50</td><td>44</td><td>4.0</td><td><span class="pill pass">scale (workhorse)</span></td></tr>
+<tr><td>v1 (late-resolution)</td><td class="red">−$46</td><td>63</td><td>+$34</td><td>6</td><td>—</td><td><span class="pill cond">keep, don't scale</span></td></tr>
+<tr><td>clean-FLB (research)</td><td>−$7</td><td>88</td><td>+$67</td><td>12</td><td>18.3*</td><td><span class="pill fail">not standalone</span></td></tr>
+</table>
+<p class="muted"><b>v31 is the only strategy positive both IS and OOS at a real sample size (293/44 trades)</b>
+— continue and scale it via BREADTH. v1 is IS-negative and its OOS is 6 trades (noise); keep it
+running (cheap, gated) but don't grow capital there. *clean-FLB/v1 OOS Sharpes are on n&lt;15 →
+underpowered, not trustworthy. Scaling bottleneck = capacity ($107 TOB), so growth = more markets,
+not bigger clips (see capacity table below: $25k needs ~234 concurrent markets, single-clip fills
+only 3–19%).</p>
 
 <h3>Taker (clean-FLB) KPI scorecard — authoritative, self-computed</h3>
 <p class="muted">Rule: buy favorite binary leg at the ask on first tick with mid∈[0.80,0.95] &amp; TTE∈[1–6h],

@@ -266,7 +266,9 @@ Last updated: <b>2026-06-13 · setup</b></p>
   <li><span class="ts">2026-06-13 A✓C✓</span> — Wave 1 complete (6/6). A: WIDE_SPARSE, MM viable. C: sub-1s perp→binary, hedge 0.50, perp-momentum taker ruled out. Launched MM candidate sim.</li>
   <li><span class="ts">2026-06-13 ⚠ limit</span> — Account session limit interrupted BOTH Wave-2 agents mid-run. Taker partial (5 gate-filtered fills, not credible); MM card not generated.</li>
   <li><span class="ts">2026-06-13 fix</span> — Agents tangled/idle after re-login. Computed the authoritative clean-FLB backtest MYSELF (scripts/research_clean_flb.py). HONEST RESULT: edge real (+6.15pp, split-half stable) but FAILS deploy KPIs as a standalone BTC-binary taker — capacity-starved + fat left tail → OOS negative. Needs BREADTH. Corrected inflated "Sharpe 10.74".</li>
-  <li><span class="ts">2026-06-13 W3✓</span> — Relocated misplaced card_c/card_f (agents wrote wrong path). Built final report <a href="hl-outcome-desk-2026-06-13.html">hl-outcome-desk-2026-06-13.html</a>: ranked recs (deploy FLB-via-breadth / build-then-gate MM / drop arb+momentum), taker KPI scorecard, 6 linked cards, unifying thesis. <b>Analysis complete.</b></li>
+  <li><span class="ts">2026-06-13 W3✓</span> — Relocated misplaced card_c/card_f. Built final report <a href="hl-outcome-desk-2026-06-13.html">hl-outcome-desk-2026-06-13.html</a>: ranked recs, taker KPI scorecard, 6 linked cards, unifying thesis.</li>
+  <li><span class="ts">2026-06-13 prod</span> — Folded live v1/v31 baselines: <b>v31 is the workhorse</b> (+$449 IS/+$50 OOS, 293/44 trades → scale via breadth); v1 keep-don't-scale; capacity bottleneck $107 TOB.</li>
+  <li><span class="ts">2026-06-13 fix2</span> — <b>CORRECTED MM cadence claim:</b> live engine is NOT 1 Hz — it's event-driven ~5 Hz (scan_min_interval_seconds 0.2, all slots, since 2026-06-05). MM upgraded from "infra-blocked" to "viable on current engine, pending end-to-end cancel-replace RTT check (&lt;~500ms).</li>
 </ul>
 </div>
 
