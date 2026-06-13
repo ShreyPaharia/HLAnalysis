@@ -456,10 +456,9 @@ strategies:
       entry_cooldown_seconds: 60
 
     global:
-      # Burn-in caps for first-week live operation (was $1000 inventory at ablation).
-      # With max_position=$50 and max_total_inventory=$100, effective concurrency is
-      # 2 positions; max_concurrent_positions=5 stays as a defense-in-depth ceiling.
-      max_total_inventory_usd: 100
+      # 2026-06-13: raised 100→500 — at max_position=$50 × max_concurrent=5 the
+      # $100 cap bound effective concurrency to 2; $500 lets all 5 concurrent slots fill.
+      max_total_inventory_usd: 500
       max_concurrent_positions: 5
       daily_loss_cap_usd: 100               # operator-locked
       max_strike_distance_pct: 50
@@ -630,8 +629,8 @@ strategies:
       fee_rate: 0.07
 
     global:
-      # Burn-in caps for first-week live operation (mirror v31_pm).
-      max_total_inventory_usd: 100
+      # 2026-06-13: raised 100→500 (mirror v31_pm).
+      max_total_inventory_usd: 500
       max_concurrent_positions: 5
       daily_loss_cap_usd: 100
       max_strike_distance_pct: 50
@@ -690,7 +689,8 @@ strategies:
       # 2026-06-12: raised 100→250 — at max_position=$50 × max_concurrent=5 the
       # $100 cap bound effective concurrency to 2 and vetoed (max_total_inventory)
       # once two ETH-multistrike legs filled; $250 lets all 5 concurrent slots fill.
-      max_total_inventory_usd: 250
+      # 2026-06-13: raised 250→500 (align with other PM slots).
+      max_total_inventory_usd: 500
       max_concurrent_positions: 5
       daily_loss_cap_usd: 100
       max_strike_distance_pct: 50
