@@ -12,7 +12,6 @@ from pathlib import Path
 
 import duckdb
 import numpy as np
-import pandas as pd
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -59,9 +58,7 @@ class TestNotionalWithinBps:
         tob_n = best_bid * bids[0][1] + best_ask * asks[0][1]
         bid_thresh = mid * (1.0 - bps_limit / 10000.0)
         ask_thresh = mid * (1.0 + bps_limit / 10000.0)
-        total = sum(p * s for p, s in bids if p >= bid_thresh) + sum(
-            p * s for p, s in asks if p <= ask_thresh
-        )
+        total = sum(p * s for p, s in bids if p >= bid_thresh) + sum(p * s for p, s in asks if p <= ask_thresh)
         return tob_n, total
 
     def test_single_level_tob(self) -> None:
@@ -187,14 +184,14 @@ class TestSplitHalfBoundary:
     """Verify the H1/H2 boundary constant."""
 
     def test_h1_end_ns_is_correct_date(self) -> None:
-        from hlanalysis.research.cards.card_a_liquidity import _H1_END_NS
-
         import datetime as dt
 
+        from hlanalysis.research.cards.card_a_liquidity import _H1_END_NS
+
         # 2026-05-23 23:59:59 UTC in nanoseconds
-        expected_dt = dt.datetime(2026, 5, 23, 23, 59, 59, tzinfo=dt.timezone.utc)
+        expected_dt = dt.datetime(2026, 5, 23, 23, 59, 59, tzinfo=dt.UTC)
         expected_ns = int(expected_dt.timestamp() * 1e9)
-        assert _H1_END_NS == expected_ns
+        assert expected_ns == _H1_END_NS
 
 
 # ---------------------------------------------------------------------------

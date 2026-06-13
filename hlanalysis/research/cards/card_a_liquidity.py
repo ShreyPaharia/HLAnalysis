@@ -374,13 +374,9 @@ def _compute_spread_vs_tte(
 ) -> pd.DataFrame:
     """Spread vs TTE bucket for binary markets."""
     bbo = _binary_bbo_glob(data_root)
-    sym_list = "', '".join(binary_syms_with_expiry["symbol"].tolist())
 
     # Build expiry map for DuckDB as a VALUES clause
-    expiry_rows = ", ".join(
-        f"('{row.symbol}', {int(row.exp_ns)})"
-        for _, row in binary_syms_with_expiry.iterrows()
-    )
+    expiry_rows = ", ".join(f"('{row.symbol}', {int(row.exp_ns)})" for _, row in binary_syms_with_expiry.iterrows())
 
     sql = f"""
         WITH expiry_map(symbol, exp_ns) AS (
@@ -556,9 +552,7 @@ def _compute_depth_from_snapshots(
         tob_n = best_bid * bids[0][1] + best_ask * asks[0][1]
         bid_thresh = mid * (1.0 - bps_limit / 10000.0)
         ask_thresh = mid * (1.0 + bps_limit / 10000.0)
-        total = sum(p * s for p, s in bids if p >= bid_thresh) + sum(
-            p * s for p, s in asks if p <= ask_thresh
-        )
+        total = sum(p * s for p, s in bids if p >= bid_thresh) + sum(p * s for p, s in asks if p <= ask_thresh)
         return tob_n, total
 
     tob_list: list[float] = []
@@ -611,11 +605,7 @@ def _compute_tob_depth_vs_tte(
 ) -> pd.DataFrame:
     """TOB bid/ask size vs TTE for binary markets."""
     bbo = _binary_bbo_glob(data_root)
-    sym_list = "', '".join(binary_syms_with_expiry["symbol"].tolist())
-    expiry_rows = ", ".join(
-        f"('{row.symbol}', {int(row.exp_ns)})"
-        for _, row in binary_syms_with_expiry.iterrows()
-    )
+    expiry_rows = ", ".join(f"('{row.symbol}', {int(row.exp_ns)})" for _, row in binary_syms_with_expiry.iterrows())
 
     sql = f"""
         WITH expiry_map(symbol, exp_ns) AS (VALUES {expiry_rows}),
@@ -946,11 +936,7 @@ def _compute_split_half(
     bkt_h2_d = _row_to_dict(bkt_h2)
 
     # Sign stability: does median spread direction hold?
-    bin_stable = (
-        bin_h1_d.get("median_spread_bps", float("nan"))
-        * bin_h2_d.get("median_spread_bps", float("nan"))
-        > 0
-    )
+    bin_stable = bin_h1_d.get("median_spread_bps", float("nan")) * bin_h2_d.get("median_spread_bps", float("nan")) > 0
 
     return {
         "H1": {
@@ -967,8 +953,7 @@ def _compute_split_half(
         },
         "sign_stable": bool(bin_stable),
         "binary_spread_ratio_h2_over_h1": (
-            bin_h2_d.get("median_spread_bps", float("nan"))
-            / bin_h1_d.get("median_spread_bps", 1.0)
+            bin_h2_d.get("median_spread_bps", float("nan")) / bin_h1_d.get("median_spread_bps", 1.0)
             if bin_h1_d.get("median_spread_bps", 0.0) != 0.0
             else float("nan")
         ),
@@ -1024,7 +1009,16 @@ def _make_spread_plots(
         ph = perp_vs_hour.set_index("utc_hour").reindex(hours)
         ax2_twin = ax2.twinx()
         ax2_twin.set_facecolor("#161b22")
-        ax2_twin.plot(hours, ph["median_spread_bps"], "^:", color="#f78166", label="Perp (RHS)", linewidth=1, markersize=3, alpha=0.7)
+        ax2_twin.plot(
+            hours,
+            ph["median_spread_bps"],
+            "^:",
+            color="#f78166",
+            label="Perp (RHS)",
+            linewidth=1,
+            markersize=3,
+            alpha=0.7,
+        )
         ax2_twin.set_ylabel("Perp spread (bps)", color="#f78166", fontsize=9)
         ax2_twin.tick_params(colors="#8b949e")
         ax2_twin.yaxis.label.set_color("#f78166")
@@ -1114,7 +1108,11 @@ def _build_spread_summary_table(
     perp_stats: pd.DataFrame,
 ) -> str:
     rows = []
-    for label, stats in [("Binary (Yes-leg)", binary_stats), ("Bucket (Yes-leg)", bucket_stats), ("Perp BTC", perp_stats)]:
+    for label, stats in [
+        ("Binary (Yes-leg)", binary_stats),
+        ("Bucket (Yes-leg)", bucket_stats),
+        ("Perp BTC", perp_stats),
+    ]:
         if stats.empty:
             continue
         r = stats.iloc[0]
@@ -1173,16 +1171,6 @@ def build_card(
             "split_half": {},
             "verdict": "INCONCLUSIVE",
         }
-        rpt = Report("Card A: Liquidity & Book Shape")
-        rpt.add_card("Card A: Liquidity & Book Shape", "<p>No data.</p>")
-        buf = []
-        import io as _io
-
-        class _Sink:
-            def write_text(self, text, **kw):
-                buf.append(text)
-
-        sink = _Sink()
         import tempfile
 
         with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w") as f:
@@ -1283,9 +1271,9 @@ def build_card(
     <table>
       <tr><th>Market</th><th>N snapshots</th><th>TOB notional (USDC, median)</th>
           <th>Within 50bps (USDC)</th><th>Within 100bps (USDC)</th><th>Within 200bps (USDC)</th></tr>
-      {_depth_row('Binary', binary_depth)}
-      {_depth_row('Bucket', bucket_depth)}
-      {_depth_row('Perp BTC', perp_depth)}
+      {_depth_row("Binary", binary_depth)}
+      {_depth_row("Bucket", bucket_depth)}
+      {_depth_row("Perp BTC", perp_depth)}
     </table>"""
 
     # TOB vs TTE table
@@ -1354,7 +1342,7 @@ def build_card(
       {sh_rows}
     </table>
     <p>H2/H1 spread ratio: {split_ratio} &mdash;
-    Sign stable: {'YES' if split_stable else 'NO'}</p>"""
+    Sign stable: {"YES" if split_stable else "NO"}</p>"""
 
     # Tick section
     tick_size_val = tick.get("tick_size", float("nan"))
@@ -1367,8 +1355,12 @@ def build_card(
     )
 
     # MM room verdict
-    binary_median_bps = float(binary_spread.iloc[0].get("median_spread_bps", float("nan"))) if not binary_spread.empty else float("nan")
-    perp_median_bps = float(perp_spread.iloc[0].get("median_spread_bps", float("nan"))) if not perp_spread.empty else float("nan")
+    binary_median_bps = (
+        float(binary_spread.iloc[0].get("median_spread_bps", float("nan"))) if not binary_spread.empty else float("nan")
+    )
+    perp_median_bps = (
+        float(perp_spread.iloc[0].get("median_spread_bps", float("nan"))) if not perp_spread.empty else float("nan")
+    )
     binary_tob_notional = binary_depth.get("tob_median", float("nan"))
     binary_100bps_notional = binary_depth.get("n100_median", float("nan"))
     perp_tob_notional = perp_depth.get("tob_median", float("nan"))
@@ -1397,16 +1389,16 @@ def build_card(
     <p>Binary markets quote a median spread of
     <strong>{_safe_float(binary_median_bps)} bps</strong> vs perp BTC
     <strong>{_safe_float(perp_median_bps)} bps</strong> — a
-    <strong>{int(binary_median_bps / perp_median_bps if perp_median_bps > 0 else float('nan'))}×</strong>
+    <strong>{int(binary_median_bps / perp_median_bps if perp_median_bps > 0 else float("nan"))}×</strong>
     wider regime. Bucket legs are even wider at
-    <strong>{_safe_float(float(bucket_spread.iloc[0].get('median_spread_bps', float('nan'))) if not bucket_spread.empty else float('nan'))} bps</strong>.
+    <strong>{_safe_float(float(bucket_spread.iloc[0].get("median_spread_bps", float("nan"))) if not bucket_spread.empty else float("nan"))} bps</strong>.
     </p>
     {spread_table}
 
     <h3 style="color:#58a6ff;margin-top:1rem">Spread vs TTE (Binary)</h3>
     <p>Spread widens sharply near expiry: mean bps at &lt;1h is
-    {_safe_float(spread_vs_tte.iloc[0]['mean_spread_bps'] if not spread_vs_tte.empty else float('nan'))}
-    vs {_safe_float(spread_vs_tte.iloc[-1]['mean_spread_bps'] if not spread_vs_tte.empty else float('nan'))}
+    {_safe_float(spread_vs_tte.iloc[0]["mean_spread_bps"] if not spread_vs_tte.empty else float("nan"))}
+    vs {_safe_float(spread_vs_tte.iloc[-1]["mean_spread_bps"] if not spread_vs_tte.empty else float("nan"))}
     at &gt;18h. Median is more stable (noise/resolution dynamics dominate the mean).</p>
     {tte_table}
     <img src="data:image/png;base64,{fig_spread_b64}" alt="Spread plots">
@@ -1414,13 +1406,13 @@ def build_card(
     <h3 style="color:#58a6ff;margin-top:1rem">2. L2 Depth</h3>
     <p>Binary TOB median notional (bid+ask): <strong>{_safe_float(binary_tob_notional)} USDC</strong>.
     Within 100 bps of mid: <strong>{_safe_float(binary_100bps_notional)} USDC</strong>.
-    Perp TOB: <strong>{_safe_float(perp_tob_notional / 1000 if perp_tob_notional else float('nan'), '.0f')}k USDC</strong>
+    Perp TOB: <strong>{_safe_float(perp_tob_notional / 1000 if perp_tob_notional else float("nan"), ".0f")}k USDC</strong>
     (4 orders of magnitude deeper than binary).</p>
     {depth_table}
     <h4 style="color:#8b949e">TOB depth vs TTE</h4>
     <p>Book deepens near expiry: bid TOB size at &lt;1h is
-    {_safe_float(tob_vs_tte.iloc[0]['mean_bid_sz'] if not tob_vs_tte.empty else float('nan'), '.0f')} mean contracts
-    vs {_safe_float(tob_vs_tte.iloc[-1]['mean_bid_sz'] if not tob_vs_tte.empty else float('nan'), '.0f')} at &gt;18h.</p>
+    {_safe_float(tob_vs_tte.iloc[0]["mean_bid_sz"] if not tob_vs_tte.empty else float("nan"), ".0f")} mean contracts
+    vs {_safe_float(tob_vs_tte.iloc[-1]["mean_bid_sz"] if not tob_vs_tte.empty else float("nan"), ".0f")} at &gt;18h.</p>
     {tob_tte_table}
     <img src="data:image/png;base64,{fig_depth_b64}" alt="Depth plots">
 
@@ -1439,13 +1431,13 @@ def build_card(
 
     <h3 style="color:#58a6ff;margin-top:1rem">5. Tick Size / Price Granularity</h3>
     {tick_section}
-    <p>At a mid of 0.50, tick = {_safe_float(tick_size_val, '.5f')} → {_safe_float(tick_size_val / 0.50 * 10000, '.1f')} bps.
-    Minimum quote improvement costs 1 tick = {_safe_float(tick_size_val, '.5f')} absolute.</p>
+    <p>At a mid of 0.50, tick = {_safe_float(tick_size_val, ".5f")} → {_safe_float(tick_size_val / 0.50 * 10000, ".1f")} bps.
+    Minimum quote improvement costs 1 tick = {_safe_float(tick_size_val, ".5f")} absolute.</p>
 
     <h3 style="color:#58a6ff;margin-top:1rem">6. MM Room Assessment</h3>
     <p>Binary spread ({_safe_float(binary_median_bps)} bps median) is wide vs perp
     ({_safe_float(perp_median_bps)} bps), suggesting apparent MM edge.
-    However, TOB notional is tiny (median ~{_safe_float(binary_tob_notional, '.0f')} USDC).
+    However, TOB notional is tiny (median ~{_safe_float(binary_tob_notional, ".0f")} USDC).
     A $1k–$25k desk can take the full resting bid/ask in a single order.
     Sustained quoting with inventory management is viable but requires small position sizing.
     Perp hedge (for delta-neutral) is 4+ orders of magnitude deeper — no hedge-leg concern.</p>
@@ -1582,7 +1574,9 @@ def build_card(
         "mm_room": {
             "binary_regime": mm_verdict_binary,
             "binary_median_spread_bps": float(binary_median_bps) if not np.isnan(binary_median_bps) else None,
-            "binary_tob_notional_usdc_median": float(binary_tob_notional) if not np.isnan(binary_tob_notional) else None,
+            "binary_tob_notional_usdc_median": float(binary_tob_notional)
+            if not np.isnan(binary_tob_notional)
+            else None,
             "binary_within_100bps_usdc_median": float(binary_depth.get("n100_median", float("nan"))),
             "perp_tob_notional_usdc_median": float(perp_tob_notional) if not np.isnan(perp_tob_notional) else None,
             "verdict": (

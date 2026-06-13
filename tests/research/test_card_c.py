@@ -16,8 +16,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-# Path to shared data root (relative to repo root, two levels above worktree)
-_DATA_ROOT = Path(__file__).parents[3] / ".." / ".." / "data"
+# Path to shared data root.
+# __file__ = .worktrees/WORKTREE_NAME/tests/research/test_card_c.py
+# parents[2] = .worktrees/WORKTREE_NAME/  (worktree root)
+# data lives in the main checkout: .worktrees/WORKTREE_NAME/../../data
+_DATA_ROOT = (Path(__file__).parents[2] / ".." / ".." / "data").resolve()
 _DATA_AVAILABLE = _DATA_ROOT.exists()
 
 _data_skip = pytest.mark.skipif(not _DATA_AVAILABLE, reason="../../data not present; skipping data-dependent test")

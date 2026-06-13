@@ -100,7 +100,7 @@ Last updated: <b>2026-06-13 · setup</b></p>
       <li><span class="pill done">done</span> <b>D</b> Mispricing surface — no static arb; σ-biased GBM edge</li>
       <li><span class="pill done">done</span> <b>F</b> Vol/theta — +14% vol premium, regime sizing r=0.53</li>
       <li><span class="pill done">done</span> <b>B</b> Adverse selection — FLB edge survives (≈9.85pp net); MM also +EV</li>
-      <li><span class="pill run">running</span> <b>A</b> Liquidity &amp; book shape <span class="muted">(MM)</span></li>
+      <li><span class="pill done">done</span> <b>A</b> Liquidity — WIDE_SPARSE; MM viable $100–500/side, perp hedge unlimited</li>
       <li><span class="pill run">running</span> <b>C</b> Cross-venue lead-lag perp→outcome <span class="muted">(MM)</span></li>
     </ul>
   </div>
@@ -199,6 +199,17 @@ Last updated: <b>2026-06-13 · setup</b></p>
   <div class="panel" style="background:var(--panel2);margin-top:12px">
     <b>Taker thesis — VALIDATED (E+B+D+F):</b> Buy favorites (binary mid <b>0.80–0.95</b>) at <b>1–6h</b> to expiry. Net edge <b>≈9.85pp</b> survives adverse selection; HL fee = 0; sign-stable. Remaining Wave-2 gates: <span class="amber">walk-forward OOS backtest at engine cadence</span> + capacity/breadth ($50–200/level) + vol-regime sizing (F's r=0.53).
   </div>
+
+  <h3 style="margin-top:18px">Card A — Liquidity &amp; book shape <span class="pill done">done</span></h3>
+  <table>
+  <tr><th>Metric</th><th>Result (n, span)</th><th>Read</th></tr>
+  <tr><td>Spread (median)</td><td>binary <b>128 bps</b> (mean 547) · bucket 1,850 bps · perp 0.13 bps</td><td>Binary books are WIDE — apparent maker edge. Widen into expiry &amp; 08–11 UTC; tightest 12–18 UTC.</td></tr>
+  <tr><td>Depth (binary)</td><td>TOB median <b>$107</b> · within 100bps <b>$679</b> · perp TOB $1.15M</td><td>Shallow → small clips; <b>perp hedge effectively unlimited</b> at desk scale.</td></tr>
+  <tr><td>Uptime / tick</td><td>two-sided ~100% · tick 1e-5</td><td>Always quotable; trivial to join inside the spread.</td></tr>
+  <tr><td>Book imbalance signal</td><td>Spearman <b>+0.031</b> (42% sig) </td><td>Weak standalone; minor combined-signal contributor.</td></tr>
+  <tr><td><b>MM room ($1k–$25k)</b></td><td>regime <b>WIDE_SPARSE</b> · $100–500/side × 5–10 expiries = $500–$5k exposure</td><td><b>MM viable</b> but wide-yet-shallow → adverse-selection discipline (Card C) is the whole game.</td></tr>
+  </table>
+  <p class="muted">Card: <code>docs/research/_cards/card_a.html</code> · Split-half stable.</p>
 </div>
 
 <h2>Strategy scorecard</h2>
