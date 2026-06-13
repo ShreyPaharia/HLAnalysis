@@ -41,7 +41,10 @@ def update_bar(bar: tuple[float, float, float], high: float, low: float, close: 
 
 
 def resample_ohlc(
-    samples: Iterable[tuple[int, float, float, float]], *, bucket_ns: int
+    samples: Iterable[tuple[int, float, float, float]],
+    *,
+    bucket_ns: int,
+    initial_last_bucket: int | None = None,
 ) -> Iterator[tuple[int, float, float, float]]:
     """Aggregate ``(ts_ns, high, low, close)`` samples into ``bucket_ns``-wide
     OHLC bars, yielding ``(last_ts_ns, high, low, close)`` per bucket.
@@ -50,27 +53,57 @@ def resample_ohlc(
     one at a time and keeps its own ring buffer, so it composes ``bucket_index``
     + ``update_bar`` directly rather than calling this generator — but the merge
     rule is identical, which is the whole point.
+
+    ``initial_last_bucket`` (optional, default ``None``): seed the prior-session
+    boundary guard. When a caller segments the input stream across multiple
+    calls — e.g., resuming from a checkpoint — passing the last bucket index
+    emitted by the prior call prevents the first tick of the new call from
+    opening a duplicate bar if it falls in the same bucket as the prior session
+    ended on. Equivalent to the ``self._len == 0`` guard in
+    ``_OhlcBuffer.ingest_tick`` (the live streaming path): both defend against
+    degenerate double-counting at bucket boundaries when history is empty
+    mid-bucket (#55). The default ``None`` is identical to the prior behaviour
+    (no caller-supplied seed), so all existing callers are unaffected.
     """
-    cur_bucket: int | None = None
+    # #55: initialise cur_bucket from the prior-session seed when supplied.
+    # ``h/l/c/last_ts`` stay at their zero values (no prior partial bar data
+    # is available), so if the very first tick lands in the SAME bucket as
+    # ``initial_last_bucket`` it merges into the in-progress bar (guarding the
+    # boundary), and if it lands in a NEW bucket the yield + open path fires.
+    cur_bucket: int | None = initial_last_bucket
     h: float = 0.0
     l: float = 0.0
     c: float = 0.0
     last_ts: int = 0
+    _have_data: bool = False  # True once at least one sample has been accumulated
     for ts, high, low, close in samples:
         bucket = bucket_index(ts, bucket_ns)
         if cur_bucket is None:
+            # Fresh start: no prior bucket — open the first bar.
             cur_bucket = bucket
             h, l, c = high, low, close
             last_ts = ts
+            _have_data = True
         elif bucket != cur_bucket:
-            yield last_ts, h, l, c
+            # Bucket transition: yield the completed bar (if we have data),
+            # then open the new bucket.
+            if _have_data:
+                yield last_ts, h, l, c
             cur_bucket = bucket
             h, l, c = high, low, close
             last_ts = ts
+            _have_data = True
         else:
-            h, l, c = update_bar((h, l, c), high, low, close)
+            # Same bucket — merge in-place.
+            if _have_data:
+                h, l, c = update_bar((h, l, c), high, low, close)
+            else:
+                # Boundary guard: cur_bucket was seeded but no data yet
+                # (initial_last_bucket matches this tick's bucket).
+                h, l, c = high, low, close
+                _have_data = True
             last_ts = ts
-    if cur_bucket is not None:
+    if cur_bucket is not None and _have_data:
         yield last_ts, h, l, c
 
 
