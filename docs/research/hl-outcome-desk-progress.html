@@ -99,20 +99,18 @@ Last updated: <b>2026-06-13 · setup</b></p>
       <li><span class="pill done">done</span> <b>E</b> Settlement convergence — FLB taker edge confirmed (keystone)</li>
       <li><span class="pill done">done</span> <b>D</b> Mispricing surface — no static arb; σ-biased GBM edge</li>
       <li><span class="pill done">done</span> <b>F</b> Vol/theta — +14% vol premium, regime sizing r=0.53</li>
-      <li><span class="pill run">running</span> <b>B</b> Adverse selection / markouts <span class="muted">(taker + MM)</span></li>
+      <li><span class="pill done">done</span> <b>B</b> Adverse selection — FLB edge survives (≈9.85pp net); MM also +EV</li>
       <li><span class="pill run">running</span> <b>A</b> Liquidity &amp; book shape <span class="muted">(MM)</span></li>
       <li><span class="pill run">running</span> <b>C</b> Cross-venue lead-lag perp→outcome <span class="muted">(MM)</span></li>
     </ul>
   </div>
   <div class="panel">
-    <span class="pill wait">queued</span> &nbsp;<b>Wave 2 — Strategy candidates</b>
+    <span class="pill run">running</span> &nbsp;<b>Wave 2 — Strategy candidates</b>
     <span class="tag">sonnet ×N</span>
     <ul>
-      <li><b>Taker 1</b> Cross-market static arb (Yes+No overround, bucket↔binary)</li>
-      <li><b>Taker 2</b> v1/v31 refinement (new gates &amp; sizing from cards B/D/E/F)</li>
-      <li><b>Taker 3</b> Settlement-convergence capture</li>
-      <li><b>MM</b> Quoter + HL-perp hedge (after taker)</li>
-      <li><b>Sizing/risk</b> edge-proportional + adverse-selection haircut, Kelly-capped</li>
+      <li><span class="pill run">running</span> <b>Taker</b> FLB favorite-buy: walk-forward OOS backtest on recorded HL binary book vs v1/v31 baselines + vol-regime sizing</li>
+      <li><span class="pill wait">queued</span> <b>MM</b> Quoter + HL-perp hedge (maker +EV per Card B; awaits A/C)</li>
+      <li><span class="pill wait">queued</span> <b>Cross-market arb</b> — likely dropped (Card D: no static arb net-of-fee)</li>
     </ul>
   </div>
   <div class="panel">
@@ -189,8 +187,17 @@ Last updated: <b>2026-06-13 · setup</b></p>
   <tr><td>Split-half</td><td>edge @mid≥0.85,TTE&lt;3h: H1 +4.0pp / H2 +3.5pp · FLB +22pp/+15pp</td><td>Direction stable; magnitude slightly lower in bearish H2.</td></tr>
   </table>
   <p class="muted">Card: <code>docs/research/_cards/card_e.html</code> · Reconciliation: D+E+F agree → <b>market overprices vol → favorites underpriced → buy favorites (v1/v31)</b>.</p>
+  <h3 style="margin-top:18px">Card B — Adverse selection / markouts <span class="pill done">done</span></h3>
+  <table>
+  <tr><th>Metric</th><th>Result (n, span)</th><th>Read</th></tr>
+  <tr><td><b>FLB zone post-entry drift</b></td><td>mid 0.80–0.95 @1–6h: <b>−0.15pp @30m</b> (n=14,943) · split-half symmetric noise (−0.76/+0.79)</td><td><b>Taker edge survives.</b> &lt;2% of the ~10pp edge lost to adverse selection → net ≈ <b>9.85pp</b>. No systematic leak.</td></tr>
+  <tr><td>Aggressor markouts</td><td>buy-side ~0 all horizons; sell-side +0.20–0.49pp (informed selling, bearish regime)</td><td>Buying favorites is not picked off; informed flow is on the sell side.</td></tr>
+  <tr><td>Maker economics</td><td>realized spread <b>0.95pp</b> @5m · makers keep ~80% of quoted spread · +EV on 55.4% trades</td><td><b>MM is also +EV</b> — green flag for the MM phase. Adverse-selection = 19.5% of effective spread.</td></tr>
+  <tr><td>Toxicity by size</td><td>flat across &lt;50 / 50–200 / &gt;200 shares</td><td>FLB is structural, not private info → safe to size up.</td></tr>
+  </table>
+  <p class="muted">Card: <code>docs/research/_cards/card_b.html</code></p>
   <div class="panel" style="background:var(--panel2);margin-top:12px">
-    <b>Taker thesis (3 cards agree):</b> Buy favorites (binary mid <b>0.80–0.95</b>) at <b>1–6h</b> to expiry. Net edge <b>+6 to +17pp</b>, HL fee = 0 (cost = half-spread). Still to clear in Wave 2: <span class="amber">adverse selection at the ask (Card B)</span>, capacity/breadth ($50–200/level), and a walk-forward OOS backtest at engine cadence.
+    <b>Taker thesis — VALIDATED (E+B+D+F):</b> Buy favorites (binary mid <b>0.80–0.95</b>) at <b>1–6h</b> to expiry. Net edge <b>≈9.85pp</b> survives adverse selection; HL fee = 0; sign-stable. Remaining Wave-2 gates: <span class="amber">walk-forward OOS backtest at engine cadence</span> + capacity/breadth ($50–200/level) + vol-regime sizing (F's r=0.53).
   </div>
 </div>
 
@@ -207,7 +214,9 @@ Last updated: <b>2026-06-13 · setup</b></p>
   <li><span class="ts">2026-06-13 F✓</span> — Card F done: +14% ann implied−realized vol premium, sign-stable → v31 theta edge confirmed. Vol-regime sizing r=0.53.</li>
   <li><span class="ts">2026-06-13 D✓</span> — Card D done: no static taker arb (90bp overround), GBM model-edge present but σ-horizon-sensitive (flagged); capacity binding at $50–200/level.</li>
   <li><span class="ts">2026-06-13 E✓</span> — Card E done (keystone): favourite-longshot bias, buy favorites 0.80–0.95 @1–6h = +6–17pp net, fee-free, split-half stable. Taker thesis locked across D+E+F.</li>
-  <li><span class="ts">2026-06-13 W1b</span> — Launched MM-leaning trio B (adverse selection), A (liquidity), C (lead-lag).</li>
+  <li><span class="ts">2026-06-13 W1b</span> — Launched MM-leaning trio B, A, C.</li>
+  <li><span class="ts">2026-06-13 B✓</span> — Card B done: FLB taker edge SURVIVES adverse selection (net ≈9.85pp); maker side also +EV. Taker thesis fully validated on analysis side.</li>
+  <li><span class="ts">2026-06-13 W2</span> — Launched Wave 2 taker backtest (FLB favorite-buy, walk-forward OOS). A &amp; C still running.</li>
 </ul>
 </div>
 

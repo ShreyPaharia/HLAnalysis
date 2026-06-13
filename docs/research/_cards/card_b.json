@@ -1,0 +1,95 @@
+{
+  "title": "Card B: Adverse Selection / Trade Markouts",
+  "headline": "Buy aggressors at mid [0.80-0.95], TTE [1-6h]: adverse selection at 30m = -0.1pp; Card E raw edge = 10pp; net survivable edge = 9.9pp. Maker realized spread at 5m = 0.95pp.",
+  "metrics": [
+    {
+      "name": "n_expiries",
+      "value": 38,
+      "n": 38,
+      "date_span": "2026-05-07 to 2026-06-13",
+      "sanity": "38 expected"
+    },
+    {
+      "name": "n_trades_total",
+      "value": 1231926,
+      "n": 1231926,
+      "date_span": "2026-05-07 to 2026-06-13",
+      "sanity": "buy: 619,425, sell: 612,501"
+    },
+    {
+      "name": "buy_markout_30m_pp",
+      "value": -0.2119,
+      "n": 619092,
+      "date_span": "2026-05-07 to 2026-06-13",
+      "sanity": "positive = informed buy flow; near-zero = structural FLB edge"
+    },
+    {
+      "name": "adverse_selection_flb_zone_30m_pp",
+      "value": -0.1486,
+      "n": 14943,
+      "date_span": "2026-05-07 to 2026-06-13",
+      "sanity": "negative = market moves against buyer; erodes Card E edge"
+    }
+  ],
+  "buy_markout_curve_pp": {
+    "buy_markout_1s_pp": 0.03575644653783282,
+    "buy_markout_5s_pp": 0.059373774818605306,
+    "buy_markout_30s_pp": 0.04939178345060184,
+    "buy_markout_60s_pp": 0.044968838234058915,
+    "buy_markout_300s_pp": -0.0025068640848209915,
+    "buy_markout_1800s_pp": -0.21192014353278676
+  },
+  "sell_markout_curve_pp": {
+    "sell_markout_1s_pp": 0.03816347416598063,
+    "sell_markout_5s_pp": 0.13741340147921646,
+    "sell_markout_30s_pp": 0.19217856851176707,
+    "sell_markout_60s_pp": 0.19912454836201604,
+    "sell_markout_300s_pp": 0.23430220624746814,
+    "sell_markout_1800s_pp": 0.4917549100317535
+  },
+  "eff_realized_spread": {
+    "n": 1231308,
+    "realized_horizon_s": 300,
+    "mean_eff_spread": 1.1842,
+    "median_eff_spread": 0.004550000000000054,
+    "mean_markout_at_horizon": 0.1152,
+    "mean_realized_spread": 0.9537,
+    "median_realized_spread": 0.544,
+    "pct_maker_profitable": 0.5544770276811326,
+    "adverse_selection_fraction": 0.1946276219885301
+  },
+  "flb_edge_survival": {
+    "raw_e_edge_pp": 10.0,
+    "adverse_selection_30m_pp": -0.14859877534631624,
+    "net_taker_edge_pp": 9.851401224653683,
+    "n": 14943,
+    "markout_by_horizon_pp": {
+      "h1s_pp": -0.04998290169310045,
+      "h5s_pp": -0.012248945994780078,
+      "h30s_pp": 0.007198554507127097,
+      "h60s_pp": 0.02055711704477022,
+      "h300s_pp": -0.05105457404804925,
+      "h1800s_pp": -0.14859877534631624
+    }
+  },
+  "split_half": {
+    "H1": {
+      "n": 739371,
+      "n_key_zone": 9041,
+      "date_span": "2026-05-07 to 2026-05-23",
+      "adverse_selection_30m_pp": -0.7619027762415667,
+      "markout_30m_all_mean_pp": 0.001701709818210343
+    },
+    "H2": {
+      "n": 491937,
+      "n_key_zone": 5902,
+      "date_span": "2026-05-24 to 2026-06-13",
+      "adverse_selection_30m_pp": 0.7908931718061679,
+      "markout_30m_all_mean_pp": 0.0008952908502511502
+    },
+    "sign_stable": false,
+    "adverse_selection_h1_pp": -0.7619027762415667,
+    "adverse_selection_h2_pp": 0.7908931718061679
+  },
+  "verdict": "FLB taker edge SURVIVES adverse selection"
+}
