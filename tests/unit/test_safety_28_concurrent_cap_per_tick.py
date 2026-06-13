@@ -280,9 +280,11 @@ def _make_scanner_with_two_questions(tmp_path, max_concurrent: int = 1):
                 )
             )
 
-    # Seed mark events for σ calculations (need at least a few)
+    # Seed mark events for σ calculations (need at least a few). The LAST mark
+    # must land at `now` so reference_age_ns ≈ 0 and the pre-existing
+    # reference-staleness gate (risk.py) does not veto the entry under test.
     for i in range(8):
-        ts = now - (8 - i) * 60_000_000_000
+        ts = now - (7 - i) * 60_000_000_000
         ms.apply(
             MarkEvent(
                 venue="hyperliquid",
