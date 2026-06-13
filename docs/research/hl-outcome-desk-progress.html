@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>HL Outcome Desk — Analysis Progress</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c232c; --border:#30363d;
+    --fg:#e6edf3; --muted:#8b949e; --accent:#58a6ff; --green:#3fb950;
+    --amber:#d29922; --red:#f85149; --purple:#bc8cff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 24px 96px}
+  h1{font-size:26px;margin:0 0 4px} h2{font-size:19px;margin:34px 0 12px;
+    border-bottom:1px solid var(--border);padding-bottom:6px}
+  h3{font-size:15px;margin:18px 0 8px;color:var(--accent)}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 24px}
+  .grid{display:grid;gap:14px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px 18px}
+  .pill{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:20px;
+    letter-spacing:.3px;text-transform:uppercase}
+  .done{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.3)}
+  .run{background:rgba(210,153,34,.15);color:var(--amber);border:1px solid rgba(210,153,34,.3)}
+  .wait{background:rgba(139,148,158,.12);color:var(--muted);border:1px solid var(--border)}
+  .kill{background:rgba(248,81,73,.12);color:var(--red);border:1px solid rgba(248,81,73,.3)}
+  table{width:100%;border-collapse:collapse;margin:8px 0;font-size:13px}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.3px}
+  code{background:var(--panel2);padding:1px 6px;border-radius:5px;font-size:12px;color:var(--purple)}
+  .muted{color:var(--muted)} .green{color:var(--green)} .amber{color:var(--amber)} .red{color:var(--red)}
+  ul{margin:6px 0 6px 0;padding-left:20px} li{margin:3px 0}
+  .log li{font-size:13px} .ts{color:var(--muted);font-variant-numeric:tabular-nums}
+  .tag{font-size:11px;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:1px 6px;margin-right:4px}
+  .updated{position:fixed;top:10px;right:14px;font-size:11px;color:var(--muted);
+    background:var(--panel);border:1px solid var(--border);border-radius:20px;padding:4px 12px}
+</style>
+</head>
+<body>
+<div class="updated">live dashboard · reload to refresh</div>
+<div class="wrap">
+
+<h1>HL Outcome-Market Desk — Analysis &amp; Strategy Hunt</h1>
+<p class="sub">Live progress dashboard. Ordering: <b>taker-first, then market-making.</b>
+Last updated: <b>2026-06-13 · setup</b></p>
+
+<div class="panel">
+  <b>Objective.</b> Characterize 36 days of granular HL data (perp BTC + binary &amp; bucket BTC outcome
+  markets) as a desk manager, let the data nominate tradable edges, and propose strategies scored
+  against hard KPIs. Build a reusable toolkit so this rerun is minutes, not hours.
+</div>
+
+<h2>Decisions taken</h2>
+<div class="panel">
+<table>
+<tr><th>Decision</th><th>Choice</th><th>Why</th></tr>
+<tr><td>Strategy ordering</td><td><b>Taker first → MM second</b></td><td>Operator directive; taker builds on what's already live (v1/v31).</td></tr>
+<tr><td>Center of gravity</td><td>Full landscape, no prior</td><td>Let data nominate edges across taker / arb / MM / settlement.</td></tr>
+<tr><td>KPI calibration</td><td>Live desk $1k→$25k, t4g.micro</td><td>Anything proposed must survive deploy on existing infra &amp; realistic fills/fees.</td></tr>
+<tr><td>Build depth</td><td>Exhaustive multi-agent</td><td>Reusable toolkit + full characterization + multiple backtested candidates.</td></tr>
+<tr><td>MM hedge venue</td><td>HL perp</td><td>Same venue, no cross-venue latency; Binance perp geo-blocked from dev IP.</td></tr>
+<tr><td>Strategy depth this run</td><td>Backtest + KPI scorecard only</td><td>No live-slot registration; promotion is a deliberate follow-up.</td></tr>
+<tr><td>Subagent model</td><td>sonnet</td><td>Operator directive.</td></tr>
+<tr><td>Data access</td><td>Read-only, main checkout <code>../../data</code></td><td>No <code>make pull-data</code>; reuse 18GB already on disk.</td></tr>
+</table>
+</div>
+
+<h2>Data landscape (verified)</h2>
+<div class="panel">
+<table>
+<tr><th>Asset</th><th>Coverage</th><th>Granularity / counts</th></tr>
+<tr><td>HL perp BTC</td><td>36d (May 6 → Jun 10)</td><td>bbo ~650k/day, trade, mark, L2 book, funding, OI, oracle</td></tr>
+<tr><td>HL spot BTC</td><td>same</td><td>bbo, trade, mark, book</td></tr>
+<tr><td>HL binary (<code>priceBinary</code>)</td><td>~36 daily 1d expiries</td><td>1 target/day, Yes+No legs; per-symbol bbo/trade/L2/mark</td></tr>
+<tr><td>HL bucket (<code>priceBucket</code>)</td><td>daily 1d</td><td>two <code>priceThresholds</code> (price band); same event set</td></tr>
+<tr><td>Settlements</td><td>99 recorded</td><td>resolution outcomes for win/label joins</td></tr>
+<tr><td>Binance spot+perp</td><td>same span</td><td>hedge-cost / cross-venue reference (perp geo-blocked live)</td></tr>
+</table>
+<p class="muted">Sanity: 2.8M binary trades · 9.75M binary bbo · 58M book snapshots · 99 settlements.</p>
+</div>
+
+<h2>Wave status</h2>
+<div class="grid">
+  <div class="panel">
+    <span class="pill run">running</span> &nbsp;<b>Wave 0 — Reusable toolkit</b>
+    <span class="tag">sonnet ×1</span>
+    <ul>
+      <li><code>hlanalysis/research/outcome_markets.py</code> — symbol↔question↔class↔expiry↔strike↔settlement resolver</li>
+      <li><code>dataset.py</code> — cached cross-venue research panels (configurable dt)</li>
+      <li><code>metrics.py</code> — desk metrics (spread, depth, markout, overround, implied-prob, theta, convergence)</li>
+      <li><code>report.py</code> — self-contained HTML card registry</li>
+    </ul>
+    <span class="muted">Gate: toolkit produces a smoke HTML from a 2-day slice; tests green.</span>
+  </div>
+  <div class="panel">
+    <span class="pill wait">queued</span> &nbsp;<b>Wave 1 — Characterization (taker-relevant first)</b>
+    <span class="tag">sonnet ×6 parallel</span>
+    <ul>
+      <li><b>E</b> Settlement / resolution convergence <span class="muted">(taker core)</span></li>
+      <li><b>D</b> Mispricing surface: implied-prob vs GBM, Yes+No overround, bucket↔binary no-arb <span class="muted">(taker core)</span></li>
+      <li><b>F</b> Vol term structure &amp; theta decay <span class="muted">(taker core)</span></li>
+      <li><b>B</b> Adverse selection / markouts <span class="muted">(taker + MM)</span></li>
+      <li><b>A</b> Liquidity &amp; book shape <span class="muted">(MM-leaning)</span></li>
+      <li><b>C</b> Cross-venue lead-lag perp→outcome <span class="muted">(MM-leaning)</span></li>
+    </ul>
+  </div>
+  <div class="panel">
+    <span class="pill wait">queued</span> &nbsp;<b>Wave 2 — Strategy candidates</b>
+    <span class="tag">sonnet ×N</span>
+    <ul>
+      <li><b>Taker 1</b> Cross-market static arb (Yes+No overround, bucket↔binary)</li>
+      <li><b>Taker 2</b> v1/v31 refinement (new gates &amp; sizing from cards B/D/E/F)</li>
+      <li><b>Taker 3</b> Settlement-convergence capture</li>
+      <li><b>MM</b> Quoter + HL-perp hedge (after taker)</li>
+      <li><b>Sizing/risk</b> edge-proportional + adverse-selection haircut, Kelly-capped</li>
+    </ul>
+  </div>
+  <div class="panel">
+    <span class="pill wait">queued</span> &nbsp;<b>Wave 3 — Synthesis</b>
+    <span class="tag">final report + review pass</span>
+    <ul><li>Ranked strategy scorecard → <code>docs/research/hl-outcome-desk-&lt;date&gt;.html</code></li></ul>
+  </div>
+</div>
+
+<h2>KPIs / acceptance bar</h2>
+<div class="panel">
+  <h3>Analysis (trust gate)</h3>
+  <ul>
+    <li>Regenerates from recorded data via one command — no synthetic/stale inputs.</li>
+    <li>Every claim carries <code>n</code> + date-span + a sanity cross-check.</li>
+    <li>Coverage ≥30 expiries / ≥30 days.</li>
+    <li><b>Split-half stability</b>: first 18d vs last 18d same sign for any edge claim.</li>
+  </ul>
+  <h3>Strategy (promote-to-paper gate)</h3>
+  <ul>
+    <li>Positive net PnL after realistic fees on <code>book_source=recorded</code> fills, <b>walk-forward OOS (≥7d held out)</b>.</li>
+    <li>Daily Sharpe ≥ 1.0 OOS; max DD within desk inventory cap.</li>
+    <li>Split-half sign stability; survives adversarial verification (no lookahead, realistic fills, safety gates intact).</li>
+    <li>Capacity ≥ current desk size; deployable on existing engine surface (or infra cost stated).</li>
+  </ul>
+</div>
+
+<h2>Findings</h2>
+<div class="panel"><p class="muted">No verified findings yet — Wave 1 will populate this section with cards as analyses complete.</p></div>
+
+<h2>Strategy scorecard</h2>
+<div class="panel"><p class="muted">Populated in Wave 2. Each candidate scored PASS/FAIL against the strategy KPIs above.</p></div>
+
+<h2>Activity log</h2>
+<div class="panel log">
+<ul>
+  <li><span class="ts">2026-06-13 setup</span> — Explored data, locked decisions, built live dashboard. Wave 0 toolkit dispatched.</li>
+</ul>
+</div>
+
+</div>
+</body>
+</html>
