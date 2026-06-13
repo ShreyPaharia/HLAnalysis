@@ -98,14 +98,22 @@ class TestHlTradeDedup:
             adapter._handle(_trades_msg([_trade(tid=i)]), _recv_ns(), sym_to_sub)
 
         # Verify tid=0 is in the seen-set (not yet evicted)
-        out_before = [e for e in adapter._handle(_trades_msg([_trade(tid=0)]), _recv_ns(), sym_to_sub) if isinstance(e, TradeEvent)]
+        out_before = [
+            e
+            for e in adapter._handle(_trades_msg([_trade(tid=0)]), _recv_ns(), sym_to_sub)
+            if isinstance(e, TradeEvent)
+        ]
         assert out_before == [], "tid=0 must still be in seen-set (not evicted yet)"
 
         # Push one more entry → tid=0 must be evicted (FIFO / LRU)
         adapter._handle(_trades_msg([_trade(tid=cap)]), _recv_ns(), sym_to_sub)
 
         # Now tid=0 should be evicted and re-accepted
-        out_after = [e for e in adapter._handle(_trades_msg([_trade(tid=0)]), _recv_ns(), sym_to_sub) if isinstance(e, TradeEvent)]
+        out_after = [
+            e
+            for e in adapter._handle(_trades_msg([_trade(tid=0)]), _recv_ns(), sym_to_sub)
+            if isinstance(e, TradeEvent)
+        ]
         assert len(out_after) == 1, "evicted tid must be re-accepted after cap overflow"
 
     def test_bound_size_reasonable(self):

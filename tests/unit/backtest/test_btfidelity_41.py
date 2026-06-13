@@ -10,6 +10,7 @@ Fix: change `>=` to `>` so the runner's break condition matches the core's
 convention: `now_ns == end_ts_ns` is STILL a valid scan tick; only
 `now_ns > end_ts_ns` is post-settlement.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -42,9 +43,7 @@ def test_question_view_settled_at_end_ts():
 
     # One nanosecond AFTER → settled
     qv_after = build_question_view(q, now_ns=end_ts + 1, strike=100.0)
-    assert qv_after.settled is True, (
-        f"Core: now_ns > end_ts_ns should be settled; got settled={qv_after.settled}"
-    )
+    assert qv_after.settled is True, f"Core: now_ns > end_ts_ns should be settled; got settled={qv_after.settled}"
 
 
 @pytest.mark.skip(

@@ -6,6 +6,7 @@ Tests:
   - normal happy-path (data readable after flush) is unchanged
   - fsync also fires on the row-count auto-flush path
 """
+
 from __future__ import annotations
 
 import os

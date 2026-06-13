@@ -19,6 +19,7 @@ bucketing output (the _OhlcBuffer.ingest_tick path is unchanged; only
 resample_ohlc gets the optional parameter which defaults to None, making
 it a no-op for all existing callers).
 """
+
 from __future__ import annotations
 
 import pytest
@@ -42,7 +43,7 @@ def test_resample_ohlc_first_tick_on_boundary_opens_correct_bucket():
     ticks = [
         (5 * 1_000_000_000, 100.0, 100.0, 100.0),  # bucket=1
         (7 * 1_000_000_000, 102.0, 102.0, 102.0),  # bucket=1
-        (10 * 1_000_000_000, 98.0, 98.0, 98.0),    # bucket=2
+        (10 * 1_000_000_000, 98.0, 98.0, 98.0),  # bucket=2
     ]
     bars = list(resample_ohlc(ticks, bucket_ns=bucket_ns))
     # Bucket 1 (ts=5..9): max(100,102)=102, min=100, close=102 at ts=7s
@@ -61,7 +62,7 @@ def test_resample_ohlc_no_degenerate_bar_after_empty_gap():
     """
     bucket_ns = 5 * 1_000_000_000
     ticks = [
-        (2 * 1_000_000_000, 100.0, 100.0, 100.0),   # bucket 0
+        (2 * 1_000_000_000, 100.0, 100.0, 100.0),  # bucket 0
         (22 * 1_000_000_000, 105.0, 105.0, 105.0),  # bucket 4 (gap 1..3)
     ]
     bars = list(resample_ohlc(ticks, bucket_ns=bucket_ns))
@@ -93,8 +94,7 @@ def test_resample_ohlc_initial_last_bucket_merges_same_bucket():
     # The tick merges (no NEW bar emitted for bucket 2 yet since no transition)
     # but since it's the last tick in the iterable, the final bar IS emitted.
     assert len(bars_seeded) == 1, (
-        f"seeded call: bucket-2 tick must yield exactly 1 bar (not a duplicate); "
-        f"got {len(bars_seeded)}: {bars_seeded}"
+        f"seeded call: bucket-2 tick must yield exactly 1 bar (not a duplicate); got {len(bars_seeded)}: {bars_seeded}"
     )
     # The bar should have the same ts as the tick.
     assert bars_seeded[0][0] == 10 * 1_000_000_000
@@ -121,7 +121,7 @@ def test_resample_ohlc_initial_last_bucket_prevents_duplicate_on_transition():
     ticks = [
         (10 * 1_000_000_000, 100.0, 100.0, 100.0),  # bucket 2
         (12 * 1_000_000_000, 103.0, 103.0, 103.0),  # bucket 2
-        (16 * 1_000_000_000, 99.0, 99.0, 99.0),     # bucket 3
+        (16 * 1_000_000_000, 99.0, 99.0, 99.0),  # bucket 3
     ]
 
     # Without seed: 2 bars (bucket 2 + bucket 3)
@@ -161,9 +161,9 @@ def test_engine_ohlc_buffer_ingest_tick_output_unchanged():
     ticks = [
         (2 * 1_000_000_000, 100.0),  # bucket 0
         (3 * 1_000_000_000, 102.0),  # bucket 0
-        (7 * 1_000_000_000, 98.0),   # bucket 1
-        (10 * 1_000_000_000, 105.0), # bucket 2
-        (14 * 1_000_000_000, 103.0), # bucket 2
+        (7 * 1_000_000_000, 98.0),  # bucket 1
+        (10 * 1_000_000_000, 105.0),  # bucket 2
+        (14 * 1_000_000_000, 103.0),  # bucket 2
     ]
     for ts, price in ticks:
         buf.ingest_tick(ts, price)

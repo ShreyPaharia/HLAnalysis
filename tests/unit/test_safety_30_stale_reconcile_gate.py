@@ -4,6 +4,7 @@ Tests that last_reconcile_ns == 0 (never reconciled) vetoes entries with a
 clear reason, while exits are always allowed, and once a reconcile timestamp is
 set entries are allowed again.
 """
+
 from __future__ import annotations
 
 from hlanalysis.engine.config import (

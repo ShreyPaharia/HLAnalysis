@@ -403,6 +403,7 @@ class HyperliquidAdapter(BaseWsAdapter):
         is kept as-is for callers that handle their own retry logic or where a
         single-attempt semantics is correct.
         """
+
         def _post() -> dict:
             r = requests.post(HL_INFO_URL, json={"type": "outcomeMeta"}, timeout=(5, 10))
             r.raise_for_status()

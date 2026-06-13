@@ -120,7 +120,9 @@ class TestSpotBboPriceValidation:
         adapter = _adapter()
         sym_to_sub = {"BTCUSDT": SPOT_SUB}
         # First frame: seq=10 — accepted
-        out1 = adapter._handle(_spot_bbo_msg(30000.0, 30001.0, seq=10), _recv_ns(), sym_to_sub, "spot", ProductType.SPOT)
+        out1 = adapter._handle(
+            _spot_bbo_msg(30000.0, 30001.0, seq=10), _recv_ns(), sym_to_sub, "spot", ProductType.SPOT
+        )
         assert len(out1) == 1, "first valid frame must pass"
         # Second frame: seq=5 < 10 — stale, must be dropped
         out2 = adapter._handle(_spot_bbo_msg(30000.0, 30001.0, seq=5), _recv_ns(), sym_to_sub, "spot", ProductType.SPOT)

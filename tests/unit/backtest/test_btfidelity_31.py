@@ -9,6 +9,7 @@ regardless of when the last real L2 snapshot arrived.
 Fix: stamp apply_l2 with last_l2_ts (the actual recorded snapshot timestamp,
 derived from book_ts_per_leg[sym][last cursor position - 1]).
 """
+
 from __future__ import annotations
 
 import pytest

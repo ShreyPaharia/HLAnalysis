@@ -4,6 +4,7 @@ Tests that when qty drift exceeds the material threshold, the ReconcileResult
 signals it via material_qty_drift=True, so the runtime can escalate to halt.
 Small drift emits alert-only (drift event), no halt flag.
 """
+
 from __future__ import annotations
 
 from hlanalysis.engine.exec_types import ClearinghouseState, VenuePosition

@@ -19,6 +19,7 @@ We test at two levels:
    Verify the second ENTER decision's inputs.positions includes the first
    question's pending position — proving the budget was decremented.
 """
+
 from __future__ import annotations
 
 from hlanalysis.engine.config import (
@@ -239,9 +240,7 @@ def _make_scanner_with_two_questions(tmp_path, max_concurrent: int = 1):
 
     now = NOW
     ms = MarketState()
-    expiry_str = datetime.fromtimestamp(
-        (now + 10 * 60 * 1_000_000_000) / 1e9, tz=timezone.utc
-    ).strftime("%Y%m%d-%H%M")
+    expiry_str = datetime.fromtimestamp((now + 10 * 60 * 1_000_000_000) / 1e9, tz=timezone.utc).strftime("%Y%m%d-%H%M")
 
     # Seed two questions with matching allowlist fields
     # q42 uses "#30"/"#31" as underlying symbols (match scanner's HL convention)
@@ -335,8 +334,7 @@ def test_scanner_second_entry_sees_pending_position_in_inputs(tmp_path):
     first_q = first.inputs.question.question_idx
     db_positions_count = 0  # DB is empty in this test
     assert len(first.inputs.positions) == db_positions_count, (
-        f"First entry should see {db_positions_count} positions (from DB), "
-        f"got {len(first.inputs.positions)}"
+        f"First entry should see {db_positions_count} positions (from DB), got {len(first.inputs.positions)}"
     )
 
     # The second one must see the first question's pending position in its
@@ -344,12 +342,10 @@ def test_scanner_second_entry_sees_pending_position_in_inputs(tmp_path):
     second = enter_decisions[1]
     second_q = second.inputs.question.question_idx
     assert len(second.inputs.positions) == 1, (
-        f"Second entry must see 1 pending position from first intent, "
-        f"got {len(second.inputs.positions)}"
+        f"Second entry must see 1 pending position from first intent, got {len(second.inputs.positions)}"
     )
     assert second.inputs.positions[0].question_idx == first_q, (
-        f"Pending position must be from the first question ({first_q}), "
-        f"got {second.inputs.positions[0].question_idx}"
+        f"Pending position must be from the first question ({first_q}), got {second.inputs.positions[0].question_idx}"
     )
 
 
@@ -368,10 +364,7 @@ def test_scanner_second_entry_router_veto_with_cap_one(tmp_path):
 
     gate = RiskGate(_strategy_cfg(max_concurrent=1))
 
-    verdicts = [
-        gate.check_pre_trade(d.decision.intents[0], d.inputs)
-        for d in enter_decisions
-    ]
+    verdicts = [gate.check_pre_trade(d.decision.intents[0], d.inputs) for d in enter_decisions]
     # First must be approved; second must be vetoed (concurrent cap)
     assert verdicts[0].approved is True, f"First intent must pass, got {verdicts[0].reason}"
     assert verdicts[1].approved is False, f"Second intent must be vetoed, got {verdicts[1].reason}"
@@ -389,10 +382,5 @@ def test_scanner_cap2_both_entries_pass_gate(tmp_path):
     assert len(enter_decisions) == 2
 
     gate = RiskGate(_strategy_cfg(max_concurrent=2))
-    verdicts = [
-        gate.check_pre_trade(d.decision.intents[0], d.inputs)
-        for d in enter_decisions
-    ]
-    assert all(v.approved for v in verdicts), (
-        f"Both intents must pass with cap=2: {[v.reason for v in verdicts]}"
-    )
+    verdicts = [gate.check_pre_trade(d.decision.intents[0], d.inputs) for d in enter_decisions]
+    assert all(v.approved for v in verdicts), f"Both intents must pass with cap=2: {[v.reason for v in verdicts]}"

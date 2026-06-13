@@ -126,9 +126,7 @@ class TestStrikeDistanceGatesSHR59:
         """
         q = _binary_q(strike=80_000.0, expiry_ns=self.expiry)
         books = self._books()
-        s = LateResolutionStrategy(
-            _v1_cfg(max_strike_distance_pct=5.0, distance_from_strike_usd_min=0.0)
-        )
+        s = LateResolutionStrategy(_v1_cfg(max_strike_distance_pct=5.0, distance_from_strike_usd_min=0.0))
         d = _evaluate(s, question=q, books=books, reference_price=90_000.0, now_ns=self.now)
         assert d.action is Action.HOLD, (
             f"Expected HOLD (strike too far from ref), got {d.action}; diags={d.diagnostics}"
@@ -144,13 +142,9 @@ class TestStrikeDistanceGatesSHR59:
         """
         q = _binary_q(strike=80_000.0, expiry_ns=self.expiry)
         books = self._books()
-        s = LateResolutionStrategy(
-            _v1_cfg(max_strike_distance_pct=5.0, distance_from_strike_usd_min=0.0)
-        )
+        s = LateResolutionStrategy(_v1_cfg(max_strike_distance_pct=5.0, distance_from_strike_usd_min=0.0))
         d = _evaluate(s, question=q, books=books, reference_price=80_300.0, now_ns=self.now)
-        assert d.action is Action.ENTER, (
-            f"Expected ENTER (within distance cap), got {d.action}; diags={d.diagnostics}"
-        )
+        assert d.action is Action.ENTER, f"Expected ENTER (within distance cap), got {d.action}; diags={d.diagnostics}"
 
     def test_below_min_usd_distance_is_vetoed(self) -> None:
         """Entry must be HELD when |strike - ref| < distance_from_strike_usd_min.
@@ -159,13 +153,9 @@ class TestStrikeDistanceGatesSHR59:
         """
         q = _binary_q(strike=80_000.0, expiry_ns=self.expiry)
         books = self._books()
-        s = LateResolutionStrategy(
-            _v1_cfg(distance_from_strike_usd_min=500.0, max_strike_distance_pct=50.0)
-        )
+        s = LateResolutionStrategy(_v1_cfg(distance_from_strike_usd_min=500.0, max_strike_distance_pct=50.0))
         d = _evaluate(s, question=q, books=books, reference_price=80_200.0, now_ns=self.now)
-        assert d.action is Action.HOLD, (
-            f"Expected HOLD (too close to strike), got {d.action}; diags={d.diagnostics}"
-        )
+        assert d.action is Action.HOLD, f"Expected HOLD (too close to strike), got {d.action}; diags={d.diagnostics}"
         assert any("strike_too_close" in diag.message for diag in d.diagnostics), (
             f"Expected strike_too_close diagnostic; got {d.diagnostics}"
         )
@@ -177,25 +167,17 @@ class TestStrikeDistanceGatesSHR59:
         """
         q = _binary_q(strike=80_000.0, expiry_ns=self.expiry)
         books = self._books()
-        s = LateResolutionStrategy(
-            _v1_cfg(distance_from_strike_usd_min=500.0, max_strike_distance_pct=50.0)
-        )
+        s = LateResolutionStrategy(_v1_cfg(distance_from_strike_usd_min=500.0, max_strike_distance_pct=50.0))
         d = _evaluate(s, question=q, books=books, reference_price=80_600.0, now_ns=self.now)
-        assert d.action is Action.ENTER, (
-            f"Expected ENTER (sufficient distance), got {d.action}; diags={d.diagnostics}"
-        )
+        assert d.action is Action.ENTER, f"Expected ENTER (sufficient distance), got {d.action}; diags={d.diagnostics}"
 
     def test_disabled_distance_gates_do_not_veto(self) -> None:
         """distance_from_strike_usd_min=0 and max_strike_distance_pct=100 → gates inactive."""
         q = _binary_q(strike=80_000.0, expiry_ns=self.expiry)
         books = self._books()
-        s = LateResolutionStrategy(
-            _v1_cfg(distance_from_strike_usd_min=0.0, max_strike_distance_pct=100.0)
-        )
+        s = LateResolutionStrategy(_v1_cfg(distance_from_strike_usd_min=0.0, max_strike_distance_pct=100.0))
         d = _evaluate(s, question=q, books=books, reference_price=80_300.0, now_ns=self.now)
-        assert d.action is Action.ENTER, (
-            f"Expected ENTER (gates disabled), got {d.action}; diags={d.diagnostics}"
-        )
+        assert d.action is Action.ENTER, f"Expected ENTER (gates disabled), got {d.action}; diags={d.diagnostics}"
 
     def test_bucket_leg_too_far_from_nearest_boundary_is_vetoed(self) -> None:
         """For priceBucket, the gate uses the nearest winning-region boundary.
@@ -223,13 +205,9 @@ class TestStrikeDistanceGatesSHR59:
             "@42": _book("@42", ask=0.97, bid=0.96, ts_ns=ts),
             "@44": _book("@44", ask=0.04, bid=0.03, ts_ns=ts),
         }
-        s = LateResolutionStrategy(
-            _v1_cfg(max_strike_distance_pct=5.0, distance_from_strike_usd_min=0.0)
-        )
+        s = LateResolutionStrategy(_v1_cfg(max_strike_distance_pct=5.0, distance_from_strike_usd_min=0.0))
         d = _evaluate(s, question=bucket_q, books=books, reference_price=90_000.0, now_ns=now)
-        assert d.action is Action.HOLD, (
-            f"Expected HOLD (bucket leg too far), got {d.action}; diags={d.diagnostics}"
-        )
+        assert d.action is Action.HOLD, f"Expected HOLD (bucket leg too far), got {d.action}; diags={d.diagnostics}"
 
 
 # ===========================================================================
@@ -247,8 +225,12 @@ class TestDriftAwareTwoSidedRegion:
         ref = 79_500.0
         lo, hi = 77_991.0, 81_174.0
         d = _safety_d_for_region(
-            ref_price=ref, lo=lo, hi=hi,
-            sigma_window=1.0, mu=0.1, tte_min=10.0,
+            ref_price=ref,
+            lo=lo,
+            hi=hi,
+            sigma_window=1.0,
+            mu=0.1,
+            tte_min=10.0,
             drift_aware=False,
         )
         assert d is not None
@@ -268,13 +250,21 @@ class TestDriftAwareTwoSidedRegion:
         tte_min = 100.0
 
         d_no_drift = _safety_d_for_region(
-            ref_price=ref, lo=lo, hi=hi,
-            sigma_window=1.0, mu=mu, tte_min=tte_min,
+            ref_price=ref,
+            lo=lo,
+            hi=hi,
+            sigma_window=1.0,
+            mu=mu,
+            tte_min=tte_min,
             drift_aware=False,
         )
         d_drift = _safety_d_for_region(
-            ref_price=ref, lo=lo, hi=hi,
-            sigma_window=1.0, mu=mu, tte_min=tte_min,
+            ref_price=ref,
+            lo=lo,
+            hi=hi,
+            sigma_window=1.0,
+            mu=mu,
+            tte_min=tte_min,
             drift_aware=True,
         )
         assert d_no_drift is not None
@@ -299,27 +289,37 @@ class TestDriftAwareTwoSidedRegion:
         tte_min = 50.0
 
         d_no_drift = _safety_d_for_region(
-            ref_price=ref, lo=lo, hi=hi,
-            sigma_window=1.0, mu=mu, tte_min=tte_min,
+            ref_price=ref,
+            lo=lo,
+            hi=hi,
+            sigma_window=1.0,
+            mu=mu,
+            tte_min=tte_min,
             drift_aware=False,
         )
         d_drift = _safety_d_for_region(
-            ref_price=ref, lo=lo, hi=hi,
-            sigma_window=1.0, mu=mu, tte_min=tte_min,
+            ref_price=ref,
+            lo=lo,
+            hi=hi,
+            sigma_window=1.0,
+            mu=mu,
+            tte_min=tte_min,
             drift_aware=True,
         )
         assert d_no_drift is not None
         assert d_drift is not None
         # Positive drift toward hi → hi-side safety shrinks → min shrinks
-        assert d_drift < d_no_drift, (
-            f"Expected drift to reduce safety_d (d_drift={d_drift} < d_no_drift={d_no_drift})"
-        )
+        assert d_drift < d_no_drift, f"Expected drift to reduce safety_d (d_drift={d_drift} < d_no_drift={d_no_drift})"
 
     def test_one_sided_drift_aware_unchanged(self) -> None:
         """One-sided (lo, None) drift handling must remain identical to before."""
         d = _safety_d_for_region(
-            ref_price=80_300.0, lo=80_000.0, hi=None,
-            sigma_window=1.0, mu=0.001, tte_min=10.0,
+            ref_price=80_300.0,
+            lo=80_000.0,
+            hi=None,
+            sigma_window=1.0,
+            mu=0.001,
+            tte_min=10.0,
             drift_aware=True,
         )
         expected = math.log(80_300.0 / 80_000.0) + 0.001 * 10.0
@@ -330,19 +330,25 @@ class TestDriftAwareTwoSidedRegion:
         """When drift_aware=False, nonzero mu must not affect two-sided result."""
         ref, lo, hi = 79_500.0, 77_991.0, 81_174.0
         d0 = _safety_d_for_region(
-            ref_price=ref, lo=lo, hi=hi,
-            sigma_window=1.0, mu=0.0, tte_min=10.0,
+            ref_price=ref,
+            lo=lo,
+            hi=hi,
+            sigma_window=1.0,
+            mu=0.0,
+            tte_min=10.0,
             drift_aware=False,
         )
         d1 = _safety_d_for_region(
-            ref_price=ref, lo=lo, hi=hi,
-            sigma_window=1.0, mu=99.9, tte_min=10.0,
+            ref_price=ref,
+            lo=lo,
+            hi=hi,
+            sigma_window=1.0,
+            mu=99.9,
+            tte_min=10.0,
             drift_aware=False,
         )
         assert d0 is not None and d1 is not None
-        assert math.isclose(d0, d1, rel_tol=1e-9), (
-            "drift_aware=False must not use mu in two-sided branch"
-        )
+        assert math.isclose(d0, d1, rel_tol=1e-9), "drift_aware=False must not use mu in two-sided branch"
 
 
 # ===========================================================================

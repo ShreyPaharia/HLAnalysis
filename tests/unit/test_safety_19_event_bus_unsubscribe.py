@@ -9,6 +9,7 @@ The risk-gate exit exemption is already present in risk.py (exits bypass entry
 gates). This test verifies it holds even with last_reconcile_ns=0 (the #30 fix
 must not accidentally block exits on halted slots).
 """
+
 from __future__ import annotations
 
 import asyncio

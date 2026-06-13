@@ -20,6 +20,7 @@ import pytest
 # Reference: replicate the live adapter's scheme so the test is self-contained.
 # ---------------------------------------------------------------------------
 
+
 def _live_adapter_qidx(condition_id: str) -> int:
     """Mirrors hlanalysis/adapters/polymarket_normalize.py::_question_idx_from_condition."""
     digest = hashlib.sha256(condition_id.encode()).digest()
@@ -50,6 +51,7 @@ SAMPLE_IDS = [
 # ---------------------------------------------------------------------------
 # Tests: polymarket.py _question_idx
 # ---------------------------------------------------------------------------
+
 
 class TestPolymarketQuestionIdx:
     def test_matches_live_adapter_scheme(self):
@@ -89,14 +91,14 @@ class TestPolymarketQuestionIdx:
             capture_output=True,
         )
         assert result.returncode == 0, (
-            f"polymarket _question_idx differs across PYTHONHASHSEED values.\n"
-            f"stderr: {result.stderr.decode()}"
+            f"polymarket _question_idx differs across PYTHONHASHSEED values.\nstderr: {result.stderr.decode()}"
         )
 
 
 # ---------------------------------------------------------------------------
 # Tests: pm_nba.py _question_idx
 # ---------------------------------------------------------------------------
+
 
 class TestNBAQuestionIdx:
     def test_matches_live_adapter_scheme(self):
@@ -136,14 +138,14 @@ class TestNBAQuestionIdx:
             capture_output=True,
         )
         assert result.returncode == 0, (
-            f"pm_nba _question_idx differs across PYTHONHASHSEED values.\n"
-            f"stderr: {result.stderr.decode()}"
+            f"pm_nba _question_idx differs across PYTHONHASHSEED values.\nstderr: {result.stderr.decode()}"
         )
 
 
 # ---------------------------------------------------------------------------
 # Cross-module consistency
 # ---------------------------------------------------------------------------
+
 
 class TestCrossModuleConsistency:
     def test_pm_and_nba_agree(self):

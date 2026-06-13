@@ -12,6 +12,7 @@ These tests:
    verified at the unit level since the runtime loop involves async venue IO
    which is hard to fake here.
 """
+
 from __future__ import annotations
 
 from hlanalysis.engine.exec_types import ClearinghouseState, VenuePosition

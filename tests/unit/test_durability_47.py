@@ -7,6 +7,7 @@ Tests:
   - Session_ model has the halt_reason field declared
   - end_session persists halt_reason to the DB column
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -29,8 +30,7 @@ def test_session_model_has_halt_reason_field():
     set as a transient Python attribute (finding #47)."""
     fields = Session_.model_fields
     assert "halt_reason" in fields, (
-        "Session_ ORM model is missing halt_reason field; the DB column exists "
-        "but the ORM silently drops writes to it"
+        "Session_ ORM model is missing halt_reason field; the DB column exists but the ORM silently drops writes to it"
     )
 
 
@@ -45,9 +45,7 @@ def test_halt_reason_round_trips_through_orm(tmp_path: Path):
 
     # Read back via raw SQL to confirm the column was actually written
     with sqlite3.connect(dal.db_path) as conn:
-        row = conn.execute(
-            "SELECT halt_reason FROM session WHERE session_id = ?", (sid,)
-        ).fetchone()
+        row = conn.execute("SELECT halt_reason FROM session WHERE session_id = ?", (sid,)).fetchone()
     assert row is not None, "session row not found after end_session"
     assert row[0] == "daily_loss_cap", (
         f"halt_reason not persisted: expected 'daily_loss_cap', got {row[0]!r}. "
@@ -65,9 +63,7 @@ def test_halt_reason_none_when_not_set(tmp_path: Path):
     dal.end_session(sid, now_ns=2_000_000_000)  # no halt_reason
 
     with sqlite3.connect(dal.db_path) as conn:
-        row = conn.execute(
-            "SELECT halt_reason FROM session WHERE session_id = ?", (sid,)
-        ).fetchone()
+        row = conn.execute("SELECT halt_reason FROM session WHERE session_id = ?", (sid,)).fetchone()
     assert row is not None
     assert row[0] is None, f"expected NULL halt_reason when not set, got {row[0]!r}"
 

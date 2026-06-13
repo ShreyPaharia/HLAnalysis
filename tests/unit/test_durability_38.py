@@ -7,6 +7,7 @@ Tests:
   - prune() retains entries whose cooldown window has NOT elapsed
   - prune() persists the pruned map to disk
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -106,8 +107,9 @@ def test_save_cooldowns_fsyncs_before_replace(tmp_path: Path):
 
     import hlanalysis.engine.router as rt_mod
 
-    with patch.object(rt_mod.os, "fsync", side_effect=spy_fsync), patch.object(
-        rt_mod.os, "replace", side_effect=spy_replace
+    with (
+        patch.object(rt_mod.os, "fsync", side_effect=spy_fsync),
+        patch.object(rt_mod.os, "replace", side_effect=spy_replace),
     ):
         router._save_cooldowns()
 
@@ -145,12 +147,10 @@ def test_prune_removes_expired_cooldown_entries(tmp_path: Path):
     router.prune(active_question_idxs={1, 2}, now_ns=now_ns)
 
     assert 1 not in router._last_exit_ts, (
-        "Expired cooldown entry (question 1) was NOT pruned; it should have been "
-        "removed because its window elapsed"
+        "Expired cooldown entry (question 1) was NOT pruned; it should have been removed because its window elapsed"
     )
     assert 2 in router._last_exit_ts, (
-        "Active cooldown entry (question 2) was incorrectly pruned; its window "
-        "has not elapsed yet"
+        "Active cooldown entry (question 2) was incorrectly pruned; its window has not elapsed yet"
     )
 
 
@@ -162,10 +162,10 @@ def test_prune_persists_pruned_map(tmp_path: Path):
 
     now_ns = time.time_ns()
     expired_ts = now_ns - int(3600 * 1e9)  # long ago
-    active_ts = now_ns - int(1 * 1e9)     # still within window
+    active_ts = now_ns - int(1 * 1e9)  # still within window
 
-    router._last_exit_ts[99] = expired_ts   # will be pruned
-    router._last_exit_ts[100] = active_ts   # will be kept
+    router._last_exit_ts[99] = expired_ts  # will be pruned
+    router._last_exit_ts[100] = active_ts  # will be kept
 
     router.prune(active_question_idxs={99, 100}, now_ns=now_ns)
 
@@ -191,6 +191,4 @@ def test_prune_retains_unexpired_active_entry(tmp_path: Path):
 
     router.prune(active_question_idxs={77}, now_ns=now_ns)
 
-    assert 77 in router._last_exit_ts, (
-        "Active, unexpired cooldown for question 77 was incorrectly removed"
-    )
+    assert 77 in router._last_exit_ts, "Active, unexpired cooldown for question 77 was incorrectly removed"

@@ -645,9 +645,7 @@ class Router:
         #    the map bounded and the on-disk JSON compact.
         if cooldown_s > 0:
             expired_qidxs = [
-                idx
-                for idx, last_exit in self._last_exit_ts.items()
-                if (_now_ns - last_exit) / 1e9 >= cooldown_s
+                idx for idx, last_exit in self._last_exit_ts.items() if (_now_ns - last_exit) / 1e9 >= cooldown_s
             ]
             for idx in expired_qidxs:
                 self._last_exit_ts.pop(idx, None)

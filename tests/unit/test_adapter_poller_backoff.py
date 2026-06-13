@@ -64,9 +64,7 @@ async def test_binance_poller_backoff_on_repeated_errors():
     assert len(sleep_calls) >= 3, f"Expected multiple sleeps, got {sleep_calls}"
     # Each successive sleep must be >= the previous (monotone non-decreasing under backoff)
     for i in range(1, len(sleep_calls)):
-        assert sleep_calls[i] >= sleep_calls[i - 1], (
-            f"Backoff must not decrease: sleep_calls={sleep_calls}"
-        )
+        assert sleep_calls[i] >= sleep_calls[i - 1], f"Backoff must not decrease: sleep_calls={sleep_calls}"
     # At least one sleep must be strictly larger than the base interval
     assert max(sleep_calls) > PERP_MARK_POLL_INTERVAL_S, (
         f"Backoff never exceeded base interval {PERP_MARK_POLL_INTERVAL_S}s: {sleep_calls}"
@@ -156,8 +154,7 @@ async def test_binance_poller_backoff_resets_on_success():
     if len(sleep_calls) >= 2:
         last_sleep = sleep_calls[-1]
         assert last_sleep <= PERP_MARK_POLL_INTERVAL_S * 4, (
-            f"Sleep after recovery should be near base interval, got {last_sleep}; "
-            f"all sleeps: {sleep_calls}"
+            f"Sleep after recovery should be near base interval, got {last_sleep}; all sleeps: {sleep_calls}"
         )
 
 
@@ -237,6 +234,4 @@ async def test_hl_fetch_outcome_meta_backoff_resets_on_success():
     # After success, backoff must be reset (attribute back to initial/base value)
     backoff_after_success = getattr(adapter, "_fetch_meta_backoff", None)
     if backoff_before_success is not None and backoff_after_success is not None:
-        assert backoff_after_success <= backoff_before_success, (
-            "Backoff must reset (decrease) after a successful fetch"
-        )
+        assert backoff_after_success <= backoff_before_success, "Backoff must reset (decrease) after a successful fetch"
