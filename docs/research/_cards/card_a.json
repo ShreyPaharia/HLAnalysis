@@ -1,6 +1,6 @@
 {
   "title": "Card A: Liquidity & Book Shape",
-  "headline": "Binary spread 127.7 bps median (956x perp); TOB notional ~$107 USDC; OBI r=0.031 (weak); tick=1e-5; regime=WIDE_SPARSE",
+  "headline": "Binary spread 127.7 bps median (956x perp); TOB notional ~$102 USDC; OBI r=0.031 (weak); tick=1e-5; regime=WIDE_SPARSE",
   "metrics": [
     {
       "name": "n_expiries",
@@ -32,15 +32,15 @@
     },
     {
       "name": "binary_tob_notional_median_usdc",
-      "value": 107.197645,
-      "n": 2004,
+      "value": 102.04234000000001,
+      "n": 2017,
       "date_span": "2026-05-07 to 2026-06-10 (36 days)",
       "sanity": "~$117 median TOB; USDC-denominated; cross-checked against known small-desk fills"
     },
     {
       "name": "binary_within_100bps_notional_median_usdc",
-      "value": 679.03507,
-      "n": 2004,
+      "value": 682.2436600000001,
+      "n": 2017,
       "date_span": "2026-05-07 to 2026-06-10 (36 days)",
       "sanity": "~$713 median within 100 bps; 5-10 levels to reach; desk-tractable"
     },
@@ -61,20 +61,20 @@
     {
       "name": "binary_tick_size",
       "value": 1e-05,
-      "n": 132658,
+      "n": 132828,
       "date_span": "2026-05-07 to 2026-06-10 (36 days)",
       "sanity": "1e-5; verified from full price distribution; consistent with HL binary spec"
     },
     {
       "name": "spread_tte_mean_bps_lt1h",
-      "value": 2270.1872532809093,
+      "value": 2270.1872532809125,
       "n": 56875,
       "date_span": "2026-05-07 to 2026-06-10 (36 days)",
       "sanity": "Mean widens near expiry due to noise/uncertainty; confirmed pattern"
     },
     {
       "name": "spread_tte_mean_bps_gt18h",
-      "value": 200.37449324976362,
+      "value": 200.37449324976117,
       "n": 702306,
       "date_span": "2026-05-07 to 2026-06-10 (36 days)",
       "sanity": "Early-life spread narrower (less gamma, more price-following behavior)"
@@ -98,9 +98,9 @@
   "mm_room": {
     "binary_regime": "WIDE_SPARSE",
     "binary_median_spread_bps": 127.70869558864314,
-    "binary_tob_notional_usdc_median": 107.197645,
-    "binary_within_100bps_usdc_median": 679.03507,
-    "perp_tob_notional_usdc_median": 1150104.9921499998,
+    "binary_tob_notional_usdc_median": 102.04234000000001,
+    "binary_within_100bps_usdc_median": 682.2436600000001,
+    "perp_tob_notional_usdc_median": 1148116.175175,
     "verdict": "Wide-spread, shallow-depth binary book. A $1k\u2013$25k desk can execute full TOB in one order. Join/improve at 1-tick improvement is viable (tick=1e-5). Sustained MM requires tiny position sizing (~$100\u2013$500/side). Perp hedge is effectively unlimited at this scale."
   }
 }

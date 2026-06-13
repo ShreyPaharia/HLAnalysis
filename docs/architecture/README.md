@@ -19,6 +19,7 @@ For the full prose architecture, see [`../architecture.html`](../architecture.ht
 | **Strategy logic** or **adding a new strategy** | [strategy.md](strategy.md) |
 | Code that must stay **sim≡live identical** (MarketState, position math, parity) | [shared-spine.md](shared-spine.md) |
 | The **recorder**, venue **adapters**, event taxonomy, on-disk layout, config files | [recorder-data.md](recorder-data.md) |
+| **Offline desk research** (outcome-market win labels, cross-venue panels, desk metrics, HTML findings) | [research.md](research.md) |
 
 ## The one-line mental model
 
@@ -41,5 +42,6 @@ For the full prose architecture, see [`../architecture.html`](../architecture.ht
 | `hlanalysis/risk/` | Shared entry-cap predicates (`caps.py`) | 0.1k |
 | `hlanalysis/parity/` | Asserts engine ≡ sim (decision replay, position timeline) | 1.2k |
 | `hlanalysis/analysis/` | Offline microstructure / markout analytics | 1.0k |
+| `hlanalysis/research/` | Offline desk research: outcome-market label resolver, cached cross-venue panels, desk metrics, HTML card builder, analysis/strategy cards | 2.3k |
 | `hlanalysis/alerts/` | Telegram alert rules | 0.4k |
 | `hlanalysis/{config,events}.py` | Shared config loader + the normalized event taxonomy | — |

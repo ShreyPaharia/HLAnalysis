@@ -141,7 +141,9 @@ class TestFillModelOptimistic:
         )
         perp = _make_perp_bbo([0.0], [80000.0])
 
-        cfg = MMConfig(fill_model="optimistic", half_edge=0.0, size_usd=100.0, hedged=False, stale_data_halt_seconds=3600.0)
+        cfg = MMConfig(
+            fill_model="optimistic", half_edge=0.0, size_usd=100.0, hedged=False, stale_data_halt_seconds=3600.0
+        )
         result = _run_mm_sim_expiry(bbo, trades, perp, _EXPIRY_NS, "#TEST", "20260601-06", True, cfg)
 
         assert result.n_fills_buy == 1
@@ -245,7 +247,9 @@ class TestFillModelConservative:
         )
         perp = _make_perp_bbo([0.0], [80000.0])
 
-        cfg = MMConfig(fill_model="conservative", half_edge=0.0, size_usd=100.0, hedged=False, stale_data_halt_seconds=3600.0)
+        cfg = MMConfig(
+            fill_model="conservative", half_edge=0.0, size_usd=100.0, hedged=False, stale_data_halt_seconds=3600.0
+        )
         result = _run_mm_sim_expiry(bbo, trades, perp, _EXPIRY_NS, "#TEST", "20260601-06", True, cfg)
 
         assert result.n_fills_sell == 1

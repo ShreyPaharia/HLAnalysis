@@ -20,6 +20,27 @@ Open the one for the area you're touching first:
 | Strategy logic / adding a strategy | [docs/architecture/strategy.md](docs/architecture/strategy.md) |
 | Code that must stay sim≡live identical (MarketState, parity) | [docs/architecture/shared-spine.md](docs/architecture/shared-spine.md) |
 | Recorder, adapters, events, on-disk layout, config files | [docs/architecture/recorder-data.md](docs/architecture/recorder-data.md) |
+| Offline desk research (outcome-market win labels, cross-venue panels, desk metrics, HTML findings) | [docs/architecture/research.md](docs/architecture/research.md) |
+
+## Desk research toolkit (`hlanalysis/research/`)
+
+For offline data analysis — characterizing liquidity/mispricing/vol/adverse-selection
+or hunting strategy edges — use `hlanalysis/research/` (read
+[docs/architecture/research.md](docs/architecture/research.md)) rather than ad-hoc
+DuckDB. It gives you the **outcome-market win-label resolver**, cached cross-venue
+**panels**, standardized desk **metrics**, an HTML **card** builder, and the six
+characterization cards from the 2026-06-13 desk study. Reusing it keeps analyses
+reproducible and minutes-fast.
+
+- **The load-bearing gotcha:** HL binary markets emit **no settlement event**;
+  `settled_side_idx` is a constant artifact (always 0). Win labels are
+  **oracle-derived** (`oracle_px(expiry)` vs `targetPrice` for binaries; band
+  thresholds for buckets) — always go through `research/outcome_markets.py`, never
+  re-derive winners from settlement.
+- Run from a worktree with `HLBT_HL_DATA_ROOT=../../data` (data is main-checkout only;
+  never `make pull-data`). Smoke gate: `uv run python -m hlanalysis.research.smoke`.
+- Findings deck: `docs/research/hl-outcome-desk-<date>.html`. Every edge claim must
+  carry n + date-span + **split-half** sign stability; treat n<15 as underpowered.
 
 ## Strategy naming
 

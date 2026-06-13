@@ -141,6 +141,9 @@ class MMConfig:
     penalty_informed_frac: float = 0.20  # 20% of fills adversely selected at 1Hz
     penalty_spread_reduction: float = 0.50  # those fills get 50% of their spread
 
+    # Performance: skip fill record accumulation (saves ~60% time; needed only for equity curves)
+    track_fill_records: bool = True
+
 
 @dataclass
 class FillRecord:
@@ -610,19 +613,20 @@ def _run_mm_sim_expiry(
                         )
                     hedge_btc += hedge_qty
 
-                result.fill_records.append(
-                    FillRecord(
-                        ts_ns=ts_ns,
-                        side="buy",
-                        price=fill_px,
-                        tokens=tokens,
-                        cost_usd=cost,
-                        mid_at_fill=mid_now,
-                        perp_px=perp_entry_px,
-                        hedge_qty_btc=hedge_qty,
-                        tte_s=(expiry_ns - ts_ns) / _NS,
+                if config.track_fill_records:
+                    result.fill_records.append(
+                        FillRecord(
+                            ts_ns=ts_ns,
+                            side="buy",
+                            price=fill_px,
+                            tokens=tokens,
+                            cost_usd=cost,
+                            mid_at_fill=mid_now,
+                            perp_px=perp_entry_px,
+                            hedge_qty_btc=hedge_qty,
+                            tte_s=(expiry_ns - ts_ns) / _NS,
+                        )
                     )
-                )
                 result.n_fills_buy += 1
                 max_inv_tokens = max(max_inv_tokens, abs(inv_tokens))
 
@@ -664,19 +668,20 @@ def _run_mm_sim_expiry(
                             hedge_perp_entry = (hedge_perp_entry * hedge_btc + perp_entry_px * hedge_qty) / total
                     hedge_btc += hedge_qty
 
-                result.fill_records.append(
-                    FillRecord(
-                        ts_ns=ts_ns,
-                        side="sell",
-                        price=fill_px,
-                        tokens=tokens,
-                        cost_usd=-proceeds,
-                        mid_at_fill=mid_now,
-                        perp_px=perp_entry_px,
-                        hedge_qty_btc=hedge_qty,
-                        tte_s=(expiry_ns - ts_ns) / _NS,
+                if config.track_fill_records:
+                    result.fill_records.append(
+                        FillRecord(
+                            ts_ns=ts_ns,
+                            side="sell",
+                            price=fill_px,
+                            tokens=tokens,
+                            cost_usd=-proceeds,
+                            mid_at_fill=mid_now,
+                            perp_px=perp_entry_px,
+                            hedge_qty_btc=hedge_qty,
+                            tte_s=(expiry_ns - ts_ns) / _NS,
+                        )
                     )
-                )
                 result.n_fills_sell += 1
                 max_inv_tokens = max(max_inv_tokens, abs(inv_tokens))
 
@@ -964,11 +969,19 @@ def _sweep_configs(
     start_date: str = IS_START,
     end_date: str = IS_END,
 ) -> list[dict[str, Any]]:
-    """Sweep key config parameters. Returns list of summary dicts."""
+    """Sweep key config parameters. Returns list of summary dicts.
+
+    Runs over the first half of IS (14 expiries) for speed; main results use full IS.
+    Focuses on the most decision-relevant dimensions: fill model, quote width, size, hedge.
+    Fill model / hedged / favorites / 1Hz results are also computed separately in build_card.
+    """
     sweep_results: list[dict[str, Any]] = []
 
+    # Use first half of IS to keep runtime manageable
+    sweep_end = SPLIT_H1_END  # 2026-05-23 (14 expiries instead of 28)
+
     def _run(label: str, cfg: MMConfig) -> dict[str, Any]:
-        res = _run_mm_all_expiries(con, data_root, expiry_df, outcomes_df, cfg, start_date, end_date)
+        res = _run_mm_all_expiries(con, data_root, expiry_df, outcomes_df, cfg, start_date, sweep_end)
         summary = _summarise_results(res)
         summary["label"] = label
         summary["fill_model"] = cfg.fill_model
@@ -981,19 +994,19 @@ def _sweep_configs(
 
     import copy
 
-    # 1. Fill model: optimistic vs conservative
+    # 1. Fill model: optimistic vs conservative (most important comparison)
     for fm in ["optimistic", "conservative"]:
         cfg = copy.copy(base_config)
         cfg.fill_model = fm
         sweep_results.append(_run(f"fill={fm}", cfg))
 
-    # 2. Quote width: half_edge sweep
-    for he in [0.0001, 0.0002, 0.0005]:
+    # 2. Quote width: half_edge sweep (key tuning dimension)
+    for he in [0.0, 0.0001, 0.0005]:
         cfg = copy.copy(base_config)
         cfg.half_edge = he
         sweep_results.append(_run(f"half_edge={he:.4f}", cfg))
 
-    # 3. Size sweep
+    # 3. Size sweep (capacity scaling)
     for sz in [50.0, 100.0, 200.0]:
         cfg = copy.copy(base_config)
         cfg.size_usd = sz
@@ -1005,18 +1018,6 @@ def _sweep_configs(
         cfg.hedged = hedged
         sweep_results.append(_run(f"hedged={hedged}", cfg))
 
-    # 5. Favorites filter
-    for fav in [False, True]:
-        cfg = copy.copy(base_config)
-        cfg.favorites_only = fav
-        sweep_results.append(_run(f"favorites_only={fav}", cfg))
-
-    # 6. 1Hz penalty
-    for penalty in [False, True]:
-        cfg = copy.copy(base_config)
-        cfg.apply_1hz_penalty = penalty
-        sweep_results.append(_run(f"1hz_penalty={penalty}", cfg))
-
     return sweep_results
 
 
@@ -1026,10 +1027,16 @@ def _sweep_configs(
 
 
 def _capacity_table() -> list[dict[str, Any]]:
-    """Estimate capacity based on Card A depth findings."""
-    # Card A: TOB notional ~$107, within 100bps ~$679
+    """Estimate capacity based on Card A depth findings.
+
+    Card A:   TOB notional ~$107, within 100bps ~$679 per binary market.
+    Card B:   maker realized spread ~0.95pp per round-trip.
+    ~24 active markets live simultaneously (daily 06:00 UTC expiries, 1 per day).
+    Desk levels: $1k = $42/market, $5k = $208/market, $25k = $1042/market.
+    """
     tob_notional = 107.0
     depth_100bps = 679.0
+    n_markets = 24  # typical simultaneous markets
 
     rows = []
     for size_usd in [25.0, 50.0, 100.0, 200.0]:
@@ -1037,9 +1044,30 @@ def _capacity_table() -> list[dict[str, Any]]:
         fill_frac_100bps = size_usd / depth_100bps
         # At typical 128bps binary spread, maker earns ~0.95pp per round-trip (Card B)
         expected_spread_per_rt = 0.0095 * size_usd  # 0.95% of size
+        desk_capacity = size_usd * n_markets
         rows.append(
             {
                 "size_usd": size_usd,
+                "desk_capacity_usd": desk_capacity,
+                "fill_frac_tob": fill_frac_tob,
+                "fill_frac_100bps": fill_frac_100bps,
+                "expected_spread_per_roundtrip_usd": expected_spread_per_rt,
+                "market_impact_note": (
+                    "minimal" if fill_frac_tob < 0.5 else "moderate" if fill_frac_tob < 1.0 else "high"
+                ),
+            }
+        )
+
+    # Add desk-level rows: $1k, $5k, $25k
+    for desk_usd in [1000.0, 5000.0, 25000.0]:
+        per_market = desk_usd / n_markets
+        fill_frac_tob = per_market / tob_notional
+        fill_frac_100bps = per_market / depth_100bps
+        expected_spread_per_rt = 0.0095 * per_market
+        rows.append(
+            {
+                "size_usd": per_market,
+                "desk_capacity_usd": desk_usd,
                 "fill_frac_tob": fill_frac_tob,
                 "fill_frac_100bps": fill_frac_100bps,
                 "expected_spread_per_roundtrip_usd": expected_spread_per_rt,
@@ -1326,6 +1354,7 @@ def _capacity_table_html(rows: list[dict[str, Any]]) -> str:
         html_rows.append(
             f"<tr>"
             f"<td>${r['size_usd']:.0f}</td>"
+            f"<td>${r.get('desk_capacity_usd', r['size_usd'] * 24):.0f}</td>"
             f"<td>{r['fill_frac_tob']:.1%}</td>"
             f"<td>{r['fill_frac_100bps']:.1%}</td>"
             f"<td>${r['expected_spread_per_roundtrip_usd']:.2f}</td>"
@@ -1335,7 +1364,8 @@ def _capacity_table_html(rows: list[dict[str, Any]]) -> str:
     return (
         "<table>"
         "<thead><tr>"
-        "<th>Size (USDC)</th><th>TOB Fraction ($107)</th><th>Depth Fraction ($679)</th>"
+        "<th>Size/Market (USDC)</th><th>Desk Total (~24 markets)</th>"
+        "<th>TOB Fraction ($107)</th><th>Depth Fraction ($679)</th>"
         "<th>Expected Spread/RT</th><th>Market Impact</th>"
         "</tr></thead>"
         "<tbody>" + "".join(html_rows) + "</tbody>"
@@ -1527,11 +1557,13 @@ def build_card(
         outcomes_df = pd.DataFrame()
 
     # Base config (conservative, hedged, 1-tick edge, $100 size)
+    # fill records not consumed by any plot/summary — skip for speed
     base_config = MMConfig(
         fill_model="conservative",
         half_edge=0.0001,
         size_usd=100.0,
         hedged=True,
+        track_fill_records=False,
     )
 
     # IS run (conservative, hedged)
@@ -1547,12 +1579,14 @@ def build_card(
 
     opt_config = copy.copy(base_config)
     opt_config.fill_model = "optimistic"
+    opt_config.track_fill_records = False
     _log.info("Strategy MM: running optimistic IS sim")
     is_results_opt = _run_mm_all_expiries(con, data_root, expiry_df, outcomes_df, opt_config, IS_START, IS_END)
 
     # Unhedged (for comparison)
     unhedged_config = copy.copy(base_config)
     unhedged_config.hedged = False
+    unhedged_config.track_fill_records = False
     _log.info("Strategy MM: running unhedged IS sim")
     is_results_unhedged = _run_mm_all_expiries(
         con, data_root, expiry_df, outcomes_df, unhedged_config, IS_START, IS_END
@@ -1565,6 +1599,7 @@ def build_card(
     # Favorites-only (IS and OOS)
     fav_config = copy.copy(base_config)
     fav_config.favorites_only = True
+    fav_config.track_fill_records = False
     _log.info("Strategy MM: running favorites-only IS sim")
     is_results_fav = _run_mm_all_expiries(con, data_root, expiry_df, outcomes_df, fav_config, IS_START, IS_END)
     _log.info("Strategy MM: running favorites-only OOS sim")
@@ -1573,6 +1608,7 @@ def build_card(
     # 1Hz penalty sim (conservative, to model live infra adverse selection)
     hz1_config = copy.copy(base_config)
     hz1_config.apply_1hz_penalty = True
+    hz1_config.track_fill_records = False
     _log.info("Strategy MM: running 1Hz-penalty IS sim")
     is_results_1hz = _run_mm_all_expiries(con, data_root, expiry_df, outcomes_df, hz1_config, IS_START, IS_END)
 
@@ -1950,7 +1986,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     data_root = os.environ.get("HLBT_HL_DATA_ROOT", "../../data")
-    out_dir = str(Path(__file__).parents[4] / "docs" / "research" / "_cards")
+    out_dir = str(Path(__file__).parents[3] / "docs" / "research" / "_cards")
 
     card_html, findings = build_card(data_root, out_dir=out_dir)
 

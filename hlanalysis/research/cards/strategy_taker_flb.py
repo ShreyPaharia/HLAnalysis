@@ -307,26 +307,31 @@ def _flb_params(
     return p
 
 
-def _live_v1_params_binary() -> dict[str, Any]:
-    """Return v1 priceBinary params from live config, for use as baseline."""
+def _live_slot_params_binary(alias: str) -> tuple[str, dict[str, Any]]:
+    """Return (strategy_id, priceBinary params) for a live slot, for use as baseline.
+
+    The strategy_id matters: the v1 slot maps to ``v1_late_resolution`` while the
+    v31 slot maps to ``v3_theta_harvester``.  Each must be run through its OWN
+    strategy — forcing theta params through late_resolution raises KeyError on
+    ``price_extreme_threshold``.
+    """
     from hlanalysis.backtest.slot_config import backtest_params_from_slot
     from hlanalysis.engine.config import load_strategies_config
 
     cfg = load_strategies_config(Path("config/strategy.yaml"))
-    v1_slot = next(s for s in cfg.strategies if s.account_alias == "v1")
-    _, params = backtest_params_from_slot(v1_slot, klass="priceBinary")
-    return params
+    slot = next(s for s in cfg.strategies if s.account_alias == alias)
+    strategy_id, params = backtest_params_from_slot(slot, klass="priceBinary")
+    return strategy_id, params
 
 
-def _live_v31_params_binary() -> dict[str, Any]:
-    """Return v31 priceBinary params from live config, for use as baseline."""
-    from hlanalysis.backtest.slot_config import backtest_params_from_slot
-    from hlanalysis.engine.config import load_strategies_config
+def _live_v1_params_binary() -> tuple[str, dict[str, Any]]:
+    """Return (strategy_id, params) for the live v1 slot (late_resolution)."""
+    return _live_slot_params_binary("v1")
 
-    cfg = load_strategies_config(Path("config/strategy.yaml"))
-    v31_slot = next(s for s in cfg.strategies if s.account_alias == "v31")
-    _, params = backtest_params_from_slot(v31_slot, klass="priceBinary")
-    return params
+
+def _live_v31_params_binary() -> tuple[str, dict[str, Any]]:
+    """Return (strategy_id, params) for the live v31 slot (theta_harvester)."""
+    return _live_slot_params_binary("v31")
 
 
 # ---------------------------------------------------------------------------
@@ -789,9 +794,9 @@ def build_card(
     # -- 5. Live v1 baseline --------------------------------------------------
     logger.info("Running baseline v1 (live config) IS+OOS ...")
     try:
-        v1_params = _live_v1_params_binary()
+        v1_strategy_id, v1_params = _live_v1_params_binary()
         v1_is_pnl, v1_is_trades, _ = _run_strategy(
-            strategy_id="v1_late_resolution",
+            strategy_id=v1_strategy_id,
             params=v1_params,
             questions=questions_is,
             data_root=data_root,
@@ -799,7 +804,7 @@ def build_card(
             n_workers=n_workers,
         )
         v1_oos_pnl, v1_oos_trades, _ = _run_strategy(
-            strategy_id="v1_late_resolution",
+            strategy_id=v1_strategy_id,
             params=v1_params,
             questions=questions_oos,
             data_root=data_root,
@@ -818,14 +823,15 @@ def build_card(
     except Exception as exc:
         logger.warning("v1 live baseline failed: %s", exc)
         v1_is_pnl, v1_oos_pnl = [], []
+        v1_is_trades, v1_oos_trades = 0, 0
         v1_is_stats = _summarise([], 0)
         v1_oos_stats = _summarise([], 0)
 
     # -- 6. Live v31 baseline -------------------------------------------------
     try:
-        v31_params = _live_v31_params_binary()
+        v31_strategy_id, v31_params = _live_v31_params_binary()
         v31_is_pnl, v31_is_trades, _ = _run_strategy(
-            strategy_id="v1_late_resolution",
+            strategy_id=v31_strategy_id,
             params=v31_params,
             questions=questions_is,
             data_root=data_root,
@@ -833,7 +839,7 @@ def build_card(
             n_workers=n_workers,
         )
         v31_oos_pnl, v31_oos_trades, _ = _run_strategy(
-            strategy_id="v1_late_resolution",
+            strategy_id=v31_strategy_id,
             params=v31_params,
             questions=questions_oos,
             data_root=data_root,
@@ -850,6 +856,7 @@ def build_card(
     except Exception as exc:
         logger.warning("v31 live baseline failed: %s", exc)
         v31_is_pnl, v31_oos_pnl = [], []
+        v31_is_trades, v31_oos_trades = 0, 0
         v31_is_stats = _summarise([], 0)
         v31_oos_stats = _summarise([], 0)
 

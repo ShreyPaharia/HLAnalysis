@@ -366,6 +366,43 @@ class TestFLBBaseParamsStrategy:
         assert isinstance(strategy, LateResolutionStrategy)
 
 
+class TestLiveSlotParams:
+    """Live baseline slot params must carry their OWN strategy_id.
+
+    Regression guard: the v31 slot maps to v3_theta_harvester (no
+    price_extreme_threshold).  Forcing v31 params through v1_late_resolution
+    raises KeyError — the baseline must run each slot through its own strategy.
+    """
+
+    def test_v1_slot_returns_late_resolution_id(self) -> None:
+        from hlanalysis.research.cards.strategy_taker_flb import _live_v1_params_binary
+
+        strategy_id, params = _live_v1_params_binary()
+        assert strategy_id == "v1_late_resolution"
+        assert isinstance(params, dict)
+        # late_resolution params carry the FLB band knob
+        assert "price_extreme_threshold" in params
+
+    def test_v31_slot_returns_theta_id(self) -> None:
+        from hlanalysis.research.cards.strategy_taker_flb import _live_v31_params_binary
+
+        strategy_id, params = _live_v31_params_binary()
+        # v31 is the theta harvester, NOT late_resolution
+        assert strategy_id != "v1_late_resolution"
+        assert "theta" in strategy_id
+        assert isinstance(params, dict)
+
+    def test_v31_params_build_under_own_strategy(self) -> None:
+        """v31 params must be buildable by their OWN strategy, not late_resolution."""
+        import hlanalysis.strategy  # noqa: F401
+        from hlanalysis.backtest.runner.parallel import build_strategy_for_run
+        from hlanalysis.research.cards.strategy_taker_flb import _live_v31_params_binary
+
+        strategy_id, params = _live_v31_params_binary()
+        strategy = build_strategy_for_run(strategy_id, params)
+        assert strategy is not None
+
+
 # ---------------------------------------------------------------------------
 # Integration tests — require recorded data
 # ---------------------------------------------------------------------------
