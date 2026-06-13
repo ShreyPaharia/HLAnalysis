@@ -85,6 +85,7 @@ from .risk_events import (
     KillSwitchActivated,
     MemoryHalt,
     NewQuestion,
+    RiskHalt,
     StaleDataHalt,
     StopLossTriggered,
 )
@@ -786,7 +787,19 @@ class EngineRuntime:
                 #         then alert-only. PM's data-api lags/flaps, so live we
                 #         trust our own fill ledger and only alert on diffs.
                 is_pm = slot.is_pm
-                apply_positions = (not is_pm) or (not slot.pm.startup_position_synced)
+                # Venue-truth application policy (finding #29):
+                #   blocked → always alert-only (read-only drift detection).
+                #     A restart-blocked slot suspended the scanner because of a
+                #     detected drift; mutating positions mid-block could destroy
+                #     the operator's chance to inspect or manually clear the state.
+                #     Drift alerting still runs so the operator is informed.
+                #   HL unblocked → always apply.
+                #   PM unblocked → apply only on first successful pass (startup
+                #     sync), then alert-only (data-api lags/flaps).
+                if slot.blocked:
+                    apply_positions = False
+                else:
+                    apply_positions = (not is_pm) or (not slot.pm.startup_position_synced)
                 # Fetch venue open-orders, clearinghouse state, and fills off the
                 # event loop (SHR-41); the cached fills feed the Reconciler's
                 # fills_lookup for every cloid.
@@ -909,6 +922,30 @@ class EngineRuntime:
                     )
                 for ev in res.drift_events:
                     await self.bus.publish(ev)
+                # Finding #26: escalate material qty drift from alert → halt.
+                # Small noise-level differences (rounding, sub-precision PM dust)
+                # are already filtered by _QTY_MISMATCH_ABS_TOL before they
+                # reach the drift list; anything surfaced here AND exceeding the
+                # material threshold is a whole-share discrepancy that indicates
+                # a real accounting problem — stop new entries until resolved.
+                # Exits are exempt from the halt (the stop-loss and settlement
+                # loops keep running per W1.9). The restart_blocked flag is the
+                # natural "halt new entries" mechanism for reconcile-discovered
+                # problems — it's what the restart-drift gate uses — so we set
+                # it here and publish a RiskHalt for the Telegram alert channel.
+                if res.material_qty_drift and not slot.blocked:
+                    slot.blocked = True
+                    logger.error(
+                        "MATERIAL QTY DRIFT alias={} — blocking new entries (scanner suspended)",
+                        slot.alias,
+                    )
+                    await self.bus.publish(
+                        RiskHalt(
+                            ts_ns=now,
+                            account_alias=slot.alias,
+                            reason="material_qty_drift",
+                        )
+                    )
                 for cloid, symbol in res.orphans_to_cancel:
                     await asyncio.to_thread(
                         slot.exec_client.cancel,

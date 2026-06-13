@@ -137,10 +137,12 @@ class RiskGate:
         # are short-circuited earlier, so this never blocks a close.
         if inp.reference_age_ns > stale_ns:
             return RiskVerdict(False, "stale_reference")
-        # last_reconcile_ns: tolerate 2x the configured interval
-        if inp.last_reconcile_ns > 0 and (
-            inp.now_ns - inp.last_reconcile_ns > 2 * self.cfg.global_.reconcile_interval_seconds * 1_000_000_000
-        ):
+        # last_reconcile_ns: 0 means never reconciled → fail closed (no position
+        # state available yet). Non-zero: tolerate 2× the configured interval.
+        # Exits are short-circuited earlier so this never blocks a close.
+        if inp.last_reconcile_ns == 0:
+            return RiskVerdict(False, "no_reconcile_yet")
+        if inp.now_ns - inp.last_reconcile_ns > 2 * self.cfg.global_.reconcile_interval_seconds * 1_000_000_000:
             return RiskVerdict(False, "stale_reconcile")
 
         # 11. No conflicting leg

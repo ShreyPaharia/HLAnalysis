@@ -50,7 +50,7 @@ class ReconcileResult:
     drift_events: list[ReconcileDrift]
     # (cloid, symbol) pairs the caller should defensively cancel. Symbol must be
     # non-empty — HL's cancelByCloid rejects empty coin and the SDK silently
-    # reports outer status='ok' even when the per-cancel statuses[] failed.
+    # reports outer status['ok' even when the per-cancel statuses[] failed.
     orphans_to_cancel: list[tuple[str, str]]
     # Local positions that no longer exist on the venue — almost always means
     # the HIP-4 market settled and HL auto-closed the position. The caller is
@@ -60,6 +60,12 @@ class ReconcileResult:
     # The list carries the pre-delete Position snapshot so the caller can
     # populate the Exit's qty/realized_pnl without re-reading the DB.
     vanished_positions: list[tuple[int, str, Position]]
+    # True when at least one position's qty drift exceeded the material threshold
+    # configured on the Reconciler (material_drift_qty). The runtime uses this to
+    # escalate from an alert to a halt — small noise-level drifts remain
+    # alert-only, while a material discrepancy (whole-share mismatch) indicates
+    # a real accounting problem that should stop new entries.
+    material_qty_drift: bool = False
 
 
 class Reconciler:
@@ -77,6 +83,12 @@ class Reconciler:
         side and from the per-account `state.db` on the local side.
     """
 
+    # Conservative default: a 1-share absolute qty difference is material.
+    # Positions under _QTY_MISMATCH_ABS_TOL (2e-2) are already filtered as
+    # noise by the mismatch check, so the effective material window is
+    # (2e-2, 1.0) = rounding noise vs. real discrepancy.
+    _DEFAULT_MATERIAL_DRIFT_QTY: float = 1.0
+
     def __init__(
         self,
         dal: StateDAL,
@@ -89,6 +101,7 @@ class Reconciler:
         venue_fill_source: str = FILL_SOURCE_ROUTER,
         settled_qidxs: frozenset[int] | set[int] | None = None,
         journal=None,
+        material_drift_qty: float | None = None,
     ) -> None:
         self.dal = dal
         # Optional trade journal (SHR-83). When a synchronous ACK carried no
@@ -130,6 +143,14 @@ class Reconciler:
         # RedemptionTimeout watchdog, not this per-cycle alert (incident
         # 2026-06-12 q700064348 flooded ~240/h through the gap).
         self._settled_qidxs: frozenset[int] = frozenset(settled_qidxs or ())
+        # Absolute qty diff above which a position mismatch is escalated to
+        # material (ReconcileResult.material_qty_drift=True) so the runtime can
+        # halt rather than just alert. Below this level the discrepancy is
+        # treated as noise (rounding, sub-precision PM dust). Defaults to 1
+        # share — a whole-share discrepancy is unambiguously a real problem.
+        self.material_drift_qty: float = (
+            material_drift_qty if material_drift_qty is not None else self._DEFAULT_MATERIAL_DRIFT_QTY
+        )
 
     def run(
         self,
@@ -141,6 +162,7 @@ class Reconciler:
         drift: list[ReconcileDrift] = []
         orphans: list[tuple[str, str]] = []
         vanished: list[tuple[int, str, Position]] = []
+        material_qty_drift: bool = False
 
         # --- orders ---
         # Match local↔venue by the 32-hex tail of the cloid. HL normalizes
@@ -414,6 +436,11 @@ class Reconciler:
                         )
                     )
                 if qty_diff:
+                    abs_diff = abs(vp.qty - lp.qty)
+                    if abs_diff >= self.material_drift_qty:
+                        # Whole-share discrepancy: set the material flag so the
+                        # runtime can escalate from alert → halt (finding #26).
+                        material_qty_drift = True
                     detail = {"hl_qty": f"{vp.qty}", "db_qty": f"{lp.qty}"}
                     if not apply:
                         detail["resolution"] = "qty_mismatch_alert_only"
@@ -490,4 +517,5 @@ class Reconciler:
             drift_events=drift,
             orphans_to_cancel=orphans,
             vanished_positions=vanished,
+            material_qty_drift=material_qty_drift,
         )
