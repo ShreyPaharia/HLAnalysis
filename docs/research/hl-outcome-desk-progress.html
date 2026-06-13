@@ -143,7 +143,23 @@ Last updated: <b>2026-06-13 · setup</b></p>
 </div>
 
 <h2>Findings</h2>
-<div class="panel"><p class="muted">No verified findings yet — Wave 1 will populate this section with cards as analyses complete.</p></div>
+<div class="panel">
+  <h3>Preliminary (single-expiry probes, pending full-sample confirmation in Wave 1)</h3>
+  <table>
+  <tr><th>Probe</th><th>Result</th><th>Read</th></tr>
+  <tr>
+    <td>Yes+No overround<br><span class="muted">#100/#101, 2026-05-08, 78k ticks</span></td>
+    <td>avg buy-both cost <b>1.0073</b> · max sell-both <b>1.0112</b> · <b>0%</b> ticks with &gt;1% taker arb</td>
+    <td>Binary book is tight &amp; slightly <b>overround (~0.7%)</b> → no naked Yes+No taker arb; the overround is gross edge to a <b>maker</b>. Reinforces taker-edge must come from mispricing/convergence, not sum-arb.</td>
+  </tr>
+  <tr>
+    <td>Settlement schema</td>
+    <td><code>settled_side_idx</code> = winning side (0=Yes/1=No), per outcome symbol <code>#NNN0</code></td>
+    <td>Clean win-label join confirmed; 99 settlements.</td>
+  </tr>
+  </table>
+  <p class="muted">Wave 1 cards (A–F) will replace these with full-sample, split-half-validated results.</p>
+</div>
 
 <h2>Strategy scorecard</h2>
 <div class="panel"><p class="muted">Populated in Wave 2. Each candidate scored PASS/FAIL against the strategy KPIs above.</p></div>
@@ -151,7 +167,8 @@ Last updated: <b>2026-06-13 · setup</b></p>
 <h2>Activity log</h2>
 <div class="panel log">
 <ul>
-  <li><span class="ts">2026-06-13 setup</span> — Explored data, locked decisions, built live dashboard. Wave 0 toolkit dispatched.</li>
+  <li><span class="ts">2026-06-13 setup</span> — Explored data, locked decisions, built live dashboard. Wave 0 toolkit dispatched (sonnet, background).</li>
+  <li><span class="ts">2026-06-13 probe</span> — Verified settlement schema (settled_side_idx) + binary bbo. First overround probe: book ~0.7% overround, no taker sum-arb. Seeded preliminary findings.</li>
 </ul>
 </div>
 
