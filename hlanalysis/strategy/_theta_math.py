@@ -52,6 +52,16 @@ def _p_leg_win_prob_and_phi(
     sigma_sqrt_tau = sigma * math.sqrt(tau_yr)
     drift = (mu_eff - 0.5 * sigma * sigma) * tau_yr
 
+    # Zero-guard: when σ=0 or τ=0, sigma_sqrt_tau=0 and _d() would divide by
+    # zero. In the degenerate limit the GBM has no variance → outcome is
+    # determined by whether reference_price is already inside the winning region.
+    # phi(±∞) = 0 so the gamma proxy collapses to zero as well.
+    if sigma_sqrt_tau <= 0.0:
+        p_above_lo = 1.0 if (lo is None or reference_price > lo) else 0.0
+        p_above_hi = 1.0 if (hi is not None and reference_price > hi) else 0.0
+        p_win = max(0.0, p_above_lo - p_above_hi)
+        return (p_win, 0.0)
+
     def _d(k: float) -> float:
         return (math.log(reference_price / k) + drift) / sigma_sqrt_tau
 
