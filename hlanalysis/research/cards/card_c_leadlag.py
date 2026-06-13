@@ -68,7 +68,7 @@ CORPUS_END = "2026-06-10"
 SPLIT_MID = "2026-05-24"  # first half: 05-06..05-23; second half: 05-24..06-10
 
 # Transport latency corrections (median, nanoseconds)
-HL_PERP_LATENCY_NS = 223_375_238   # ~223ms median perp transport latency
+HL_PERP_LATENCY_NS = 223_375_238  # ~223ms median perp transport latency
 HL_BINARY_LATENCY_NS = 214_432_894  # ~214ms median binary transport latency
 # Binance spot exchange_ts is sentinel 0 → local_recv_ts IS wall clock; no adjustment possible.
 
@@ -81,7 +81,7 @@ VOL_LOOKBACK_S = 3600
 
 # Xcorr max lags (in grid steps @ 5s resolution → −5s .. +30s = −1..+6 steps,
 # but we use 10 steps max to allow generous scan)
-MAX_LAG_STEPS = 10   # ±50 seconds at 5s grid
+MAX_LAG_STEPS = 10  # ±50 seconds at 5s grid
 
 # Half-spread assumption for taker signal net-of-spread edge calculation
 # (binary mid - ask on the side being bought ≈ half-spread)
@@ -402,7 +402,7 @@ def _compute_xcorr_for_expiry(
     y_ser = pd.Series(delta_model, dtype="float64")
 
     n = len(x_ser)
-    if MAX_LAG_STEPS >= n:
+    if n <= MAX_LAG_STEPS:
         max_lag = max(1, n // 2 - 1)
     else:
         max_lag = MAX_LAG_STEPS
@@ -455,9 +455,7 @@ def _compute_xcorr_for_expiry(
         "n_valid_steps": int(valid.sum()),
         "tte_mean_h": float(np.nanmean((expiry_ns - grid) / _NS / 3600.0)),
         # Hedge ratio: ∂(binary_mid)/∂(model_prob) at contemporaneous lag
-        "hedge_ratio": float(
-            _compute_hedge_ratio(delta_binary[valid], delta_model[valid])
-        ),
+        "hedge_ratio": float(_compute_hedge_ratio(delta_binary[valid], delta_model[valid])),
     }
 
 
@@ -624,9 +622,7 @@ def _run_leadlag_analysis(
     # Filter binaries to those expiring within [start_date + 1d, end_date + 1d]
     # (a binary expiring on date D is active on date D-1 and D)
     start_ns = int(dt_mod.datetime(start_d.year, start_d.month, start_d.day, tzinfo=dt_mod.UTC).timestamp() * _NS)
-    end_ns = int(
-        dt_mod.datetime(end_d.year, end_d.month, end_d.day, tzinfo=dt_mod.UTC).timestamp() * _NS
-    ) + 86400 * _NS
+    end_ns = int(dt_mod.datetime(end_d.year, end_d.month, end_d.day, tzinfo=dt_mod.UTC).timestamp() * _NS) + 86400 * _NS
 
     active = binaries[(binaries["expiry_ns"] >= start_ns) & (binaries["expiry_ns"] <= end_ns)].copy()
     _log.info("run_leadlag: %d binaries in %s..%s", len(active), start_date, end_date)
@@ -678,9 +674,12 @@ def _run_leadlag_analysis(
             res["symbol"] = sym
             res["expiry_str"] = str(row["expiry_str"])
             res["target_price"] = target_price
-            res["half_period"] = "first" if expiry_ns < int(
-                dt_mod.datetime.strptime(SPLIT_MID, "%Y-%m-%d").replace(tzinfo=dt_mod.UTC).timestamp() * _NS
-            ) else "second"
+            res["half_period"] = (
+                "first"
+                if expiry_ns
+                < int(dt_mod.datetime.strptime(SPLIT_MID, "%Y-%m-%d").replace(tzinfo=dt_mod.UTC).timestamp() * _NS)
+                else "second"
+            )
             perp_binary_results.append(res)
 
         # Perp vs Spot: only do once per day (use exp_prev)
@@ -731,10 +730,11 @@ def _plot_xcorr_summary(results: list[dict], title: str) -> matplotlib.figure.Fi
                 all_lags,
                 np.nanpercentile(corr_arr, 25, axis=0),
                 np.nanpercentile(corr_arr, 75, axis=0),
-                alpha=0.3, color="#58a6ff", label="IQR"
+                alpha=0.3,
+                color="#58a6ff",
+                label="IQR",
             )
-            ax0.plot(all_lags, np.nanmedian(corr_arr, axis=0),
-                     color="#58a6ff", linewidth=2, label="Median xcorr")
+            ax0.plot(all_lags, np.nanmedian(corr_arr, axis=0), color="#58a6ff", linewidth=2, label="Median xcorr")
             ax0.axhline(0, color="#30363d", linewidth=0.8)
             ax0.axvline(0, color="#8b949e", linewidth=0.8, linestyle="--")
     ax0.set_xlabel("Lag (grid steps @ 5s)")
@@ -747,8 +747,9 @@ def _plot_xcorr_summary(results: list[dict], title: str) -> matplotlib.figure.Fi
     peak_lags = [r["peak_lag_s"] for r in results if r.get("peak_lag_s") is not None]
     if peak_lags:
         ax1.hist(peak_lags, bins=20, color="#58a6ff", alpha=0.8, edgecolor="#30363d")
-        ax1.axvline(np.nanmedian(peak_lags), color="#f78166", linewidth=1.5,
-                    label=f"Median={np.nanmedian(peak_lags):.0f}s")
+        ax1.axvline(
+            np.nanmedian(peak_lags), color="#f78166", linewidth=1.5, label=f"Median={np.nanmedian(peak_lags):.0f}s"
+        )
     ax1.set_xlabel("Peak Lead Time (seconds)")
     ax1.set_ylabel("Count (expiries)")
     ax1.set_title("Perp→Binary Lead Time Distribution")
@@ -758,8 +759,7 @@ def _plot_xcorr_summary(results: list[dict], title: str) -> matplotlib.figure.Fi
     ax2 = axes[2]
     tte_h = [r.get("tte_mean_h", np.nan) for r in results]
     peak_corrs = [abs(r["peak_corr"]) for r in results]
-    sc = ax2.scatter(tte_h, peak_corrs, c=[r["peak_lag_s"] for r in results],
-                     cmap="viridis", alpha=0.7, s=25)
+    sc = ax2.scatter(tte_h, peak_corrs, c=[r["peak_lag_s"] for r in results], cmap="viridis", alpha=0.7, s=25)
     cbar = plt.colorbar(sc, ax=ax2)
     cbar.ax.yaxis.set_tick_params(color="#e6edf3")
     plt.setp(cbar.ax.yaxis.get_ticklabels(), color="#e6edf3")
@@ -803,10 +803,11 @@ def _plot_perp_spot_xcorr(results: list[dict]) -> matplotlib.figure.Figure:
                 all_lags,
                 np.nanpercentile(corr_arr, 25, axis=0),
                 np.nanpercentile(corr_arr, 75, axis=0),
-                alpha=0.3, color="#3fb950", label="IQR"
+                alpha=0.3,
+                color="#3fb950",
+                label="IQR",
             )
-            ax0.plot(all_lags, np.nanmedian(corr_arr, axis=0),
-                     color="#3fb950", linewidth=2, label="Median")
+            ax0.plot(all_lags, np.nanmedian(corr_arr, axis=0), color="#3fb950", linewidth=2, label="Median")
             ax0.axhline(0, color="#30363d", linewidth=0.8)
             ax0.axvline(0, color="#8b949e", linewidth=0.8, linestyle="--")
     ax0.set_xlabel("Lag (grid steps @ 5s, positive = spot's past)")
@@ -815,11 +816,9 @@ def _plot_perp_spot_xcorr(results: list[dict]) -> matplotlib.figure.Figure:
     ax0.legend(fontsize=8, labelcolor="#e6edf3", facecolor="#161b22")
 
     ax1 = axes[1]
-    peak_lags = [r["peak_lag_s"] for r in results if r.get("peak_lag_s") is not None]
     leaders = [r.get("leader", "unknown") for r in results]
     leader_counts = {l: sum(1 for x in leaders if x == l) for l in set(leaders)}
-    ax1.bar(list(leader_counts.keys()), list(leader_counts.values()),
-            color="#3fb950", alpha=0.8, edgecolor="#30363d")
+    ax1.bar(list(leader_counts.keys()), list(leader_counts.values()), color="#3fb950", alpha=0.8, edgecolor="#30363d")
     ax1.set_xlabel("Leader")
     ax1.set_ylabel("Count (days)")
     ax1.set_title("Which venue leads? (perp vs spot)")
@@ -849,8 +848,9 @@ def _plot_hedge_ratio(results: list[dict]) -> matplotlib.figure.Figure:
     ax0 = axes[0]
     if hedge_ratios:
         ax0.hist(hedge_ratios, bins=20, color="#f78166", alpha=0.8, edgecolor="#30363d")
-        ax0.axvline(np.nanmedian(hedge_ratios), color="#58a6ff", linewidth=1.5,
-                    label=f"Median={np.nanmedian(hedge_ratios):.2f}")
+        ax0.axvline(
+            np.nanmedian(hedge_ratios), color="#58a6ff", linewidth=1.5, label=f"Median={np.nanmedian(hedge_ratios):.2f}"
+        )
         ax0.axvline(1.0, color="#3fb950", linewidth=1.0, linestyle="--", label="Ideal=1.0")
     ax0.set_xlabel("Hedge Ratio ∂binary/∂model_prob")
     ax0.set_ylabel("Count")
@@ -861,8 +861,13 @@ def _plot_hedge_ratio(results: list[dict]) -> matplotlib.figure.Figure:
     if hedge_ratios and tte_h:
         ax1.scatter(tte_h, hedge_ratios, color="#f78166", alpha=0.7, s=25)
         ax1.axhline(1.0, color="#3fb950", linewidth=1.0, linestyle="--", label="Ideal=1.0")
-        ax1.axhline(np.nanmedian(hedge_ratios), color="#58a6ff", linewidth=1.0,
-                    linestyle=":", label=f"Median={np.nanmedian(hedge_ratios):.2f}")
+        ax1.axhline(
+            np.nanmedian(hedge_ratios),
+            color="#58a6ff",
+            linewidth=1.0,
+            linestyle=":",
+            label=f"Median={np.nanmedian(hedge_ratios):.2f}",
+        )
     ax1.set_xlabel("Mean TTE (hours)")
     ax1.set_ylabel("Hedge Ratio")
     ax1.set_title("Hedge Ratio vs TTE")
@@ -902,21 +907,30 @@ def _plot_tte_dependence(results: list[dict], dt_s: int = 5) -> matplotlib.figur
     ax0, ax1 = axes[0], axes[1]
 
     # Peak lead time by bucket
-    medians_lag = [np.nanmedian(bucket_data[b]["peak_lags"]) if bucket_data[b]["peak_lags"] else np.nan
-                   for b in buckets]
+    medians_lag = [
+        np.nanmedian(bucket_data[b]["peak_lags"]) if bucket_data[b]["peak_lags"] else np.nan for b in buckets
+    ]
     counts = [len(bucket_data[b]["peak_lags"]) for b in buckets]
     bars = ax0.bar(buckets, medians_lag, color=colors, alpha=0.8, edgecolor="#30363d")
     for bar, cnt in zip(bars, counts):
         if np.isfinite(bar.get_height()):
-            ax0.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.1,
-                     f"n={cnt}", ha="center", va="bottom", fontsize=8, color="#e6edf3")
+            ax0.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.1,
+                f"n={cnt}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                color="#e6edf3",
+            )
     ax0.set_xlabel("TTE Bucket")
     ax0.set_ylabel("Median Peak Lead Time (seconds)")
     ax0.set_title("Perp→Binary Lead Time by TTE")
 
     # Hedge ratio by bucket
-    medians_hr = [np.nanmedian(bucket_data[b]["hedge_ratios"]) if bucket_data[b]["hedge_ratios"] else np.nan
-                  for b in buckets]
+    medians_hr = [
+        np.nanmedian(bucket_data[b]["hedge_ratios"]) if bucket_data[b]["hedge_ratios"] else np.nan for b in buckets
+    ]
     ax1.bar(buckets, medians_hr, color=colors, alpha=0.8, edgecolor="#30363d")
     ax1.axhline(1.0, color="#8b949e", linewidth=1.0, linestyle="--", label="Ideal=1.0")
     ax1.set_xlabel("TTE Bucket")
@@ -1009,18 +1023,11 @@ def build_card(
     dt_s = 5  # 5-second grid
 
     # Full corpus analysis
-    pb_results, ps_results = _run_leadlag_analysis(
-        con, data_root, binaries, CORPUS_START, CORPUS_END, dt_s=dt_s
-    )
+    pb_results, ps_results = _run_leadlag_analysis(con, data_root, binaries, CORPUS_START, CORPUS_END, dt_s=dt_s)
 
     _log.info("Card C: %d perp→binary results, %d perp-vs-spot results", len(pb_results), len(ps_results))
 
     # Split-half analysis
-    import datetime as dt_mod
-
-    split_mid_ns = int(
-        dt_mod.datetime.strptime(SPLIT_MID, "%Y-%m-%d").replace(tzinfo=dt_mod.UTC).timestamp() * _NS
-    )
     pb_first = [r for r in pb_results if r.get("half_period") == "first"]
     pb_second = [r for r in pb_results if r.get("half_period") == "second"]
 
@@ -1032,16 +1039,11 @@ def build_card(
             return {}
         peak_lags = np.array([r["peak_lag_s"] for r in results], dtype="float64")
         peak_corrs = np.array([r["peak_corr"] for r in results], dtype="float64")
-        corr_lag0s = np.array(
-            [r.get("corr_lag0", r["peak_corr"]) for r in results], dtype="float64"
-        )
+        corr_lag0s = np.array([r.get("corr_lag0", r["peak_corr"]) for r in results], dtype="float64")
         half_lives = np.array(
-            [r["half_life_s"] if r["half_life_s"] is not None else np.nan for r in results],
-            dtype="float64"
+            [r["half_life_s"] if r["half_life_s"] is not None else np.nan for r in results], dtype="float64"
         )
-        hedge_ratios = np.array(
-            [r["hedge_ratio"] for r in results], dtype="float64"
-        )
+        hedge_ratios = np.array([r["hedge_ratio"] for r in results], dtype="float64")
         valid_hr = hedge_ratios[np.isfinite(hedge_ratios)]
         return {
             "n": len(results),
@@ -1150,32 +1152,38 @@ def build_card(
 
     if full_ps:
         leader_str = "perp" if full_ps.get("frac_perp_leads", 0) > 0.5 else "spot"
-        metrics.append({
-            "name": "perp_vs_spot_leader",
-            "value": leader_str,
-            "n": full_ps.get("n", 0),
-            "date_span": date_span,
-            "sanity": f"perp_leads={full_ps.get('frac_perp_leads', 0):.1%} days",
-        })
-        metrics.append({
-            "name": "perp_spot_peak_lag_median_s",
-            "value": _fmt(full_ps.get("median_peak_lag_s"), ".1f") + "s",
-            "n": full_ps.get("n", 0),
-            "date_span": date_span,
-            "sanity": "negative = perp leads spot; after 223ms latency correction",
-        })
+        metrics.append(
+            {
+                "name": "perp_vs_spot_leader",
+                "value": leader_str,
+                "n": full_ps.get("n", 0),
+                "date_span": date_span,
+                "sanity": f"perp_leads={full_ps.get('frac_perp_leads', 0):.1%} days",
+            }
+        )
+        metrics.append(
+            {
+                "name": "perp_spot_peak_lag_median_s",
+                "value": _fmt(full_ps.get("median_peak_lag_s"), ".1f") + "s",
+                "n": full_ps.get("n", 0),
+                "date_span": date_span,
+                "sanity": "negative = perp leads spot; after 223ms latency correction",
+            }
+        )
 
     if taker:
-        metrics.append({
-            "name": "taker_signal_r2",
-            "value": _fmt(taker.get("median_r2"), ".3f"),
-            "n": taker.get("n_expiries", 0),
-            "date_span": date_span,
-            "sanity": (
-                f"edge_net={_fmt(taker.get('edge_net_of_half_spread'), '.4f')} after {BINARY_HALF_SPREAD_TYPICAL:.3f} half-spread; "
-                f"survives_spread={taker.get('survives_half_spread')}"
-            ),
-        })
+        metrics.append(
+            {
+                "name": "taker_signal_r2",
+                "value": _fmt(taker.get("median_r2"), ".3f"),
+                "n": taker.get("n_expiries", 0),
+                "date_span": date_span,
+                "sanity": (
+                    f"edge_net={_fmt(taker.get('edge_net_of_half_spread'), '.4f')} after {BINARY_HALF_SPREAD_TYPICAL:.3f} half-spread; "
+                    f"survives_spread={taker.get('survives_half_spread')}"
+                ),
+            }
+        )
 
     # Split-half
     def _sh_metric(key: str, first: dict, second: dict, fmt: str = ".2f") -> dict:
@@ -1183,7 +1191,8 @@ def build_card(
         v2 = second.get(key)
         stable = (
             (v1 is not None and v2 is not None)
-            and np.isfinite(v1) and np.isfinite(v2)
+            and np.isfinite(v1)
+            and np.isfinite(v2)
             and (abs(v1 - v2) / (abs(v1) + 1e-10) < 0.5)  # <50% relative change
         )
         return {
@@ -1223,7 +1232,7 @@ def build_card(
     verdict_parts = []
     if full_pb:
         lag0_corr = full_pb.get("median_corr_lag0", full_pb.get("median_peak_corr", 0))
-        r2 = lag0_corr ** 2
+        r2 = lag0_corr**2
         hl_s = full_pb.get("median_half_life_s")
         sh = split_half.get("contemporaneous_xcorr", {}).get("stable", False)
         verdict_parts.append(
@@ -1287,17 +1296,17 @@ def build_card(
     summary_html = (
         f"<p><strong>Corpus:</strong> {date_span} — {n_binaries} binary expiries, "
         f"{len(pb_results)} with sufficient data for xcorr.</p>"
-        f"<p><strong>Grid resolution:</strong> {dt_s}s. Lags: −{MAX_LAG_STEPS*dt_s}s .. +{MAX_LAG_STEPS*dt_s}s.</p>"
-        f"<p><strong>Latency corrections:</strong> HL perp −{HL_PERP_LATENCY_NS/1e6:.0f}ms, "
-        f"Binary −{HL_BINARY_LATENCY_NS/1e6:.0f}ms, Binance spot: exchange_ts=0 sentinel (no correction).</p>"
+        f"<p><strong>Grid resolution:</strong> {dt_s}s. Lags: −{MAX_LAG_STEPS * dt_s}s .. +{MAX_LAG_STEPS * dt_s}s.</p>"
+        f"<p><strong>Latency corrections:</strong> HL perp −{HL_PERP_LATENCY_NS / 1e6:.0f}ms, "
+        f"Binary −{HL_BINARY_LATENCY_NS / 1e6:.0f}ms, Binance spot: exchange_ts=0 sentinel (no correction).</p>"
         + metrics_html
     )
     rpt.add_card("Summary & KPIs", summary_html)
 
     # Split-half
     sh_html = (
-        f"<p>Split: first half {CORPUS_START}..2026-05-23 ({first_pb.get('n',0)} expiries), "
-        f"second half {SPLIT_MID}..{CORPUS_END} ({second_pb.get('n',0)} expiries).</p>"
+        f"<p>Split: first half {CORPUS_START}..2026-05-23 ({first_pb.get('n', 0)} expiries), "
+        f"second half {SPLIT_MID}..{CORPUS_END} ({second_pb.get('n', 0)} expiries).</p>"
         + _split_half_table_html(split_half)
     )
     rpt.add_card("Split-Half Stability", sh_html)
@@ -1321,14 +1330,18 @@ def build_card(
 
     # MM implication + taker signal
     taker_html = (
-        f"<p>{mm_refresh_speed_note}</p>"
-        f"<p><strong>Taker signal:</strong> "
-        f"R²={_fmt(taker.get('median_r2'), '.3f')}, "
-        f"n={taker.get('n_expiries', 0)} expiries, "
-        f"best lag={_fmt(taker.get('median_peak_lag_s'), '.0f')}s, "
-        f"edge_net={_fmt(taker.get('edge_net_of_half_spread'), '.4f')} "
-        f"({'POSITIVE' if taker.get('survives_half_spread') else 'negative'} after {BINARY_HALF_SPREAD_TYPICAL:.3f} half-spread).</p>"
-    ) if taker else "<p>Insufficient data for taker signal analysis.</p>"
+        (
+            f"<p>{mm_refresh_speed_note}</p>"
+            f"<p><strong>Taker signal:</strong> "
+            f"R²={_fmt(taker.get('median_r2'), '.3f')}, "
+            f"n={taker.get('n_expiries', 0)} expiries, "
+            f"best lag={_fmt(taker.get('median_peak_lag_s'), '.0f')}s, "
+            f"edge_net={_fmt(taker.get('edge_net_of_half_spread'), '.4f')} "
+            f"({'POSITIVE' if taker.get('survives_half_spread') else 'negative'} after {BINARY_HALF_SPREAD_TYPICAL:.3f} half-spread).</p>"
+        )
+        if taker
+        else "<p>Insufficient data for taker signal analysis.</p>"
+    )
     rpt.add_card("MM Implication & Taker Signal", taker_html)
 
     # Verdict
@@ -1375,9 +1388,9 @@ def build_card(
     card_html = rpt._HTML_TEMPLATE.format(
         title="Card C — Cross-Venue Lead-Lag",
         css=rpt._DARK_CSS,
-        generated_at=__import__("datetime").datetime.now(tz=__import__("datetime").timezone.utc).strftime(
-            "%Y-%m-%d %H:%M UTC"
-        ),
+        generated_at=__import__("datetime")
+        .datetime.now(tz=__import__("datetime").timezone.utc)
+        .strftime("%Y-%m-%d %H:%M UTC"),
         cards="\n".join(
             rpt._CARD_TEMPLATE.format(
                 title=c["title"],
@@ -1426,7 +1439,7 @@ def main() -> None:
     if findings.get("metrics"):
         print("\nKey metrics:")
         for m in findings["metrics"]:
-            print(f"  {m['name']}: {m['value']} (n={m.get('n')}, {m.get('date_span')}) — {m.get('sanity','')}")
+            print(f"  {m['name']}: {m['value']} (n={m.get('n')}, {m.get('date_span')}) — {m.get('sanity', '')}")
     print(f"\nVerdict:\n{findings.get('verdict', 'N/A')}")
     sys.exit(0)
 

@@ -8,7 +8,6 @@ Light tests:
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import duckdb
@@ -38,14 +37,14 @@ def _import_card():
 
 
 def _import_internals():
-    from hlanalysis.research.cards.card_c_leadlag import (
+    from hlanalysis.research.cards.card_c_leadlag import (  # noqa: F401
         BINARY_HALF_SPREAD_TYPICAL,
         HL_BINARY_LATENCY_NS,
         HL_PERP_LATENCY_NS,
         _compute_hedge_ratio,
         _compute_perp_vs_spot_xcorr,
-        _compute_xcorr_for_expiry,
         _compute_taker_signal,
+        _compute_xcorr_for_expiry,
         _model_prob_series,
         _parkinson_sigma_rolling,
         _tte_bucket,
@@ -280,16 +279,17 @@ class TestXcorrForExpiry:
         sigma = 0.50
         tau_s = (expiry_ns - ts) / 1_000_000_000
 
-        probs = np.array([
-            implied_prob_gbm(float(p), target, sigma, float(t))
-            for p, t in zip(perp_df["mid"].to_numpy(), tau_s)
-        ])
+        probs = np.array(
+            [implied_prob_gbm(float(p), target, sigma, float(t)) for p, t in zip(perp_df["mid"].to_numpy(), tau_s)]
+        )
         # Shift by lag_steps
         lagged_probs = np.roll(probs, lag_steps)
         lagged_probs[:lag_steps] = probs[:lag_steps]
         binary_mid = lagged_probs + np.random.randn(len(ts)) * noise
         binary_mid = np.clip(binary_mid, 0.01, 0.99)
-        return pd.DataFrame({"ts_ns": ts, "mid": binary_mid, "bid_px": binary_mid - 0.005, "ask_px": binary_mid + 0.005})
+        return pd.DataFrame(
+            {"ts_ns": ts, "mid": binary_mid, "bid_px": binary_mid - 0.005, "ask_px": binary_mid + 0.005}
+        )
 
     def test_returns_dict_on_valid_data(self) -> None:
         from hlanalysis.research.cards.card_c_leadlag import _compute_xcorr_for_expiry
@@ -300,14 +300,26 @@ class TestXcorrForExpiry:
         result = _compute_xcorr_for_expiry(perp_df, binary_df, 80000.0, expiry_ns, dt_s=5)
         # Should return a dict with required fields
         assert result is not None
-        required = {"lags", "corrs", "peak_lag_steps", "peak_lag_s", "peak_corr",
-                    "half_life_steps", "half_life_s", "n_valid_steps", "tte_mean_h", "hedge_ratio"}
+        required = {
+            "lags",
+            "corrs",
+            "peak_lag_steps",
+            "peak_lag_s",
+            "peak_corr",
+            "half_life_steps",
+            "half_life_s",
+            "n_valid_steps",
+            "tte_mean_h",
+            "hedge_ratio",
+        }
         assert required.issubset(set(result.keys()))
 
     def test_returns_none_on_empty_perp(self) -> None:
         from hlanalysis.research.cards.card_c_leadlag import _compute_xcorr_for_expiry
 
-        result = _compute_xcorr_for_expiry(pd.DataFrame(), pd.DataFrame(columns=["ts_ns", "mid"]), 80000.0, 10**18, dt_s=5)
+        result = _compute_xcorr_for_expiry(
+            pd.DataFrame(), pd.DataFrame(columns=["ts_ns", "mid"]), 80000.0, 10**18, dt_s=5
+        )
         assert result is None
 
     def test_peak_corr_in_valid_range(self) -> None:
@@ -348,8 +360,7 @@ class TestBuildCardSchema:
         build_card = _import_card()
         con = duckdb.connect()
         _, findings = build_card(con, str(_DATA_ROOT))
-        required = {"title", "headline", "metrics", "split_half", "verdict",
-                    "latency_corrections", "mm_implication"}
+        required = {"title", "headline", "metrics", "split_half", "verdict", "latency_corrections", "mm_implication"}
         assert required.issubset(set(findings.keys())), f"Missing keys: {required - set(findings.keys())}"
 
     @_data_skip

@@ -93,7 +93,7 @@ Last updated: <b>2026-06-13 · setup</b></p>
     <span class="muted">Gate PASSED: tests green + smoke HTML renders correct labels.</span>
   </div>
   <div class="panel">
-    <span class="pill run">running</span> &nbsp;<b>Wave 1 — Characterization</b>
+    <span class="pill done">done</span> &nbsp;<b>Wave 1 — Characterization (6/6)</b>
     <span class="tag">sonnet ×6</span>
     <ul>
       <li><span class="pill done">done</span> <b>E</b> Settlement convergence — FLB taker edge confirmed (keystone)</li>
@@ -101,7 +101,7 @@ Last updated: <b>2026-06-13 · setup</b></p>
       <li><span class="pill done">done</span> <b>F</b> Vol/theta — +14% vol premium, regime sizing r=0.53</li>
       <li><span class="pill done">done</span> <b>B</b> Adverse selection — FLB edge survives (≈9.85pp net); MM also +EV</li>
       <li><span class="pill done">done</span> <b>A</b> Liquidity — WIDE_SPARSE; MM viable $100–500/side, perp hedge unlimited</li>
-      <li><span class="pill run">running</span> <b>C</b> Cross-venue lead-lag perp→outcome <span class="muted">(MM)</span></li>
+      <li><span class="pill done">done</span> <b>C</b> Lead-lag — sub-1s perp→binary, hedge ratio 0.50; perp-taker ruled out</li>
     </ul>
   </div>
   <div class="panel">
@@ -109,8 +109,8 @@ Last updated: <b>2026-06-13 · setup</b></p>
     <span class="tag">sonnet ×N</span>
     <ul>
       <li><span class="pill run">running</span> <b>Taker</b> FLB favorite-buy: walk-forward OOS backtest on recorded HL binary book vs v1/v31 baselines + vol-regime sizing</li>
-      <li><span class="pill wait">queued</span> <b>MM</b> Quoter + HL-perp hedge (maker +EV per Card B; awaits A/C)</li>
-      <li><span class="pill wait">queued</span> <b>Cross-market arb</b> — likely dropped (Card D: no static arb net-of-fee)</li>
+      <li><span class="pill run">running</span> <b>MM</b> Quoter + HL-perp hedge (lightweight sim; maker +EV Card B, WIDE_SPARSE Card A, hedge 0.50 / &lt;1s Card C)</li>
+      <li><span class="kill pill">dropped</span> <b>Cross-market arb &amp; perp-momentum taker</b> — killed by data (Card D no static arb; Card C perp-taker −0.36pp net)</li>
     </ul>
   </div>
   <div class="panel">
@@ -210,6 +210,17 @@ Last updated: <b>2026-06-13 · setup</b></p>
   <tr><td><b>MM room ($1k–$25k)</b></td><td>regime <b>WIDE_SPARSE</b> · $100–500/side × 5–10 expiries = $500–$5k exposure</td><td><b>MM viable</b> but wide-yet-shallow → adverse-selection discipline (Card C) is the whole game.</td></tr>
   </table>
   <p class="muted">Card: <code>docs/research/_cards/card_a.html</code> · Split-half stable.</p>
+
+  <h3 style="margin-top:18px">Card C — Cross-venue lead-lag <span class="pill done">done</span></h3>
+  <table>
+  <tr><th>Metric</th><th>Result (n, span)</th><th>Read</th></tr>
+  <tr><td>Perp → binary lead</td><td><b>sub-second</b> (lag=0 @1s grid) · half-life 1–2s · xcorr 0.283 stable</td><td>Binary tracks perp almost instantly.</td></tr>
+  <tr><td><b>Hedge ratio</b> ∂binary/∂model_prob</td><td><b>≈0.50</b> (std 0.18) · stable H1 0.45 / H2 0.57</td><td>Clean delta hedge on HL perp; binary ~half as elastic as model (spread damping).</td></tr>
+  <tr><td>MM quote-refresh need</td><td><b>&lt;1s</b> to avoid perp-informed pick-off · HL RTT 100–500ms fits</td><td><b>MM hedge feasible</b> — but current engine is 1Hz → infra gap to note.</td></tr>
+  <tr><td>Perp-momentum taker</td><td>R²=0.08 · net edge <b>−0.36pp</b> (vs half-spread)</td><td>Dead end — does NOT survive the binary spread. Ruled out.</td></tr>
+  <tr><td>TTE coverage caveat</td><td>C's panel thin at 2–8h</td><td class="amber">Windowing artifact (B/E/A show thousands of 1–6h trades); Wave-2 backtest must confirm 1–6h fills.</td></tr>
+  </table>
+  <p class="muted">Card: <code>docs/research/_cards/card_c.html</code> · <b>Wave 1 complete (6/6).</b></p>
 </div>
 
 <h2>Strategy scorecard</h2>
@@ -227,7 +238,8 @@ Last updated: <b>2026-06-13 · setup</b></p>
   <li><span class="ts">2026-06-13 E✓</span> — Card E done (keystone): favourite-longshot bias, buy favorites 0.80–0.95 @1–6h = +6–17pp net, fee-free, split-half stable. Taker thesis locked across D+E+F.</li>
   <li><span class="ts">2026-06-13 W1b</span> — Launched MM-leaning trio B, A, C.</li>
   <li><span class="ts">2026-06-13 B✓</span> — Card B done: FLB taker edge SURVIVES adverse selection (net ≈9.85pp); maker side also +EV. Taker thesis fully validated on analysis side.</li>
-  <li><span class="ts">2026-06-13 W2</span> — Launched Wave 2 taker backtest (FLB favorite-buy, walk-forward OOS). A &amp; C still running.</li>
+  <li><span class="ts">2026-06-13 W2</span> — Launched Wave 2 taker backtest (FLB favorite-buy, walk-forward OOS).</li>
+  <li><span class="ts">2026-06-13 A✓C✓</span> — Wave 1 complete (6/6). A: WIDE_SPARSE, MM viable. C: sub-1s perp→binary, hedge 0.50, perp-momentum taker ruled out. Launched MM candidate sim.</li>
 </ul>
 </div>
 
