@@ -570,8 +570,10 @@ def test_safety_d_drift_upper_bounded_subtracts_mu_tau():
     assert math.isclose(d, expected, rel_tol=1e-9)
 
 
-def test_safety_d_drift_ignored_for_middle_bucket():
-    # Two-sided region has no single adverse direction → drift dropped.
+def test_safety_d_drift_applied_for_middle_bucket():
+    # Two-sided region: drift_aware=True now incorporates drift on both bounds
+    # consistently with the one-sided handling. Positive mu trending toward hi
+    # reduces the hi-side safety distance, so d_with_drift < d_no_drift.
     d_no_drift = _safety_d_for_region(
         ref_price=79_500.0,
         lo=77_991.0,
@@ -591,7 +593,21 @@ def test_safety_d_drift_ignored_for_middle_bucket():
         drift_aware=True,
     )
     assert d_no_drift is not None and d_with_drift is not None
-    assert math.isclose(d_no_drift, d_with_drift, rel_tol=1e-9)
+    # Drift MUST now change the two-sided result (was a bug that it didn't).
+    assert not math.isclose(d_no_drift, d_with_drift, rel_tol=1e-6)
+    # drift_aware=False with mu=0 is still pure geometry.
+    d_baseline = _safety_d_for_region(
+        ref_price=79_500.0,
+        lo=77_991.0,
+        hi=81_174.0,
+        sigma_window=1.0,
+        mu=0.01,
+        tte_min=100.0,
+        drift_aware=False,
+    )
+    # drift_aware=False must be invariant to mu (no drift applied).
+    assert d_baseline is not None
+    assert math.isclose(d_no_drift, d_baseline, rel_tol=1e-9)
 
 
 def test_safety_d_unbounded_returns_none():
@@ -788,11 +804,14 @@ def test_size_cap_disabled_by_default_no_change_in_size():
     # Near-strike low-ask entry with default cap (pct=0) should produce the
     # full size: floor(100 / 0.86 * 100)/100 = 116.27 contracts. Notional
     # = 116.27 * 0.86 = $99.99, within the $100 cap.
+    # distance_from_strike_usd_min=0 disables the USD-distance gate so this
+    # near-strike scenario (ref=80_100, strike=80_000, $100 apart) can exercise
+    # the size-cap logic without being vetoed first.
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
     books = _cap_books(yes_ask=0.86, no_ask=0.14, ts_ns=now - 100)
-    cfg = _cfg(price_extreme_threshold=0.80, min_recent_volume_usd=0.0)
+    cfg = _cfg(price_extreme_threshold=0.80, min_recent_volume_usd=0.0, distance_from_strike_usd_min=0.0)
     d = LateResolutionStrategy(cfg).evaluate(
         question=q,
         books=books,
@@ -811,6 +830,8 @@ def test_size_cap_disabled_by_default_no_change_in_size():
 def test_size_cap_halves_size_on_near_strike_low_ask_entry():
     # BTC at 80_100, strike 80_000 → dist_pct = 0.125% < 1.5%.
     # YES ask 0.86 < 0.88 (min_ask). pct=0.5 → scale 0.5 → size 50.
+    # distance_from_strike_usd_min=0 disables the USD-distance veto so the
+    # near-strike scenario ($100 from strike) can reach the size-cap logic.
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
@@ -818,6 +839,7 @@ def test_size_cap_halves_size_on_near_strike_low_ask_entry():
     cfg = _cfg(
         price_extreme_threshold=0.80,
         min_recent_volume_usd=0.0,
+        distance_from_strike_usd_min=0.0,
         size_cap_near_strike_pct=0.5,
         size_cap_max_dist_pct=1.5,
         size_cap_min_ask=0.88,
@@ -840,6 +862,8 @@ def test_size_cap_halves_size_on_near_strike_low_ask_entry():
 
 def test_size_cap_does_not_apply_when_ask_above_min_ask():
     # Same near-strike setup but ask 0.95 ≥ 0.88 → cap does NOT apply.
+    # distance_from_strike_usd_min=0 disables the USD-distance veto so the
+    # near-strike scenario ($100 from strike) can reach the size-cap logic.
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
@@ -847,6 +871,7 @@ def test_size_cap_does_not_apply_when_ask_above_min_ask():
     cfg = _cfg(
         price_extreme_threshold=0.80,
         min_recent_volume_usd=0.0,
+        distance_from_strike_usd_min=0.0,
         size_cap_near_strike_pct=0.5,
         size_cap_max_dist_pct=1.5,
         size_cap_min_ask=0.88,
@@ -901,6 +926,8 @@ def test_size_cap_does_not_apply_when_far_from_strike():
 
 def test_size_cap_works_on_no_leg_for_binary():
     # BTC just below strike → NO wins. NO ask 0.86 < 0.88 → cap applies → size halved.
+    # distance_from_strike_usd_min=0 disables the USD-distance veto so the
+    # near-strike scenario (ref=79_900, $100 from strike) can reach the size-cap logic.
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
@@ -908,6 +935,7 @@ def test_size_cap_works_on_no_leg_for_binary():
     cfg = _cfg(
         price_extreme_threshold=0.80,
         min_recent_volume_usd=0.0,
+        distance_from_strike_usd_min=0.0,
         size_cap_near_strike_pct=0.5,
         size_cap_max_dist_pct=1.5,
         size_cap_min_ask=0.88,
@@ -929,6 +957,8 @@ def test_size_cap_works_on_no_leg_for_binary():
 
 
 def test_size_cap_emits_diagnostic_when_active():
+    # distance_from_strike_usd_min=0 disables the USD-distance veto so the
+    # near-strike scenario ($100 from strike) can reach the size-cap logic.
     now = 10_000_000_000_000
     expiry = now + 600 * 1_000_000_000
     q = _q(strike=80_000.0, expiry_ns=expiry)
@@ -936,6 +966,7 @@ def test_size_cap_emits_diagnostic_when_active():
     cfg = _cfg(
         price_extreme_threshold=0.80,
         min_recent_volume_usd=0.0,
+        distance_from_strike_usd_min=0.0,
         size_cap_near_strike_pct=0.5,
         size_cap_max_dist_pct=1.5,
         size_cap_min_ask=0.88,

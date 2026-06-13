@@ -55,10 +55,9 @@ def test_safety_d_upper_bounded(drift_aware, mu, tte_min):
     assert math.isclose(got, expected, rel_tol=1e-12, abs_tol=0.0)
 
 
-@pytest.mark.parametrize("drift_aware", [False, True])
-def test_safety_d_middle_bucket_drops_drift(drift_aware):
-    # Middle (two-sided) bucket: nearest adverse boundary, drift NOT applied
-    # regardless of drift_aware.
+def test_safety_d_middle_bucket_no_drift_is_pure_geometry():
+    # Middle (two-sided) bucket with drift_aware=False: nearest adverse
+    # boundary only, no drift applied.
     got = ref_fn(
         ref_price=79_500.0,
         lo=77_991.0,
@@ -66,7 +65,7 @@ def test_safety_d_middle_bucket_drops_drift(drift_aware):
         sigma_window=1.0,
         mu=0.01,
         tte_min=100.0,
-        drift_aware=drift_aware,
+        drift_aware=False,
     )
     expected = min(
         math.log(79_500.0 / 77_991.0),
@@ -74,6 +73,41 @@ def test_safety_d_middle_bucket_drops_drift(drift_aware):
     )
     assert got is not None
     assert math.isclose(got, expected, rel_tol=1e-12, abs_tol=0.0)
+
+
+def test_safety_d_middle_bucket_drift_aware_applies_drift():
+    # Middle (two-sided) bucket with drift_aware=True: drift is now incorporated
+    # on both bounds. Positive mu → hi-side safety shrinks → min changes vs no-drift.
+    mu = 0.01
+    tte_min = 100.0
+    got_drift = ref_fn(
+        ref_price=79_500.0,
+        lo=77_991.0,
+        hi=81_174.0,
+        sigma_window=1.0,
+        mu=mu,
+        tte_min=tte_min,
+        drift_aware=True,
+    )
+    got_no_drift = ref_fn(
+        ref_price=79_500.0,
+        lo=77_991.0,
+        hi=81_174.0,
+        sigma_window=1.0,
+        mu=mu,
+        tte_min=tte_min,
+        drift_aware=False,
+    )
+    # With drift applied, d_hi = ln(hi/ref) - mu*tte_min = 0.021 - 1.0 = -0.979
+    # which is much smaller than d_lo = 0.019 + 1.0 = 1.019. min → -0.979.
+    expected_d_lo = math.log(79_500.0 / 77_991.0) + mu * tte_min
+    expected_d_hi = math.log(81_174.0 / 79_500.0) - mu * tte_min
+    expected = min(expected_d_lo, expected_d_hi)
+    assert got_drift is not None
+    assert math.isclose(got_drift, expected, rel_tol=1e-12, abs_tol=0.0)
+    # Must differ from the no-drift case.
+    assert got_no_drift is not None
+    assert not math.isclose(got_drift, got_no_drift, rel_tol=1e-6)
 
 
 def test_safety_d_middle_bucket_adverse_negative():

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from dataclasses import replace as _dc_replace
 from pathlib import Path
 
@@ -183,6 +184,13 @@ class Router:
         try:
             with open(tmp, "w") as f:
                 json.dump({str(k): v for k, v in self._last_exit_ts.items()}, f)
+                # Finding #38: flush the userspace buffer then fsync the fd
+                # before os.replace so a power-loss between write and rename
+                # cannot produce a zero-length (or corrupt) cooldown file. The
+                # with-block keeps the fd open until after the flush+fsync so
+                # the OS doesn't coalesce the writes with later I/O.
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, path)
         except OSError as e:
             logger.warning("failed to persist exit_cooldowns.json: {}", e)
@@ -604,22 +612,50 @@ class Router:
             )
         )
 
-    def prune(self, active_question_idxs: set[int]) -> None:
-        """Drop per-question cache entries for question_idxs no longer active.
+    def prune(self, active_question_idxs: set[int], *, now_ns: int | None = None) -> None:
+        """Drop per-question cache entries for question_idxs no longer active,
+        and expire elapsed cooldown entries by TTL (finding #38).
 
         Wiring choice: same as Scanner.prune — an explicit method rather than
         hooking into MarketState's eviction, so all eviction logic stays within
-        the owned files (no edits to runtime.py required).  The caller passes the
+        the owned files (no edits to runtime.py required). The caller passes the
         current active set; Router removes stale entries from _last_exit_ts and
-        the reject-breaker dicts (keyed by (qidx, side)).  Cooldowns for active
-        questions are untouched.  Note: _last_exit_ts is also persisted to disk
-        (exit_cooldowns.json); prune() does NOT rewrite the file — entries there
-        are harmless (they only extend a cooldown for a question that no longer
-        exists) and a disk write on every eviction is wasteful.
+        the reject-breaker dicts (keyed by (qidx, side)).
+
+        TTL expiry (finding #38): entries whose cooldown window has already
+        elapsed are removed regardless of whether the question is still active.
+        Without this, _last_exit_ts grows unbounded — every closed question
+        leaves a permanent entry in memory and on disk. The entry is only useful
+        while the cooldown is active; once elapsed it is dead weight. If
+        entry_cooldown_seconds is 0 (disabled), no entries are TTL-pruned (the
+        gate is already bypassed in handle()). After removing any expired entries
+        the pruned map is persisted to disk so a restart doesn't reload them.
         """
+        _now_ns = now_ns if now_ns is not None else time.time_ns()
+        cooldown_s = getattr(self.strategy_cfg.defaults, "entry_cooldown_seconds", 0) or 0
+
+        # 1. Inactivity eviction (existing behaviour): drop entries for question
+        #    idxs that are no longer in the active market set.
         stale_qidxs = {idx for idx in self._last_exit_ts if idx not in active_question_idxs}
         for idx in stale_qidxs:
             self._last_exit_ts.pop(idx, None)
+
+        # 2. TTL expiry (finding #38): remove entries whose cooldown window has
+        #    already elapsed, even if the question is still active. This keeps
+        #    the map bounded and the on-disk JSON compact.
+        if cooldown_s > 0:
+            expired_qidxs = [
+                idx for idx, last_exit in self._last_exit_ts.items() if (_now_ns - last_exit) / 1e9 >= cooldown_s
+            ]
+            for idx in expired_qidxs:
+                self._last_exit_ts.pop(idx, None)
+
+        # 3. Persist the pruned map so a restart loads the trimmed version.
+        #    Only write when something was actually removed to avoid a disk write
+        #    on every prune call in the common no-change case.
+        if stale_qidxs or (cooldown_s > 0 and expired_qidxs):
+            self._save_cooldowns()
+
         stale_breaker_keys = [k for k in self._consecutive_rejects if k[0] not in active_question_idxs]
         for k in stale_breaker_keys:
             self._consecutive_rejects.pop(k, None)

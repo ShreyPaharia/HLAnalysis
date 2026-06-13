@@ -295,6 +295,17 @@ class Scanner:
         all_positions_strategy = [self._db_pos_to_strategy(p) for p in positions_db]
         live_orders = self.dal.live_orders()
         live_notional = sum(o.price * o.size for o in live_orders)
+        # Finding #28: In-tick pending-position budget tracking.
+        # The DB snapshot (all_positions_strategy) is taken once before the
+        # question loop. Without correction, two questions that both fire ENTER
+        # in the same tick both see the same 0-position snapshot and both pass
+        # the concurrent-positions cap — collectively breaching it. Fix: track
+        # pending entry intents within this tick and augment the positions list
+        # passed to RiskInputs so later intents see the reduced budget.
+        # An entry intent is counted as "consuming a slot" even if the Router
+        # later vetoes it for another reason — conservative but correct.
+        # Exit intents do NOT consume a pending slot.
+        _tick_pending_positions: list[Position] = []
         # Daily loss: realized PnL since the configured daily window start
         # (default UTC midnight, set to 06:00 UTC to align with HL HIP-4
         # binary settlement). Prefer the injected provider (HL truth) over
@@ -460,13 +471,17 @@ class Scanner:
                 target = books.get(intent.symbol)
                 if target is None:
                     continue
+                # Augment positions with in-tick pending entries so later
+                # intents in the same tick see the reduced concurrent-position
+                # and inventory budget (finding #28).
+                effective_positions = all_positions_strategy + _tick_pending_positions
                 inputs = RiskInputs(
                     question=q,
                     question_fields=fields,
                     reference_price=ref,
                     book=target,
                     recent_volume_usd=volume_total,
-                    positions=all_positions_strategy,
+                    positions=effective_positions,
                     live_orders_total_notional=live_notional,
                     realized_pnl_today=realized_today,
                     kill_switch_active=kill,
@@ -481,6 +496,20 @@ class Scanner:
                         recent_returns=tuple(recent_returns),
                     )
                 )
+                # Track this entry intent as a pending position so subsequent
+                # questions in the same tick see the reduced budget (finding #28).
+                # Only for true entry intents; exits don't consume a slot.
+                if not intent.reduce_only:
+                    _tick_pending_positions.append(
+                        Position(
+                            question_idx=intent.question_idx,
+                            symbol=intent.symbol,
+                            qty=intent.size,
+                            avg_entry=intent.limit_price,
+                            stop_loss_price=0.0,
+                            last_update_ts_ns=now_ns,
+                        )
+                    )
             # EXIT with no intents (settlement) — pass through with a synthetic input
             if decision.action is Action.EXIT and not decision.intents:
                 # Build a stub inputs (book is required; pick any leg we have)

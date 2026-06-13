@@ -23,6 +23,7 @@ Internal concerns live in sub-modules (all verbatim extractions):
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 import json
 from collections.abc import Iterable, Iterator
@@ -96,7 +97,16 @@ class StrikeCoverageError(Exception):
 
 
 def _question_idx(question_id: str) -> int:
-    return hash(question_id) & 0x7FFFFFFF
+    """Deterministic 31-bit id derived via SHA-256.
+
+    Must match the live adapter (_question_idx_from_condition in
+    hlanalysis/adapters/polymarket_normalize.py) exactly so backtest
+    question_idx values align with live engine DB rows.  Python's built-in
+    hash() is process-salted (PYTHONHASHSEED) and therefore non-deterministic
+    across restarts and parallel workers — never use it for persistent keys.
+    """
+    digest = hashlib.sha256(question_id.encode()).digest()
+    return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
 
 
 @dataclass(frozen=True, slots=True)

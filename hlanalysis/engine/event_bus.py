@@ -27,6 +27,18 @@ class EventBus:
         self._subs.append(q)
         return q
 
+    def unsubscribe(self, q: asyncio.Queue[BusEvent]) -> None:
+        """Remove a previously-subscribed queue from the fanout list.
+
+        Symmetric with subscribe(). Safe to call on a queue that was never
+        subscribed (no-op) and idempotent (second call is also a no-op).
+        After unsubscribe, publish() will no longer deliver events to ``q``.
+        """
+        try:
+            self._subs.remove(q)
+        except ValueError:
+            pass  # not subscribed — no-op
+
     async def publish(self, ev: BusEvent) -> None:
         # Surface every bus event in journalctl so post-mortems aren't limited
         # to Telegram (ephemeral, no search) and gate_decisions.jsonl

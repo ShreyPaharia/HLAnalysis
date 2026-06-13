@@ -60,6 +60,12 @@ def _safety_d_for_region(
     if lo is not None and hi is not None:
         d_lo = math.log(ref_price / lo)
         d_hi = math.log(hi / ref_price)
+        if drift_aware:
+            # Apply drift consistently with the one-sided handling:
+            #   lower bound (lo): positive drift moves ref away from lo → safer
+            #   upper bound (hi): positive drift moves ref toward hi → less safe
+            d_lo += mu * tte_min
+            d_hi -= mu * tte_min
         return (d_lo if d_lo < d_hi else d_hi) / sigma_window
     if lo is not None:
         d = math.log(ref_price / lo)
@@ -690,8 +696,67 @@ class LateResolutionStrategy(Strategy):
         win = best_book
         win_symbol = best_symbol
 
-        # Skipped strike-distance gate for multi-outcome compatibility — buckets
-        # don't have a single strike. Binary callers can tighten via config if needed.
+        # 5) Strike-distance gates. For binary questions use question.strike directly.
+        # For priceBucket questions use the nearest adverse boundary of the chosen
+        # leg's winning region (the boundary closest to reference_price), which is
+        # the same geometry used by the safety_d and size-cap logic. When no boundary
+        # is available (e.g. NO of a middle bucket — winning_region returns (None,None))
+        # the gate is skipped so those legs are still eligible.
+        if reference_price > 0:
+            # Determine the reference boundary for this entry.
+            # For binary questions question.strike is exact; for buckets derive from
+            # the winning region of the selected leg.
+            _nearest_boundary: float | None = None
+            if question.klass == "priceBinary" and math.isfinite(question.strike):
+                _nearest_boundary = question.strike
+            else:
+                _lo, _hi = winning_region(question, win_symbol)
+                if _lo is not None and _hi is not None:
+                    # Two-sided: pick the closer boundary.
+                    _d_lo = abs(reference_price - _lo)
+                    _d_hi = abs(reference_price - _hi)
+                    _nearest_boundary = _lo if _d_lo <= _d_hi else _hi
+                elif _lo is not None:
+                    _nearest_boundary = _lo
+                elif _hi is not None:
+                    _nearest_boundary = _hi
+
+            if _nearest_boundary is not None:
+                _abs_dist_usd = abs(reference_price - _nearest_boundary)
+                # Gate A: minimum USD distance — reference_price is too close to
+                # strike/boundary; reject entries in the ambiguous near-strike zone.
+                if _abs_dist_usd < self.cfg.distance_from_strike_usd_min:
+                    return Decision(
+                        action=Action.HOLD,
+                        diagnostics=(
+                            Diagnostic(
+                                "info",
+                                "strike_too_close",
+                                (
+                                    ("dist_usd", f"{_abs_dist_usd:.2f}"),
+                                    ("min_usd", f"{self.cfg.distance_from_strike_usd_min:.2f}"),
+                                ),
+                            ),
+                        ),
+                    )
+                # Gate B: maximum distance as % of reference_price — reference_price
+                # is so far from the strike that the market is likely not near-resolution
+                # and our data quality assumptions break down.
+                _dist_pct = _abs_dist_usd / reference_price * 100.0
+                if _dist_pct > self.cfg.max_strike_distance_pct:
+                    return Decision(
+                        action=Action.HOLD,
+                        diagnostics=(
+                            Diagnostic(
+                                "info",
+                                "strike_too_far",
+                                (
+                                    ("dist_pct", f"{_dist_pct:.2f}"),
+                                    ("max_pct", f"{self.cfg.max_strike_distance_pct:.2f}"),
+                                ),
+                            ),
+                        ),
+                    )
 
         # 6) Realized vol cap (sample stdev of log-returns; treat as raw, not annualised)
         # Slice recent_returns to last vol_lookback_seconds (runner provides 24h of 1m bars).

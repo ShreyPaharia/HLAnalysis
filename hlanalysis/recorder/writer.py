@@ -95,6 +95,15 @@ class ParquetWriter:
         try:
             table = pa.Table.from_pylist(rows)
             pq.write_table(table, tmp_path, compression="zstd")
+            # SHR-64: fsync the temp file before the atomic rename so that
+            # OOM-kills and power-loss after os.replace can't silently lose
+            # un-fsync'd rows. High-value, low-volume keys (settlement,
+            # strike-capture, question meta) are most at risk because they may
+            # sit in the buffer for the full flush_interval_s. We open the
+            # already-written tmp path in append mode (no truncation) purely to
+            # obtain a file descriptor for fsync, then close it immediately.
+            with open(tmp_path, "ab") as _fd:
+                os.fsync(_fd.fileno())
             os.replace(tmp_path, path)
         except Exception:
             log.exception("failed to write %s (%d rows)", path, len(rows))

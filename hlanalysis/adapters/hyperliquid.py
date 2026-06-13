@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 
 import requests
@@ -41,6 +42,15 @@ _STD_TO_HL: dict[str, str] = {
 }
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 OUTCOME_REFRESH_INTERVAL_S = 60.0
+
+# #39: per-symbol bounded deque of seen trade tids for reconnect dedup.
+# Cap large enough to survive any realistic reconnect burst (hundreds of
+# recent trades replayed), but bounded so the set never grows unboundedly.
+_TRADE_DEDUP_CAP: int = 2_000
+
+# #33: exponential-backoff bounds for _fetch_outcome_meta on persistent errors.
+_META_BACKOFF_INITIAL_S: float = 1.0
+_META_BACKOFF_MAX_S: float = 60.0
 
 # Reconnect circuit-breaker (window/threshold/cooldown) is owned by
 # BaseWsAdapter; its defaults (8 reconnects / 60s → 300s cooldown) match the
@@ -99,6 +109,43 @@ class HyperliquidAdapter(BaseWsAdapter):
     # This window only needs to catch the "subscribed but silent" outage (a live
     # socket delivering no data frames across ALL multiplexed subscriptions).
     stale_timeout_s: float = 120.0
+
+    # #39: cap exposed for tests.
+    _trade_dedup_cap: int = _TRADE_DEDUP_CAP
+
+    def __init__(self) -> None:
+        # #39: per-symbol bounded deque of seen trade tids.
+        # {symbol: deque of seen tid strings, maxlen=_TRADE_DEDUP_CAP}
+        # Using a deque so the oldest entry is evicted automatically when the cap
+        # is reached; a parallel set enables O(1) membership tests.
+        self._seen_tids: dict[str, deque[str]] = {}
+        self._seen_tids_set: dict[str, set[str]] = {}
+
+        # #33: backoff state for _fetch_outcome_meta_with_backoff.
+        self._fetch_meta_backoff: float = _META_BACKOFF_INITIAL_S
+
+    def _record_tid(self, symbol: str, tid: str) -> bool:
+        """Record a trade id for `symbol`.  Returns True if the tid is NEW (should
+        be emitted), False if it was already seen (duplicate → drop).
+
+        The per-symbol deque is capped at _trade_dedup_cap entries; on overflow
+        the oldest tid is evicted from both the deque and the membership set,
+        so the overall memory footprint stays bounded.
+        """
+        if symbol not in self._seen_tids:
+            self._seen_tids[symbol] = deque(maxlen=self._trade_dedup_cap)
+            self._seen_tids_set[symbol] = set()
+        s = self._seen_tids_set[symbol]
+        if tid in s:
+            return False
+        dq = self._seen_tids[symbol]
+        if len(dq) == self._trade_dedup_cap:
+            # Evict the oldest entry from the set before the deque auto-evicts it.
+            oldest = dq[0]
+            s.discard(oldest)
+        dq.append(tid)
+        s.add(tid)
+        return True
 
     def supports(self, product_type: ProductType, mechanism: Mechanism) -> bool:
         if mechanism != Mechanism.CLOB:
@@ -343,6 +390,40 @@ class HyperliquidAdapter(BaseWsAdapter):
             log.warning("outcomeMeta fetch failed: %s", e)
             return None
 
+    async def _fetch_outcome_meta_with_backoff(self) -> dict | None:
+        """Like ``_fetch_outcome_meta`` but applies exponential backoff (#33).
+
+        On each call that raises an exception the internal backoff counter
+        (_fetch_meta_backoff) is doubled (up to _META_BACKOFF_MAX_S) and a
+        corresponding sleep is inserted.  On success the counter resets to the
+        initial value so a recovered endpoint is polled at normal cadence again.
+
+        Callers that want to back off persistent errors (e.g. _sync_wildcards,
+        _refresh_wildcards) should prefer this variant. ``_fetch_outcome_meta``
+        is kept as-is for callers that handle their own retry logic or where a
+        single-attempt semantics is correct.
+        """
+
+        def _post() -> dict:
+            r = requests.post(HL_INFO_URL, json={"type": "outcomeMeta"}, timeout=(5, 10))
+            r.raise_for_status()
+            return r.json()
+
+        try:
+            result = await asyncio.to_thread(_post)
+            # Success: reset backoff.
+            self._fetch_meta_backoff = _META_BACKOFF_INITIAL_S
+            return result
+        except Exception as exc:
+            log.warning(
+                "outcomeMeta fetch failed (backing off %.1fs): %s",
+                self._fetch_meta_backoff,
+                exc,
+            )
+            await asyncio.sleep(self._fetch_meta_backoff)
+            self._fetch_meta_backoff = min(self._fetch_meta_backoff * 2, _META_BACKOFF_MAX_S)
+            return None
+
     async def _expand_wildcard(self, template: Subscription) -> list[Subscription]:
         data = await self._fetch_outcome_meta()
         if data is None:
@@ -448,6 +529,13 @@ class HyperliquidAdapter(BaseWsAdapter):
                 sub = sym_to_sub.get(t.get("coin"))
                 if sub is None:
                     continue
+                # #39: skip already-seen trade ids to avoid duplicate emission on
+                # reconnect (HL re-publishes recent trades after stream re-attach).
+                raw_tid = t.get("tid")
+                tid_str = str(raw_tid) if raw_tid is not None else None
+                if tid_str is not None and not self._record_tid(t["coin"], tid_str):
+                    log.debug("hyperliquid: dedup trade coin=%s tid=%s", t["coin"], tid_str)
+                    continue
                 block_ns = int(t["time"]) * 1_000_000
                 users = t.get("users") or [None, None]
                 buyer = users[0] if len(users) > 0 else None
@@ -464,7 +552,7 @@ class HyperliquidAdapter(BaseWsAdapter):
                         price=float(t["px"]),
                         size=float(t["sz"]),
                         side="buy" if t.get("side") == "B" else "sell",
-                        trade_id=str(t.get("tid", "")) or None,
+                        trade_id=tid_str,
                         buyer=buyer,
                         seller=seller,
                         block_hash=t.get("hash"),

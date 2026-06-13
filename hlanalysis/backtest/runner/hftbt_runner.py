@@ -596,7 +596,12 @@ def run_one_question(
         now_ns = int(hbt.current_timestamp)
         if event_mode:
             _last_scan_ns = now_ns
-        if now_ns >= q.end_ts_ns:
+        # Convention (aligned with build_question_view in core/question.py:~37):
+        # ``settled = now_ns > q.end_ts_ns``. A tick at EXACTLY end_ts_ns is
+        # therefore the last valid scan (settled=False) and must be processed.
+        # Using ``>=`` would break one tick early, silently skipping the final
+        # scan and missing any edge/exit decision at expiry (#41).
+        if now_ns > q.end_ts_ns:
             break
 
         # Drain reference events up to now into MarketState.
@@ -641,9 +646,14 @@ def run_one_question(
             bs = _book_state(hbt, asset_no, sym, last_l2_ts_ns=last_l2_ts)
             if bs is not None:
                 books[sym] = bs
+                # #31: stamp apply_l2 with the snapshot's own exchange/recv
+                # timestamp (last_l2_ts), NOT the current scan tick (now_ns).
+                # Using now_ns makes last_l2_ts_ns in the book always equal to
+                # the scan time, so the stale-data gate can never detect a stale
+                # book (last_l2_ts << now_ns would be the correct signal).
                 state.apply_l2(
                     BookSnapshot(
-                        ts_ns=now_ns,
+                        ts_ns=last_l2_ts,
                         symbol=sym,
                         bids=((bs.bid_px, bs.bid_sz or 0.0),) if bs.bid_px is not None else (),
                         asks=((bs.ask_px, bs.ask_sz or 0.0),) if bs.ask_px is not None else (),

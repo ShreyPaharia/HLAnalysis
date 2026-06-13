@@ -588,8 +588,8 @@ class ThetaHarvesterStrategy(Strategy):
                     ),
                 )
             arr = np.asarray(window, dtype=np.float64)
-            bv_per_sample = float(bipower_variation_sigma(arr))
-            if bv_per_sample <= 0.0:
+            bipower_sigma = float(bipower_variation_sigma(arr))
+            if bipower_sigma <= 0.0:
                 return Decision(
                     action=Action.HOLD,
                     diagnostics=(
@@ -597,7 +597,7 @@ class ThetaHarvesterStrategy(Strategy):
                         diag,
                     ),
                 )
-            lm_stat = abs(float(arr[-1])) / bv_per_sample
+            lm_stat = abs(float(arr[-1])) / bipower_sigma
             if lm_stat < self.cfg.lm_threshold:
                 return Decision(
                     action=Action.HOLD,
