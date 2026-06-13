@@ -35,6 +35,12 @@ PERP_WS = "wss://fstream.binance.com/ws"
 PERP_REST_PREMIUM_INDEX = "https://fapi.binance.com/fapi/v1/premiumIndex"
 PERP_MARK_POLL_INTERVAL_S = 3.0
 
+# Exponential-backoff bounds for the REST poller generic error path (#33).
+# On a persistent failure we ramp from PERP_MARK_POLL_INTERVAL_S up to this cap
+# so a network outage doesn't hammer the endpoint at full rate.
+_POLL_BACKOFF_INITIAL_S: float = PERP_MARK_POLL_INTERVAL_S
+_POLL_BACKOFF_MAX_S: float = 60.0
+
 # Several perp WS streams (aggTrade, markPrice, forceOrder, kline_*) are silently
 # unavailable from non-allowlisted IPs (e.g. US residential), even though REST works
 # and `bookTicker`/`depth20`/`@trade` deliver fine. We use `@trade` for perp trades
@@ -59,6 +65,23 @@ class BinanceAdapter(BaseWsAdapter):
     # BaseWsAdapter. Binance BBO/trade frames arrive multiple times per second,
     # so the base's 30s frameless window is unambiguously a dead/half-open
     # stream — not a quiet market.
+
+    # SHR-61 (#22): per-symbol last-seen seq, for monotonic-seq enforcement.
+    # Key = symbol (e.g. "BTCUSDT"), value = last accepted seq number.
+    # Reset on adapter construction; NOT reset on reconnect (intentional: a lower
+    # seq after reconnect is exactly the stale-overwrite scenario we guard against).
+    # BboEvent/BookSnapshotEvent frames with seq <= _last_seq[sym] are dropped.
+    # Initialized lazily on first frame per symbol.
+
+    # SHR-61: drop counter exposed for ops/tests.
+    bbo_drops: int = 0
+
+    def __init__(self) -> None:
+        # Per-symbol last-seen sequence numbers.  Separate from decode_failures
+        # (base class) — this is a per-instance mutable dict, not a class attr.
+        self._last_seq: dict[str, int] = {}
+        # bbo_drops is a class attr default; rebind as instance attr on first drop.
+        self.bbo_drops = 0
 
     def supports(self, product_type: ProductType, mechanism: Mechanism) -> bool:
         return mechanism == Mechanism.CLOB and product_type in {
@@ -131,6 +154,47 @@ class BinanceAdapter(BaseWsAdapter):
             product_type=product_type,
         )
 
+    # ------------------------------------------------------------------
+    # SHR-61: price-validation helpers
+    # ------------------------------------------------------------------
+
+    def _check_seq(self, symbol: str, seq: int) -> bool:
+        """Return True iff `seq` is strictly greater than the last accepted seq.
+
+        On first frame for a symbol (no prior state) always returns True.
+        Updates internal state on acceptance; callers must not update state
+        on rejection.
+        """
+        last = self._last_seq.get(symbol)
+        if last is not None and seq <= last:
+            return False
+        self._last_seq[symbol] = seq
+        return True
+
+    def _drop_bbo(self, reason: str, symbol: str, bid: float, ask: float, seq: int) -> list:
+        """Increment drop counter, emit a warning log, and return []."""
+        self.bbo_drops += 1
+        log.warning(
+            "binance: drop invalid BBO symbol=%s bid=%.6g ask=%.6g seq=%d reason=%s",
+            symbol,
+            bid,
+            ask,
+            seq,
+            reason,
+        )
+        return []
+
+    def _drop_depth(self, reason: str, symbol: str, seq: int) -> list:
+        """Increment drop counter, emit a warning log, and return []."""
+        self.bbo_drops += 1
+        log.warning(
+            "binance: drop invalid depth symbol=%s seq=%d reason=%s",
+            symbol,
+            seq,
+            reason,
+        )
+        return []
+
     def _handle(
         self,
         msg: dict,
@@ -158,18 +222,29 @@ class BinanceAdapter(BaseWsAdapter):
             sub = sym_to_sub.get(msg["s"].upper())
             if sub is None:
                 return out
+            sym = msg["s"].upper()
+            seq = int(msg.get("u", 0))
+            bid_px = float(msg["b"])
+            ask_px = float(msg["a"])
+            # SHR-61: validate prices and monotonic seq before emitting.
+            if bid_px <= 0.0 or ask_px <= 0.0:
+                return self._drop_bbo("non-positive-price", sym, bid_px, ask_px, seq)
+            if bid_px >= ask_px:
+                return self._drop_bbo("crossed", sym, bid_px, ask_px, seq)
+            if not self._check_seq(sym, seq):
+                return self._drop_bbo("seq-regression", sym, bid_px, ask_px, seq)
             out.append(
                 BboEvent(
                     venue=self.venue,
                     product_type=sub.product_type,
                     mechanism=sub.mechanism,
-                    symbol=msg["s"].upper(),
+                    symbol=sym,
                     exchange_ts=0,  # not provided by Binance spot @bookTicker
                     local_recv_ts=recv_ns,
-                    seq=int(msg.get("u", 0)),
-                    bid_px=float(msg["b"]),
+                    seq=seq,
+                    bid_px=bid_px,
                     bid_sz=float(msg["B"]),
-                    ask_px=float(msg["a"]),
+                    ask_px=ask_px,
                     ask_sz=float(msg["A"]),
                 )
             )
@@ -184,18 +259,29 @@ class BinanceAdapter(BaseWsAdapter):
             if len(sym_to_sub) != 1:
                 return out
             sub = next(iter(sym_to_sub.values()))
+            sym = sub.symbol.upper()
+            seq = int(msg["lastUpdateId"])
+            # SHR-61: validate monotonic seq.
+            if not self._check_seq(sym + ":depth", seq):
+                return self._drop_depth("seq-regression", sym, seq)
+            # SHR-61: validate prices — any non-positive price in the book is
+            # suspicious (transient zero-level or stale snapshot); drop the whole frame.
+            bid_prices = [float(b[0]) for b in msg["bids"]]
+            ask_prices = [float(a[0]) for a in msg["asks"]]
+            if any(p <= 0.0 for p in bid_prices) or any(p <= 0.0 for p in ask_prices):
+                return self._drop_depth("non-positive-price", sym, seq)
             out.append(
                 BookSnapshotEvent(
                     venue=self.venue,
                     product_type=sub.product_type,
                     mechanism=sub.mechanism,
-                    symbol=sub.symbol.upper(),
+                    symbol=sym,
                     exchange_ts=0,  # not provided by Binance spot partial-depth stream
                     local_recv_ts=recv_ns,
-                    seq=int(msg["lastUpdateId"]),
-                    bid_px=[float(b[0]) for b in msg["bids"]],
+                    seq=seq,
+                    bid_px=bid_prices,
                     bid_sz=[float(b[1]) for b in msg["bids"]],
-                    ask_px=[float(a[0]) for a in msg["asks"]],
+                    ask_px=ask_prices,
                     ask_sz=[float(a[1]) for a in msg["asks"]],
                 )
             )
@@ -235,14 +321,24 @@ class BinanceAdapter(BaseWsAdapter):
                 )
             )
         elif e == "bookTicker":  # perp BBO carries event_type marker
+            seq = int(msg.get("u", 0))
+            bid_px = float(msg["b"])
+            ask_px = float(msg["a"])
+            # SHR-61: validate prices and monotonic seq.
+            if bid_px <= 0.0 or ask_px <= 0.0:
+                return self._drop_bbo("non-positive-price", symbol, bid_px, ask_px, seq)
+            if bid_px >= ask_px:
+                return self._drop_bbo("crossed", symbol, bid_px, ask_px, seq)
+            if not self._check_seq(symbol, seq):
+                return self._drop_bbo("seq-regression", symbol, bid_px, ask_px, seq)
             out.append(
                 BboEvent(
                     **common,
                     exchange_ts=int(msg.get("T", msg.get("E", 0))) * 1_000_000,
-                    seq=int(msg.get("u", 0)),
-                    bid_px=float(msg["b"]),
+                    seq=seq,
+                    bid_px=bid_px,
                     bid_sz=float(msg["B"]),
-                    ask_px=float(msg["a"]),
+                    ask_px=ask_px,
                     ask_sz=float(msg["A"]),
                 )
             )
@@ -292,8 +388,16 @@ class BinanceAdapter(BaseWsAdapter):
         subs: list[Subscription],
         queue: asyncio.Queue[NormalizedEvent],
     ) -> None:
-        """Poll /fapi/v1/premiumIndex for mark + funding; emit MarkEvent and FundingEvent."""
+        """Poll /fapi/v1/premiumIndex for mark + funding; emit MarkEvent and FundingEvent.
+
+        #33: The generic `except` path now applies exponential backoff (capped at
+        _POLL_BACKOFF_MAX_S) so a persistent network failure does not hammer the
+        endpoint at the normal poll rate. Backoff resets to base on a successful
+        response.
+        """
+        backoff = _POLL_BACKOFF_INITIAL_S
         while True:
+            error_this_round = False
             for sub in subs:
                 try:
                     r = await asyncio.to_thread(
@@ -308,11 +412,15 @@ class BinanceAdapter(BaseWsAdapter):
                             r.status_code,
                             sub.symbol.upper(),
                         )
-                        await asyncio.sleep(min(PERP_MARK_POLL_INTERVAL_S * 2, 30.0))
+                        error_this_round = True
+                        await asyncio.sleep(min(backoff * 2, _POLL_BACKOFF_MAX_S))
                         continue
                     p = r.json()
-                except Exception as e:
-                    log.warning("binance premiumIndex poll failed: %s", e)
+                except Exception as exc:
+                    log.warning("binance premiumIndex poll failed: %s; backing off %.1fs", exc, backoff)
+                    error_this_round = True
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, _POLL_BACKOFF_MAX_S)
                     continue
                 ts_ns = int(p.get("time", time.time() * 1000)) * 1_000_000
                 recv_ns = time.time_ns()
@@ -338,4 +446,10 @@ class BinanceAdapter(BaseWsAdapter):
                             next_funding_ts=next_funding,
                         )
                     )
-            await asyncio.sleep(PERP_MARK_POLL_INTERVAL_S)
+            if not error_this_round:
+                # Successful round: reset backoff and sleep the normal poll interval.
+                backoff = _POLL_BACKOFF_INITIAL_S
+                await asyncio.sleep(PERP_MARK_POLL_INTERVAL_S)
+            # On error rounds we already slept inside the except block; skip the
+            # normal poll-interval sleep so we don't add a second, shorter delay
+            # that would make the overall backoff sequence non-monotone.
