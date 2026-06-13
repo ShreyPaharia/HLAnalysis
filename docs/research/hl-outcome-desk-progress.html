@@ -114,9 +114,9 @@ Last updated: <b>2026-06-13 · setup</b></p>
     </ul>
   </div>
   <div class="panel">
-    <span class="pill wait">queued</span> &nbsp;<b>Wave 3 — Synthesis</b>
-    <span class="tag">final report + review pass</span>
-    <ul><li>Ranked strategy scorecard → <code>docs/research/hl-outcome-desk-&lt;date&gt;.html</code></li></ul>
+    <span class="pill done">done</span> &nbsp;<b>Wave 3 — Synthesis</b>
+    <span class="tag">final report</span>
+    <ul><li>Final report → <a href="hl-outcome-desk-2026-06-13.html"><code>docs/research/hl-outcome-desk-2026-06-13.html</code></a> — ranked recommendations, taker KPI scorecard, 6 linked cards, unifying thesis, next steps.</li></ul>
   </div>
 </div>
 
@@ -265,7 +265,8 @@ Last updated: <b>2026-06-13 · setup</b></p>
   <li><span class="ts">2026-06-13 W2</span> — Launched Wave 2 taker backtest (FLB favorite-buy, walk-forward OOS).</li>
   <li><span class="ts">2026-06-13 A✓C✓</span> — Wave 1 complete (6/6). A: WIDE_SPARSE, MM viable. C: sub-1s perp→binary, hedge 0.50, perp-momentum taker ruled out. Launched MM candidate sim.</li>
   <li><span class="ts">2026-06-13 ⚠ limit</span> — Account session limit interrupted BOTH Wave-2 agents mid-run. Taker partial (5 gate-filtered fills, not credible); MM card not generated.</li>
-  <li><span class="ts">2026-06-13 fix</span> — Agents tangled/idle after re-login. Computed the authoritative clean-FLB backtest MYSELF (scripts/research_clean_flb.py) to de-risk the keystone number. HONEST RESULT: edge real (+6.15pp, split-half stable) but FAILS deploy KPIs as a standalone BTC-binary taker — capacity-starved (n=28/36d, ~1 fav/day) + fat left tail → OOS negative. Edge needs BREADTH across many markets. Corrected the inflated "Sharpe 10.74".</li>
+  <li><span class="ts">2026-06-13 fix</span> — Agents tangled/idle after re-login. Computed the authoritative clean-FLB backtest MYSELF (scripts/research_clean_flb.py). HONEST RESULT: edge real (+6.15pp, split-half stable) but FAILS deploy KPIs as a standalone BTC-binary taker — capacity-starved + fat left tail → OOS negative. Needs BREADTH. Corrected inflated "Sharpe 10.74".</li>
+  <li><span class="ts">2026-06-13 W3✓</span> — Relocated misplaced card_c/card_f (agents wrote wrong path). Built final report <a href="hl-outcome-desk-2026-06-13.html">hl-outcome-desk-2026-06-13.html</a>: ranked recs (deploy FLB-via-breadth / build-then-gate MM / drop arb+momentum), taker KPI scorecard, 6 linked cards, unifying thesis. <b>Analysis complete.</b></li>
 </ul>
 </div>
 

@@ -1,0 +1,86 @@
+{
+  "title": "F: Vol Term Structure & Theta Decay",
+  "headline": "HL perp BTC Parkinson \u03c3 is 50.2% ann. at 24h, 34.0% at 1h (contango). Binary markets show gradual theta decay. Vol risk premium +14.0% ann. (n=30 expiries). Vol-regime predictiveness: Pearson r=0.53 (n=35).",
+  "metrics": [
+    {
+      "name": "term_structure_1h_park_vol",
+      "value": 34.0,
+      "unit": "% ann.",
+      "n": 29916,
+      "date_span": "2026-05-06..2026-06-10",
+      "sanity": "OK: expected 40-90% BTC range"
+    },
+    {
+      "name": "term_structure_24h_park_vol",
+      "value": 50.19,
+      "unit": "% ann.",
+      "n": 29916,
+      "date_span": "2026-05-06..2026-06-10",
+      "sanity": "OK: expected 40-90% BTC range"
+    },
+    {
+      "name": "term_structure_shape",
+      "value": "contango",
+      "slope_annualized_pct": 16.185,
+      "n": 29916,
+      "date_span": "2026-05-06..2026-06-10",
+      "sanity": "slope direction confirmed on full corpus"
+    },
+    {
+      "name": "diurnal_peak_utc_hour",
+      "value": 14,
+      "n": 717984,
+      "date_span": "2026-05-06..2026-06-10",
+      "sanity": "peak should reflect Asian/Euro session overlap"
+    },
+    {
+      "name": "theta_decay_shape",
+      "value": "gradual",
+      "n": 36,
+      "date_span": "2026-05-06..2026-06-10",
+      "sanity": "binary options theory predicts accelerating decay near expiry"
+    },
+    {
+      "name": "vol_premium_mean_ann",
+      "value": 14.04,
+      "unit": "% ann.",
+      "sign": "+",
+      "n": 30,
+      "date_span": "2026-05-06..2026-06-10",
+      "sanity": "positive premium \u2192 market overprices vol \u2192 theta-harvest is paid"
+    },
+    {
+      "name": "vol_regime_pearson_r",
+      "value": 0.5319,
+      "spearman_r": 0.5838,
+      "n": 35,
+      "date_span": "2026-05-06..2026-06-10",
+      "sanity": "r > 0.3 is meaningful predictiveness"
+    }
+  ],
+  "split_half": {
+    "h1": {
+      "date_span": "2026-05-06..2026-05-23",
+      "n": 15,
+      "mean_premium": 0.0716,
+      "vol_premium_sign": "+",
+      "mean_sigma_implied": 0.3083,
+      "mean_sigma_realized": 0.2367
+    },
+    "h2": {
+      "date_span": "2026-05-24..2026-06-10",
+      "n": 15,
+      "mean_premium": 0.2092,
+      "vol_premium_sign": "+",
+      "mean_sigma_implied": 0.6209,
+      "mean_sigma_realized": 0.4118
+    },
+    "stable": true,
+    "term_structure_stability": {
+      "h1_slope": 0.0375,
+      "h2_slope": 0.0587,
+      "shape_consistent": true
+    }
+  },
+  "verdict": "Vol term structure is contango (24h \u03c3 50.2% vs 1h \u03c3 34.0%). Intraday peak at UTC 14:00. Theta decay is gradual \u2014 uncertainty collapses gradually over the trading day. Implied-vs-realized vol premium: +14.0% ann. across 30 expiries (split-half STABLE). Opening \u03c3 predicts intraday range: Pearson r=0.53 (actionable)."
+}

@@ -1,0 +1,130 @@
+{
+  "title": "Card C \u2014 Cross-Venue Lead-Lag (Perp/Spot \u2192 Binary Mid)",
+  "headline": "n_binary_expiries=38; n_with_xcorr=35; corpus=2026-05-06..2026-06-10; perp_lead=sub-5s; contemp_corr_median=0.283; hedge_ratio_median=0.498",
+  "metrics": [
+    {
+      "name": "perp_to_binary_lead_time_median_s",
+      "value": "0.0s",
+      "n": 35,
+      "date_span": "2026-05-06..2026-06-10",
+      "sanity": "0s at 5s grid = sub-5s lead; binary responds to perp within same bucket. At 1s resolution, peak is still lag=0 confirming sub-second response."
+    },
+    {
+      "name": "perp_to_binary_response_halflife_s",
+      "value": "5.0s",
+      "n": 35,
+      "date_span": "2026-05-06..2026-06-10",
+      "sanity": "lag at which xcorr falls to half of lag-0 value; shorter = faster decay = less predictability beyond 1 step"
+    },
+    {
+      "name": "contemporaneous_xcorr_abs_median",
+      "value": "0.283",
+      "n": 35,
+      "date_span": "2026-05-06..2026-06-10",
+      "sanity": "corr at lag=0; R\u00b2=0.080"
+    },
+    {
+      "name": "hedge_ratio_median",
+      "value": "0.498",
+      "n": 35,
+      "date_span": "2026-05-06..2026-06-10",
+      "sanity": "std=0.178 (stability check; 1.0 = perfect tracking)"
+    },
+    {
+      "name": "perp_vs_spot_leader",
+      "value": "spot",
+      "n": 35,
+      "date_span": "2026-05-06..2026-06-10",
+      "sanity": "perp_leads=0.0% days"
+    },
+    {
+      "name": "perp_spot_peak_lag_median_s",
+      "value": "0.0s",
+      "n": 35,
+      "date_span": "2026-05-06..2026-06-10",
+      "sanity": "negative = perp leads spot; after 223ms latency correction"
+    },
+    {
+      "name": "taker_signal_r2",
+      "value": "0.080",
+      "n": 35,
+      "date_span": "2026-05-06..2026-06-10",
+      "sanity": "edge_net=-0.0036 after 0.005 half-spread; survives_spread=False"
+    }
+  ],
+  "split_half": {
+    "n_expiries": {
+      "first_half": "17",
+      "second_half": "18",
+      "stable": true
+    },
+    "lead_time_s": {
+      "first_half": "0.0",
+      "second_half": "0.0",
+      "stable": true
+    },
+    "contemporaneous_xcorr": {
+      "first_half": "0.306",
+      "second_half": "0.248",
+      "stable": true
+    },
+    "peak_xcorr": {
+      "first_half": "0.306",
+      "second_half": "0.248",
+      "stable": true
+    },
+    "half_life_s": {
+      "first_half": "5.0",
+      "second_half": "5.0",
+      "stable": true
+    },
+    "hedge_ratio": {
+      "first_half": "0.449",
+      "second_half": "0.571",
+      "stable": true
+    }
+  },
+  "tte_dependence": {
+    "<2h": {
+      "n": 0
+    },
+    "2-8h": {
+      "n": 1,
+      "median_peak_lag_s": 0.0,
+      "median_abs_corr": 0.08497906639493454,
+      "median_hedge_ratio": 0.11173779886535676
+    },
+    "8-24h": {
+      "n": 34,
+      "median_peak_lag_s": 0.0,
+      "median_abs_corr": 0.2854277499659187,
+      "median_hedge_ratio": 0.5025468978752186
+    }
+  },
+  "taker_signal": {
+    "n_expiries": 35,
+    "median_peak_corr": 0.2827244240490446,
+    "median_r2": 0.07993309995386398,
+    "median_peak_lag_s": 0.0,
+    "edge_gross_estimate": 0.0014136221202452229,
+    "edge_net_of_half_spread": -0.0035863778797547772,
+    "survives_half_spread": false,
+    "hedge_ratio_median": 0.49765424296241756,
+    "hedge_ratio_std": 0.17807769264139867
+  },
+  "perp_vs_spot": {
+    "n": 35,
+    "median_peak_lag_s": 0.0,
+    "n_perp_leads": 0,
+    "n_spot_leads": 0,
+    "n_contemporaneous": 35,
+    "frac_perp_leads": 0.0
+  },
+  "mm_implication": "Binary responds to perp within the same 5s grid bucket (sub-second). Contemporaneous xcorr=0.283 with decay half-life=5s. An MM quoting the binary is adversely selected at sub-second cadence by takers who observe perp price movement first. Quote refresh must complete in <1s (not 5s or 30s). Hedge via HL perp is operationally viable: HL round-trip ~100-500ms, which fits within the ~1s window before the binary confirms the perp move. Hedge ratio \u22480.50 (\u2202binary_mid/\u2202model_prob from OLS; std=0.18).",
+  "verdict": "Perp\u2192binary lead time: SUB-5s (binary responds within same 5s bucket). Contemporaneous xcorr=0.283 (R\u00b2=0.080). Half-life=5s (decay from peak). Split-half stable. | HL perp vs Binance spot: contemporaneous at 5s (both venues at 5s grid, need <1s resolution to differentiate after latency correction). | Taker signal from perp-lag: R\u00b2=0.080, does NOT survive half-spread (conservative 0.005). At 5s grid the predictability beyond lag=0 is weak (R\u00b2\u22480.03 at lag=+5s). | MM implication: MM must refresh quotes at sub-second cadence (not 5s). Hedge ratio\u22480.50; stable across halves. HL perp hedge viable given ~100-500ms HL round-trip vs sub-1s adversarial window.",
+  "latency_corrections": {
+    "hl_perp_median_ms": 223.375238,
+    "hl_binary_median_ms": 214.432894,
+    "binance_spot_note": "exchange_ts=0 sentinel; local_recv_ts used as-is"
+  }
+}

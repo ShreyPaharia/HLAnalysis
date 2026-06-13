@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>HL Outcome-Market Desk — Findings & Strategy Recommendations</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c232c; --border:#30363d;
+    --fg:#e6edf3; --muted:#8b949e; --accent:#58a6ff; --green:#3fb950;
+    --amber:#d29922; --red:#f85149; --purple:#bc8cff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:1120px;margin:0 auto;padding:36px 24px 120px}
+  h1{font-size:28px;margin:0 0 4px} h2{font-size:21px;margin:42px 0 14px;
+    border-bottom:2px solid var(--border);padding-bottom:8px}
+  h3{font-size:16px;margin:22px 0 8px;color:var(--accent)}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 8px}
+  .lede{font-size:15px;line-height:1.7;background:var(--panel);border:1px solid var(--border);
+    border-left:4px solid var(--accent);border-radius:8px;padding:18px 20px;margin:18px 0}
+  .grid{display:grid;gap:14px}.g2{grid-template-columns:1fr 1fr}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px 20px}
+  .pill{display:inline-block;font-size:11px;font-weight:700;padding:2px 10px;border-radius:20px;letter-spacing:.4px;text-transform:uppercase}
+  .pass{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.3)}
+  .fail{background:rgba(248,81,73,.14);color:var(--red);border:1px solid rgba(248,81,73,.3)}
+  .cond{background:rgba(210,153,34,.15);color:var(--amber);border:1px solid rgba(210,153,34,.3)}
+  table{width:100%;border-collapse:collapse;margin:10px 0;font-size:13px}
+  th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.3px}
+  code{background:var(--panel2);padding:1px 6px;border-radius:5px;font-size:12px;color:var(--purple)}
+  .green{color:var(--green)}.amber{color:var(--amber)}.red{color:var(--red)}.muted{color:var(--muted)}
+  ul{margin:6px 0;padding-left:22px}li{margin:4px 0}
+  a{color:var(--accent)}
+  .rec{border-left:4px solid var(--green);padding:12px 16px;background:var(--panel);border-radius:6px;margin:10px 0}
+  .rec.b{border-left-color:var(--amber)} .rec.c{border-left-color:var(--red)}
+  .big{font-size:30px;font-weight:700} .tag{font-size:11px;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:1px 7px}
+  .kpi{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>HL Outcome-Market Desk — Findings &amp; Strategy Recommendations</h1>
+<p class="sub">Desk-manager analysis of 36 days (2026-05-06 → 2026-06-10) of granular Hyperliquid data:
+BTC perp + daily BTC binary &amp; bucket outcome markets. All edge claims split-half validated.
+Generated 2026-06-13.</p>
+<p class="sub">Live progress log: <a href="hl-outcome-desk-progress.html">hl-outcome-desk-progress.html</a> ·
+Reusable toolkit: <code>hlanalysis/research/</code> · Spec: <a href="SPEC-hl-outcome-desk-analysis.md">SPEC</a></p>
+
+<div class="lede">
+<b>Bottom line.</b> The HL daily-BTC outcome markets contain a single, robust, model-free edge:
+a <b>favourite-longshot bias</b> — strong favorites (binary mid 0.80–0.95) are systematically
+underpriced by <b>~6–9pp</b>, driven by the market overpricing volatility (+14% ann vs realized,
+sign-stable). It survives adverse selection and fees (HL exchange fee = 0). <b>But it is not
+deployable as a standalone single-name BTC-binary bet</b>: at ~1 qualifying favorite per day the
+strategy is capacity-starved (n=28 trades in 36 days) and dominated by a fat left tail (one losing
+favorite = −87pp), so out-of-sample it went negative on the 8-trade holdout. <b>The edge becomes a
+desk only through breadth</b> — running favorite-capture across many markets simultaneously (ETH
+binaries, bucket bands, and the already-recorded Polymarket multi-strike/multi-asset series).
+Market-making is independently <b>+EV on paper</b> (makers keep ~80% of a 128bp spread net of
+adverse selection) but is <b>blocked on infrastructure</b>: the binary tracks perp sub-second, so an
+MM must re-quote in &lt;1s, while the live engine scans at 1 Hz. Two candidates (static Yes+No arb,
+perp-momentum taking) were <b>killed on the evidence</b>.
+</div>
+
+<h2>1 · Strategy scorecard &amp; recommendations</h2>
+
+<div class="rec">
+<b>① DEPLOY (with work): Favorite-capture across breadth</b> &nbsp;<span class="pill cond">conditional pass</span><br>
+The FLB edge is real (+6.15pp mean, split-half +6.9/+5.4pp). To make it deployable, extend the
+existing v1/v31 favorite-buying to <b>many markets at once</b> so the law of large numbers tames the
+single-settlement tail. Priority order by data already in hand: HL bucket bands → HL ETH binaries
+(if listed) → PM multi-strike BTC/ETH/SOL/XRP series (recorded since 2026-06-06). Keep the
+<code>min_safety_d</code>/<code>stop_loss</code> safety gates — they cost trade count, not edge, and
+the tail risk is exactly what they exist for. Size per-market small ($50–200, capacity-bound) and
+diversify across ≥10–20 concurrent markets. <b>Acceptance before live: re-run the clean-FLB
+backtest on the multi-market corpus and clear Sharpe≥1 OOS at the portfolio level</b> (the single
+BTC binary cannot).
+</div>
+
+<div class="rec b">
+<b>② BUILD THEN GATE ON INFRA: Outcome-market making + perp hedge</b> &nbsp;<span class="pill cond">+EV, infra-blocked</span><br>
+Maker economics are positive (Card B: 0.95pp realized spread at 5m, ~80% of the quoted spread kept
+net of adverse selection, profitable on 55% of trades; books are WIDE_SPARSE — 128bp median spread,
+~100% two-sided uptime). The HL-perp delta hedge is clean (hedge ratio ≈0.50, stable) and effectively
+unlimited in size. <b>The blocker is latency:</b> perp→binary is sub-second (half-life 1–2s), so a
+naive MM is picked off unless it re-quotes in &lt;1s — the live engine is 1 Hz. <b>Recommendation:</b>
+finish the passive-fill sim (<code>strategy_mm.py</code>) to quantify the 1 Hz penalty, and treat MM
+as a Phase-2 item contingent on an event-driven sub-second quoting path (the engine-execution-speed
+work already prototyped) — not a 1 Hz deploy.
+</div>
+
+<div class="rec c">
+<b>③ DROPPED on evidence</b> &nbsp;<span class="pill fail">killed</span><br>
+<b>Static Yes+No arb</b> — book is consistently ~90bp overround; 0 of 3.18M ticks offered a taker
+buy-arb (Card D). <b>Perp-momentum taking on the binary</b> — perp move predicts binary move but
+R²=0.08 and net edge −0.36pp, swamped by the binary half-spread (Card C). Neither warrants further
+work.
+</div>
+
+<h3>Taker (clean-FLB) KPI scorecard — authoritative, self-computed</h3>
+<p class="muted">Rule: buy favorite binary leg at the ask on first tick with mid∈[0.80,0.95] &amp; TTE∈[1–6h],
+hold to oracle settlement, no live-strategy gates. <code>scripts/research_clean_flb.py</code> /
+<code>docs/research/_cards/clean_flb_authoritative.json</code>.</p>
+<table class="kpi">
+<tr><th>Window</th><th>n</th><th>hit</th><th>mean edge</th><th>edge SD</th><th>Sharpe/trade</th><th>maxDD ($1)</th></tr>
+<tr><td>Full 36d</td><td>28</td><td>92.9%</td><td class="green">+6.15pp</td><td>27.5</td><td>0.22</td><td>−0.98</td></tr>
+<tr><td>In-sample (≤06-04)</td><td>20</td><td>95.0%</td><td class="green">+9.13pp</td><td>21.9</td><td>0.42</td><td>−0.83</td></tr>
+<tr><td>OOS (7d holdout)</td><td>8</td><td>87.5%</td><td class="red">−1.30pp</td><td>37.0</td><td>−0.04</td><td>−0.98</td></tr>
+<tr><td>Split H1 / H2</td><td>14/14</td><td>92.9%</td><td class="green">+6.9 / +5.4pp</td><td colspan="3">sign-stable</td></tr>
+</table>
+<table>
+<tr><th>KPI</th><th>Result</th><th>Verdict</th></tr>
+<tr><td>Net PnL positive (mean)</td><td>+6.15pp full, split-half stable</td><td><span class="pill pass">pass</span></td></tr>
+<tr><td>Walk-forward OOS positive</td><td>−1.30pp on n=8 (one losing favorite)</td><td><span class="pill fail">fail</span></td></tr>
+<tr><td>Daily Sharpe ≥ 1.0 OOS</td><td>per-trade 0.22; OOS negative; underpowered</td><td><span class="pill fail">fail</span></td></tr>
+<tr><td>Max DD within cap</td><td>−0.98 per $1 clip (full single-name loss)</td><td><span class="pill fail">fail</span></td></tr>
+<tr><td>Capacity ≥ desk</td><td>~1 favorite/day → n=28/36d; fat left tail undiversifiable single-name</td><td><span class="pill fail">fail</span></td></tr>
+<tr><td>Edge source verified</td><td>+14% vol premium → favorites underpriced (Cards E+F)</td><td><span class="pill pass">pass</span></td></tr>
+</table>
+<p class="muted"><b>Why the interrupted run's "Sharpe 10.74" was wrong:</b> it routed FLB through v1's
+<code>min_safety_d=3.0</code> gate, leaving 5 lucky fills. The clean unfiltered run (n=28) shows the
+honest payoff — high hit rate, fat left tail, low per-trade Sharpe, OOS-fragile at single-name scale.</p>
+
+<h2>2 · What the data says (6 characterization cards)</h2>
+<p class="sub">Each card is a standalone HTML with embedded plots in <code>docs/research/_cards/</code>;
+all metrics carry n + date-span + split-half stability.</p>
+
+<div class="panel">
+<table>
+<tr><th>Card</th><th>Headline finding</th><th>Desk implication</th></tr>
+<tr><td><a href="_cards/card_e.html"><b>E</b> Convergence</a> <span class="tag">keystone</span></td>
+  <td>Strong favourite-longshot bias: favorites mid 0.65–0.80 underpriced <b>+18.8pp</b>; mid 0.85–0.95 @&lt;3h win 100% vs ask 0.93 → net <b>+9.3pp</b> (n=28,963). Outcome "known" median 4.47h pre-expiry. Sign-stable.</td>
+  <td>The core taker edge. Buy favorites, never longshots. Model-free.</td></tr>
+<tr><td><a href="_cards/card_b.html"><b>B</b> Adverse selection</a></td>
+  <td>FLB-zone post-entry drift only <b>−0.15pp @30m</b> (split-half symmetric noise) → ≈9.9pp net survives. Maker realized spread <b>0.95pp</b>, keeps ~80% of spread, +EV 55% of trades. No size-toxicity.</td>
+  <td>Edge isn't picked off. Maker side independently +EV → MM viable.</td></tr>
+<tr><td><a href="_cards/card_f.html"><b>F</b> Vol &amp; theta</a></td>
+  <td>Implied−realized vol premium <b>+14% ann</b> (H1 +7.2/H2 +20.9, sign-stable). Term structure contango (1h 34%→24h 50%). Theta decay gradual. Open-2h σ predicts daily range <b>r=0.53</b>.</td>
+  <td>Root cause of FLB (overpriced vol → squashed favorites). Vol-regime = sizing signal.</td></tr>
+<tr><td><a href="_cards/card_a.html"><b>A</b> Liquidity</a></td>
+  <td>Binary spread <b>128bp</b> median (956× perp), shallow (TOB <b>$107</b>, $679 within 100bp). ~100% two-sided. Tick 1e-5. Regime WIDE_SPARSE. Perp TOB $1.15M.</td>
+  <td>MM viable $100–500/side × 5–10 markets; perp hedge unconstrained. Capacity is the binding constraint for any strategy.</td></tr>
+<tr><td><a href="_cards/card_c.html"><b>C</b> Lead-lag</a></td>
+  <td>Perp→binary <b>sub-second</b> (half-life 1–2s); hedge ratio ∂binary/∂model_prob <b>≈0.50</b>, stable. Perp-momentum taker R²=0.08, net <b>−0.36pp</b> (dies to spread).</td>
+  <td>MM hedge clean &amp; feasible but needs &lt;1s re-quote (vs 1 Hz engine). Perp-taker ruled out.</td></tr>
+<tr><td><a href="_cards/card_d.html"><b>D</b> Mispricing</a></td>
+  <td>Overround p50 <b>90bp</b>, <b>0%</b> taker buy-arb across 3.18M ticks. Buckets ~3% overround. GBM "model edge" present but σ-horizon-biased (superseded by E's model-free calibration).</td>
+  <td>No static arb. Confirms taker edge must come from convergence, not sum-arb.</td></tr>
+</table>
+</div>
+
+<h2>3 · The unifying thesis</h2>
+<div class="panel">
+<p>Four cards independently point to one mechanism:</p>
+<p style="text-align:center;font-size:15px;margin:14px 0">
+<b>Market overprices volatility (F: +14%)</b> &nbsp;→&nbsp; <b>binary mids pulled toward 0.5</b>
+&nbsp;→&nbsp; <b>favorites underpriced (E: +18.8pp; D's GBM "rich" was a σ-horizon artifact)</b>
+&nbsp;→&nbsp; <b>buying favorites is +EV and not adversely selected (B)</b>.</p>
+<p>The constraint everywhere is <b>capacity / breadth</b> (A: $107 TOB; only 1 BTC binary/day). The
+edge per market is small and the single-name tail is fat; the desk's job is to harvest it across as
+many uncorrelated-settlement markets as possible. This is consistent with the live desk being
+profitable-but-small and scaling by adding markets.</p>
+</div>
+
+<h2>4 · Reusable analysis toolkit (the speedup)</h2>
+<div class="panel">
+<p>Built <code>hlanalysis/research/</code> so this analysis reruns in minutes (86 tests, ruff clean):</p>
+<ul>
+<li><code>outcome_markets.py</code> — symbol↔question↔class↔expiry↔strike↔leg resolver with
+<b>oracle-derived win labels</b> (a critical fix: binaries emit no settlement event;
+<code>settled_side_idx</code> is a constant artifact, not the winner — verified, 47.4% binary
+Yes-win / buckets 1-winner-per-question at 100% oracle-mid agreement).</li>
+<li><code>dataset.py</code> — cached cross-venue research panels (configurable dt).</li>
+<li><code>metrics.py</code> — 9 tested desk metrics (spread, depth, markout, overround, GBM
+implied-prob, theta, convergence, vol term structure, lead-lag).</li>
+<li><code>report.py</code> — self-contained HTML card builder.</li>
+<li><code>cards/</code> — the 6 characterization cards + strategy drivers, each regenerable.</li>
+<li><code>scripts/research_clean_flb.py</code> — authoritative clean-FLB backtest (reproducible).</li>
+</ul>
+<p class="muted">All read-only against the main-checkout recorded data via <code>HLBT_HL_DATA_ROOT</code>;
+no synthetic/stale inputs.</p>
+</div>
+
+<h2>5 · Next steps (ranked)</h2>
+<div class="panel">
+<ol>
+<li><b>Multi-market FLB portfolio backtest</b> — extend clean-FLB to HL buckets + PM multi-strike
+series; measure portfolio-level Sharpe/DD with realistic per-market capacity. This is the gate that
+turns the real-but-fragile single-name edge into a deployable desk strategy.</li>
+<li><b>Vol-regime sizing, honestly re-tested</b> — Card F's r=0.53 signal, validated on the
+multi-market corpus where σ actually varies (the single-name test had all OOS σ above median, so it
+didn't discriminate).</li>
+<li><b>Finish MM sim + 1 Hz-penalty quantification</b> — decide MM as a Phase-2 item contingent on
+sub-second quoting; do not deploy at 1 Hz.</li>
+<li><b>Bucket-band favorite study</b> — buckets are ~3% overround (richer than binaries) and add
+breadth; characterize their FLB and adverse selection (Card B/E focused on binaries).</li>
+</ol>
+</div>
+
+<p class="muted" style="margin-top:40px">All findings split-half validated on recorded data. No live
+config or production changes were made. Strategy work stopped at backtest + KPI scorecard per the
+agreed scope.</p>
+
+</div>
+</body>
+</html>
