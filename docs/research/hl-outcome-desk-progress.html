@@ -93,15 +93,15 @@ Last updated: <b>2026-06-13 · setup</b></p>
     <span class="muted">Gate PASSED: tests green + smoke HTML renders correct labels.</span>
   </div>
   <div class="panel">
-    <span class="pill wait">queued</span> &nbsp;<b>Wave 1 — Characterization (taker-relevant first)</b>
-    <span class="tag">sonnet ×6 parallel</span>
+    <span class="pill run">running</span> &nbsp;<b>Wave 1 — Characterization</b>
+    <span class="tag">sonnet ×6</span>
     <ul>
-      <li><b>E</b> Settlement / resolution convergence <span class="muted">(taker core)</span></li>
-      <li><b>D</b> Mispricing surface: implied-prob vs GBM, Yes+No overround, bucket↔binary no-arb <span class="muted">(taker core)</span></li>
-      <li><b>F</b> Vol term structure &amp; theta decay <span class="muted">(taker core)</span></li>
-      <li><b>B</b> Adverse selection / markouts <span class="muted">(taker + MM)</span></li>
-      <li><b>A</b> Liquidity &amp; book shape <span class="muted">(MM-leaning)</span></li>
-      <li><b>C</b> Cross-venue lead-lag perp→outcome <span class="muted">(MM-leaning)</span></li>
+      <li><span class="pill done">done</span> <b>E</b> Settlement convergence — FLB taker edge confirmed (keystone)</li>
+      <li><span class="pill done">done</span> <b>D</b> Mispricing surface — no static arb; σ-biased GBM edge</li>
+      <li><span class="pill done">done</span> <b>F</b> Vol/theta — +14% vol premium, regime sizing r=0.53</li>
+      <li><span class="pill run">running</span> <b>B</b> Adverse selection / markouts <span class="muted">(taker + MM)</span></li>
+      <li><span class="pill run">running</span> <b>A</b> Liquidity &amp; book shape <span class="muted">(MM)</span></li>
+      <li><span class="pill run">running</span> <b>C</b> Cross-venue lead-lag perp→outcome <span class="muted">(MM)</span></li>
     </ul>
   </div>
   <div class="panel">
@@ -179,6 +179,19 @@ Last updated: <b>2026-06-13 · setup</b></p>
   <tr><td class="red">Capacity (binding)</td><td>TOB <b>$50–$200 notional/level</b></td><td>Small clips → any taker/MM edge needs breadth across many markets to scale to desk size.</td></tr>
   </table>
   <p class="muted">Card: <code>docs/research/_cards/card_d.html</code> · Verdict: pure arb FAIL, directional model-edge PASS (pending σ-horizon reconciliation).</p>
+
+  <h3 style="margin-top:18px">Card E — Settlement convergence &amp; calibration <span class="pill done">done</span> <span class="muted">(keystone)</span></h3>
+  <table>
+  <tr><th>Metric</th><th>Result (n, span)</th><th>Read</th></tr>
+  <tr><td><b>Favourite-longshot bias</b></td><td>favorites mid 0.65–0.80 underpriced by <b>+18.8pp</b>; longshots overpriced · sign-stable both halves</td><td><b>The taker edge.</b> Buy favorites, don't touch longshots. Model-free → overrides Card D's σ-biased GBM sign.</td></tr>
+  <tr><td>Best net-edge cells (fee=0)</td><td>mid 0.80–0.85 @3–6h <b>+17.4pp</b> (10 exp) · @1–3h +16.0pp · mid 0.85–0.90 +12pp</td><td>Edge concentrated in 0.80–0.95 favorites, 1–6h before expiry.</td></tr>
+  <tr><td>How early outcome known</td><td>median <b>4.47h</b> pre-expiry (IQR 1.4–8.2h); 33/38 definitive, 5 close calls</td><td>Plenty of runway to enter the edge window.</td></tr>
+  <tr><td>Split-half</td><td>edge @mid≥0.85,TTE&lt;3h: H1 +4.0pp / H2 +3.5pp · FLB +22pp/+15pp</td><td>Direction stable; magnitude slightly lower in bearish H2.</td></tr>
+  </table>
+  <p class="muted">Card: <code>docs/research/_cards/card_e.html</code> · Reconciliation: D+E+F agree → <b>market overprices vol → favorites underpriced → buy favorites (v1/v31)</b>.</p>
+  <div class="panel" style="background:var(--panel2);margin-top:12px">
+    <b>Taker thesis (3 cards agree):</b> Buy favorites (binary mid <b>0.80–0.95</b>) at <b>1–6h</b> to expiry. Net edge <b>+6 to +17pp</b>, HL fee = 0 (cost = half-spread). Still to clear in Wave 2: <span class="amber">adverse selection at the ask (Card B)</span>, capacity/breadth ($50–200/level), and a walk-forward OOS backtest at engine cadence.
+  </div>
 </div>
 
 <h2>Strategy scorecard</h2>
@@ -192,7 +205,9 @@ Last updated: <b>2026-06-13 · setup</b></p>
   <li><span class="ts">2026-06-13 W0✓</span> — Toolkit delivered (86 tests). Independently caught a critical win-label bug; dispatched fix agent. Verified: binary 47.4% Yes-win, bucket 1-winner-per-question, 100% oracle/mid agreement.</li>
   <li><span class="ts">2026-06-13 W1</span> — Launched taker-first cards E/D/F in parallel.</li>
   <li><span class="ts">2026-06-13 F✓</span> — Card F done: +14% ann implied−realized vol premium, sign-stable → v31 theta edge confirmed. Vol-regime sizing r=0.53.</li>
-  <li><span class="ts">2026-06-13 D✓</span> — Card D done: no static taker arb (90bp overround), GBM model-edge present but σ-horizon-sensitive (flagged for reconciliation); capacity binding at $50–200/level. Awaiting E.</li>
+  <li><span class="ts">2026-06-13 D✓</span> — Card D done: no static taker arb (90bp overround), GBM model-edge present but σ-horizon-sensitive (flagged); capacity binding at $50–200/level.</li>
+  <li><span class="ts">2026-06-13 E✓</span> — Card E done (keystone): favourite-longshot bias, buy favorites 0.80–0.95 @1–6h = +6–17pp net, fee-free, split-half stable. Taker thesis locked across D+E+F.</li>
+  <li><span class="ts">2026-06-13 W1b</span> — Launched MM-leaning trio B (adverse selection), A (liquidity), C (lead-lag).</li>
 </ul>
 </div>
 
