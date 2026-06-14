@@ -520,3 +520,29 @@ async def test_persist_loop_prune_fires_via_n_counter(tmp_path):
 
     rows = dal.events_since(since_ts_ns=0)
     assert len(rows) <= 3
+
+
+@pytest.mark.asyncio
+async def test_event_written_once_tagged_by_alias(tmp_path):
+    """Each event is persisted exactly once, tagged with its own alias as
+    strategy_id (no fan-out duplication on the unified DB)."""
+    db_path = tmp_path / "state.db"
+    dal = StateDAL(db_path)
+    dal.run_migrations()
+
+    bus = EventBus(maxsize=64)
+    task, _ = _make_persist_task(bus, dal)
+    await bus.publish(RiskVeto(ts_ns=1, account_alias="v1", reason="low_volume"))
+    await bus.publish(RiskVeto(ts_ns=2, account_alias="v31", reason="stale_data"))
+    await asyncio.sleep(0.15)
+    await _stop_task(task)
+
+    rows = dal.events_since(since_ts_ns=0)
+    assert len(rows) == 2  # exactly once each, not duplicated
+    # strategy_id stamped from the event's own alias
+    import sqlite3
+
+    c = sqlite3.connect(db_path)
+    by_sid = dict(c.execute("SELECT strategy_id, COUNT(*) FROM events GROUP BY strategy_id").fetchall())
+    c.close()
+    assert by_sid == {"v1": 1, "v31": 1}

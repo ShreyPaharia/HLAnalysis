@@ -327,6 +327,10 @@ class EngineRuntime:
         # run_migrations once here — all slots share one DB and one schema.
         _shared_dal = CachedStateDAL(self.deploy_cfg.state_db_path_shared())
         _shared_dal.run_migrations()
+        # Kept for the events persist loop, which writes each event ONCE to this
+        # shared base DAL (tagged by the event's own alias) rather than fanning
+        # out to every slot's scoped DAL — see _events_persist_loop.
+        self._shared_dal = _shared_dal
         self.slots = [self._build_slot(s_cfg, shared_dal=_shared_dal) for s_cfg in self.strategies]
         slots = self.slots
         if len({s.alias for s in slots}) != len(slots):
@@ -720,17 +724,18 @@ class EngineRuntime:
     # ---- events persistence (Component 2 — engine observability) -----------
 
     async def _events_persist_loop(self) -> None:
-        """Subscribe to the bus and persist every event to each slot's DB via
-        the unified ``events_sink.events_persist_loop``.
+        """Subscribe to the bus and persist every event to the unified state DB
+        via ``events_sink.events_persist_loop``.
 
-        Route events to every slot's DAL. All slots' DBs are independent
-        (one state.db per alias). We write the same event to every slot so
-        each slot has a full engine-wide event log — cheap (event volume is
-        low) and avoids needing a cross-alias query.
+        Writes each event ONCE to the shared base DAL, tagged with its own
+        ``alias`` as ``strategy_id`` (tools query by strategy_id). All slots
+        share one state.db, so fanning the same event out to every slot's scoped
+        DAL would store it N times (one row per strategy_id) — the duplication
+        that bloated the unified events table. Pruning also runs once per cycle.
 
-        NOTE: self.slots is populated by run() before tasks are spawned, so
-        it is non-empty when this coroutine is awaited. Terminates via task
-        cancellation (CancelledError), matching the alerts loop pattern.
+        NOTE: self._shared_dal is set by run() before tasks are spawned.
+        Terminates via task cancellation (CancelledError), matching the alerts
+        loop pattern.
         """
         sub = self.bus.subscribe()
         max_age_ns = self.deploy_cfg.events_retention_days * 24 * 3600 * 10**9
@@ -739,7 +744,7 @@ class EngineRuntime:
         journal_max_rows = self.deploy_cfg.trade_journal_retention_max_rows
         await events_persist_loop(
             sub,
-            [s.dal for s in self.slots],
+            [self._shared_dal],
             max_age_ns=max_age_ns,
             max_rows=max_rows,
             journal_max_age_ns=journal_max_age_ns,

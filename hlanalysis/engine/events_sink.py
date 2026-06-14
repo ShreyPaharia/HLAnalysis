@@ -52,10 +52,11 @@ async def events_persist_loop(
 
     Symmetric to AlertRules.run(alerts_sub): loops on sub.get(), extracts the
     stable fields (alias, kind, question_idx, reason) into named columns for SQL
-    queries, and writes the full event as payload_json for fidelity. The same
-    event is written to EVERY dal in ``dals`` — all slots' DBs are independent
-    (one state.db per alias), so each slot keeps a full engine-wide event log
-    (cheap; event volume is low) and no cross-alias query is needed.
+    queries, and writes the full event as payload_json for fidelity. With the
+    unified state DB, ``dals`` is a single shared base DAL and each event is
+    written ONCE, tagged with its own ``alias`` as ``strategy_id``; tools query
+    by ``strategy_id``. (Pre-unification this fanned the same event out to every
+    per-slot DB — that became 5× duplication once the DBs were merged.)
 
     Terminates via task cancellation (CancelledError from sub.get()), matching
     the alerts loop pattern.
@@ -76,8 +77,14 @@ async def events_persist_loop(
         ev = await sub.get()
         try:
             cols = event_columns(ev)
+            # Write each event ONCE, tagged with the strategy it pertains to
+            # (its own ``alias``). With the unified state DB, ``dals`` is a
+            # single shared base DAL; fanning out to per-slot scoped DALs would
+            # store the same event N times (one row per strategy_id) — the 5×
+            # duplication that bloated the unified events table. Engine-wide
+            # events (heartbeats) carry alias=None → strategy_id=None.
             for dal in dals:
-                dal.append_event(**cols)
+                dal.append_event(**cols, strategy_id=cols["alias"])
             inserted += 1
             if inserted % prune_every_n == 0:
                 try:
