@@ -291,6 +291,13 @@ class MarketState:
         self._last_mark_ts: dict[str, int] = {}
         # Per-symbol deque of (ts_ns, price, size) for rolling-volume accounting.
         self._trades: dict[str, deque[tuple[int, float, float]]] = {}
+        # Version-cached re-sum for recent_volume_usd (FIX A).
+        # _trades_version[sym] is bumped on every deque mutation (append or popleft).
+        # _vol_cache[sym] stores (version_when_computed, summed_notional); if the
+        # stored version equals the current version the sum is reused, else recomputed
+        # with the identical sum(px*sz ...) expression so the float is bit-identical.
+        self._trades_version: dict[str, int] = {}
+        self._vol_cache: dict[str, tuple[int, float]] = {}
         # Per-(symbol, dt_ns) OHLC bar buffers; one feed fans into every cadence
         # registered for the symbol (engine semantics).
         self._buffers: dict[tuple[str, int], _OhlcBuffer] = {}
@@ -387,7 +394,8 @@ class MarketState:
     def apply_trade(self, symbol: str, *, ts_ns: int, price: float, size: float) -> None:
         dq = self._trades.setdefault(symbol, deque())
         dq.append((ts_ns, price, size))
-        self._evict(dq, now_ns=ts_ns)
+        self._trades_version[symbol] = self._trades_version.get(symbol, 0) + 1
+        self._evict(symbol, dq, now_ns=ts_ns)
         b = self._books.setdefault(symbol, _MutableBook())
         b.last_trade_ts_ns = max(b.last_trade_ts_ns, ts_ns)
 
@@ -405,10 +413,11 @@ class MarketState:
         bucket_ns = self._resolve_dt_ns(symbol, None)
         self._buffer(symbol, bucket_ns).append_bar(ts_ns, high, low, close)
 
-    def _evict(self, dq: deque[tuple[int, float, float]], *, now_ns: int) -> None:
+    def _evict(self, symbol: str, dq: deque[tuple[int, float, float]], *, now_ns: int) -> None:
         cutoff = now_ns - self._volume_window_ns
         while dq and dq[0][0] < cutoff:
             dq.popleft()
+            self._trades_version[symbol] = self._trades_version.get(symbol, 0) + 1
 
     # ---- query ---------------------------------------------------------
 
@@ -474,15 +483,31 @@ class MarketState:
         """Total traded notional (Σ price·size) over the last hour as of
         ``now_ns``, summed across ``symbols`` (a single symbol or an iterable of
         leg symbols). Evicts stale entries per-symbol on read — the live engine
-        + backtest semantics SHR-78 pinned."""
+        + backtest semantics SHR-78 pinned.
+
+        Performance (FIX A): uses a version-cached re-sum.  The deque version
+        is incremented on every mutation (append in ``apply_trade``, each
+        ``popleft`` in ``_evict``).  If the version has not changed since the
+        last computed sum the cached value is returned without iterating the
+        deque.  When the version has changed the identical
+        ``sum(px*sz for _,px,sz in dq)`` expression is used so the float
+        result is bit-identical to the un-cached path.
+        """
         syms: Iterable[str] = (symbols,) if isinstance(symbols, str) else symbols
         total = 0.0
         for sym in syms:
             dq = self._trades.get(sym)
             if dq is None:
                 continue
-            self._evict(dq, now_ns=now_ns)
-            total += sum(px * sz for _, px, sz in dq)
+            self._evict(sym, dq, now_ns=now_ns)
+            ver = self._trades_version.get(sym, 0)
+            cached = self._vol_cache.get(sym)
+            if cached is not None and cached[0] == ver:
+                total += cached[1]
+            else:
+                s = sum(px * sz for _, px, sz in dq)
+                self._vol_cache[sym] = (ver, s)
+                total += s
         return total
 
     def sigma(

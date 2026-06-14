@@ -693,7 +693,10 @@ def run_one_question(
         # numpy arrays to tuples so sim and live pass the identical container
         # type to strategy.evaluate.
         recent_returns: tuple[float, ...] = tuple(_rets_arr.tolist())
-        recent_hl_bars: tuple[tuple[float, float], ...] = tuple((float(h), float(lo)) for h, lo in _hl_arr)
+        # FIX B: bulk C-level unbox via .tolist() then build inner tuples —
+        # bit-identical to float(h)/float(lo) but avoids per-element numpy
+        # scalar boxing in the Python loop (~68% of backtest runtime).
+        recent_hl_bars: tuple[tuple[float, float], ...] = tuple((h, lo) for h, lo in _hl_arr.tolist())
         ref_close = state.latest_btc_close() or qv.strike
 
         decision = strategy.evaluate(
