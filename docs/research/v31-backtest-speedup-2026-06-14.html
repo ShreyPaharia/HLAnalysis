@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>v31 backtest — depth-backend & cadence speedup comparison</title>
+    <style>
+:root {
+    --bg:        #0d1117;
+    --card-bg:   #161b22;
+    --border:    #30363d;
+    --text:      #e6edf3;
+    --muted:     #8b949e;
+    --accent:    #58a6ff;
+    --code-bg:   #1f2428;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    padding: 2rem 1rem;
+}
+h1 {
+    color: var(--accent);
+    font-size: 1.8rem;
+    margin-bottom: 0.4rem;
+}
+.subtitle {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin-bottom: 2rem;
+}
+.card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 1.5rem;
+    padding: 1.2rem 1.4rem;
+    max-width: 1100px;
+}
+.card h2 {
+    color: var(--accent);
+    font-size: 1.1rem;
+    margin-bottom: 0.8rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.4rem;
+}
+.card img {
+    max-width: 100%;
+    border-radius: 4px;
+    margin-top: 0.8rem;
+}
+.notes {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin-top: 0.8rem;
+    padding: 0.5rem 0.8rem;
+    border-left: 3px solid var(--border);
+}
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin-top: 0.6rem;
+}
+th, td {
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    text-align: left;
+    font-size: 0.85rem;
+}
+th { background: var(--code-bg); color: var(--accent); }
+tr:nth-child(even) td { background: #1a1f26; }
+code, pre {
+    background: var(--code-bg);
+    border-radius: 4px;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.85em;
+}
+code { padding: 0.1em 0.3em; }
+pre { padding: 0.8em; overflow-x: auto; }
+</style>
+</head>
+<body>
+    <h1>v31 backtest — depth-backend & cadence speedup comparison</h1>
+    <div class="subtitle">Generated 2026-06-14 10:07 UTC</div>
+    <div class="card">
+    <h2>Summary — wall-time & speedup</h2>
+    <p>6 binary questions (2026-05-13..05-19), each run as an isolated single-question backtest via the resumable driver. Speedup = baseline mean wall ÷ config mean wall.</p><table><thead><tr><th>config</th><th>done</th><th>mean wall/q</th><th>wall range</th><th>speedup</th><th>total PnL</th></tr></thead><tbody><tr><td>HashMap 0.2/2 (baseline)</td><td>6/6</td><td>2356s</td><td>2329–2385s</td><td>1.00×</td><td>$318.17</td></tr><tr><td>ROI-vector 0.2/2</td><td>6/6</td><td>2228s</td><td>2199–2239s</td><td>1.06×</td><td>$318.17</td></tr><tr><td>HashMap 1s/5s (cadence)</td><td>6/6</td><td>762s</td><td>750–784s</td><td>3.09×</td><td>$340.90</td></tr></tbody></table>
+    
+    
+</div>
+
+<div class="card">
+    <h2>ROI vs HashMap — fill bit-identical check</h2>
+    <p><b class='green'>ROI is bit-identical to HashMap</b> (per-question PnL + trade count match) — confirms ROI [0,1] clips nothing for probability-priced tokens.</p><table><thead><tr><th>question</th><th>HashMap</th><th>ROI</th><th>identical?</th></tr></thead><tbody><tr><td>q0</td><td>$-21.61 / 20tr</td><td>$-21.61 / 20tr</td><td class='green'>MATCH</td></tr><tr><td>q1</td><td>$78.03 / 2tr</td><td>$78.03 / 2tr</td><td class='green'>MATCH</td></tr><tr><td>q2</td><td>$52.54 / 31tr</td><td>$52.54 / 31tr</td><td class='green'>MATCH</td></tr><tr><td>q3</td><td>$84.86 / 6tr</td><td>$84.86 / 6tr</td><td class='green'>MATCH</td></tr><tr><td>q4</td><td>$77.62 / 14tr</td><td>$77.62 / 14tr</td><td class='green'>MATCH</td></tr><tr><td>q5</td><td>$46.73 / 38tr</td><td>$46.73 / 38tr</td><td class='green'>MATCH</td></tr></tbody></table>
+    
+    
+</div>
+
+<div class="card">
+    <h2>Per-question detail</h2>
+    <p>Per-question wall-time and PnL. Cadence-drift = (1s/5s PnL − baseline PnL): non-zero shows the fidelity cost of coarsening the scan cadence.</p><table><thead><tr><th>q</th><th>HashMap 0.2/2</th><th>ROI 0.2/2</th><th>HashMap 1/5</th><th>cadence ΔPnL</th></tr></thead><tbody><tr><td>q0</td><td>2345s<br>$-21.61</td><td>2235s<br>$-21.61</td><td>758s<br>$-0.79</td><td class='red'>+20.82</td></tr><tr><td>q1</td><td>2363s<br>$78.03</td><td>2237s<br>$78.03</td><td>752s<br>$78.03</td><td class='green'>+0.00</td></tr><tr><td>q2</td><td>2385s<br>$52.54</td><td>2235s<br>$52.54</td><td>750s<br>$51.26</td><td class='red'>-1.28</td></tr><tr><td>q3</td><td>2329s<br>$84.86</td><td>2223s<br>$84.86</td><td>778s<br>$84.86</td><td class='green'>+0.00</td></tr><tr><td>q4</td><td>2363s<br>$77.62</td><td>2239s<br>$77.62</td><td>784s<br>$78.72</td><td class='red'>+1.10</td></tr><tr><td>q5</td><td>2351s<br>$46.73</td><td>2199s<br>$46.73</td><td>752s<br>$48.82</td><td class='red'>+2.09</td></tr></tbody></table>
+    
+    
+</div>
+
+</body>
+</html>
