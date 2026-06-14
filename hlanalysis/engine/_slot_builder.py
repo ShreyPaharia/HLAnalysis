@@ -85,12 +85,16 @@ def build_slot(
     from .runtime import AccountSlot, PmSlotState
 
     # ``account_alias`` is the unique per-slot identifier enforced by
-    # ``load_strategies_config``.  We use it as ``strategy_id`` so that:
-    #   1. It's guaranteed unique within the running engine.
-    #   2. It matches the existing per-slot directory naming convention.
-    #   3. It maps one-to-one to the account (today's 1-strategy-per-account
-    #      invariant), so ``account_alias`` is a stable proxy for "this slot".
+    # ``load_strategies_config``.  The effective ``strategy_id`` used for DB
+    # row scoping and per-slot flag files is:
+    #   * ``s_cfg.strategy_id`` when the operator sets it explicitly — enabling
+    #     a future "Stage 1" where two strategy entries share the same account
+    #     but use different DB-scoping keys (config-only change, no code change).
+    #   * ``account_alias`` otherwise — the current default, preserving today's
+    #     1-strategy-per-account invariant where ``account_alias`` is a stable
+    #     proxy for "this slot".
     alias = s_cfg.account_alias
+    strategy_id = s_cfg.strategy_id if s_cfg.strategy_id is not None else alias
     if alias not in deploy_cfg.accounts:
         raise ValueError(
             f"strategy '{s_cfg.name}' references account_alias={alias!r} but "
@@ -99,9 +103,9 @@ def build_slot(
     acct = deploy_cfg.accounts[alias]
 
     # Shared DB: one file for the whole engine, scoped per slot by strategy_id.
-    # Per-strategy flag/sibling files live in slot_dir_for(alias).
+    # Per-strategy flag/sibling files live in slot_dir_for(strategy_id).
     shared_db_path = deploy_cfg.state_db_path_shared()
-    slot_dir = deploy_cfg.slot_dir_for(alias)
+    slot_dir = deploy_cfg.slot_dir_for(strategy_id)
     slot_dir.mkdir(parents=True, exist_ok=True)
     kill_switch_path = slot_dir / Path(deploy_cfg.kill_switch_path).name
 
@@ -116,11 +120,12 @@ def build_slot(
         _base_dal.run_migrations()
     else:
         _base_dal = shared_dal
-    # strategy_id = account_alias (unique per slot, enforced by load_strategies_config).
+    # strategy_id = s_cfg.strategy_id ?? account_alias (explicit config value
+    #   wins; falls back to account_alias, the current default).
     # account     = account_alias (venue-agnostic; account_address is HL-only).
-    # Using account_alias for both keeps the scoping consistent and avoids
+    # Using account_alias for account keeps the scoping consistent and avoids
     # attribute differences between HyperliquidAccount and PolymarketAccount.
-    dal = StrategyScopedDAL(_base_dal, strategy_id=alias, account=alias)
+    dal = StrategyScopedDAL(_base_dal, strategy_id=strategy_id, account=alias)
 
     if exec_client_factory is not None:
         exec_client = exec_client_factory(alias, acct, s_cfg.paper_mode)
@@ -146,7 +151,7 @@ def build_slot(
         bus=bus,
         exec_client=exec_client,
         strategy_cfg=s_cfg,
-        strategy_id=s_cfg.name,
+        strategy_id=strategy_id,
         cloid_prefix=cloid_prefix,
         reduce_close_atol=reduce_close_atol,
         journal=journal,

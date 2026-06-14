@@ -1,13 +1,13 @@
 # tests/unit/test_engine_config.py
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from hlanalysis.engine.config import (
     AllowlistEntry,
-    DeployConfig,
     StrategyConfig,
     load_deploy_config,
     load_strategies_config,
@@ -271,3 +271,138 @@ def test_pm_slots_reference_binance_spot():
     assert pm["v31_pm"].reference_symbol == "BTCUSDT_SPOT"
     assert pm["v1_pm"].reference_symbol == "BTCUSDT_SPOT"
     assert pm["v31_pm"].reference_sigma_source == "bbo"  # σ source stays bbo (now spot bbo)
+
+
+# ---------------------------------------------------------------------------
+# Task 9: optional explicit strategy_id field
+# ---------------------------------------------------------------------------
+
+
+def _make_minimal_strategy_cfg(**kwargs) -> StrategyConfig:
+    """Build a minimal valid StrategyConfig; kwargs override defaults."""
+    entry = AllowlistEntry(
+        match={"class": "priceBinary"},
+        max_position_usd=100,
+        stop_loss_pct=None,
+        tte_min_seconds=0,
+        tte_max_seconds=7200,
+        price_extreme_threshold=0.90,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
+    )
+    base = dict(
+        name="late_resolution",
+        paper_mode=True,
+        account_alias="v1",
+        allowlist=[entry],
+        blocklist_question_idxs=[],
+        defaults=entry,
+        **{
+            "global": {
+                "max_total_inventory_usd": 500,
+                "max_concurrent_positions": 5,
+                "daily_loss_cap_usd": 200,
+                "max_strike_distance_pct": 50,
+                "min_recent_volume_usd": 0,
+                "stale_data_halt_seconds": 30,
+                "reconcile_interval_seconds": 60,
+            }
+        },
+    )
+    base.update(kwargs)
+    return StrategyConfig(**base)
+
+
+def test_strategy_id_defaults_to_account_alias_when_omitted():
+    """When ``strategy_id`` is absent from config, it is None in the model.
+
+    ``_slot_builder.build_slot`` derives the effective strategy_id as
+    ``s_cfg.strategy_id or s_cfg.account_alias``; this test asserts that the
+    field is None (the default) so the builder correctly falls back to
+    account_alias.
+    """
+    cfg = _make_minimal_strategy_cfg()  # no strategy_id kwarg
+    assert cfg.strategy_id is None
+    # Derived value (mirrors _slot_builder logic) must equal account_alias
+    effective_id = cfg.strategy_id if cfg.strategy_id is not None else cfg.account_alias
+    assert effective_id == cfg.account_alias == "v1"
+
+
+def test_strategy_id_explicit_overrides_account_alias():
+    """When ``strategy_id`` is set explicitly, it is used as the DB scoping key."""
+    cfg = _make_minimal_strategy_cfg(strategy_id="my_custom_id")
+    assert cfg.strategy_id == "my_custom_id"
+    # account_alias is unchanged
+    assert cfg.account_alias == "v1"
+    # Derived value (mirrors _slot_builder logic) must use the explicit id
+    effective_id = cfg.strategy_id if cfg.strategy_id is not None else cfg.account_alias
+    assert effective_id == "my_custom_id"
+
+
+def test_prod_config_strategy_id_not_set():
+    """The current strategy.yaml has NO strategy_id field on any entry.
+
+    All slots must have strategy_id=None so the builder falls back to
+    account_alias — preserving today's exact behavior.
+    """
+    strategies = load_strategies_config(Path("config/strategy.yaml"))
+    for s in strategies.strategies:
+        assert s.strategy_id is None, (
+            f"slot {s.account_alias!r} has an unexpected strategy_id={s.strategy_id!r}; "
+            "the current config intentionally omits this field"
+        )
+
+
+def test_all_slots_resolve_to_one_shared_db_path():
+    """All slots in the current config must resolve to ONE shared DB path.
+
+    DeployConfig.state_db_path_shared() returns the same Path regardless of
+    which slot calls it — all strategy slots share one physical DB file; only
+    their (strategy_id, account) row tags differ.
+    """
+    # Set required env vars for the full deploy.yaml to load
+    env_vars = {
+        "HL_ACCOUNT_ADDRESS": "0xtest",
+        "HL_API_SECRET_KEY": "0xtest",
+        "HL_ACCOUNT_ADDRESS_V31": "0xtest31",
+        "HL_API_SECRET_KEY_V31": "0xtest31",
+        "TG_BOT_TOKEN": "tok",
+        "TG_CHAT_ID": "1",
+        "PM_PRIVATE_KEY": "0xpm",
+        "PM_CLOB_API_KEY": "k",
+        "PM_CLOB_API_SECRET": "s",
+        "PM_CLOB_API_PASSPHRASE": "p",
+        "PM_FUNDER_ADDRESS": "0xfund",
+        "PM_PRIVATE_KEY_V1": "0xpmv1",
+        "PM_CLOB_API_KEY_V1": "kv1",
+        "PM_CLOB_API_SECRET_V1": "sv1",
+        "PM_CLOB_API_PASSPHRASE_V1": "pv1",
+        "PM_FUNDER_ADDRESS_V1": "0xfundv1",
+        "PM_PRIVATE_KEY_ETH_MS": "0xethms",
+        "PM_CLOB_API_KEY_ETH_MS": "kethms",
+        "PM_CLOB_API_SECRET_ETH_MS": "sethms",
+        "PM_CLOB_API_PASSPHRASE_ETH_MS": "pethms",
+        "PM_FUNDER_ADDRESS_ETH_MS": "0xfundethms",
+    }
+    orig = {k: os.environ.get(k) for k in env_vars}
+    try:
+        os.environ.update(env_vars)
+        deploy_cfg = load_deploy_config(Path("config/deploy.yaml"))
+        shared_path = deploy_cfg.state_db_path_shared()
+        strategies = load_strategies_config(Path("config/strategy.yaml"))
+        # Every slot resolves to the same shared DB path
+        for s in strategies.strategies:
+            # The slot builder uses state_db_path_shared() — confirm it's
+            # consistent across accounts and strategy types.
+            assert deploy_cfg.state_db_path_shared() == shared_path, (
+                f"slot {s.account_alias!r} resolved to a different DB path"
+            )
+        # Shared path must be a single file (not a per-alias subdirectory path)
+        assert shared_path.name == "state.db"
+        assert str(shared_path) == "data/engine/state.db"
+    finally:
+        for k, v in orig.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v

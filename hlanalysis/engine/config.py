@@ -186,6 +186,16 @@ class StrategyConfig(BaseModel):
     # Logical name keyed into deploy_cfg.hl_accounts. Default "default" preserves
     # legacy single-account YAMLs that omit this field.
     account_alias: str = "default"
+    # Optional explicit strategy identifier used as the DB scoping key in
+    # StrategyScopedDAL and the per-slot slot_dir_for() path.  When absent
+    # (the normal case), _slot_builder derives it from ``account_alias``, so
+    # today's 1-strategy-per-account layout is unchanged.
+    #
+    # Setting this enables a future "Stage 1" where two StrategyConfig entries
+    # share the same ``account_alias`` (same venue account) but use different
+    # ``strategy_id`` values — all that's needed is a distinct key for DB row
+    # scoping and flag files.  No code change required, only a config edit.
+    strategy_id: str | None = None
     # Which Strategy subclass to instantiate. Defaults to the v1 live strategy.
     # Validated dynamically against the live registry (live_registry.py) so that
     # adding a new live strategy requires no edit here.
