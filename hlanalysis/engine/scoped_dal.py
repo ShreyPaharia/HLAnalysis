@@ -21,8 +21,10 @@ Usage::
 The scoped DAL exposes every method that the engine touches (router, scanner,
 reconciler, events_sink, trade_journal, diag, reconcile_report). Methods that
 are genuinely global — run_migrations, applied_versions, prune_events,
-prune_trade_journal, start_session, end_session, mirror_venue_fills — are
-delegated straight through with no scope filter.
+prune_trade_journal, start_session, end_session — are delegated straight
+through with no scope filter. mirror_venue_fills is SCOPED: it injects the
+slot's strategy_id + account so mirrored venue fills are attributed to the
+owning strategy and show up in per-strategy realized_pnl_since queries.
 """
 
 from __future__ import annotations
@@ -39,9 +41,13 @@ class StrategyScopedDAL:
     Auto-injects ``strategy_id`` and ``account`` into every read/write so a
     slot only ever touches its own rows in the unified state DB.
 
-    Genuinely global operations (migrations, prune, session lifecycle,
-    mirror_venue_fills) delegate straight through — they operate across the
-    whole DB and must not be narrowed to one strategy's rows.
+    Genuinely global operations (migrations, prune, session lifecycle) delegate
+    straight through — they operate across the whole DB and must not be
+    narrowed to one strategy's rows.
+
+    ``mirror_venue_fills`` is SCOPED: it stamps each mirrored venue Fill row
+    with the slot's ``strategy_id`` / ``account`` so that per-strategy
+    ``realized_pnl_since`` queries find them (correctness gap fixed in task 6).
 
     ``db_path`` is a **virtual** per-strategy path whose *parent* is the
     per-strategy slot directory (``<shared_db.parent>/<strategy_id>/``).
@@ -83,17 +89,6 @@ class StrategyScopedDAL:
     def prune_trade_journal(self, *, max_age_ns: int, max_rows: int) -> None:
         # global across the DB — not scoped by strategy to keep table bounded
         self._base.prune_trade_journal(max_age_ns=max_age_ns, max_rows=max_rows)
-
-    def mirror_venue_fills(
-        self,
-        fills: Any,
-        *,
-        symbol_to_question: dict[str, int] | None = None,
-    ) -> int:
-        # Venue-mirror runs cross-slot (HL user_fills are per-account, not
-        # per-strategy). Delegate globally; the reconcile loop already filters
-        # by symbol.
-        return self._base.mirror_venue_fills(fills, symbol_to_question=symbol_to_question)
 
     # ------------------------------------------------------------------ #
     # Orders
@@ -200,6 +195,35 @@ class StrategyScopedDAL:
 
     def append_fill(self, f: Fill) -> bool:
         return self._base.append_fill(f, strategy_id=self.strategy_id, account=self.account)
+
+    def mirror_venue_fills(
+        self,
+        fills: Any,
+        *,
+        symbol_to_question: dict[str, int] | None = None,
+    ) -> int:
+        # Stamp strategy_id + account on every mirrored venue fill so that
+        # per-strategy realized_pnl_since queries find them.  In the current
+        # 1:1 configuration (one strategy per account) the owning strategy is
+        # unambiguously this slot's strategy_id.  Multi-strategy attribution
+        # by symbol (for shared-wallet, multi-slot HL accounts) is a
+        # documented follow-up; Stage-0 correctness requires the 1:1 path.
+        #
+        # Daily-loss gate semantics (HL wallet-level caveat): the primary path
+        # reads venue truth via exec_client.realized_pnl_since, which queries
+        # the HL REST API for the whole wallet's HIP-4 closedPnl.  In 1:1
+        # (one strategy per account) wallet == strategy, so this is correct
+        # per-strategy.  The DAL fallback path (used on venue-read failure)
+        # reads slot.dal.realized_pnl_since — which is NOW per-strategy
+        # because venue fills are stamped here.  Multi-strategy HL wallets
+        # would need attribution by symbol for the fallback; that is a
+        # follow-up (not Stage-0).
+        return self._base.mirror_venue_fills(
+            fills,
+            symbol_to_question=symbol_to_question,
+            strategy_id=self.strategy_id,
+            account=self.account,
+        )
 
     def fills_count(self) -> int:
         return self._base.fills_count(strategy_id=self.strategy_id)

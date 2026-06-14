@@ -530,6 +530,8 @@ class StateDAL:
         fills,
         *,
         symbol_to_question: dict[str, int] | None = None,
+        strategy_id: str | None = None,
+        account: str | None = None,
     ) -> int:
         """Book HL venue user_fills into the local Fill table as source='venue'
         (SHR-74). Only outcome ("#") fills are mirrored — perp/spot legs are not
@@ -540,8 +542,19 @@ class StateDAL:
         included). Returns the count of rows newly inserted.
 
         ``fills`` is any iterable of objects with the UserFillRow shape
-        (fill_id, cloid, symbol, side, price, size, fee, ts_ns, closed_pnl)."""
+        (fill_id, cloid, symbol, side, price, size, fee, ts_ns, closed_pnl).
+
+        ``strategy_id`` / ``account``: when provided (stamped by
+        StrategyScopedDAL), each mirrored Fill row is tagged with the owning
+        strategy so that ``realized_pnl_since(strategy_id=...)`` finds it. In
+        the current 1:1 (one strategy per account) configuration, the owning
+        strategy is the account's single strategy — multi-strategy attribution
+        by symbol is a documented follow-up for when multiple strategies share
+        an account. When ``strategy_id`` is None (direct / un-scoped call), Fill
+        rows are written with no strategy tag (backward-compatible)."""
         sym_q = symbol_to_question or {}
+        # Normalise: treat empty-string the same as None (no scope).
+        _sid = strategy_id or None
         inserted = 0
         for f in fills:
             if not f.symbol.startswith("#"):
@@ -559,6 +572,8 @@ class StateDAL:
                     ts_ns=f.ts_ns,
                     closed_pnl=f.closed_pnl,
                     source=FILL_SOURCE_VENUE,
+                    strategy_id=_sid,
+                    account=account,
                 )
             ):
                 inserted += 1
