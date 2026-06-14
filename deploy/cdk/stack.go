@@ -316,14 +316,15 @@ TIMEREOF`),
 	})
 
 	// EC2 Instance.
-	// t4g.micro (1GB RAM) — recorder + engine co-locate. Steady-state RAM is
-	// ~250MB recorder + ~250MB engine + ~200MB OS, which fits, but peaks
-	// (parquet flush colliding with a WS reconnect storm or settlement burst)
-	// can spike. A 1GB swap file (configured below in user-data) absorbs
-	// these peaks; it only ever gets touched under pressure. Bump to
-	// t4g.small if `vmstat 60` shows sustained `si`/`so` > 0.
+	// t4g.small (2GB RAM) — recorder + engine co-locate. Steady-state RAM is
+	// ~250MB recorder + ~250MB engine + ~200MB OS, but peaks (parquet flush
+	// colliding with a WS reconnect storm or settlement burst) plus hourly
+	// compaction repeatedly OOM-killed the 1GB t4g.micro even with swap +
+	// memory caps (SSM agent dropped to ConnectionLost ~2026-06-14). Bumped to
+	// t4g.small to give headroom; the 1GB swap file (configured below in
+	// user-data) still absorbs residual peaks.
 	instance := awsec2.NewInstance(stack, jsii.String("HLRecorderInstance"), &awsec2.InstanceProps{
-		InstanceType: awsec2.NewInstanceType(jsii.String("t4g.micro")), // ARM/Graviton - 1GB RAM
+		InstanceType: awsec2.NewInstanceType(jsii.String("t4g.small")), // ARM/Graviton - 2GB RAM
 		MachineImage: awsec2.MachineImage_LatestAmazonLinux2023(&awsec2.AmazonLinux2023ImageSsmParameterProps{
 			CpuType: awsec2.AmazonLinuxCpuType_ARM_64,
 		}),
