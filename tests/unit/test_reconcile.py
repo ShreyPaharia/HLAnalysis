@@ -783,3 +783,38 @@ def test_settled_qidx_suppresses_venue_absent_alert(dal):
         settled_qidxs={700064348},
     ).run(venue_open=[], venue_state=venue, now_ns=2)
     assert not any(d.case == "position_mismatch" for d in res.drift_events)
+
+
+def test_paper_pm_startup_does_not_wipe_positions(dal):
+    # Paper PM slots must never have apply_position_changes=True. The paper
+    # exec_client's in-memory _paper_positions is empty after every engine
+    # restart, so a startup reconcile with apply=True would see all local DB
+    # positions as "vanished" and delete them — causing the scanner to re-enter
+    # every question on the next tick (incident 2026-06-14, q=1344204256).
+    # The runtime fix passes apply_position_changes=False for paper PM slots
+    # (getattr(exec_client, "paper_mode", False) == True). This test verifies
+    # the underlying Reconciler behaviour: apply=False keeps the local position
+    # even when the venue reports the symbol absent (as the paper client always
+    # does after restart).
+    dal.upsert_position(
+        Position(
+            question_idx=1344204256,
+            symbol="87807399316685494666758265046411378672996461742381804308143136940120062962015",
+            qty=158.45,
+            avg_entry=0.9467,
+            realized_pnl=0.0,
+            last_update_ts_ns=1,
+            stop_loss_price=0.0,
+        )
+    )
+    # Venue returns no positions (paper client is empty after restart)
+    res = Reconciler(
+        dal,
+        fills_lookup=lambda _: [],
+        symbol_to_question={
+            "87807399316685494666758265046411378672996461742381804308143136940120062962015": 1344204256
+        },
+        apply_position_changes=False,  # what the runtime now passes for paper PM
+    ).run(venue_open=[], venue_state=ClearinghouseState(positions=(), account_value_usd=0), now_ns=2)
+    assert dal.get_position(1344204256) is not None, "paper PM position must survive startup reconcile"
+    assert res.vanished_positions == [], "must not trigger a settlement exit"

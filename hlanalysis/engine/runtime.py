@@ -799,7 +799,12 @@ class EngineRuntime:
                 if slot.blocked:
                     apply_positions = False
                 else:
-                    apply_positions = (not is_pm) or (not slot.pm.startup_position_synced)
+                    # Paper PM slots have no real venue positions — their in-memory
+                    # paper client is always empty after restart, so a startup sync
+                    # with apply=True would delete every local DB position as
+                    # "vanished". Paper slots trust their own fill ledger exclusively.
+                    is_paper = getattr(slot.exec_client, "paper_mode", False)
+                    apply_positions = (not is_pm) or (not slot.pm.startup_position_synced and not is_paper)
                 # Fetch venue open-orders, clearinghouse state, and fills off the
                 # event loop (SHR-41); the cached fills feed the Reconciler's
                 # fills_lookup for every cloid.
