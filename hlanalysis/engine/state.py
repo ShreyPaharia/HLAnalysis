@@ -305,7 +305,14 @@ class StateDAL:
 
     # ---- orders ----
 
-    def upsert_order(self, o: OpenOrder) -> None:
+    def upsert_order(self, o: OpenOrder, *, strategy_id: str = "", account: str | None = None) -> None:
+        # Stamp scoping columns if callers provide them (StrategyScopedDAL path).
+        # Values already set on the object take precedence when the kwargs are
+        # empty-string / None so un-scoped direct calls stay bit-identical.
+        if strategy_id:
+            o.strategy_id = strategy_id
+        if account is not None:
+            o.account = account
         # expire_on_commit=False so `o` stays readable after commit (the cached
         # subclass reads its fields post-write without a re-SELECT).
         with _Session(self._engine, expire_on_commit=False) as s:
@@ -318,9 +325,14 @@ class StateDAL:
                 s.add(existing)
             s.commit()
 
-    def get_order(self, cloid: str) -> OpenOrder | None:
+    def get_order(self, cloid: str, *, strategy_id: str = "") -> OpenOrder | None:
         with _Session(self._engine) as s:
-            return s.get(OpenOrder, cloid)
+            row = s.get(OpenOrder, cloid)
+            if row is None:
+                return None
+            if strategy_id and row.strategy_id != strategy_id:
+                return None
+            return row
 
     def update_order_status(
         self,
@@ -329,10 +341,13 @@ class StateDAL:
         status: str,
         venue_oid: str | None = None,
         now_ns: int,
+        strategy_id: str = "",
     ) -> None:
         with _Session(self._engine) as s:
             o = s.get(OpenOrder, cloid)
             if o is None:
+                return
+            if strategy_id and o.strategy_id != strategy_id:
                 return
             o.status = status  # type: ignore[assignment]
             if venue_oid is not None:
@@ -341,14 +356,21 @@ class StateDAL:
             s.add(o)
             s.commit()
 
-    def live_orders(self) -> list[OpenOrder]:
+    def live_orders(self, *, strategy_id: str = "") -> list[OpenOrder]:
         with _Session(self._engine) as s:
             stmt = select(OpenOrder).where(OpenOrder.status.in_(("pending", "open", "partially_filled")))
+            if strategy_id:
+                stmt = stmt.where(OpenOrder.strategy_id == strategy_id)
             return list(s.exec(stmt).all())
 
     # ---- positions ----
 
-    def upsert_position(self, p: Position) -> None:
+    def upsert_position(self, p: Position, *, strategy_id: str = "", account: str | None = None) -> None:
+        # Stamp scoping columns when callers provide them (StrategyScopedDAL path).
+        if strategy_id:
+            p.strategy_id = strategy_id
+        if account is not None:
+            p.account = account
         # expire_on_commit=False so `p` stays readable after commit (the cached
         # subclass reads its fields post-write without a re-SELECT).
         with _Session(self._engine, expire_on_commit=False) as s:
@@ -365,9 +387,12 @@ class StateDAL:
         with _Session(self._engine) as s:
             return s.get(Position, (strategy_id, question_idx))
 
-    def all_positions(self) -> list[Position]:
+    def all_positions(self, *, strategy_id: str = "") -> list[Position]:
         with _Session(self._engine) as s:
-            return list(s.exec(select(Position)).all())
+            stmt = select(Position)
+            if strategy_id:
+                stmt = stmt.where(Position.strategy_id == strategy_id)
+            return list(s.exec(stmt).all())
 
     def delete_position(self, question_idx: int, *, strategy_id: str = "") -> None:
         with _Session(self._engine) as s:
@@ -421,10 +446,13 @@ class StateDAL:
                 s.add(existing)
             s.commit()
 
-    def coin_klass_map(self) -> dict[str, str]:
+    def coin_klass_map(self, *, strategy_id: str = "") -> dict[str, str]:
         """All persisted coin("#N") → klass pairs, for the daily report's split."""
         with _Session(self._engine) as s:
-            return {r.coin: r.klass for r in s.exec(select(CoinKlass)).all()}
+            stmt = select(CoinKlass)
+            if strategy_id:
+                stmt = stmt.where(CoinKlass.strategy_id == strategy_id)
+            return {r.coin: r.klass for r in s.exec(stmt).all()}
 
     # ---- settlements ----
 
@@ -435,9 +463,11 @@ class StateDAL:
         symbol: str,
         realized_pnl: float,
         ts_ns: int,
+        strategy_id: str = "",
+        account: str | None = None,
     ) -> None:
-        """Persist a settled position's realized PnL, keyed by question_idx
-        (SHR-53). Upsert (single row per qidx) so the two close paths — the
+        """Persist a settled position's realized PnL, keyed by (strategy_id, question_idx)
+        (SHR-53). Upsert (single row per slot/qidx pair) so the two close paths — the
         reconcile vanished-position path and router._close_settled — can't
         double-book: the daily-loss gate sums one row per settlement, never two.
         Last write wins, which is correct because the vanished-position path can
@@ -445,34 +475,48 @@ class StateDAL:
         realized) and then re-emit the authoritative payout once settled_symbol
         is known; the authoritative value, written later, must overwrite."""
         with _Session(self._engine) as s:
-            existing = s.get(Settlement, ("", question_idx))
+            existing = s.get(Settlement, (strategy_id, question_idx))
             if existing is None:
                 s.add(
                     Settlement(
+                        strategy_id=strategy_id,
                         question_idx=question_idx,
                         symbol=symbol,
                         realized_pnl=realized_pnl,
                         ts_ns=ts_ns,
+                        account=account,
                     )
                 )
             else:
                 existing.symbol = symbol
                 existing.realized_pnl = realized_pnl
                 existing.ts_ns = ts_ns
+                if account is not None:
+                    existing.account = account
                 s.add(existing)
             s.commit()
 
-    def settlement_pnl_since(self, since_ts_ns: int) -> float:
+    def settlement_pnl_since(self, since_ts_ns: int, *, strategy_id: str = "") -> float:
         with _Session(self._engine) as s:
-            rows = list(s.exec(select(Settlement).where(Settlement.ts_ns >= since_ts_ns)).all())
+            stmt = select(Settlement).where(Settlement.ts_ns >= since_ts_ns)
+            if strategy_id:
+                stmt = stmt.where(Settlement.strategy_id == strategy_id)
+            rows = list(s.exec(stmt).all())
         return sum(r.realized_pnl for r in rows)
 
     # ---- fills ----
 
-    def append_fill(self, f: Fill) -> bool:
+    def append_fill(self, f: Fill, *, strategy_id: str = "", account: str | None = None) -> bool:
         """Insert a Fill row if its fill_id is not already present. Returns True
         when a new row was inserted, False when it already existed (the dedup
-        that lets the venue mirror run idempotently every reconcile cycle)."""
+        that lets the venue mirror run idempotently every reconcile cycle).
+
+        strategy_id / account stamp the scoping columns when provided by
+        StrategyScopedDAL; un-scoped direct calls (strategy_id="") are unchanged."""
+        if strategy_id and not f.strategy_id:
+            f.strategy_id = strategy_id
+        if account is not None and f.account is None:
+            f.account = account
         with _Session(self._engine) as s:
             existing = s.get(Fill, f.fill_id)
             if existing is None:
@@ -520,14 +564,19 @@ class StateDAL:
                 inserted += 1
         return inserted
 
-    def fills_count(self) -> int:
+    def fills_count(self, *, strategy_id: str = "") -> int:
         """Total number of Fill rows (used by the daily report)."""
         with _Session(self._engine) as s:
-            return int(s.exec(select(func.count()).select_from(Fill)).one())
+            stmt = select(func.count()).select_from(Fill)
+            if strategy_id:
+                stmt = stmt.where(Fill.strategy_id == strategy_id)
+            return int(s.exec(stmt).one())
 
-    def fills_for_cloid(self, cloid: str) -> list[Fill]:
+    def fills_for_cloid(self, cloid: str, *, strategy_id: str = "") -> list[Fill]:
         with _Session(self._engine) as s:
             stmt = select(Fill).where(Fill.cloid == cloid).order_by(Fill.ts_ns)
+            if strategy_id:
+                stmt = stmt.where(Fill.strategy_id == strategy_id)
             return list(s.exec(stmt).all())
 
     # ---- session ----
@@ -562,6 +611,7 @@ class StateDAL:
         question_idx: int | None,
         reason: str | None,
         payload_json: str | None,
+        strategy_id: str | None = None,
     ) -> None:
         """Insert one event row. Thread-safe (each call opens its own session
         on the shared engine, same connect-per-call isolation as before)."""
@@ -574,52 +624,90 @@ class StateDAL:
                     question_idx=question_idx,
                     reason=reason,
                     payload_json=payload_json,
+                    strategy_id=strategy_id,
                 )
             )
             s.commit()
 
-    def events_since(self, since_ts_ns: int) -> list[dict[str, Any]]:
-        """Return all events with ts_ns >= since_ts_ns, ordered by ts_ns asc."""
+    def events_since(self, since_ts_ns: int, *, strategy_id: str | None = None) -> list[dict[str, Any]]:
+        """Return all events with ts_ns >= since_ts_ns, ordered by ts_ns asc.
+
+        When strategy_id is provided (non-None), filter to that strategy. When
+        None (default), return events for all strategies (global view).
+        """
         with _Session(self._engine) as s:
-            rows = s.exec(select(Event).where(Event.ts_ns >= since_ts_ns).order_by(Event.ts_ns)).all()
+            stmt = select(Event).where(Event.ts_ns >= since_ts_ns)
+            if strategy_id is not None:
+                stmt = stmt.where(Event.strategy_id == strategy_id)
+            stmt = stmt.order_by(Event.ts_ns)
+            rows = s.exec(stmt).all()
             return [r.model_dump() for r in rows]
 
-    def reject_counts_since(self, since_ts_ns: int) -> list[dict[str, Any]]:
+    def reject_counts_since(self, since_ts_ns: int, *, strategy_id: str | None = None) -> list[dict[str, Any]]:
         """Group events by (kind, reason) since since_ts_ns with counts.
 
         Returns a list of dicts with keys: kind, reason, count, sample_payload.
         Covers all event kinds (not just order_rejected) so callers can aggregate
         risk_veto counts too. Rows ordered by count desc.
+
+        When strategy_id is provided (non-None), filter to that strategy. When
+        None (default), aggregate across all strategies (global view).
         """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """
-                SELECT kind, reason, COUNT(*) AS count,
-                       MAX(payload_json) AS sample_payload
-                FROM events
-                WHERE ts_ns >= ?
-                GROUP BY kind, reason
-                ORDER BY count DESC
-                """,
-                (since_ts_ns,),
-            ).fetchall()
+            if strategy_id is not None:
+                rows = conn.execute(
+                    """
+                    SELECT kind, reason, COUNT(*) AS count,
+                           MAX(payload_json) AS sample_payload
+                    FROM events
+                    WHERE ts_ns >= ? AND strategy_id = ?
+                    GROUP BY kind, reason
+                    ORDER BY count DESC
+                    """,
+                    (since_ts_ns, strategy_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT kind, reason, COUNT(*) AS count,
+                           MAX(payload_json) AS sample_payload
+                    FROM events
+                    WHERE ts_ns >= ?
+                    GROUP BY kind, reason
+                    ORDER BY count DESC
+                    """,
+                    (since_ts_ns,),
+                ).fetchall()
         return [dict(r) for r in rows]
 
-    def events_for_question(self, question_idx: int) -> list[dict[str, Any]]:
-        """Return all events for a given question_idx, ordered by ts_ns asc."""
+    def events_for_question(self, question_idx: int, *, strategy_id: str | None = None) -> list[dict[str, Any]]:
+        """Return all events for a given question_idx, ordered by ts_ns asc.
+
+        When strategy_id is provided (non-None), filter to that strategy. When
+        None (default), return events across all strategies (global view).
+        """
         with _Session(self._engine) as s:
-            rows = s.exec(select(Event).where(Event.question_idx == question_idx).order_by(Event.ts_ns)).all()
+            stmt = select(Event).where(Event.question_idx == question_idx)
+            if strategy_id is not None:
+                stmt = stmt.where(Event.strategy_id == strategy_id)
+            stmt = stmt.order_by(Event.ts_ns)
+            rows = s.exec(stmt).all()
             return [r.model_dump() for r in rows]
 
-    def last_event_by_kind(self, kind: str, *, alias: str | None = None) -> dict[str, Any] | None:
+    def last_event_by_kind(
+        self, kind: str, *, alias: str | None = None, strategy_id: str | None = None
+    ) -> dict[str, Any] | None:
         """Return the single most-recent event of the given kind.
 
-        When alias is provided, filter to that slot. Returns None if no match.
+        When alias is provided, filter to that slot. When strategy_id is
+        provided (non-None), filter to that strategy. Returns None if no match.
         """
         stmt = select(Event).where(Event.kind == kind)
         if alias is not None:
             stmt = stmt.where(Event.alias == alias)
+        if strategy_id is not None:
+            stmt = stmt.where(Event.strategy_id == strategy_id)
         stmt = stmt.order_by(Event.ts_ns.desc()).limit(1)
         with _Session(self._engine) as s:
             row = s.exec(stmt).first()
@@ -652,11 +740,24 @@ class StateDAL:
 
     # ---- trade journal (SHR-83) ----
 
-    def add_journal_decision(self, row: TradeJournalRow) -> bool:
+    def add_journal_decision(
+        self,
+        row: TradeJournalRow,
+        *,
+        strategy_id: str = "",
+        account: str | None = None,
+    ) -> bool:
         """Insert a journal row if its cloid is not already present. Returns True
         when a new row was inserted, False when one already existed (cloids are
         unique per order, so a duplicate decision is a no-op — first write wins,
-        matching append_fill's insert-once semantics)."""
+        matching append_fill's insert-once semantics).
+
+        strategy_id / account stamp the scoping columns when provided by
+        StrategyScopedDAL; un-scoped direct calls are unchanged."""
+        if strategy_id and not row.strategy_id:
+            row.strategy_id = strategy_id
+        if account is not None and row.account is None:
+            row.account = account
         with _Session(self._engine) as s:
             if s.get(TradeJournalRow, row.cloid) is not None:
                 return False
@@ -664,32 +765,53 @@ class StateDAL:
             s.commit()
             return True
 
-    def update_journal(self, cloid: str, **changes: Any) -> None:
+    def update_journal(self, cloid: str, *, strategy_id: str = "", **changes: Any) -> None:
         """Set the given columns on an existing journal row. No-op if the cloid
         has no decision row (a stray send/fill/reject is dropped rather than
-        creating a partial row)."""
+        creating a partial row).
+
+        When strategy_id is provided, only update the row if it belongs to that
+        strategy (defensive guard for shared-DB usage)."""
         if not changes:
             return
         with _Session(self._engine) as s:
             row = s.get(TradeJournalRow, cloid)
             if row is None:
                 return
+            if strategy_id and row.strategy_id and row.strategy_id != strategy_id:
+                return
             for k, v in changes.items():
                 setattr(row, k, v)
             s.add(row)
             s.commit()
 
-    def get_journal_row(self, cloid: str) -> TradeJournalRow | None:
+    def get_journal_row(self, cloid: str, *, strategy_id: str = "") -> TradeJournalRow | None:
         with _Session(self._engine) as s:
-            return s.get(TradeJournalRow, cloid)
+            row = s.get(TradeJournalRow, cloid)
+            if row is None:
+                return None
+            if strategy_id and row.strategy_id and row.strategy_id != strategy_id:
+                return None
+            return row
 
-    def delete_journal_decision(self, cloid: str) -> None:
+    def delete_journal_decision(self, cloid: str, *, strategy_id: str = "") -> None:
         """Remove a journal row by cloid (no-op if absent). Used to drop a
         decision that was vetoed by a routine, high-frequency gate reason we
         don't retain — the row is inserted at decision time, then removed here
-        once the suppressed veto is known (see TradeJournal.record_reject)."""
+        once the suppressed veto is known (see TradeJournal.record_reject).
+
+        When strategy_id is provided, only delete the row if it belongs to that
+        strategy (defensive guard for shared-DB usage)."""
         with _Session(self._engine) as s:
-            s.exec(delete(TradeJournalRow).where(TradeJournalRow.cloid == cloid))
+            if strategy_id:
+                row = s.get(TradeJournalRow, cloid)
+                if row is None:
+                    return
+                if row.strategy_id and row.strategy_id != strategy_id:
+                    return
+                s.delete(row)
+            else:
+                s.exec(delete(TradeJournalRow).where(TradeJournalRow.cloid == cloid))
             s.commit()
 
     def prune_trade_journal(self, *, max_age_ns: int, max_rows: int) -> None:
@@ -714,7 +836,7 @@ class StateDAL:
 
     # ---- realized pnl helpers ----
 
-    def realized_pnl_since(self, since_ts_ns: int) -> float:
+    def realized_pnl_since(self, since_ts_ns: int, *, strategy_id: str = "") -> float:
         """Local-DB realized PnL. Diagnostic fallback only — the live daily-loss
         gate now reads from HL (HLClient.realized_pnl_since) because the local
         fill table was historically empty on the happy path and closed
@@ -738,17 +860,27 @@ class StateDAL:
         avoid double-counting. A PM slot (or a not-yet-mirrored HL slot) has no
         'venue' rows, so this falls back to summing all rows — its 'router'
         ledger is authoritative.
+
+        When strategy_id is provided, filter fills and settlements to that
+        strategy (for shared-DB usage via StrategyScopedDAL).
         """
         with _Session(self._engine) as s:
-            has_venue = s.exec(select(func.count()).select_from(Fill).where(Fill.source == FILL_SOURCE_VENUE)).one() > 0
+            venue_stmt = select(func.count()).select_from(Fill).where(Fill.source == FILL_SOURCE_VENUE)
+            if strategy_id:
+                venue_stmt = venue_stmt.where(Fill.strategy_id == strategy_id)
+            has_venue = s.exec(venue_stmt).one() > 0
             stmt = select(Fill).where(Fill.ts_ns >= since_ts_ns)
+            if strategy_id:
+                stmt = stmt.where(Fill.strategy_id == strategy_id)
             if has_venue:
                 stmt = stmt.where(Fill.source == FILL_SOURCE_VENUE)
             fills = list(s.exec(stmt).all())
         # Settlement payouts are not fills (HIP-4 binaries close via settlement,
         # not HL trades), so without this the dominant PnL component of the
         # binary strategy is invisible here (SHR-53/49).
-        return sum(getattr(f, "closed_pnl", 0.0) - f.fee for f in fills) + self.settlement_pnl_since(since_ts_ns)
+        return sum(getattr(f, "closed_pnl", 0.0) - f.fee for f in fills) + self.settlement_pnl_since(
+            since_ts_ns, strategy_id=strategy_id
+        )
 
 
 class CachedStateDAL(StateDAL):
@@ -769,68 +901,70 @@ class CachedStateDAL(StateDAL):
       * Off-loop aggregate reads (settlement_pnl_since / realized_pnl_since) are
         inherited UNCHANGED and keep reading the DB — they run on worker threads
         and must never touch the cache dicts. Same for the events-table helpers.
+      * The cache is namespaced by strategy_id so multiple StrategyScopedDAL
+        instances sharing this CachedStateDAL remain isolated in memory.
     """
 
     def __init__(self, db_path: Path) -> None:
         super().__init__(db_path)
         self._cache_lock = threading.Lock()
-        self._loaded = False
-        self._pos_cache: dict[int, Position] = {}
-        self._order_cache: dict[str, OpenOrder] = {}
+        # Per-strategy_id loaded flags and caches.
+        self._loaded: dict[str, bool] = {}
+        self._pos_cache: dict[str, dict[int, Position]] = {}  # strategy_id -> qidx -> Position
+        self._order_cache: dict[str, dict[str, OpenOrder]] = {}  # strategy_id -> cloid -> OpenOrder
 
-    def _ensure_loaded(self) -> None:
-        # Fast path (no lock): already loaded.  The lock is only needed to
-        # prevent two threads from racing through the slow-path initialisation
-        # simultaneously.
-        if self._loaded:
+    def _ensure_loaded(self, strategy_id: str = "") -> None:
+        # Fast path (no lock): already loaded for this strategy_id.
+        if self._loaded.get(strategy_id):
             return
         with self._cache_lock:
             # Re-check under the lock; another thread may have loaded while we
             # were waiting.
-            if self._loaded:
+            if self._loaded.get(strategy_id):
                 return
-            # Pull current truth from the DB once. live_orders() returns only
-            # the not-terminal statuses, which is all the cache ever needs to
-            # serve.
-            self._pos_cache = {p.question_idx: p for p in super().all_positions()}
-            self._order_cache = {o.cloid: o for o in super().live_orders()}
-            self._loaded = True
+            # Pull current truth from the DB once for this strategy_id. live_orders()
+            # returns only the not-terminal statuses, which is all the cache needs.
+            self._pos_cache[strategy_id] = {p.question_idx: p for p in super().all_positions(strategy_id=strategy_id)}
+            self._order_cache[strategy_id] = {o.cloid: o for o in super().live_orders(strategy_id=strategy_id)}
+            self._loaded[strategy_id] = True
 
     # ---- positions: cached reads, write-through writes ----
 
-    def upsert_position(self, p: Position) -> None:
-        self._ensure_loaded()
+    def upsert_position(self, p: Position, *, strategy_id: str = "", account: str | None = None) -> None:
+        sid = strategy_id or p.strategy_id
+        self._ensure_loaded(sid)
         # DB first; the base writes with expire_on_commit=False so `p` stays
         # readable after the commit and can be cached directly.
-        super().upsert_position(p)
+        super().upsert_position(p, strategy_id=strategy_id, account=account)
         with self._cache_lock:
-            self._pos_cache[p.question_idx] = p
+            self._pos_cache.setdefault(sid, {})[p.question_idx] = p
 
-    def get_position(self, question_idx: int) -> Position | None:
-        self._ensure_loaded()
+    def get_position(self, question_idx: int, *, strategy_id: str = "") -> Position | None:
+        self._ensure_loaded(strategy_id)
         with self._cache_lock:
-            return self._pos_cache.get(question_idx)
+            return self._pos_cache.get(strategy_id, {}).get(question_idx)
 
-    def all_positions(self) -> list[Position]:
-        self._ensure_loaded()
+    def all_positions(self, *, strategy_id: str = "") -> list[Position]:
+        self._ensure_loaded(strategy_id)
         with self._cache_lock:
-            return list(self._pos_cache.values())
+            return list(self._pos_cache.get(strategy_id, {}).values())
 
-    def delete_position(self, question_idx: int) -> None:
-        self._ensure_loaded()
-        super().delete_position(question_idx)
+    def delete_position(self, question_idx: int, *, strategy_id: str = "") -> None:
+        self._ensure_loaded(strategy_id)
+        super().delete_position(question_idx, strategy_id=strategy_id)
         with self._cache_lock:
-            self._pos_cache.pop(question_idx, None)
+            self._pos_cache.get(strategy_id, {}).pop(question_idx, None)
 
     # ---- orders: cached reads, write-through writes ----
 
-    def upsert_order(self, o: OpenOrder) -> None:
-        self._ensure_loaded()
+    def upsert_order(self, o: OpenOrder, *, strategy_id: str = "", account: str | None = None) -> None:
+        sid = strategy_id or o.strategy_id
+        self._ensure_loaded(sid)
         # DB first; the base writes with expire_on_commit=False so `o` stays
         # readable after the commit and can be cached directly.
-        super().upsert_order(o)
+        super().upsert_order(o, strategy_id=strategy_id, account=account)
         with self._cache_lock:
-            self._order_cache[o.cloid] = o
+            self._order_cache.setdefault(sid, {})[o.cloid] = o
 
     def update_order_status(
         self,
@@ -839,23 +973,29 @@ class CachedStateDAL(StateDAL):
         status: str,
         venue_oid: str | None = None,
         now_ns: int,
+        strategy_id: str = "",
     ) -> None:
-        self._ensure_loaded()
+        self._ensure_loaded(strategy_id)
         super().update_order_status(
             cloid,
             status=status,
             venue_oid=venue_oid,
             now_ns=now_ns,
+            strategy_id=strategy_id,
         )
         with self._cache_lock:
-            o = self._order_cache.get(cloid)
+            o = self._order_cache.get(strategy_id, {}).get(cloid)
             if o is not None:
                 o.status = status
                 o.last_update_ts_ns = now_ns
                 if venue_oid is not None:
                     o.venue_oid = venue_oid
 
-    def live_orders(self) -> list[OpenOrder]:
-        self._ensure_loaded()
+    def live_orders(self, *, strategy_id: str = "") -> list[OpenOrder]:
+        self._ensure_loaded(strategy_id)
         with self._cache_lock:
-            return [o for o in self._order_cache.values() if o.status in ("pending", "open", "partially_filled")]
+            return [
+                o
+                for o in self._order_cache.get(strategy_id, {}).values()
+                if o.status in ("pending", "open", "partially_filled")
+            ]
