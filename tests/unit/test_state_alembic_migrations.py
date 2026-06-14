@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from hlanalysis.engine.state import Fill, StateDAL
+from hlanalysis.engine.state import StateDAL
 
 # --- frozen pre-Alembic production schema -----------------------------------
 
@@ -198,11 +198,28 @@ def test_existing_db_upgrades_without_data_loss_and_backfills_closed_qty(tmp_pat
         "idx_trade_journal_decision_ts",
     }
     for name, sql in schema_before.items():
-        if name in ("position", "fill"):
-            continue  # position gains closed_qty (0002); fill gains source (0004)
+        if name in (
+            # post-baseline column additions (pre-0006)
+            "position",  # gains closed_qty (0002) + account/strategy_id + composite PK (0006)
+            "fill",  # gains source (0004) + account/strategy_id (0006)
+            # 0006: account/strategy_id added via ALTER TABLE
+            "openorder",  # gains account (0006)
+            "trade_journal",  # gains account + strategy_id (0006; table added by 0005)
+            "events",  # gains strategy_id (0006)
+            # 0006: batch-recreated (composite PK change alters CREATE TABLE text)
+            "seen_question",
+            "pm_strike",
+            "settlement",
+            "coin_klass",
+        ):
+            continue
         assert schema_after[name] == sql, f"unexpected schema drift on {name}"
     assert "closed_qty" in schema_after["position"]
     assert "source" in schema_after["fill"]
+    # 0006 additions
+    assert "strategy_id" in schema_after["position"]
+    assert "account" in schema_after["position"]
+    assert "strategy_id" in schema_after["events"]
 
     # 2) Stamped + upgraded (version table present).
     assert "alembic_version" in _table_names(db)
