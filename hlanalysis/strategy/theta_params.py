@@ -90,6 +90,25 @@ class ThetaHarvesterParams(BaseModel):
     # preventing a stale high ask from triggering a spurious entry. Default False
     # preserves the current behavior exactly (bit-identical live when off).
     require_two_sided_entry: bool = False
+    # === v31-improvement-eval 2026-06-13: favorite-band tilt (Card E FLB) ===
+    # Upper bound on the favorite leg's mid. When set, the favorite gate keeps
+    # only legs with mid in [favorite_threshold, favorite_max]. Card E found
+    # favorites in mid∈[0.80,0.95] are underpriced ~6-9pp, but above ~0.95 the
+    # premium thins. None disables (bit-identical). Applies to binary + bucket.
+    favorite_max: float | None = None
+    # === v31-improvement-eval 2026-06-13: vol-regime sizing (Card F) ===
+    # When True, scale the entry clip by the realized-σ regime. σ >= threshold →
+    # max_position_usd *= high_mult; else *= low_mult. Defaults are bit-identical.
+    vol_regime_sizing: bool = False
+    vol_regime_sigma_threshold: float | None = None
+    vol_regime_low_mult: float = 1.0
+    vol_regime_high_mult: float = 1.0
+    # === v31-improvement-eval 2026-06-13: lead-lag micro-veto (Card C) ===
+    # Pure downside-protection entry veto: skip entry when the most-recent
+    # per-sample reference return is a sharp move ADVERSE to the chosen favorite
+    # (|r_last|/σ_per_sample > k), catching the brief window where the binary
+    # mid is stale after a perp move. None disables. Typical k: 3-5.
+    leadlag_veto_k: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,6 +278,39 @@ class ThetaHarvesterConfig:
     # preventing a stale high ask from triggering a spurious entry. Default False
     # preserves the current behavior exactly (bit-identical live when off).
     require_two_sided_entry: bool = False
+    # === v31-improvement-eval 2026-06-13: favorite-band tilt (Card E FLB) ===
+    # Upper bound on the favorite leg's mid. When set, the favorite gate keeps
+    # only legs with mid in [favorite_threshold, favorite_max]. Card E found
+    # favorites in mid∈[0.80,0.95] are underpriced ~6-9pp, but above ~0.95 the
+    # premium thins (deep favorites carry little edge over fee+half-spread and a
+    # fat left tail). None disables the cap (bit-identical). Applies to both
+    # binary (caps the chosen favorite) and bucket (caps the favorite band leg).
+    favorite_max: float | None = None
+    # === v31-improvement-eval 2026-06-13: vol-regime sizing (Card F) ===
+    # When True, scale the entry clip by the prevailing realized-σ regime: the
+    # strategy's annualized σ (same estimator the d-statistic uses) is compared
+    # to vol_regime_sigma_threshold — σ >= threshold → max_position_usd *=
+    # vol_regime_high_mult; σ < threshold → *= vol_regime_low_mult. Card F found
+    # a +14% ann vol-risk-premium and r=0.53 between open-2h σ and theta edge, so
+    # theta-harvest is paid more in high-σ regimes. Defaults (False, mults=1.0)
+    # are bit-identical. The clip is still bounded by the engine inventory cap,
+    # so prefer low_mult<1.0 (de-risk calm regimes) over high_mult>1.0.
+    vol_regime_sizing: bool = False
+    vol_regime_sigma_threshold: float | None = None
+    vol_regime_low_mult: float = 1.0
+    vol_regime_high_mult: float = 1.0
+    # === v31-improvement-eval 2026-06-13: lead-lag micro-veto (Card C) ===
+    # Pure downside-protection entry veto. Card C found the binary mid tracks the
+    # perp with a ~5s half-life (sub-5s lag), so immediately after a sharp
+    # adverse reference move the binary mid is briefly STALE (hasn't repriced
+    # down), making the favorite ask look artificially attractive. When set, veto
+    # entry if the most-recent per-sample reference return is a sharp move
+    # ADVERSE to the chosen favorite, in per-sample σ units:
+    #   |r_last| / σ_per_sample > leadlag_veto_k  AND  the move is adverse.
+    # Binary: adverse = down for a YES favorite, up for a NO favorite.
+    # Bucket : adverse = any sharp move (|r_last| crosses a band; mid stale).
+    # None disables (bit-identical). Typical k: 3-5 (jump-sized moves only).
+    leadlag_veto_k: float | None = None
 
 
 from hlanalysis.backtest.core.registry import register  # noqa: E402
@@ -331,6 +383,18 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         entry_spread_gate=bool(params.get("entry_spread_gate", _D.entry_spread_gate)),
         exit_spread_hold=float(params.get("exit_spread_hold", _D.exit_spread_hold)),
         require_two_sided_entry=bool(params.get("require_two_sided_entry", _D.require_two_sided_entry)),
+        favorite_max=(float(params["favorite_max"]) if params.get("favorite_max") is not None else _D.favorite_max),
+        vol_regime_sizing=bool(params.get("vol_regime_sizing", _D.vol_regime_sizing)),
+        vol_regime_sigma_threshold=(
+            float(params["vol_regime_sigma_threshold"])
+            if params.get("vol_regime_sigma_threshold") is not None
+            else _D.vol_regime_sigma_threshold
+        ),
+        vol_regime_low_mult=float(params.get("vol_regime_low_mult", _D.vol_regime_low_mult)),
+        vol_regime_high_mult=float(params.get("vol_regime_high_mult", _D.vol_regime_high_mult)),
+        leadlag_veto_k=(
+            float(params["leadlag_veto_k"]) if params.get("leadlag_veto_k") is not None else _D.leadlag_veto_k
+        ),
     )
     return ThetaHarvesterStrategy(cfg)
 

@@ -317,7 +317,7 @@ class ThetaHarvesterStrategy(Strategy):
         # the comparison entirely — a one-sided stale ask (e.g. 0.99) cannot
         # pass the threshold on the ask alone. Default False preserves legacy
         # _mid fallback behavior (bit-identical when off).
-        if self.cfg.favorite_threshold > 0.0:
+        if self.cfg.favorite_threshold > 0.0 or self.cfg.favorite_max is not None:
 
             def _mid(b: BookState) -> float:
                 if b.bid_px is not None and b.ask_px is not None:
@@ -326,7 +326,13 @@ class ThetaHarvesterStrategy(Strategy):
                     return 0.0  # one-sided quote fails the favorite gate
                 return b.ask_px if b.ask_px is not None else (b.bid_px or 0.0)
 
-            per_leg = [t for t in per_leg if _mid(t[3]) >= self.cfg.favorite_threshold]
+            if self.cfg.favorite_threshold > 0.0:
+                per_leg = [t for t in per_leg if _mid(t[3]) >= self.cfg.favorite_threshold]
+            # v31-improvement-eval (Card E): upper-bound the favorite band — deep
+            # favorites above favorite_max carry little net edge over fee+half-
+            # spread and a fat left tail. None → no cap (bit-identical).
+            if self.cfg.favorite_max is not None:
+                per_leg = [t for t in per_leg if _mid(t[3]) <= self.cfg.favorite_max]
             if not per_leg:
                 return Decision(action=Action.HOLD, diagnostics=(Diagnostic("info", "no_favorite"),))
 
@@ -359,6 +365,36 @@ class ThetaHarvesterStrategy(Strategy):
             per_leg, key=lambda t: t[2] - gamma_lambda * t[4]
         )
         effective_edge = chosen_edge - gamma_lambda * chosen_phi
+
+        # v31-improvement-eval (Card C): lead-lag micro-veto. Pure downside
+        # protection — the binary mid tracks the perp with a ~5s half-life, so
+        # right after a sharp ADVERSE reference move the favorite ask is briefly
+        # stale-high. Veto when the latest per-sample reference return is a
+        # jump-sized adverse move (|z| > k). None disables (bit-identical).
+        if self.cfg.leadlag_veto_k is not None and recent_returns:
+            r_last = float(recent_returns[-1])
+            sigma_per_sample = sigma * math.sqrt(self.cfg.vol_sampling_dt_seconds / _ANNUAL_SECONDS)
+            if sigma_per_sample > 0.0:
+                z = r_last / sigma_per_sample
+                fav_side = +1 if chosen_sym == question.yes_symbol else -1
+                # Binary: adverse = move against the favorite (down for YES, up
+                # for NO). Bucket: any jump-sized move destabilizes the band.
+                adverse = (z * fav_side < -self.cfg.leadlag_veto_k) if is_binary else (abs(z) > self.cfg.leadlag_veto_k)
+                if adverse:
+                    return Decision(
+                        action=Action.HOLD,
+                        diagnostics=(
+                            Diagnostic(
+                                "info",
+                                "leadlag_veto",
+                                (
+                                    ("z", f"{z:.3f}"),
+                                    ("k", f"{self.cfg.leadlag_veto_k:.3f}"),
+                                    ("fav_side", str(fav_side)),
+                                ),
+                            ),
+                        ),
+                    )
 
         # SHR-102 (a): dynamic entry spread gate. When enabled, compare the
         # chosen leg's live half-spread to the net fair-value edge budget. The
@@ -614,7 +650,19 @@ class ThetaHarvesterStrategy(Strategy):
                     ),
                 )
 
-        size = max(0.0, round_size(self.cfg.max_position_usd, chosen_book.ask_px))
+        # v31-improvement-eval (Card F): vol-regime sizing. Scale the clip by the
+        # realized-σ regime (theta-harvest is paid more in high-σ regimes). The
+        # resulting clip is still bounded by the engine inventory cap. Defaults
+        # (disabled / mults=1.0) are bit-identical.
+        clip = self.cfg.max_position_usd
+        if self.cfg.vol_regime_sizing and self.cfg.vol_regime_sigma_threshold is not None:
+            mult = (
+                self.cfg.vol_regime_high_mult
+                if sigma >= self.cfg.vol_regime_sigma_threshold
+                else self.cfg.vol_regime_low_mult
+            )
+            clip = clip * mult
+        size = max(0.0, round_size(clip, chosen_book.ask_px))
         if size <= 0:
             return Decision(action=Action.HOLD, diagnostics=(Diagnostic("warn", "size_zero"), diag))
 
