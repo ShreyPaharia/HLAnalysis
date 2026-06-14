@@ -122,6 +122,21 @@ _PRICE_EVENT_TYPES = (
 _SPOT_REF_SYMBOL = _SPOT_REF_SYMBOLS["BTCUSDT"]
 
 
+def _account_address(account_cfg: AccountConfig) -> str:
+    """Return the canonical wallet address for an account config.
+
+    For HL this is ``account_address`` (the wallet public key). For PM it is
+    ``funder_address`` if set (the on-chain maker for proxy/safe accounts),
+    otherwise the string representation of ``private_key`` is used as a
+    unique-but-opaque identifier.  This value is only used to group slots that
+    share a wallet; it never reaches the venue or logs.
+    """
+    if isinstance(account_cfg, HyperliquidAccount):
+        return account_cfg.account_address
+    # PolymarketAccount: funder (proxy wallet) or private-key identity.
+    return account_cfg.funder_address or account_cfg.private_key
+
+
 @dataclass
 class PmSlotState:
     """Polymarket-only mutable slot state. Present (non-None) on a slot iff its
@@ -839,6 +854,25 @@ class EngineRuntime:
                 # fills_lookup for every cloid.
                 venue_open, venue_state, all_fills = await self._venue_snapshot(slot)
                 sym_to_q = self.market_state.symbol_to_question_map()
+                # Compute symbols owned by OTHER strategies sharing this same
+                # wallet address. In the current 1:1 config each slot has its
+                # own wallet, so this set is always empty and reconcile
+                # behaviour is identical to before. When two slots later share
+                # an account (same wallet address), each sibling's tracked
+                # position/order symbols are excluded from this slot's orphan
+                # detection so neither strategy incorrectly alerts on the
+                # other's venue orders/positions.
+                this_account = _account_address(slot.account_cfg)
+                sibling_syms: set[str] = set()
+                for other in self.slots:
+                    if other is slot:
+                        continue
+                    if _account_address(other.account_cfg) != this_account:
+                        continue
+                    for p in other.dal.all_positions():
+                        sibling_syms.add(p.symbol)
+                    for o in other.dal.live_orders():
+                        sibling_syms.add(o.symbol)
                 rec = Reconciler(
                     slot.dal,
                     fills_lookup=lambda c, _f=all_fills: _f,
@@ -853,6 +887,7 @@ class EngineRuntime:
                     # gap floods the alert channel (incident 2026-06-12).
                     settled_qidxs=self.market_state.settled_question_idxs(),
                     journal=slot.journal,
+                    sibling_symbols=sibling_syms or None,
                 )
                 res = rec.run(
                     venue_open=venue_open,

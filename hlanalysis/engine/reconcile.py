@@ -14,6 +14,50 @@ from .state import FILL_SOURCE_ROUTER, Fill, OpenOrder, Position, StateDAL
 
 CLOID_PREFIX = "hla-"
 
+
+def attribute_venue_positions(
+    venue_positions: list,
+    strategy_symbol_owners: dict[str, set[str]],
+) -> dict[str, list]:
+    """Partition venue positions to their owning strategy.
+
+    Parameters
+    ----------
+    venue_positions:
+        The wallet's flat list of venue position objects (each must have a
+        ``.symbol`` attribute).
+    strategy_symbol_owners:
+        Map of ``strategy_id -> set[symbol]`` for each strategy that shares
+        this wallet.  A strategy's set is derived from its open positions /
+        orders (i.e. what it *knows* it owns on this account).
+
+    Returns
+    -------
+    dict mapping ``strategy_id -> [positions]``.  An ``"unattributed"`` key
+    collects positions no strategy claims; those are orphans the caller should
+    alert on.
+
+    The current 1:1 config (one strategy per wallet) never populates more than
+    one key, so existing code paths are unaffected.
+    """
+    buckets: dict[str, list] = {sid: [] for sid in strategy_symbol_owners}
+    buckets.setdefault("unattributed", [])
+
+    for vp in venue_positions:
+        sym = vp.symbol
+        owner: str | None = None
+        for sid, syms in strategy_symbol_owners.items():
+            if sym in syms:
+                owner = sid
+                break
+        if owner is not None:
+            buckets[owner].append(vp)
+        else:
+            buckets["unattributed"].append(vp)
+
+    return buckets
+
+
 # Position quantities are compared across two independently-sourced floats: the
 # venue's reported size (HL szi / spot balance, or the PM data-api `/positions`
 # `size` truncated to 4dp) versus our fill ledger's summed fill sizes. They
@@ -102,6 +146,7 @@ class Reconciler:
         settled_qidxs: frozenset[int] | set[int] | None = None,
         journal=None,
         material_drift_qty: float | None = None,
+        sibling_symbols: set[str] | None = None,
     ) -> None:
         self.dal = dal
         # Optional trade journal (SHR-83). When a synchronous ACK carried no
@@ -151,6 +196,13 @@ class Reconciler:
         self.material_drift_qty: float = (
             material_drift_qty if material_drift_qty is not None else self._DEFAULT_MATERIAL_DRIFT_QTY
         )
+        # Symbols owned by OTHER strategies that share the same wallet. A venue
+        # order or position whose symbol appears here belongs to a sibling
+        # strategy — it is NOT an orphan from this strategy's perspective and
+        # must not be cancelled or alerted on. Default (None / empty) preserves
+        # today's 1:1 behaviour exactly: every venue order/position not in the
+        # local DB is treated as an orphan as before.
+        self._sibling_symbols: frozenset[str] = frozenset(sibling_symbols or ())
 
     def run(
         self,
@@ -290,6 +342,12 @@ class Reconciler:
         # the venue's form (HL hex) — that's what cancel() needs to address it.
         for cloid_hex, vo in venue_by_hex.items():
             if cloid_hex in local_by_hex:
+                continue
+            # If the order's symbol is owned by a sibling strategy on the same
+            # wallet, it is not our orphan — skip it silently. With the current
+            # 1:1 config sibling_symbols is empty and this branch never fires,
+            # so legacy behaviour is preserved exactly.
+            if vo.symbol in self._sibling_symbols:
                 continue
             orphans.append((vo.cloid, vo.symbol))
             drift.append(
@@ -461,6 +519,11 @@ class Reconciler:
         # re-adopting a just-closed position would resurrect it — so we only
         # alert. Stop-loss is disabled on adopted rows (no entry context).
         for sym, vp in venue_by_symbol.items():
+            # If this symbol belongs to a sibling strategy on the same wallet,
+            # skip it entirely — it is not our orphan. With the current 1:1
+            # config sibling_symbols is empty and this branch never fires.
+            if sym in self._sibling_symbols:
+                continue
             qidx = self.symbol_to_question.get(sym)
             if qidx is None:
                 # No question mapping yet (e.g. meta event not ingested). We
