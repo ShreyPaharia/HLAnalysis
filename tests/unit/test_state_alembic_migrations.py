@@ -176,9 +176,21 @@ def test_existing_db_upgrades_without_data_loss_and_backfills_closed_qty(tmp_pat
     conn.commit()
     conn.close()
 
-    seed = StateDAL(db)
-    seed.set_pm_strike(1000126, 73_500.0)
-    seed.record_settlement(question_idx=42, symbol="@30", realized_pnl=-5.0, ts_ns=333)
+    # Seed pm_strike and settlement via raw SQL (same principle as the fill
+    # row above — the ORM models now carry composite-PK columns that don't
+    # exist in the legacy schema, so ORM writes would fail; raw SQL matches
+    # exactly what a pre-Alembic production DB would hold on disk).
+    conn2 = sqlite3.connect(db)
+    conn2.execute(
+        "INSERT INTO pm_strike (question_idx, strike) VALUES (?, ?)",
+        (1000126, 73_500.0),
+    )
+    conn2.execute(
+        "INSERT INTO settlement (question_idx, symbol, realized_pnl, ts_ns) VALUES (?, ?, ?, ?)",
+        (42, "@30", -5.0, 333),
+    )
+    conn2.commit()
+    conn2.close()
 
     schema_before = _app_schema(db)
 

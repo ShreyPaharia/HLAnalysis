@@ -94,6 +94,9 @@ def upgrade() -> None:
         b.add_column(sa.Column("account", sa.String(), nullable=True))
         b.add_column(sa.Column("strategy_id", sa.String(), nullable=True))
         b.create_primary_key("pk_position", ["strategy_id", "question_idx"])
+    # Backfill: existing per-slot rows belong to the default (empty) strategy_id
+    # so the ORM composite PK lookup (strategy_id='', question_idx) finds them.
+    op.execute("UPDATE position SET strategy_id = '' WHERE strategy_id IS NULL")
 
     # ------------------------------------------------------------------
     # 5. seen_question — add account + strategy_id; PK → (strategy_id, question_idx).
@@ -102,6 +105,7 @@ def upgrade() -> None:
         b.add_column(sa.Column("account", sa.String(), nullable=True))
         b.add_column(sa.Column("strategy_id", sa.String(), nullable=True))
         b.create_primary_key("pk_seen_question", ["strategy_id", "question_idx"])
+    op.execute("UPDATE seen_question SET strategy_id = '' WHERE strategy_id IS NULL")
 
     # ------------------------------------------------------------------
     # 6. pm_strike — add account + strategy_id; PK → (strategy_id, question_idx).
@@ -110,6 +114,7 @@ def upgrade() -> None:
         b.add_column(sa.Column("account", sa.String(), nullable=True))
         b.add_column(sa.Column("strategy_id", sa.String(), nullable=True))
         b.create_primary_key("pk_pm_strike", ["strategy_id", "question_idx"])
+    op.execute("UPDATE pm_strike SET strategy_id = '' WHERE strategy_id IS NULL")
 
     # ------------------------------------------------------------------
     # 7. settlement — add account + strategy_id; PK → (strategy_id, question_idx).
@@ -118,6 +123,7 @@ def upgrade() -> None:
         b.add_column(sa.Column("account", sa.String(), nullable=True))
         b.add_column(sa.Column("strategy_id", sa.String(), nullable=True))
         b.create_primary_key("pk_settlement", ["strategy_id", "question_idx"])
+    op.execute("UPDATE settlement SET strategy_id = '' WHERE strategy_id IS NULL")
 
     # ------------------------------------------------------------------
     # 8. coin_klass — add account + strategy_id; PK → (strategy_id, coin).
@@ -126,6 +132,7 @@ def upgrade() -> None:
         b.add_column(sa.Column("account", sa.String(), nullable=True))
         b.add_column(sa.Column("strategy_id", sa.String(), nullable=True))
         b.create_primary_key("pk_coin_klass", ["strategy_id", "coin"])
+    op.execute("UPDATE coin_klass SET strategy_id = '' WHERE strategy_id IS NULL")
 
     # ------------------------------------------------------------------
     # 9. events — add strategy_id; backfill from existing alias column.

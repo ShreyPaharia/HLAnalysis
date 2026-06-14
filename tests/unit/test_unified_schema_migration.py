@@ -248,3 +248,316 @@ def test_coin_klass_composite_pk(tmp_path):
         assert len(rows) == 2
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# ORM round-trip tests (Task 2) — verify SQLModel classes have correct fields
+# ---------------------------------------------------------------------------
+# These tests import the ORM models directly to ensure:
+#   1. New fields (strategy_id, account) are present at the ORM layer.
+#   2. Composite PKs on Position/PmStrike/Settlement/SeenQuestion/CoinKlass
+#      match what migration 0006 creates (no SAWarning about PK mismatch).
+#   3. Fill and TradeJournalRow carry nullable strategy_id/account.
+#   4. Event carries a nullable strategy_id.
+
+
+import warnings
+
+from sqlmodel import Session as _Session
+from sqlmodel import select
+
+from hlanalysis.engine.state import (
+    CoinKlass,
+    Event,
+    Fill,
+    PmStrike,
+    Position,
+    SeenQuestion,
+    Settlement,
+    TradeJournalRow,
+)
+
+
+def _make_dal(tmp_path):
+    db = tmp_path / "orm.db"
+    dal = StateDAL(db)
+    dal.run_migrations()
+    return dal
+
+
+def test_no_sa_warning_on_orm_ops_after_migration(tmp_path):
+    """ORM operations on a FULLY MIGRATED DB must emit no SAWarning about PK
+    mismatch.
+
+    Note: the Alembic batch-alter step in 0006 necessarily fires SAWarning
+    during the migration itself (the temp-table is created against the OLD
+    single-PK schema before the PK change lands).  That warning is an
+    inherent Alembic batch-alter side effect and cannot be suppressed at the
+    ORM layer.
+
+    What CAN be verified: after migration is complete, a fresh run_migrations()
+    call (idempotent — already at head) and normal ORM insert/query operations
+    must not produce any PK-mismatch SAWarning.  Before Task 2, this test
+    would have failed because the ORM model still declared the old single
+    primary_key, so every subsequent operation that triggers SQLAlchemy
+    reflection would repeat the warning.
+    """
+    import sqlalchemy.exc
+
+    db = tmp_path / "warn.db"
+    dal = StateDAL(db)
+    dal.run_migrations()  # first run — the batch-alter SAWarnings happen here (expected)
+
+    # Second run: already at head, no DDL executes — must be warning-free.
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        dal.run_migrations()
+
+    sa_pk_warnings = [
+        x
+        for x in w
+        if issubclass(x.category, sqlalchemy.exc.SAWarning)
+        and "primary_key" in str(x.message).lower()
+        and "not matching" in str(x.message).lower()
+    ]
+    assert sa_pk_warnings == [], (
+        f"Got {len(sa_pk_warnings)} SAWarning(s) about PK mismatch on idempotent run:\n"
+        + "\n".join(str(x.message) for x in sa_pk_warnings)
+    )
+
+    # ORM insert/query on fully-migrated DB must also be warning-free.
+    with warnings.catch_warnings(record=True) as w2:
+        warnings.simplefilter("always")
+        p = Position(
+            strategy_id="v1",
+            question_idx=9999,
+            symbol="@30",
+            qty=1.0,
+            avg_entry=0.85,
+            realized_pnl=0.0,
+            last_update_ts_ns=1,
+            stop_loss_price=0.75,
+            closed_qty=0.0,
+        )
+        with _Session(dal._engine) as s:
+            s.add(p)
+            s.commit()
+        with _Session(dal._engine) as s:
+            rows = list(s.exec(select(Position).where(Position.question_idx == 9999)).all())
+        assert len(rows) == 1
+
+    orm_pk_warns = [
+        x
+        for x in w2
+        if issubclass(x.category, sqlalchemy.exc.SAWarning)
+        and "primary_key" in str(x.message).lower()
+        and "not matching" in str(x.message).lower()
+    ]
+    assert orm_pk_warns == [], f"Got {len(orm_pk_warns)} SAWarning(s) during ORM ops on migrated DB:\n" + "\n".join(
+        str(x.message) for x in orm_pk_warns
+    )
+
+
+def test_position_orm_composite_pk_roundtrip(tmp_path):
+    """ORM: two Position rows with same question_idx, different strategy_id,
+    both persist and are independently readable via s.get()."""
+    dal = _make_dal(tmp_path)
+
+    p1 = Position(
+        strategy_id="v31",
+        account="w1",
+        question_idx=2001,
+        symbol="@30",
+        qty=5.0,
+        avg_entry=0.85,
+        realized_pnl=0.0,
+        last_update_ts_ns=1_000_000_000,
+        stop_loss_price=0.75,
+        closed_qty=0.0,
+    )
+    p2 = Position(
+        strategy_id="v1",
+        account="w1",
+        question_idx=2001,
+        symbol="@30",
+        qty=3.0,
+        avg_entry=0.90,
+        realized_pnl=0.0,
+        last_update_ts_ns=1_000_000_001,
+        stop_loss_price=0.80,
+        closed_qty=0.0,
+    )
+
+    with _Session(dal._engine) as s:
+        s.add(p1)
+        s.add(p2)
+        s.commit()
+
+    with _Session(dal._engine) as s:
+        rows = list(s.exec(select(Position).where(Position.question_idx == 2001)).all())
+    assert len(rows) == 2
+    strat_ids = {r.strategy_id for r in rows}
+    assert strat_ids == {"v1", "v31"}
+
+
+def test_pm_strike_orm_has_strategy_id_account(tmp_path):
+    """ORM: PmStrike accepts strategy_id and account fields."""
+    dal = _make_dal(tmp_path)
+
+    ps = PmStrike(
+        strategy_id="v31",
+        account="w1",
+        question_idx=3001,
+        strike=98_000.0,
+    )
+    with _Session(dal._engine) as s:
+        s.add(ps)
+        s.commit()
+
+    with _Session(dal._engine) as s:
+        rows = list(s.exec(select(PmStrike).where(PmStrike.question_idx == 3001)).all())
+    assert len(rows) == 1
+    assert rows[0].strategy_id == "v31"
+    assert rows[0].account == "w1"
+    assert rows[0].strike == 98_000.0
+
+
+def test_settlement_orm_has_strategy_id_account(tmp_path):
+    """ORM: Settlement accepts strategy_id and account fields."""
+    dal = _make_dal(tmp_path)
+
+    st = Settlement(
+        strategy_id="v1",
+        account="w2",
+        question_idx=4001,
+        symbol="@30",
+        realized_pnl=12.5,
+        ts_ns=2_000_000_000,
+    )
+    with _Session(dal._engine) as s:
+        s.add(st)
+        s.commit()
+
+    with _Session(dal._engine) as s:
+        rows = list(s.exec(select(Settlement).where(Settlement.question_idx == 4001)).all())
+    assert len(rows) == 1
+    assert rows[0].strategy_id == "v1"
+    assert rows[0].account == "w2"
+    assert rows[0].realized_pnl == 12.5
+
+
+def test_fill_orm_has_strategy_id_account(tmp_path):
+    """ORM: Fill accepts nullable strategy_id and account fields."""
+    dal = _make_dal(tmp_path)
+
+    f = Fill(
+        fill_id="f-orm-1",
+        cloid="c-orm-1",
+        question_idx=5001,
+        symbol="@30",
+        side="buy",
+        price=0.85,
+        size=10.0,
+        fee=0.01,
+        ts_ns=3_000_000_000,
+        closed_pnl=0.0,
+        source="router",
+        strategy_id="v31",
+        account="w1",
+    )
+    with _Session(dal._engine) as s:
+        s.add(f)
+        s.commit()
+
+    with _Session(dal._engine) as s:
+        row = s.get(Fill, "f-orm-1")
+    assert row is not None
+    assert row.strategy_id == "v31"
+    assert row.account == "w1"
+
+
+def test_trade_journal_row_orm_has_strategy_id_account(tmp_path):
+    """ORM: TradeJournalRow accepts nullable strategy_id and account fields."""
+    dal = _make_dal(tmp_path)
+
+    tj = TradeJournalRow(
+        cloid="tj-orm-1",
+        question_idx=6001,
+        decision_ts_ns=4_000_000_000,
+        action="enter",
+        strategy_id="v31",
+        account="w1",
+    )
+    with _Session(dal._engine) as s:
+        s.add(tj)
+        s.commit()
+
+    with _Session(dal._engine) as s:
+        row = s.get(TradeJournalRow, "tj-orm-1")
+    assert row is not None
+    assert row.strategy_id == "v31"
+    assert row.account == "w1"
+
+
+def test_event_orm_has_strategy_id(tmp_path):
+    """ORM: Event accepts nullable strategy_id field."""
+    dal = _make_dal(tmp_path)
+
+    ev = Event(
+        ts_ns=5_000_000_000,
+        alias="v31",
+        kind="entry",
+        question_idx=7001,
+        strategy_id="v31",
+    )
+    with _Session(dal._engine) as s:
+        s.add(ev)
+        s.commit()
+
+    with _Session(dal._engine) as s:
+        rows = list(s.exec(select(Event).where(Event.question_idx == 7001)).all())
+    assert len(rows) == 1
+    assert rows[0].strategy_id == "v31"
+
+
+def test_seen_question_orm_has_strategy_id_account(tmp_path):
+    """ORM: SeenQuestion accepts strategy_id and account fields."""
+    dal = _make_dal(tmp_path)
+
+    sq = SeenQuestion(
+        strategy_id="v1",
+        account="w1",
+        question_idx=8001,
+        first_seen_ts_ns=6_000_000_000,
+    )
+    with _Session(dal._engine) as s:
+        s.add(sq)
+        s.commit()
+
+    with _Session(dal._engine) as s:
+        rows = list(s.exec(select(SeenQuestion).where(SeenQuestion.question_idx == 8001)).all())
+    assert len(rows) == 1
+    assert rows[0].strategy_id == "v1"
+    assert rows[0].account == "w1"
+
+
+def test_coin_klass_orm_has_strategy_id_account(tmp_path):
+    """ORM: CoinKlass accepts strategy_id and account fields."""
+    dal = _make_dal(tmp_path)
+
+    ck = CoinKlass(
+        strategy_id="v31",
+        account="w1",
+        coin="#10",
+        klass="priceBinary",
+        question_idx=9001,
+    )
+    with _Session(dal._engine) as s:
+        s.add(ck)
+        s.commit()
+
+    with _Session(dal._engine) as s:
+        rows = list(s.exec(select(CoinKlass).where(CoinKlass.coin == "#10")).all())
+    assert len(rows) == 1
+    assert rows[0].strategy_id == "v31"
+    assert rows[0].account == "w1"

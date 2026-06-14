@@ -30,9 +30,14 @@ class OpenOrder(SQLModel, table=True):
     placed_ts_ns: int
     last_update_ts_ns: int
     strategy_id: str
+    # 0006_unified_slot_db: account scoping column (nullable — existing rows unscoped).
+    account: str | None = None
 
 
 class Position(SQLModel, table=True):
+    # 0006_unified_slot_db: composite PK (strategy_id, question_idx) so the same
+    # question can be held independently by different strategy slots in a shared DB.
+    strategy_id: str = Field(default="", primary_key=True)
     question_idx: int = Field(primary_key=True)
     symbol: str
     qty: float
@@ -46,6 +51,8 @@ class Position(SQLModel, table=True):
     # event (see marketdata.position_math.PositionState.closed_qty). Default 0.0
     # so pre-migration rows and fresh opens start at zero.
     closed_qty: float = 0.0
+    # Account scoping column (nullable — existing per-slot rows have no account yet).
+    account: str | None = None
 
 
 class Fill(SQLModel, table=True):
@@ -69,6 +76,9 @@ class Fill(SQLModel, table=True):
     # prefers 'venue' rows when present so the HL local ledger == venue (HIP-4
     # settlement payouts only ever arrive as venue fills). See 0004_fill_source.
     source: str = FILL_SOURCE_ROUTER
+    # 0006_unified_slot_db: scoping columns (nullable — PK stays fill_id).
+    strategy_id: str | None = None
+    account: str | None = None
 
 
 class Session_(SQLModel, table=True):
@@ -89,8 +99,12 @@ class SeenQuestion(SQLModel, table=True):
     restarts so NewQuestion alerts don't re-fire for already-known markets."""
 
     __tablename__ = "seen_question"
+    # 0006_unified_slot_db: composite PK (strategy_id, question_idx).
+    strategy_id: str = Field(default="", primary_key=True)
     question_idx: int = Field(primary_key=True)
     first_seen_ts_ns: int
+    # Account scoping column (nullable — existing rows unscoped).
+    account: str | None = None
 
 
 class PmStrike(SQLModel, table=True):
@@ -100,8 +114,12 @@ class PmStrike(SQLModel, table=True):
     reuse the strike instead of skipping markets whose open it can no longer see."""
 
     __tablename__ = "pm_strike"
+    # 0006_unified_slot_db: composite PK (strategy_id, question_idx).
+    strategy_id: str = Field(default="", primary_key=True)
     question_idx: int = Field(primary_key=True)
     strike: float
+    # Account scoping column (nullable — existing rows unscoped).
+    account: str | None = None
 
 
 class CoinKlass(SQLModel, table=True):
@@ -117,22 +135,31 @@ class CoinKlass(SQLModel, table=True):
     coin user_fills returns. HL-only (PM fills are binary by construction)."""
 
     __tablename__ = "coin_klass"
+    # 0006_unified_slot_db: composite PK (strategy_id, coin).
+    strategy_id: str = Field(default="", primary_key=True)
     coin: str = Field(primary_key=True)
     klass: str
     question_idx: int
+    # Account scoping column (nullable — existing rows unscoped).
+    account: str | None = None
 
 
 class Settlement(SQLModel, table=True):
     """Persisted realized PnL of a settled position (SHR-53). HIP-4 binaries
     close via settlement payouts, not HL fills, so this PnL was previously only
     alerted, never stored — leaving the daily-loss gate blind to it. Keyed by
-    question_idx so the two close paths can't double-book (first writer wins)."""
+    (strategy_id, question_idx) so the two close paths can't double-book per slot
+    (first writer wins)."""
 
     __tablename__ = "settlement"
+    # 0006_unified_slot_db: composite PK (strategy_id, question_idx).
+    strategy_id: str = Field(default="", primary_key=True)
     question_idx: int = Field(primary_key=True)
     symbol: str
     realized_pnl: float
     ts_ns: int
+    # Account scoping column (nullable — existing rows unscoped).
+    account: str | None = None
 
 
 class TradeJournalRow(SQLModel, table=True):
@@ -159,6 +186,9 @@ class TradeJournalRow(SQLModel, table=True):
     question_idx: int
     decision_ts_ns: int
     action: str  # "enter" | "exit"
+    # 0006_unified_slot_db: scoping columns (nullable — PK stays cloid).
+    strategy_id: str | None = None
+    account: str | None = None
     side: str | None = None  # "buy" | "sell"
     symbol: str | None = None
     intended_size: float | None = None
@@ -196,6 +226,9 @@ class Event(SQLModel, table=True):
     question_idx: int | None = None
     reason: str | None = None
     payload_json: str | None = None
+    # 0006_unified_slot_db: strategy_id scoping column, backfilled from alias on
+    # existing rows. Nullable — alias kept for backward compat.
+    strategy_id: str | None = None
 
 
 # Public alias for tests / external users.
@@ -319,7 +352,7 @@ class StateDAL:
         # expire_on_commit=False so `p` stays readable after commit (the cached
         # subclass reads its fields post-write without a re-SELECT).
         with _Session(self._engine, expire_on_commit=False) as s:
-            existing = s.get(Position, p.question_idx)
+            existing = s.get(Position, (p.strategy_id, p.question_idx))
             if existing is None:
                 s.add(p)
             else:
@@ -328,43 +361,43 @@ class StateDAL:
                 s.add(existing)
             s.commit()
 
-    def get_position(self, question_idx: int) -> Position | None:
+    def get_position(self, question_idx: int, *, strategy_id: str = "") -> Position | None:
         with _Session(self._engine) as s:
-            return s.get(Position, question_idx)
+            return s.get(Position, (strategy_id, question_idx))
 
     def all_positions(self) -> list[Position]:
         with _Session(self._engine) as s:
             return list(s.exec(select(Position)).all())
 
-    def delete_position(self, question_idx: int) -> None:
+    def delete_position(self, question_idx: int, *, strategy_id: str = "") -> None:
         with _Session(self._engine) as s:
-            p = s.get(Position, question_idx)
+            p = s.get(Position, (strategy_id, question_idx))
             if p is not None:
                 s.delete(p)
                 s.commit()
 
-    def has_seen_question(self, question_idx: int) -> bool:
+    def has_seen_question(self, question_idx: int, *, strategy_id: str = "") -> bool:
         with _Session(self._engine) as s:
-            return s.get(SeenQuestion, question_idx) is not None
+            return s.get(SeenQuestion, (strategy_id, question_idx)) is not None
 
-    def mark_question_seen(self, question_idx: int, *, now_ns: int) -> None:
+    def mark_question_seen(self, question_idx: int, *, now_ns: int, strategy_id: str = "") -> None:
         with _Session(self._engine) as s:
-            if s.get(SeenQuestion, question_idx) is None:
-                s.add(SeenQuestion(question_idx=question_idx, first_seen_ts_ns=now_ns))
+            if s.get(SeenQuestion, (strategy_id, question_idx)) is None:
+                s.add(SeenQuestion(strategy_id=strategy_id, question_idx=question_idx, first_seen_ts_ns=now_ns))
                 s.commit()
 
     # ---- PM open-strikes ----
 
-    def get_pm_strike(self, question_idx: int) -> float | None:
+    def get_pm_strike(self, question_idx: int, *, strategy_id: str = "") -> float | None:
         with _Session(self._engine) as s:
-            row = s.get(PmStrike, question_idx)
+            row = s.get(PmStrike, (strategy_id, question_idx))
             return None if row is None else row.strike
 
-    def set_pm_strike(self, question_idx: int, strike: float) -> None:
+    def set_pm_strike(self, question_idx: int, strike: float, *, strategy_id: str = "") -> None:
         with _Session(self._engine) as s:
-            existing = s.get(PmStrike, question_idx)
+            existing = s.get(PmStrike, (strategy_id, question_idx))
             if existing is None:
-                s.add(PmStrike(question_idx=question_idx, strike=strike))
+                s.add(PmStrike(strategy_id=strategy_id, question_idx=question_idx, strike=strike))
             else:
                 existing.strike = strike
                 s.add(existing)
@@ -372,16 +405,16 @@ class StateDAL:
 
     # ---- coin → market-class map (SHR-77) ----
 
-    def set_coin_klass(self, *, coin: str, klass: str, question_idx: int) -> None:
+    def set_coin_klass(self, *, coin: str, klass: str, question_idx: int, strategy_id: str = "") -> None:
         """Persist (or refresh) the market class for an HL outcome coin "#N".
 
         Idempotent upsert: a question's QuestionMetaEvent is re-ingested on every
         engine restart, and its class never changes, so re-stamping the same pair
         must not error or duplicate."""
         with _Session(self._engine) as s:
-            existing = s.get(CoinKlass, coin)
+            existing = s.get(CoinKlass, (strategy_id, coin))
             if existing is None:
-                s.add(CoinKlass(coin=coin, klass=klass, question_idx=question_idx))
+                s.add(CoinKlass(strategy_id=strategy_id, coin=coin, klass=klass, question_idx=question_idx))
             else:
                 existing.klass = klass
                 existing.question_idx = question_idx
@@ -412,7 +445,7 @@ class StateDAL:
         realized) and then re-emit the authoritative payout once settled_symbol
         is known; the authoritative value, written later, must overwrite."""
         with _Session(self._engine) as s:
-            existing = s.get(Settlement, question_idx)
+            existing = s.get(Settlement, ("", question_idx))
             if existing is None:
                 s.add(
                     Settlement(
