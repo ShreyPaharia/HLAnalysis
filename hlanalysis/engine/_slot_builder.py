@@ -35,6 +35,7 @@ from .market_state import MarketState
 from .risk import RiskGate
 from .router import Router
 from .scanner import Scanner
+from .scoped_dal import StrategyScopedDAL
 from .state import CachedStateDAL
 from .trade_journal import TradeJournal
 
@@ -49,6 +50,7 @@ def build_slot(
     exec_client_factory: Callable[[str, AccountConfig, bool], ExecutionClient] | None,
     bus: EventBus,
     market_state: MarketState,
+    shared_dal: CachedStateDAL | None = None,
 ) -> object:
     """Construct one ``AccountSlot`` for the given strategy config.
 
@@ -70,11 +72,24 @@ def build_slot(
         The shared engine event bus (passed to Router).
     market_state:
         The shared engine MarketState (passed to Scanner).
+    shared_dal:
+        Optional pre-built ``CachedStateDAL`` that all slots share.  When
+        provided (the normal engine path, where ``EngineRuntime.run()``
+        constructs one DAL before the slot-build loop), this DAL is wrapped
+        per-slot via ``StrategyScopedDAL`` so every slot sees only its own
+        rows.  When ``None`` (legacy/test path), a fresh ``CachedStateDAL``
+        is built from ``deploy_cfg.state_db_path_shared()``.
     """
     # Import here to avoid a module-level cycle (AccountSlot / PmSlotState
     # live in runtime.py, which imports this module).
     from .runtime import AccountSlot, PmSlotState
 
+    # ``account_alias`` is the unique per-slot identifier enforced by
+    # ``load_strategies_config``.  We use it as ``strategy_id`` so that:
+    #   1. It's guaranteed unique within the running engine.
+    #   2. It matches the existing per-slot directory naming convention.
+    #   3. It maps one-to-one to the account (today's 1-strategy-per-account
+    #      invariant), so ``account_alias`` is a stable proxy for "this slot".
     alias = s_cfg.account_alias
     if alias not in deploy_cfg.accounts:
         raise ValueError(
@@ -82,15 +97,30 @@ def build_slot(
             f"deploy.accounts has only {list(deploy_cfg.accounts)}",
         )
     acct = deploy_cfg.accounts[alias]
-    state_db_path = Path(deploy_cfg.state_db_path_for(alias))
-    kill_switch_path = Path(deploy_cfg.kill_switch_path_for(alias))
+
+    # Shared DB: one file for the whole engine, scoped per slot by strategy_id.
+    # Per-strategy flag/sibling files live in slot_dir_for(alias).
+    shared_db_path = deploy_cfg.state_db_path_shared()
+    slot_dir = deploy_cfg.slot_dir_for(alias)
+    slot_dir.mkdir(parents=True, exist_ok=True)
+    kill_switch_path = slot_dir / Path(deploy_cfg.kill_switch_path).name
+
     cloid_prefix = f"hla-{alias}-"
 
-    # Cached DAL: positions/orders are read every loop wake (esp. under the
-    # event-driven scan, P1); serve those from memory, write through to the
-    # DB. run_migrations FIRST so the lazy cache load sees existing tables.
-    dal = CachedStateDAL(state_db_path)
-    dal.run_migrations()
+    # DAL: build or reuse the shared CachedStateDAL; wrap with a strategy-
+    # scoped view so this slot only reads/writes its own rows.
+    # run_migrations is idempotent; calling it here (when shared_dal is None)
+    # ensures single-slot / test callers don't need an extra setup step.
+    if shared_dal is None:
+        _base_dal = CachedStateDAL(shared_db_path)
+        _base_dal.run_migrations()
+    else:
+        _base_dal = shared_dal
+    # strategy_id = account_alias (unique per slot, enforced by load_strategies_config).
+    # account     = account_alias (venue-agnostic; account_address is HL-only).
+    # Using account_alias for both keeps the scoping consistent and avoids
+    # attribute differences between HyperliquidAccount and PolymarketAccount.
+    dal = StrategyScopedDAL(_base_dal, strategy_id=alias, account=alias)
 
     if exec_client_factory is not None:
         exec_client = exec_client_factory(alias, acct, s_cfg.paper_mode)
@@ -98,8 +128,9 @@ def build_slot(
         exec_client = build_exec_client(alias, acct, s_cfg.paper_mode)
 
     risk = RiskGate(s_cfg)
-    # Durable trade journal (SHR-83): persists into the slot's state.db, shared
-    # by the Router (decision/send/reject/fill) and Reconciler (late fills).
+    # Durable trade journal (SHR-83): persists into the shared state.db under
+    # this slot's strategy_id, shared by the Router (decision/send/reject/fill)
+    # and Reconciler (late fills).
     journal = TradeJournal(
         dal,
         suppress_veto_reasons=frozenset(deploy_cfg.journal_suppress_veto_reasons),
@@ -121,11 +152,12 @@ def build_slot(
         journal=journal,
     )
     strategy = _build_strategy_for_slot(s_cfg)
-    # Gate-decision log sibling of state.db. Operators tail this during
+    # Gate-decision log lives in the per-strategy slot directory so each slot's
+    # decisions remain in separate files. Operators tail this during
     # forward-testing to see which gates are firing without combing
     # through journal heartbeats. State-change-debounced, so file size
     # stays small (one line per question per transition).
-    gate_log_path = state_db_path.parent / "gate_decisions.jsonl"
+    gate_log_path = slot_dir / "gate_decisions.jsonl"
     scanner = Scanner(
         strategy=strategy,
         cfg=s_cfg,
@@ -150,7 +182,7 @@ def build_slot(
         cfg=s_cfg,
         account_cfg=acct,
         venue=acct.venue,
-        state_db_path=state_db_path,
+        state_db_path=shared_db_path,
         kill_switch_path=kill_switch_path,
         cloid_prefix=cloid_prefix,
         dal=dal,

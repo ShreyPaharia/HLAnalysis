@@ -27,6 +27,7 @@ delegated straight through with no scope filter.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from .state import Fill, OpenOrder, Position, StateDAL, TradeJournalRow
@@ -41,12 +42,23 @@ class StrategyScopedDAL:
     Genuinely global operations (migrations, prune, session lifecycle,
     mirror_venue_fills) delegate straight through — they operate across the
     whole DB and must not be narrowed to one strategy's rows.
+
+    ``db_path`` is a **virtual** per-strategy path whose *parent* is the
+    per-strategy slot directory (``<shared_db.parent>/<strategy_id>/``).
+    This lets existing code that computes sibling-file paths via
+    ``Path(dal.db_path).parent / "<file>"`` (e.g. Router._cooldown_path)
+    resolve those files into the per-strategy slot directory rather than the
+    shared-DB root, preserving per-slot isolation for operational files.
     """
 
     def __init__(self, base: StateDAL, *, strategy_id: str, account: str) -> None:
         self._base = base
         self.strategy_id = strategy_id
         self.account = account
+        # Virtual per-strategy path: <shared_db_parent>/<strategy_id>/<db_name>.
+        # Parent = slot_dir_for(strategy_id) so sibling-file lookups
+        # (exit_cooldowns.json, gate_decisions.jsonl) resolve into the slot dir.
+        self.db_path: Path = base.db_path.parent / strategy_id / base.db_path.name
 
     # ------------------------------------------------------------------ #
     # Global (pass-through) operations

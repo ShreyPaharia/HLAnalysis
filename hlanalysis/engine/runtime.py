@@ -94,6 +94,7 @@ from .scanner import Scanner
 from .state import (
     FILL_SOURCE_ROUTER,
     FILL_SOURCE_VENUE,
+    CachedStateDAL,
     StateDAL,
 )
 from .trade_journal import HaltSnapshot, TradeJournal
@@ -306,7 +307,12 @@ class EngineRuntime:
             raise ValueError("EngineRuntime requires at least one strategy")
         # 1) Build slots — store on self so observers (tests, heartbeat) can
         # read live state.
-        self.slots = [self._build_slot(s_cfg) for s_cfg in self.strategies]
+        # Construct ONE shared CachedStateDAL for the whole engine.  Each slot
+        # gets a StrategyScopedDAL view over it (built inside _build_slot).
+        # run_migrations once here — all slots share one DB and one schema.
+        _shared_dal = CachedStateDAL(self.deploy_cfg.state_db_path_shared())
+        _shared_dal.run_migrations()
+        self.slots = [self._build_slot(s_cfg, shared_dal=_shared_dal) for s_cfg in self.strategies]
         slots = self.slots
         if len({s.alias for s in slots}) != len(slots):
             raise ValueError(
@@ -406,14 +412,32 @@ class EngineRuntime:
 
     # ---------- slot construction ----------
 
-    def _build_slot(self, s_cfg: StrategyConfig) -> AccountSlot:
-        """Thin delegator — logic lives in ``_slot_builder.build_slot``."""
+    def _build_slot(
+        self,
+        s_cfg: StrategyConfig,
+        shared_dal: CachedStateDAL | None = None,
+    ) -> AccountSlot:
+        """Thin delegator — logic lives in ``_slot_builder.build_slot``.
+
+        Parameters
+        ----------
+        s_cfg:
+            The strategy config for this slot.
+        shared_dal:
+            The engine-wide shared ``CachedStateDAL``.  When provided (normal
+            path, from ``run()``), all slots share one DB file and each slot
+            is wrapped via ``StrategyScopedDAL`` inside ``build_slot``.  When
+            ``None`` (legacy/test path where ``_build_slot`` is called without
+            ``run()``), ``build_slot`` opens a fresh DAL from
+            ``deploy_cfg.state_db_path_shared()``.
+        """
         return _build_slot_fn(  # type: ignore[return-value]
             s_cfg,
             deploy_cfg=self.deploy_cfg,
             exec_client_factory=self.exec_client_factory,
             bus=self.bus,
             market_state=self.market_state,
+            shared_dal=shared_dal,
         )
 
     # ---------- task bodies ----------
@@ -710,7 +734,8 @@ class EngineRuntime:
     # ---- liveness / dead-man's-switch (SHR-43) -----------------------------
 
     def _heartbeat_file_path(self) -> Path:
-        return Path(self.deploy_cfg.state_db_path).parent / "engine_heartbeat"
+        # Engine-wide (not per-slot): lives alongside the shared state.db.
+        return self.deploy_cfg.state_db_path_shared().parent / "engine_heartbeat"
 
     def _touch_heartbeat_file(self, now_ns: int) -> None:
         """Server-side dead-man's-switch primitive: rewrite a file every

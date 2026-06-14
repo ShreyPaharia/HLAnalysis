@@ -352,19 +352,48 @@ class DeployConfig(BaseModel):
     def state_db_path_for(self, alias: str) -> str:
         """Per-account state DB path. Multiple accounts → namespaced subdir;
         single 'default' account → legacy flat path so existing deployments
-        don't see their state.db move."""
+        don't see their state.db move.
+
+        Back-compat: still callable. For the unified-DB path use
+        ``state_db_path_shared()`` instead — all slots share one DB file."""
         base = Path(self.state_db_path)
         if len(self.accounts) <= 1 and alias == "default":
             return str(base)
         return str(base.parent / alias / base.name)
 
+    def state_db_path_shared(self) -> Path:
+        """Return the ONE shared state DB path used by all slots.
+
+        Uses the raw ``state_db_path`` config value as-is (e.g.
+        ``/data/engine/state.db``).  All strategy slots share this single DB
+        file; per-strategy isolation is provided by ``StrategyScopedDAL``.
+        Per-strategy sibling files (flags, gate-log) live under
+        ``slot_dir_for(strategy_id)``, NOT alongside this file.
+        """
+        return Path(self.state_db_path)
+
+    def slot_dir_for(self, strategy_id: str) -> Path:
+        """Return the per-strategy directory for flag files and sibling files.
+
+        Layout: ``<state_db_path.parent>/<strategy_id>/``
+
+        Houses: ``restart_blocked``, kill-switch flag, ``gate_decisions.jsonl``,
+        and any other per-strategy operational files.  The shared DB file lives
+        at ``state_db_path_shared()`` — not inside this directory.
+        """
+        return Path(self.state_db_path).parent / strategy_id
+
     def kill_switch_path_for(self, alias: str) -> str:
         """Per-account kill switch (so an operator can halt one strategy
-        without killing both). Same namespacing rule as state_db_path_for."""
+        without killing both). Same namespacing rule as state_db_path_for.
+
+        With the unified DB, kill-switch files live inside
+        ``slot_dir_for(alias)`` so each strategy's flags stay isolated in
+        their own subdirectory.  This method now returns
+        ``slot_dir_for(alias)/<kill_switch filename>``.
+        """
         base = Path(self.kill_switch_path)
-        if len(self.accounts) <= 1 and alias == "default":
-            return str(base)
-        return str(base.parent / alias / base.name)
+        return str(self.slot_dir_for(alias) / base.name)
 
 
 # Back-compat property: monitoring code reads `.hl_accounts` directly.
