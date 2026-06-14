@@ -138,12 +138,23 @@ class RiskGate:
         if inp.reference_age_ns > stale_ns:
             return RiskVerdict(False, "stale_reference")
         # last_reconcile_ns: 0 means never reconciled → fail closed (no position
-        # state available yet). Non-zero: tolerate 2× the configured interval.
+        # state available yet). This stays a GLOBAL block: at cold start we don't
+        # know ANY of our positions, so even a "flat" local view is untrustworthy.
         # Exits are short-circuited earlier so this never blocks a close.
         if inp.last_reconcile_ns == 0:
             return RiskVerdict(False, "no_reconcile_yet")
+        # Non-zero but old (>2× the configured interval): our venue view of HELD
+        # positions may be stale. Scope the veto to questions we actually hold a
+        # position in — a fresh entry into a market we hold nothing in cannot be
+        # endangered by stale position state for *other* markets. Without this,
+        # one slot's wedged reconcile loop (a hung venue read freezes
+        # last_reconcile_ns) suspends EVERY market in the slot, even flat ones
+        # (incident 2026-06-14: v31_pm fired stale_reconcile for 2.5h while flat).
+        # Held/topup markets stay blocked: their qty/avg_entry could be wrong, and
+        # a position that just settled/vanished would be re-entered blind.
         if inp.now_ns - inp.last_reconcile_ns > 2 * self.cfg.global_.reconcile_interval_seconds * 1_000_000_000:
-            return RiskVerdict(False, "stale_reconcile")
+            if any(p.question_idx == intent.question_idx for p in inp.positions):
+                return RiskVerdict(False, "stale_reconcile")
 
         # 11. No conflicting leg
         for p in inp.positions:

@@ -3,6 +3,13 @@
 Tests that last_reconcile_ns == 0 (never reconciled) vetoes entries with a
 clear reason, while exits are always allowed, and once a reconcile timestamp is
 set entries are allowed again.
+
+2026-06-14: the *stale* (non-zero but old) reconcile veto is now scoped to
+questions where we actually hold a position — a hung venue-read froze one PM
+slot's reconcile loop and the global block suspended every market in the slot,
+even the flat ones. A fresh entry into a market we hold nothing in cannot be
+endangered by stale position state for *other* markets, so it is allowed;
+held/topup markets stay blocked because their qty/avg_entry may be wrong.
 """
 
 from __future__ import annotations
@@ -13,7 +20,7 @@ from hlanalysis.engine.config import (
     StrategyConfig,
 )
 from hlanalysis.engine.risk import RiskGate, RiskInputs
-from hlanalysis.strategy.types import BookState, OrderIntent, QuestionView
+from hlanalysis.strategy.types import BookState, OrderIntent, Position, QuestionView
 
 NOW = 10_000_000_000_000_000
 
@@ -146,12 +153,46 @@ def test_entry_allowed_after_reconcile_timestamp_set():
     assert "reconcile" not in v.reason
 
 
-def test_entry_still_vetoed_when_reconcile_stale():
-    """Existing behaviour: stale (but non-zero) reconcile still vetoes entries."""
+def _held_position(question_idx: int) -> Position:
+    return Position(
+        question_idx=question_idx,
+        symbol="@30",
+        qty=10.0,
+        avg_entry=0.90,
+        stop_loss_price=0.80,
+        last_update_ts_ns=NOW,
+    )
+
+
+# reconcile_interval = 60s; stale threshold = 2 * 60s = 120s
+_STALE_RECONCILE_NS = NOW - 130 * 1_000_000_000  # 130s ago
+
+
+def test_stale_reconcile_blocks_entry_into_held_question():
+    """A stale (but non-zero) reconcile must still veto entries/topups into a
+    question we hold a position in — its qty/avg_entry may be wrong."""
     gate = RiskGate(_strategy_cfg())
-    # reconcile_interval = 60s; stale threshold = 2 * 60s = 120s
-    stale_reconcile_ns = NOW - 130 * 1_000_000_000  # 130s ago
-    inp = _inputs(last_reconcile_ns=stale_reconcile_ns)
+    inp = _inputs(last_reconcile_ns=_STALE_RECONCILE_NS, positions=[_held_position(42)])
     v = gate.check_pre_trade(_entry_intent(), inp)
     assert v.approved is False
-    assert "reconcile" in v.reason
+    assert v.reason == "stale_reconcile"
+
+
+def test_stale_reconcile_allows_entry_into_flat_question():
+    """A stale reconcile must NOT block a market we hold no position in — a
+    frozen reconcile loop on one slot must not suspend every market (the
+    2026-06-14 v31_pm hang blocked a flat market with the whole-slot veto)."""
+    gate = RiskGate(_strategy_cfg())
+    # Holding a DIFFERENT question; the target (42) is flat.
+    inp = _inputs(last_reconcile_ns=_STALE_RECONCILE_NS, positions=[_held_position(99)])
+    v = gate.check_pre_trade(_entry_intent(), inp)
+    assert "reconcile" not in v.reason
+
+
+def test_stale_reconcile_allows_entry_when_flat():
+    """Stale reconcile + no positions at all → entry allowed (nothing to be
+    stale about). This is the exact v31_pm incident shape (positions=0)."""
+    gate = RiskGate(_strategy_cfg())
+    inp = _inputs(last_reconcile_ns=_STALE_RECONCILE_NS, positions=[])
+    v = gate.check_pre_trade(_entry_intent(), inp)
+    assert "reconcile" not in v.reason

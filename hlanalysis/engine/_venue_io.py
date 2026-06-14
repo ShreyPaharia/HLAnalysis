@@ -26,19 +26,59 @@ from loguru import logger
 from .exec_types import ClearinghouseState, OpenOrderRow, UserFillRow
 from .scanner import Scanner
 
+# Wall-clock bound on a single venue read. The SDK calls offloaded below are
+# requests-backed and tenacity-wrapped, but tenacity's ``stop_after_delay`` only
+# fires *between* attempts — it cannot interrupt one socket read that stalls with
+# no timeout. Without this bound a hung venue connection (PM data-api flap) parks
+# the worker thread forever; the reconcile loop's ``await`` never returns, so
+# ``slot.last_reconcile_ns`` freezes and the per-slot ``stale_reconcile`` gate
+# vetoes every entry indefinitely with NO exception and NO log (incident
+# 2026-06-14: v31_pm stuck 2.5h). On timeout ``asyncio.wait_for`` raises
+# ``TimeoutError`` — already classified transient by ``_is_transient_venue_error``
+# — so the reconcile loop logs concisely and retries next cycle. The bound is
+# generous (the three reads are sequential and each carries its own ~8s tenacity
+# budget, plus the data-api positions fetch) so a legitimately-retrying snapshot
+# is never false-aborted; only a true wedge trips it.
+#
+# NOTE: ``wait_for`` cancels the *await*, not the underlying worker thread — a
+# truly-wedged socket leaks one thread until it unblocks. That is an acceptable,
+# bounded cost: the loop recovers and keeps reconciling, which is the property
+# that matters (a permanently-dead reconcile loop also kills exit/settlement
+# detection for the slot).
+_VENUE_READ_TIMEOUT_S = 30.0
 
-async def venue_snapshot(slot: object) -> tuple[list[OpenOrderRow], ClearinghouseState, list[UserFillRow]]:
+
+async def venue_snapshot(
+    slot: object,
+    *,
+    timeout_s: float = _VENUE_READ_TIMEOUT_S,
+) -> tuple[list[OpenOrderRow], ClearinghouseState, list[UserFillRow]]:
     """Fetch venue open-orders, clearinghouse state, and the full fills list
     off the event loop. Fills are fetched once and reused as the reconcile
     `fills_lookup` for every cloid — the live lambda ignores its cloid arg
     and returns all fills anyway, so this is behaviour-preserving.
 
+    Each read is wall-clock bounded (``timeout_s``) so a wedged venue socket
+    cannot freeze the caller's loop; on timeout ``TimeoutError`` propagates.
+
     ``slot`` is typed ``object`` to avoid importing ``AccountSlot`` from
     ``runtime.py`` (import cycle); callers pass an ``AccountSlot`` instance.
     """
-    open_orders = await asyncio.to_thread(slot.exec_client.open_orders)  # type: ignore[attr-defined]
-    state = await asyncio.to_thread(slot.exec_client.clearinghouse_state)  # type: ignore[attr-defined]
-    fills = await asyncio.to_thread(slot.exec_client.user_fills)  # type: ignore[attr-defined]
+
+    async def _bounded(call, what: str):
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(call), timeout=timeout_s)
+        except TimeoutError:
+            logger.warning(
+                "venue read '{}' exceeded {}s wall-clock — aborting (retried next cycle)",
+                what,
+                timeout_s,
+            )
+            raise
+
+    open_orders = await _bounded(slot.exec_client.open_orders, "open_orders")  # type: ignore[attr-defined]
+    state = await _bounded(slot.exec_client.clearinghouse_state, "clearinghouse_state")  # type: ignore[attr-defined]
+    fills = await _bounded(slot.exec_client.user_fills, "user_fills")  # type: ignore[attr-defined]
     return open_orders, state, fills
 
 

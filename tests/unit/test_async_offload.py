@@ -19,6 +19,7 @@ sleeps, no timing flakiness.
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -266,6 +267,50 @@ async def test_venue_snapshot_runs_off_event_loop_thread(tmp_path):
         assert tid != loop_thread, (
             f"exec_client.{name}() ran on the event-loop thread — must be offloaded via asyncio.to_thread()."
         )
+
+
+class _HangingExecClient:
+    """A venue client whose open_orders() stalls (a socket read with no timeout,
+    as a hung PM data-api connection does). venue_snapshot must abort it via a
+    wall-clock bound instead of awaiting forever."""
+
+    paper_mode = False
+
+    def open_orders(self) -> list[OpenOrderRow]:
+        # Far exceeds the test's 0.2s bound, but short enough that the leaked
+        # worker thread (wait_for cancels the await, not the thread) doesn't
+        # stall executor teardown for the whole suite.
+        time.sleep(1.5)
+        return []
+
+    def clearinghouse_state(self) -> ClearinghouseState:
+        return ClearinghouseState(positions=(), account_value_usd=0.0)
+
+    def user_fills(self, *, since_ts_ns: int = 0) -> list[UserFillRow]:
+        return []
+
+
+class _SlotStub:
+    def __init__(self, client) -> None:
+        self.exec_client = client
+
+
+@pytest.mark.asyncio
+async def test_venue_snapshot_aborts_on_hung_venue_read():
+    """A wedged venue read must NOT pin the reconcile loop forever. Without a
+    wall-clock bound, asyncio.to_thread(open_orders) never returns and
+    slot.last_reconcile_ns freezes → permanent `stale_reconcile` veto storm
+    (incident 2026-06-14 v31_pm). venue_snapshot must raise TimeoutError (which
+    _is_transient_venue_error already classifies → the reconcile loop logs
+    concisely and retries next cycle)."""
+    from hlanalysis.engine._venue_io import venue_snapshot
+
+    slot = _SlotStub(_HangingExecClient())
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await venue_snapshot(slot, timeout_s=0.2)
+    # Aborted promptly on the bound — did not block on the 30s sleep.
+    assert time.monotonic() - started < 5.0
 
 
 @pytest.mark.asyncio
