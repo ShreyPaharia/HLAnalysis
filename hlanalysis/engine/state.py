@@ -650,6 +650,35 @@ class StateDAL:
         with _Session(self._engine) as s:
             return s.get(TradeJournalRow, cloid)
 
+    def delete_journal_decision(self, cloid: str) -> None:
+        """Remove a journal row by cloid (no-op if absent). Used to drop a
+        decision that was vetoed by a routine, high-frequency gate reason we
+        don't retain — the row is inserted at decision time, then removed here
+        once the suppressed veto is known (see TradeJournal.record_reject)."""
+        with _Session(self._engine) as s:
+            s.exec(delete(TradeJournalRow).where(TradeJournalRow.cloid == cloid))
+            s.commit()
+
+    def prune_trade_journal(self, *, max_age_ns: int, max_rows: int) -> None:
+        """Delete journal rows older than max_age_ns, then enforce max_rows.
+
+        Mirrors ``prune_events``: age prune is primary (rows older than the
+        retention window are dropped — they are archived in the daily S3
+        state.db snapshot), and the row-count ceiling is a burst backstop for a
+        high-fan-out slot that journals faster than the age prune removes. Rows
+        are ordered by decision_ts_ns; the newest max_rows are kept."""
+        cutoff_ns = time.time_ns() - max_age_ns
+        with _Session(self._engine) as s:
+            # 1) Age prune
+            s.exec(delete(TradeJournalRow).where(TradeJournalRow.decision_ts_ns < cutoff_ns))
+            # 2) Row-count ceiling: keep only the newest max_rows by decision_ts.
+            count = s.exec(select(func.count()).select_from(TradeJournalRow)).one()
+            excess = count - max_rows
+            if excess > 0:
+                oldest = select(TradeJournalRow.cloid).order_by(TradeJournalRow.decision_ts_ns.asc()).limit(excess)
+                s.exec(delete(TradeJournalRow).where(TradeJournalRow.cloid.in_(oldest)))
+            s.commit()
+
     # ---- realized pnl helpers ----
 
     def realized_pnl_since(self, since_ts_ns: int) -> float:

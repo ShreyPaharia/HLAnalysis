@@ -100,7 +100,10 @@ def build_slot(
     risk = RiskGate(s_cfg)
     # Durable trade journal (SHR-83): persists into the slot's state.db, shared
     # by the Router (decision/send/reject/fill) and Reconciler (late fills).
-    journal = TradeJournal(dal)
+    journal = TradeJournal(
+        dal,
+        suppress_veto_reasons=frozenset(deploy_cfg.journal_suppress_veto_reasons),
+    )
     # PM market sells floor the share amount to 2dp, stranding sub-0.01 dust
     # that wedges the position open (2026-06-06 v31_pm). PM slots treat a
     # reduce landing within that dust of flat as a full close (and suppress

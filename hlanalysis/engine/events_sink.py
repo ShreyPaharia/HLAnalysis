@@ -44,6 +44,8 @@ async def events_persist_loop(
     *,
     max_age_ns: int,
     max_rows: int,
+    journal_max_age_ns: int | None = None,
+    journal_max_rows: int | None = None,
     prune_every_n: int = 500,
 ) -> None:
     """Consume every BusEvent and write it to each DAL's events table.
@@ -60,7 +62,11 @@ async def events_persist_loop(
 
     Prune runs every prune_every_n inserts (not per-insert) to avoid a steady
     per-row overhead while still bounding growth between long idle periods. Both
-    age and row-count bounds are applied on each prune call.
+    age and row-count bounds are applied on each prune call. When
+    ``journal_max_age_ns``/``journal_max_rows`` are given, the slot's
+    ``trade_journal`` is pruned on the same cadence (it shares the slot DB);
+    when either is None the journal is left untouched (the historical behaviour,
+    used by tests that only exercise the events path).
 
     Exposed as a free function so tests can call it directly (with a single-DAL
     list) without constructing a full EngineRuntime.
@@ -77,6 +83,13 @@ async def events_persist_loop(
                 try:
                     for dal in dals:
                         dal.prune_events(max_age_ns=max_age_ns, max_rows=max_rows)
+                        # Prune the trade_journal on the same cadence (SHR-83):
+                        # it shares the slot DB and was the unbounded grower.
+                        if journal_max_age_ns is not None and journal_max_rows is not None:
+                            dal.prune_trade_journal(
+                                max_age_ns=journal_max_age_ns,
+                                max_rows=journal_max_rows,
+                            )
                 except Exception:
                     logger.exception("events_persist_loop: prune failed")
         except asyncio.CancelledError:

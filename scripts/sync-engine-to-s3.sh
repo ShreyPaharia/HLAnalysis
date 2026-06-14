@@ -92,7 +92,13 @@ if [ ! -d "$ENGINE_ROOT" ]; then
   exit 1
 fi
 
-TMP=$(mktemp -d)
+# The snapshot temp dir MUST be disk-backed, not tmpfs. The default mktemp dir
+# ($TMPDIR or /tmp) is a tmpfs sized at ~50% of RAM (~945 MB on the 2 GB box),
+# so the online .backup of a >1 GB slot DB failed with SQLITE_FULL and the slot
+# was silently skipped from S3 (the 2026-06-14 eth_ms gap — 1.4 GB trade_journal
+# never archived). Stage on /var/tmp (root xfs, 16 GB) instead; overridable.
+BACKUP_TMPDIR="${ENGINE_BACKUP_TMPDIR:-/var/tmp}"
+TMP=$(mktemp -d -p "$BACKUP_TMPDIR" 2>/dev/null || mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 # Upload (or, in tests, local-copy) one file to its dated key. Switching on the

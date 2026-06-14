@@ -122,8 +122,21 @@ class TradeJournal:
     Wraps a slot's :class:`StateDAL`; every method swallows persistence errors
     so the journal can never break the engine's order path."""
 
-    def __init__(self, dal: StateDAL) -> None:
+    def __init__(
+        self,
+        dal: StateDAL,
+        *,
+        suppress_veto_reasons: frozenset[str] = frozenset(),
+    ) -> None:
         self.dal = dal
+        # Veto reasons whose decisions we do NOT retain. The router journals the
+        # decision the instant the cloid is final (so a sent/filled order always
+        # has a row); when one of these high-frequency mechanical gates then
+        # vetoes it pre-send, the transient row is dropped here. Without this a
+        # high-fan-out slot accumulates hundreds of thousands of `low_volume`
+        # veto rows/day (the 2026-06-14 eth_ms disk-fill). Empty set = retain all
+        # (the historical behaviour).
+        self.suppress_veto_reasons = suppress_veto_reasons
 
     def record_decision(
         self,
@@ -172,6 +185,15 @@ class TradeJournal:
         self._update(cloid, send_ts_ns=send_ts_ns)
 
     def record_reject(self, *, cloid: str, reject_reason: str) -> None:
+        # Drop (don't retain) decisions vetoed by a routine, high-frequency gate
+        # reason — the decision row was inserted at decision time; remove it now
+        # rather than update it with the reason. Best-effort like every write.
+        if reject_reason in self.suppress_veto_reasons:
+            try:
+                self.dal.delete_journal_decision(cloid)
+            except Exception as e:  # noqa: BLE001 — journal must never raise
+                logger.warning("trade_journal suppress-delete failed cloid={}: {}", cloid, e)
+            return
         self._update(cloid, reject_reason=reject_reason)
 
     def record_fill(

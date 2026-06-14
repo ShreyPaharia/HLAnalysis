@@ -336,6 +336,18 @@ class DeployConfig(BaseModel):
     # Both default to conservative values safe for the 1 GiB EC2 box.
     events_retention_days: int = 14
     events_retention_max_rows: int = 1_000_000
+    # Retention bounds for the trade_journal table (SHR-83). Each row carries
+    # JSON blobs (book-at-decision, diagnostics) so rows are ~10x heavier than an
+    # events row; the cap is correspondingly lower. Older rows live in the daily
+    # S3 state.db snapshot, so local pruning loses nothing. Pruned alongside
+    # events in the persist loop.
+    trade_journal_retention_days: int = 14
+    trade_journal_retention_max_rows: int = 100_000
+    # Gate-veto reasons whose decisions are NOT retained in trade_journal. These
+    # are routine, high-frequency mechanical vetoes that never reach the venue;
+    # journaling every one grew a high-fan-out slot's DB to >1GB (the 2026-06-14
+    # eth_ms disk-fill). Sends, fills, and all other veto reasons are still kept.
+    journal_suppress_veto_reasons: tuple[str, ...] = ("low_volume", "stale_data")
 
     def state_db_path_for(self, alias: str) -> str:
         """Per-account state DB path. Multiple accounts → namespaced subdir;

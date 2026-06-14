@@ -696,11 +696,15 @@ class EngineRuntime:
         sub = self.bus.subscribe()
         max_age_ns = self.deploy_cfg.events_retention_days * 24 * 3600 * 10**9
         max_rows = self.deploy_cfg.events_retention_max_rows
+        journal_max_age_ns = self.deploy_cfg.trade_journal_retention_days * 24 * 3600 * 10**9
+        journal_max_rows = self.deploy_cfg.trade_journal_retention_max_rows
         await events_persist_loop(
             sub,
             [s.dal for s in self.slots],
             max_age_ns=max_age_ns,
             max_rows=max_rows,
+            journal_max_age_ns=journal_max_age_ns,
+            journal_max_rows=journal_max_rows,
         )
 
     # ---- liveness / dead-man's-switch (SHR-43) -----------------------------
