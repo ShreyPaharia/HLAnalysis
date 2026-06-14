@@ -6,6 +6,11 @@ Reads state.db (including the events table from Component 2) and flag files
 on disk, and prints ONE JSON object to stdout. No engine introspection / no
 IPC — safe to run against a live engine over SSM.
 
+Unified-DB awareness: if `<root>/state.db` is the shared multi-slot DB
+(detected by the presence of a `strategy_id` column on the `events` table),
+it is used for all slots and all queries are scoped by `strategy_id=alias`.
+Otherwise the legacy per-slot `<root>/<alias>/state.db` layout is used.
+
 Per-slot snapshot sections:
   status           — running / paper / halted / blocked (flags + Session)
   positions        — open positions + true_pnl breakdown
@@ -32,6 +37,29 @@ from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
+# Unified-DB detection
+# ---------------------------------------------------------------------------
+
+
+def _is_unified_db(db_path: Path) -> bool:
+    """Return True if db_path is a unified multi-slot DB.
+
+    Detection: the ``events`` table exists AND has a ``strategy_id`` column
+    (added in migration 0006_unified_slot_db).  A per-slot legacy DB only has
+    ``alias``; a unified DB has both.  Missing file or missing table → False.
+    """
+    if not db_path.exists():
+        return False
+    try:
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute("PRAGMA table_info(events)").fetchall()
+    except sqlite3.Error:
+        return False
+    # PRAGMA table_info columns: (cid, name, type, notnull, dflt_value, pk)
+    return any(row[1] == "strategy_id" for row in rows)
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -55,38 +83,69 @@ def _open_dal(db_path: Path):
     return StateDAL(db_path)
 
 
-def _reject_counts_since_alias(db_path: Path, *, alias: str, since_ts_ns: int) -> list[dict[str, Any]]:
+def _reject_counts_since_alias(
+    db_path: Path,
+    *,
+    alias: str,
+    since_ts_ns: int,
+    strategy_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Return reject-like counts grouped by (kind, reason) for a specific alias.
 
-    Filters by alias so cross-slot events in the same DB don't double-count.
+    Filters by alias (legacy DB) or strategy_id (unified DB) so cross-slot
+    events in the same DB don't double-count.
     Returns [] if the DB doesn't exist or the events table is absent.
+
+    Pass ``strategy_id`` when querying a unified DB; it takes precedence over
+    the ``alias`` column filter so the correct scoping column is used.
     """
     if not db_path.exists():
         return []
     try:
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """
-                SELECT kind, reason, COUNT(*) AS count,
-                       MAX(payload_json) AS sample_payload
-                FROM events
-                WHERE ts_ns >= ? AND alias = ?
-                GROUP BY kind, reason
-                ORDER BY count DESC
-                """,
-                (since_ts_ns, alias),
-            ).fetchall()
+            if strategy_id is not None:
+                rows = conn.execute(
+                    """
+                    SELECT kind, reason, COUNT(*) AS count,
+                           MAX(payload_json) AS sample_payload
+                    FROM events
+                    WHERE ts_ns >= ? AND strategy_id = ?
+                    GROUP BY kind, reason
+                    ORDER BY count DESC
+                    """,
+                    (since_ts_ns, strategy_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT kind, reason, COUNT(*) AS count,
+                           MAX(payload_json) AS sample_payload
+                    FROM events
+                    WHERE ts_ns >= ? AND alias = ?
+                    GROUP BY kind, reason
+                    ORDER BY count DESC
+                    """,
+                    (since_ts_ns, alias),
+                ).fetchall()
         return [dict(r) for r in rows]
     except sqlite3.OperationalError:
         # events table not yet created (migration not run)
         return []
 
 
-def _last_event_by_kinds(db_path: Path, *, kinds: list[str], alias: str | None) -> dict[str, Any] | None:
+def _last_event_by_kinds(
+    db_path: Path,
+    *,
+    kinds: list[str],
+    alias: str | None,
+    strategy_id: str | None = None,
+) -> dict[str, Any] | None:
     """Return the most-recent event matching any of the given kinds.
 
-    If alias is provided, filter to that alias. Returns None on any error.
+    If alias is provided, filter to that alias (legacy DB) OR to strategy_id
+    (unified DB — pass ``strategy_id`` to use the correct scoping column).
+    Returns None on any error.
     """
     if not db_path.exists():
         return None
@@ -94,7 +153,14 @@ def _last_event_by_kinds(db_path: Path, *, kinds: list[str], alias: str | None) 
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             placeholders = ",".join("?" for _ in kinds)
-            if alias is not None:
+            if strategy_id is not None:
+                row = conn.execute(
+                    f"SELECT id, ts_ns, alias, strategy_id, kind, question_idx, reason, payload_json "
+                    f"FROM events WHERE kind IN ({placeholders}) AND strategy_id = ? "
+                    f"ORDER BY ts_ns DESC LIMIT 1",
+                    [*kinds, strategy_id],
+                ).fetchone()
+            elif alias is not None:
                 row = conn.execute(
                     f"SELECT id, ts_ns, alias, kind, question_idx, reason, payload_json "
                     f"FROM events WHERE kind IN ({placeholders}) AND alias = ? "
@@ -148,8 +214,14 @@ def _build_slot_snapshot(
     *,
     reject_window_hours: float = 24.0,
     now_ns: int,
+    strategy_id: str | None = None,
 ) -> dict[str, Any]:
-    """Build one slot's snapshot dict."""
+    """Build one slot's snapshot dict.
+
+    ``strategy_id``: when querying a unified DB, pass this to scope all queries
+    to the correct slot. When None (legacy per-slot DB), alias-based filtering
+    is used instead.
+    """
 
     # ---- flag files ----
     halt_info = _flag_info(halt_flag_path)
@@ -183,11 +255,11 @@ def _build_slot_snapshot(
     settlement = 0.0
     if dal is not None:
         try:
-            positions = dal.all_positions()
+            positions = dal.all_positions(strategy_id=strategy_id or "")
             # fills_realized = realized_pnl_since(0) - settlement_pnl_since(0)
             # because realized_pnl_since already includes settlement
-            total_realized = dal.realized_pnl_since(0)
-            settlement = dal.settlement_pnl_since(0)
+            total_realized = dal.realized_pnl_since(0, strategy_id=strategy_id or "")
+            settlement = dal.settlement_pnl_since(0, strategy_id=strategy_id or "")
             fills_realized = total_realized - settlement
 
             for p in positions:
@@ -215,7 +287,7 @@ def _build_slot_snapshot(
     live_orders: list[dict[str, Any]] = []
     if dal is not None:
         try:
-            orders = dal.live_orders()
+            orders = dal.live_orders(strategy_id=strategy_id or "")
             for o in orders:
                 age_seconds = (now_ns - o.placed_ts_ns) / 1e9
                 live_orders.append(
@@ -236,7 +308,8 @@ def _build_slot_snapshot(
             pass
 
     # ---- feed info ----
-    # Heartbeat events use alias="" or None (cross-slot); query without alias filter
+    # Heartbeat events are cross-slot (alias=None/empty); query without slot filter.
+    # In the unified DB they have strategy_id=None so we also pass no strategy_id.
     feed: dict[str, Any] = {
         "last_heartbeat_ts_ns": None,
         "events_ingested": None,
@@ -264,12 +337,17 @@ def _build_slot_snapshot(
         feed["last_feed_status"] = feed_status_event["kind"]
         feed["last_feed_status_ts_ns"] = feed_status_event["ts_ns"]
 
-    # ---- rejects (alias-filtered) ----
+    # ---- rejects (scoped to this slot) ----
     reject_window_ns = int(reject_window_hours * 3600 * 1e9)
     since_ts_ns = now_ns - reject_window_ns
-    rejects = _reject_counts_since_alias(db_path, alias=alias, since_ts_ns=since_ts_ns)
+    rejects = _reject_counts_since_alias(
+        db_path,
+        alias=alias,
+        since_ts_ns=since_ts_ns,
+        strategy_id=strategy_id,
+    )
 
-    # ---- last_decision: most recent entry/exit/risk_veto/risk_halt for this alias ----
+    # ---- last_decision: most recent entry/exit/risk_veto/risk_halt for this slot ----
     decision_kinds = [
         "entry",
         "exit",
@@ -280,7 +358,12 @@ def _build_slot_snapshot(
         "stale_data_halt",
         "order_rejected",
     ]
-    last_decision = _last_event_by_kinds(db_path, kinds=decision_kinds, alias=alias)
+    last_decision = _last_event_by_kinds(
+        db_path,
+        kinds=decision_kinds,
+        alias=alias,
+        strategy_id=strategy_id,
+    )
 
     # ---- config fingerprint ----
     config_fingerprint = _build_config_fingerprint(alias, strategy_cfg)
@@ -363,6 +446,12 @@ def build_snapshot(
     # data_dir: parent of the state_db_path
     data_dir = str(Path(deploy_cfg.state_db_path).parent)
 
+    # Detect unified DB: single shared <root>/state.db with strategy_id column.
+    # When present, all slots read from one file scoped by strategy_id=alias.
+    # When absent, fall back to legacy per-slot <root>/<alias>/state.db layout.
+    unified_db_path = deploy_cfg.state_db_path_shared()
+    use_unified = _is_unified_db(unified_db_path)
+
     slots: dict[str, Any] = {}
 
     for s_cfg in strategies_cfg.strategies:
@@ -370,14 +459,22 @@ def build_snapshot(
         if alias_filter is not None and alias != alias_filter:
             continue
 
-        db_path_str = deploy_cfg.state_db_path_for(alias)
-        db_path = Path(db_path_str)
-
-        kill_switch_path_str = deploy_cfg.kill_switch_path_for(alias)
-        halt_flag_path = Path(kill_switch_path_str)
-
-        # restart_blocked lives next to the kill-switch (same parent dir)
-        restart_blocked_path = halt_flag_path.parent / "restart_blocked"
+        if use_unified:
+            # Unified layout: one DB, per-slot data scoped by strategy_id.
+            db_path = unified_db_path
+            slot_strategy_id: str | None = alias
+            # Flag files live in <root>/<alias>/ (slot_dir_for layout).
+            slot_dir = deploy_cfg.slot_dir_for(alias)
+            kill_switch_name = Path(deploy_cfg.kill_switch_path).name
+            halt_flag_path = slot_dir / kill_switch_name
+            restart_blocked_path = slot_dir / "restart_blocked"
+        else:
+            # Legacy layout: per-slot DB at <root>/<alias>/state.db.
+            db_path = Path(deploy_cfg.state_db_path_for(alias))
+            slot_strategy_id = None
+            kill_switch_path_str = deploy_cfg.kill_switch_path_for(alias)
+            halt_flag_path = Path(kill_switch_path_str)
+            restart_blocked_path = halt_flag_path.parent / "restart_blocked"
 
         slot_snapshot = _build_slot_snapshot(
             alias=alias,
@@ -387,6 +484,7 @@ def build_snapshot(
             restart_blocked_path=restart_blocked_path,
             reject_window_hours=reject_window_hours,
             now_ns=now_ns,
+            strategy_id=slot_strategy_id,
         )
         slots[alias] = slot_snapshot
 

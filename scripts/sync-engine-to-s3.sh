@@ -114,48 +114,116 @@ put() {  # put <local_file> <relative_key>
 
 # --- per-slot Tier 1: state.db snapshot + gate_decisions.jsonl --------------
 SLOTS=0
-# A slot is any immediate subdir holding a state.db, PLUS the top-level state.db
-# (the un-namespaced default account) keyed under the alias "_root".
-shopt -s nullglob
-declare -a SLOT_DBS=()
-declare -a SLOT_ALIASES=()
-for db in "$ENGINE_ROOT"/*/state.db; do
-  SLOT_DBS+=("$db")
-  SLOT_ALIASES+=("$(basename "$(dirname "$db")")")
-done
-if [ -f "$ENGINE_ROOT/state.db" ]; then
-  SLOT_DBS+=("$ENGINE_ROOT/state.db")
-  SLOT_ALIASES+=("_root")
+
+# Detect unified DB: <root>/state.db exists and its events table has a
+# strategy_id column (added in migration 0006_unified_slot_db).  When present,
+# we snapshot THAT single file once under "unified/state.db.gz" and skip the
+# per-slot state.db loop.  Per-strategy sibling dirs (<root>/<id>/) are still
+# walked for gate_decisions.jsonl regardless of layout.
+UNIFIED_DB="$ENGINE_ROOT/state.db"
+USE_UNIFIED=0
+if [ -f "$UNIFIED_DB" ]; then
+  # PRAGMA table_info returns one row per column; we check for strategy_id.
+  # Prefer the sqlite3 CLI (fast, available in tests); fall back to Python when
+  # the CLI is absent (prod box has no sqlite3 CLI, uses .venv python instead).
+  _detect_unified() {
+    local db="$1"
+    if command -v "$SQLITE3" >/dev/null 2>&1; then
+      # sqlite3 exits 0 when it finds rows; grep returns 0 on match.
+      "$SQLITE3" "$db" "PRAGMA table_info(events);" 2>/dev/null | grep -q "strategy_id"
+      return $?
+    fi
+    # Python fallback: use $PYBIN (prod venv), then python3 as last resort.
+    local _py="${PYBIN}"
+    command -v "$_py" >/dev/null 2>&1 || _py="python3"
+    "$_py" - "$db" <<'PYEOF' 2>/dev/null
+import sqlite3, sys
+db = sys.argv[1]
+try:
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    cols = [r[1] for r in con.execute("PRAGMA table_info(events)").fetchall()]
+    con.close()
+    sys.exit(0 if "strategy_id" in cols else 1)
+except Exception:
+    sys.exit(1)
+PYEOF
+  }
+  if _detect_unified "$UNIFIED_DB"; then
+    USE_UNIFIED=1
+  fi
 fi
-shopt -u nullglob
 
-for i in "${!SLOT_DBS[@]}"; do
-  db="${SLOT_DBS[$i]}"
-  alias="${SLOT_ALIASES[$i]}"
-  dir="$(dirname "$db")"
-  echo "==> slot $alias"
+if [ "$USE_UNIFIED" -eq 1 ]; then
+  echo "==> unified DB detected: $UNIFIED_DB"
 
-  # Consistent snapshot via the online backup API (folds the WAL, committed rows
-  # only). Waits out a transient writer lock instead of failing.
-  snap="$TMP/$alias-state.db"
-  if sqlite_backup "$db" "$snap"; then
+  # Snapshot the unified DB once, keyed under "unified/".
+  snap="$TMP/unified-state.db"
+  if sqlite_backup "$UNIFIED_DB" "$snap"; then
     gzip -c "$snap" > "$snap.gz"
-    put "$snap.gz" "$alias/state.db.gz"
+    put "$snap.gz" "unified/state.db.gz"
     rm -f "$snap" "$snap.gz"
+    SLOTS=$((SLOTS + 1))
   else
-    echo "WARN: .backup failed for $alias ($db); skipping state.db" >&2
+    echo "WARN: .backup failed for unified DB ($UNIFIED_DB); skipping" >&2
   fi
 
-  # Live decision log (sibling of state.db). May be absent on a fresh slot.
-  gd="$dir/gate_decisions.jsonl"
-  if [ -f "$gd" ]; then
-    gzip -c "$gd" > "$TMP/$alias-gd.jsonl.gz"
-    put "$TMP/$alias-gd.jsonl.gz" "$alias/gate_decisions.jsonl.gz"
-    rm -f "$TMP/$alias-gd.jsonl.gz"
-  fi
+  # Per-strategy sibling dirs: gate_decisions.jsonl (no state.db per slot).
+  shopt -s nullglob
+  for dir in "$ENGINE_ROOT"/*/; do
+    strategy_id="$(basename "$dir")"
+    gd="$dir/gate_decisions.jsonl"
+    if [ -f "$gd" ]; then
+      gzip -c "$gd" > "$TMP/$strategy_id-gd.jsonl.gz"
+      put "$TMP/$strategy_id-gd.jsonl.gz" "$strategy_id/gate_decisions.jsonl.gz"
+      rm -f "$TMP/$strategy_id-gd.jsonl.gz"
+    fi
+  done
+  shopt -u nullglob
 
-  SLOTS=$((SLOTS + 1))
-done
+else
+  # Legacy layout: a slot is any immediate subdir holding a state.db, PLUS the
+  # top-level state.db (un-namespaced default account) keyed under "_root".
+  shopt -s nullglob
+  declare -a SLOT_DBS=()
+  declare -a SLOT_ALIASES=()
+  for db in "$ENGINE_ROOT"/*/state.db; do
+    SLOT_DBS+=("$db")
+    SLOT_ALIASES+=("$(basename "$(dirname "$db")")")
+  done
+  if [ -f "$ENGINE_ROOT/state.db" ]; then
+    SLOT_DBS+=("$ENGINE_ROOT/state.db")
+    SLOT_ALIASES+=("_root")
+  fi
+  shopt -u nullglob
+
+  for i in "${!SLOT_DBS[@]}"; do
+    db="${SLOT_DBS[$i]}"
+    alias="${SLOT_ALIASES[$i]}"
+    dir="$(dirname "$db")"
+    echo "==> slot $alias"
+
+    # Consistent snapshot via the online backup API (folds the WAL, committed
+    # rows only). Waits out a transient writer lock instead of failing.
+    snap="$TMP/$alias-state.db"
+    if sqlite_backup "$db" "$snap"; then
+      gzip -c "$snap" > "$snap.gz"
+      put "$snap.gz" "$alias/state.db.gz"
+      rm -f "$snap" "$snap.gz"
+    else
+      echo "WARN: .backup failed for $alias ($db); skipping state.db" >&2
+    fi
+
+    # Live decision log (sibling of state.db). May be absent on a fresh slot.
+    gd="$dir/gate_decisions.jsonl"
+    if [ -f "$gd" ]; then
+      gzip -c "$gd" > "$TMP/$alias-gd.jsonl.gz"
+      put "$TMP/$alias-gd.jsonl.gz" "$alias/gate_decisions.jsonl.gz"
+      rm -f "$TMP/$alias-gd.jsonl.gz"
+    fi
+
+    SLOTS=$((SLOTS + 1))
+  done
+fi
 
 # --- Tier 2: filtered engine log (engine-wide, not per-slot) ----------------
 # Pipe journalctl|grep|gzip so the 97 MB/day raw log never lands on disk or in

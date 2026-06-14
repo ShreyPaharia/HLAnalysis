@@ -135,7 +135,89 @@ grep -q "pnl=12.30"       "$LOG" && { echo "FAIL: log filter kept 1 Hz PnL-poll 
 grep -q "heartbeat"       "$LOG" && { echo "FAIL: log filter kept heartbeat noise"; fail=1; } || true
 
 if [ "$fail" -eq 0 ]; then
-  echo "PASS: sync-engine-to-s3.sh integration test"
+  echo "PASS: sync-engine-to-s3.sh integration test (legacy layout)"
+else
+  exit 1
+fi
+
+# ===========================================================================
+# UNIFIED-DB CASE: <root>/state.db has strategy_id column on events table
+# ===========================================================================
+
+SANDBOX2=$(mktemp -d)
+trap 'rm -rf "$SANDBOX2"' EXIT
+
+ENGINE_ROOT2="$SANDBOX2/engine-data"
+S3_LOCAL2="$SANDBOX2/s3"
+mkdir -p "$ENGINE_ROOT2" "$S3_LOCAL2"
+DATE2="2026-06-15"
+
+# Build a unified state.db with strategy_id on events table
+UNIFIED_DB="$ENGINE_ROOT2/state.db"
+sqlite3 "$UNIFIED_DB" <<SQL
+PRAGMA journal_mode=WAL;
+CREATE TABLE events (
+  id INTEGER PRIMARY KEY,
+  ts_ns INTEGER,
+  alias TEXT,
+  kind TEXT,
+  question_idx INTEGER,
+  reason TEXT,
+  payload_json TEXT,
+  strategy_id TEXT
+);
+INSERT INTO events VALUES (1,1000,'v1','entry',42,NULL,NULL,'v1');
+INSERT INTO events VALUES (2,2000,'v31','exit',42,NULL,NULL,'v31');
+SQL
+
+# Per-strategy sibling dirs with gate_decisions.jsonl
+mkdir -p "$ENGINE_ROOT2/v1" "$ENGINE_ROOT2/v31_pm"
+printf '{"q":1,"d":"enter"}\n' > "$ENGINE_ROOT2/v1/gate_decisions.jsonl"
+printf '{"q":2,"d":"exit"}\n'  > "$ENGINE_ROOT2/v31_pm/gate_decisions.jsonl"
+# A subdir without gate_decisions.jsonl (no error expected)
+mkdir -p "$ENGINE_ROOT2/v31"
+
+# Run the script against the unified layout
+PATH="$SHIM:$PATH" \
+ARCHIVE_BUCKET="test-bucket" \
+ENGINE_DATA_ROOT="$ENGINE_ROOT2" \
+ENGINE_SYNC_S3_BASE="$S3_LOCAL2" \
+SYNC_DATE="$DATE2" \
+LOG_UNIT="hl-engine" \
+  bash "$REPO/scripts/sync-engine-to-s3.sh"
+
+# Assertions for unified layout
+fail2=0
+BASE2="$S3_LOCAL2/date=$DATE2"
+exists2()     { [ -f "$1" ] || { echo "FAIL(unified): expected object missing: $1"; fail2=1; }; }
+not_exists2() { [ -e "$1" ] && { echo "FAIL(unified): unexpected object present: $1"; fail2=1; } || true; }
+
+# Unified DB is snapshotted once under unified/
+exists2 "$BASE2/unified/state.db.gz"
+
+# Per-strategy gate_decisions.jsonl still uploaded per slot
+exists2 "$BASE2/v1/gate_decisions.jsonl.gz"
+exists2 "$BASE2/v31_pm/gate_decisions.jsonl.gz"
+
+# No per-slot state.db.gz files (those are legacy-only)
+not_exists2 "$BASE2/v1/state.db.gz"
+not_exists2 "$BASE2/v31_pm/state.db.gz"
+not_exists2 "$BASE2/v31/state.db.gz"
+# No _root alias in unified layout
+not_exists2 "$BASE2/_root/state.db.gz"
+
+# Unified snapshot is a valid SQLite DB with strategy_id column
+USNAP="$SANDBOX2/unified-check.db"
+gunzip -c "$BASE2/unified/state.db.gz" > "$USNAP"
+u_integ=$(sqlite3 "$USNAP" "PRAGMA integrity_check;")
+[ "$u_integ" = "ok" ] || { echo "FAIL(unified): snapshot integrity_check=$u_integ"; fail2=1; }
+u_has_strategy_id=$(sqlite3 "$USNAP" "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='strategy_id';")
+[ "$u_has_strategy_id" = "1" ] || { echo "FAIL(unified): snapshot missing strategy_id column on events"; fail2=1; }
+u_rows=$(sqlite3 "$USNAP" "SELECT COUNT(*) FROM events;")
+[ "$u_rows" = "2" ] || { echo "FAIL(unified): expected 2 event rows, got $u_rows"; fail2=1; }
+
+if [ "$fail2" -eq 0 ]; then
+  echo "PASS: sync-engine-to-s3.sh integration test (unified layout)"
 else
   exit 1
 fi

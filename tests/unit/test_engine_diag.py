@@ -18,11 +18,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
 
-import pytest
-
-from hlanalysis.engine.state import Fill, OpenOrder, Position, Settlement, StateDAL
 from hlanalysis.engine.config import (
     AllowlistEntry,
     DeployConfig,
@@ -31,7 +27,7 @@ from hlanalysis.engine.config import (
     StrategyConfig,
     load_deploy_config,
 )
-
+from hlanalysis.engine.state import Fill, OpenOrder, Position, StateDAL
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -703,3 +699,195 @@ def test_multi_slot_both_present(tmp_path):
 
     snapshot = diag.build_snapshot(deploy_cfg, strategies)
     assert set(snapshot["slots"].keys()) == {"v1", "v31"}
+
+
+# ---------------------------------------------------------------------------
+# 16. Unified-DB layout: single shared state.db with strategy_id scoping
+# ---------------------------------------------------------------------------
+
+
+def _seed_unified_dal(deploy_cfg: DeployConfig) -> StateDAL:
+    """Create and migrate the SHARED state.db at state_db_path_shared()."""
+    db_path = deploy_cfg.state_db_path_shared()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    dal = StateDAL(db_path)
+    dal.run_migrations()
+    return dal
+
+
+def test_unified_db_detected(tmp_path):
+    """A fully-migrated shared state.db is detected as a unified DB."""
+    diag = _import_diag()
+    deploy_cfg = _make_deploy_config(tmp_path, ["v1"])
+    _seed_unified_dal(deploy_cfg)
+    assert diag._is_unified_db(deploy_cfg.state_db_path_shared()) is True
+
+
+def test_unified_db_not_detected_for_legacy(tmp_path):
+    """A per-slot state.db WITHOUT strategy_id column is NOT detected as unified."""
+    diag = _import_diag()
+    # Create a raw DB without strategy_id on events
+    import sqlite3
+
+    db_path = tmp_path / "legacy" / "state.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(db_path))
+    con.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, ts_ns INTEGER, alias TEXT, kind TEXT)")
+    con.commit()
+    con.close()
+    assert diag._is_unified_db(db_path) is False
+
+
+def test_unified_db_snapshot_top_level_keys(tmp_path):
+    """Unified-DB layout returns the same top-level snapshot structure."""
+    diag = _import_diag()
+    deploy_cfg = _make_deploy_config(tmp_path, ["v1"])
+    strategies = StrategiesConfig(strategies=[_make_strategy_config("v1")])
+    _seed_unified_dal(deploy_cfg)
+
+    snapshot = diag.build_snapshot(deploy_cfg, strategies)
+    assert "generated_at_ns" in snapshot
+    assert "slots" in snapshot
+    assert "v1" in snapshot["slots"]
+
+
+def test_unified_db_rejects_scoped_by_strategy_id(tmp_path):
+    """In the unified DB, reject events for v31 must NOT appear in v1's rejects."""
+    diag = _import_diag()
+    deploy_cfg = _make_deploy_config(tmp_path, ["v1", "v31"])
+    strategies = StrategiesConfig(
+        strategies=[
+            _make_strategy_config("v1"),
+            _make_strategy_config("v31", strategy_type="theta_harvester"),
+        ]
+    )
+    dal = _seed_unified_dal(deploy_cfg)
+
+    now = time.time_ns()
+    # v1 events: strategy_id="v1"
+    for i in range(3):
+        dal.append_event(
+            ts_ns=now - i * 1000,
+            alias="v1",
+            kind="order_rejected",
+            question_idx=i,
+            reason="bad_token",
+            payload_json=f'{{"cloid":"c{i}"}}',
+            strategy_id="v1",
+        )
+    # v31 events: strategy_id="v31"
+    for i in range(2):
+        dal.append_event(
+            ts_ns=now - i * 1000,
+            alias="v31",
+            kind="order_rejected",
+            question_idx=100 + i,
+            reason="min_notional",
+            payload_json=f'{{"cloid":"c31-{i}"}}',
+            strategy_id="v31",
+        )
+
+    snapshot = diag.build_snapshot(deploy_cfg, strategies, reject_window_hours=24)
+
+    v1_rejects = snapshot["slots"]["v1"]["rejects"]
+    v31_rejects = snapshot["slots"]["v31"]["rejects"]
+
+    v1_reasons = {r["reason"] for r in v1_rejects}
+    v31_reasons = {r["reason"] for r in v31_rejects}
+
+    assert "bad_token" in v1_reasons
+    assert "min_notional" not in v1_reasons  # v31's events must not bleed in
+    assert "min_notional" in v31_reasons
+    assert "bad_token" not in v31_reasons
+
+
+def test_unified_db_last_decision_scoped_by_strategy_id(tmp_path):
+    """In the unified DB, last_decision returns only events for the correct slot."""
+    diag = _import_diag()
+    deploy_cfg = _make_deploy_config(tmp_path, ["v1", "v31"])
+    strategies = StrategiesConfig(
+        strategies=[
+            _make_strategy_config("v1"),
+            _make_strategy_config("v31", strategy_type="theta_harvester"),
+        ]
+    )
+    dal = _seed_unified_dal(deploy_cfg)
+
+    now = time.time_ns()
+    dal.append_event(
+        ts_ns=now - 2_000_000_000,
+        alias="v1",
+        kind="entry",
+        question_idx=10,
+        reason=None,
+        payload_json=None,
+        strategy_id="v1",
+    )
+    dal.append_event(
+        ts_ns=now - 1_000_000_000,
+        alias="v31",
+        kind="exit",
+        question_idx=20,
+        reason="theta_gate",
+        payload_json=None,
+        strategy_id="v31",
+    )
+
+    snapshot = diag.build_snapshot(deploy_cfg, strategies)
+
+    v1_last = snapshot["slots"]["v1"]["last_decision"]
+    v31_last = snapshot["slots"]["v31"]["last_decision"]
+
+    assert v1_last is not None
+    assert v1_last["kind"] == "entry"
+    assert v31_last is not None
+    assert v31_last["kind"] == "exit"
+
+
+def test_unified_db_positions_scoped(tmp_path):
+    """Positions in the unified DB are scoped to the correct strategy_id."""
+    diag = _import_diag()
+    deploy_cfg = _make_deploy_config(tmp_path, ["v1", "v31"])
+    strategies = StrategiesConfig(
+        strategies=[
+            _make_strategy_config("v1"),
+            _make_strategy_config("v31", strategy_type="theta_harvester"),
+        ]
+    )
+    dal = _seed_unified_dal(deploy_cfg)
+
+    # Insert a position for v1 only
+    dal.upsert_position(
+        Position(
+            question_idx=42,
+            symbol="@BTC",
+            qty=10.0,
+            avg_entry=0.50,
+            realized_pnl=0.0,
+            last_update_ts_ns=1000,
+            stop_loss_price=0.0,
+        ),
+        strategy_id="v1",
+    )
+
+    snapshot = diag.build_snapshot(deploy_cfg, strategies)
+
+    assert snapshot["slots"]["v1"]["positions"]["open_count"] == 1
+    assert snapshot["slots"]["v31"]["positions"]["open_count"] == 0
+
+
+def test_unified_db_alias_filter(tmp_path):
+    """alias_filter works when reading from a unified DB."""
+    diag = _import_diag()
+    deploy_cfg = _make_deploy_config(tmp_path, ["v1", "v31"])
+    strategies = StrategiesConfig(
+        strategies=[
+            _make_strategy_config("v1"),
+            _make_strategy_config("v31", strategy_type="theta_harvester"),
+        ]
+    )
+    _seed_unified_dal(deploy_cfg)
+
+    snapshot = diag.build_snapshot(deploy_cfg, strategies, alias_filter="v1")
+    assert "v1" in snapshot["slots"]
+    assert "v31" not in snapshot["slots"]
