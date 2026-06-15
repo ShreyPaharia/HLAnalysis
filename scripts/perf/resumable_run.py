@@ -189,6 +189,10 @@ def done_marker(out_dir: Path) -> Path:
     return out_dir / ".done"
 
 
+def qdir(out_base: Path, config_id: str, q_global: int) -> Path:
+    return out_base / config_id / f"q{q_global:04d}"
+
+
 def parse_pnl(out_dir: Path) -> tuple[float | None, int | None]:
     rp = report_path(out_dir)
     if not rp.exists():
@@ -245,8 +249,8 @@ class Driver:
         self.running: dict[tuple[str, int], tuple[subprocess.Popen, float, Path]] = {}
         self._stop = False
 
-    def qdir(self, config_id: str, idx: int) -> Path:
-        return self.out_base / config_id / f"q{idx:04d}"
+    def qdir(self, config_id: str, q_global: int) -> Path:
+        return qdir(self.out_base, config_id, q_global)
 
     def _load_manifest(self) -> None:
         if not self.manifest_path.exists():
@@ -468,6 +472,69 @@ def main() -> int:
     rc = Driver(args, configs, n).run()
     aggregate(out_base)
     return rc
+
+
+# === WORKER MODE ==========================================================
+import contextlib  # noqa: E402  (kept with the worker section for locality)
+
+
+def _invoke_run(argv: list[str]) -> int:
+    """Run one ``hl-bt run`` cell in-process. Thin wrapper so tests can patch it.
+
+    The module-global in-process bundle memo (set via HLBT_INPROC_BUNDLE_MEMO)
+    persists across calls within this process — that is the whole point: the
+    first config to touch question q decodes its bundle, configs 2..M reuse it.
+    """
+    from hlanalysis.backtest.cli import main as bt_main
+
+    return bt_main(argv)
+
+
+@contextlib.contextmanager
+def _env_overlay(overrides: dict[str, str]):
+    old = {k: os.environ.get(k) for k in overrides}
+    os.environ.update(overrides)
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def run_worker_chunk(args, configs: list[Config], chunk_idx: int, n_questions: int) -> int:
+    """Run every (config, question) cell of ONE chunk in-process, reusing the
+    bundle memo. question-outer / config-inner keeps ~one bundle resident.
+
+    Returns 0 iff every cell ended with a .done marker; non-zero otherwise so the
+    supervisor classifies + retries the chunk.
+    """
+    os.environ["HLBT_INPROC_BUNDLE_MEMO"] = "1"
+    out_base = Path(args.out_base)
+    chunk_size = max(1, int(getattr(args, "chunk_size", 1) or 1))
+    start, length = chunk_bounds(chunk_idx, n_questions, chunk_size)
+    failures = 0
+    for q_global in range(start, start + length):
+        for cfg in configs:
+            out_dir = qdir(out_base, cfg.id, q_global)
+            if done_marker(out_dir).exists():
+                continue
+            out_dir.mkdir(parents=True, exist_ok=True)
+            argv = build_run_argv(args, cfg, q_global, out_dir)
+            try:
+                with _env_overlay(cfg.env):
+                    rc = _invoke_run(argv)
+            except Exception as exc:  # noqa: BLE001  one bad cell must not kill the chunk
+                rc = 1
+                (out_dir / "run.log").write_text(f"worker exception: {exc!r}")
+            if rc == 0 and report_path(out_dir).exists():
+                done_marker(out_dir).write_text(str(int(time.time())))
+            else:
+                failures += 1
+                print(f"[cell-fail] {cfg.id}/q{q_global:04d} rc={rc}", flush=True)
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

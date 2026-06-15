@@ -282,3 +282,74 @@ class TestConfigPersistence:
         assert [c.id for c in back] == ["a", "b"]
         assert back[0].scan_min == 1.0 and back[0].scan_max == 5.0
         assert back[1].env == {"K": "v"}
+
+
+# --- worker mode ----------------------------------------------------------
+
+
+class TestWorkerChunk:
+    def _fake_invoke(self, calls):
+        def _inv(argv):
+            calls.append(argv)
+            out = Path(argv[argv.index("--out-dir") + 1])
+            _write_report(out, "1.00", 1)
+            return 0
+
+        return _inv
+
+    def test_runs_all_cells_and_marks_done(self, tmp_path, monkeypatch):
+        cfgs = [rr.Config(id="a"), rr.Config(id="b")]
+        calls = []
+        monkeypatch.setattr(rr, "_invoke_run", self._fake_invoke(calls))
+        rc = rr.run_worker_chunk(_args(tmp_path, chunk_size=2), cfgs, chunk_idx=0, n_questions=3)
+        assert rc == 0
+        assert len(calls) == 4
+        for cid in ("a", "b"):
+            for q in (0, 1):
+                assert (rr.qdir(Path(tmp_path), cid, q) / ".done").exists()
+        assert not (rr.qdir(Path(tmp_path), "a", 2)).exists()
+
+    def test_sets_inproc_memo_env(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def _inv(argv):
+            seen["memo"] = rr.os.environ.get("HLBT_INPROC_BUNDLE_MEMO")
+            _write_report(Path(argv[argv.index("--out-dir") + 1]), "1.00", 1)
+            return 0
+
+        monkeypatch.setattr(rr, "_invoke_run", _inv)
+        rr.run_worker_chunk(_args(tmp_path, chunk_size=2), [rr.Config(id="a")], chunk_idx=0, n_questions=1)
+        assert seen["memo"] == "1"
+
+    def test_skips_already_done_cells(self, tmp_path, monkeypatch):
+        cfgs = [rr.Config(id="a")]
+        d = rr.qdir(Path(tmp_path), "a", 0)
+        _write_report(d, "9.00", 1)
+        (d / ".done").write_text("1")
+        calls = []
+        monkeypatch.setattr(rr, "_invoke_run", self._fake_invoke(calls))
+        rr.run_worker_chunk(_args(tmp_path, chunk_size=2), cfgs, chunk_idx=0, n_questions=1)
+        assert calls == []
+
+    def test_applies_per_config_env_during_invoke(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def _inv(argv):
+            seen["K"] = rr.os.environ.get("K")
+            _write_report(Path(argv[argv.index("--out-dir") + 1]), "1.00", 1)
+            return 0
+
+        monkeypatch.setattr(rr, "_invoke_run", _inv)
+        rr.run_worker_chunk(
+            _args(tmp_path, chunk_size=1), [rr.Config(id="a", env={"K": "v"})], chunk_idx=0, n_questions=1
+        )
+        assert seen["K"] == "v"
+        assert rr.os.environ.get("K") is None
+
+    def test_nonzero_rc_when_a_cell_fails(self, tmp_path, monkeypatch):
+        def _inv(argv):
+            return 1
+
+        monkeypatch.setattr(rr, "_invoke_run", _inv)
+        rc = rr.run_worker_chunk(_args(tmp_path, chunk_size=1), [rr.Config(id="a")], chunk_idx=0, n_questions=1)
+        assert rc != 0
