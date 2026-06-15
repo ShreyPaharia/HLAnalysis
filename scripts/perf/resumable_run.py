@@ -454,27 +454,28 @@ def load_configs_file(path: Path) -> list[Config]:
 
 
 def aggregate(out_base: Path) -> None:
-    """Per-config totals from completed cells (reads the manifest)."""
-    mp = out_base / "manifest.json"
-    if not mp.exists():
-        print("no manifest", file=sys.stderr)
-        return
-    m = json.loads(mp.read_text())
-    by_cfg: dict[str, list[dict]] = {}
-    for j in m["jobs"]:
-        if j["status"] == "done":
-            by_cfg.setdefault(j["config_id"], []).append(j)
+    """Per-config totals from completed cells, read straight from report dirs.
+
+    Jobs are chunk-keyed now, so per-config PnL no longer lives in the manifest —
+    the per-(config, question) report dirs are the source of truth.
+    """
+    cfg_file = out_base / "_configs.json"
+    if cfg_file.exists():
+        config_ids = [c.id for c in load_configs_file(cfg_file)]
+    else:  # fall back to top-level dirs that contain q* cells
+        config_ids = sorted(p.name for p in out_base.iterdir() if p.is_dir() and not p.name.startswith("_"))
     print("=== AGGREGATE (completed cells per config) ===")
-    for cid in sorted(by_cfg):
-        js = by_cfg[cid]
-        tot = sum(j["pnl"] or 0 for j in js)
-        tr = sum(j["n_trades"] or 0 for j in js)
-        walls = [j["wall_s"] for j in js]
-        mean_w = sum(walls) / len(walls) if walls else 0
-        print(f"  {cid:16s}: n={len(js):>3} totalPnL=${tot:>9.2f} trades={tr:>5} mean_wall={mean_w:.0f}s")
+    for cid in config_ids:
+        cdir = out_base / cid
+        cells = sorted(cdir.glob("q*/report.md")) if cdir.is_dir() else []
+        rows = [parse_pnl(rp.parent) for rp in cells]
+        rows = [(p, t) for (p, t) in rows if p is not None]
+        tot = sum(p for p, _ in rows)
+        tr = sum(t or 0 for _, t in rows)
+        print(f"  {cid:16s}: n={len(rows):>3} totalPnL=${tot:>9.2f} trades={tr:>5}")
 
 
-def main() -> int:
+def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--kind", choices=["binary", "bucket"], required=True)
     ap.add_argument("--start", required=True)
@@ -486,14 +487,32 @@ def main() -> int:
     ap.add_argument("--slot-class", default=None)
     ap.add_argument("--strategy", default=None)
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument(
+        "--chunk-size",
+        type=int,
+        default=25,
+        help="questions per warm subprocess (amortizes startup + shares the bundle memo across configs)",
+    )
     ap.add_argument("--max-retries", type=int, default=2, help="retries AFTER the first attempt")
-    ap.add_argument("--timeout", type=float, default=3600.0, help="per-job wall timeout (s)")
+    ap.add_argument("--timeout", type=float, default=3600.0, help="per-chunk wall timeout (s)")
     ap.add_argument(
         "--scan-min", type=float, default=None, help="event-mode min interval (s); omit to use slot default"
     )
     ap.add_argument("--scan-max", type=float, default=None)
     ap.add_argument("--aggregate-only", action="store_true")
-    args = ap.parse_args()
+    # hidden worker-mode args (the supervisor self-invokes with these)
+    ap.add_argument("--_worker-chunk", type=int, default=None, dest="worker_chunk", help=argparse.SUPPRESS)
+    ap.add_argument("--n-questions", type=int, default=None, dest="n_questions", help=argparse.SUPPRESS)
+    return ap
+
+
+def main() -> int:
+    args = _build_arg_parser().parse_args()
+
+    # worker mode: run one chunk in-process and exit.
+    if args.worker_chunk is not None:
+        configs = load_configs_file(Path(args.configs))
+        return run_worker_chunk(args, configs, args.worker_chunk, args.n_questions)
 
     out_base = Path(args.out_base)
     if args.aggregate_only:
@@ -504,7 +523,7 @@ def main() -> int:
     n = discover_count(args)
     print(
         f"discovered {n} {args.kind} questions in [{args.start},{args.end}); "
-        f"{len(configs)} config(s) → {n * len(configs)} jobs",
+        f"{len(configs)} config(s); chunk_size={args.chunk_size} → {num_chunks(n, args.chunk_size)} chunks",
         flush=True,
     )
     if n == 0:

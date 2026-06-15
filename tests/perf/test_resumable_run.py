@@ -336,3 +336,48 @@ class TestWorkerChunk:
         monkeypatch.setattr(rr, "_invoke_run", _inv)
         rc = rr.run_worker_chunk(_args(tmp_path, chunk_size=1), [rr.Config(id="a")], chunk_idx=0, n_questions=1)
         assert rc != 0
+
+
+# --- aggregate + CLI ------------------------------------------------------
+
+
+class TestAggregateFromDirs:
+    def test_sums_per_config_from_report_dirs(self, tmp_path, capsys):
+        for cid, q, pnl in [("a", 0, "10.00"), ("a", 1, "5.00"), ("b", 0, "1.00")]:
+            d = rr.qdir(Path(tmp_path), cid, q)
+            _write_report(d, pnl, 1)
+            (d / ".done").write_text("1")
+        rr.write_configs_file(Path(tmp_path), [rr.Config(id="a"), rr.Config(id="b")])
+        rr.aggregate(Path(tmp_path))
+        out = capsys.readouterr().out
+        assert "a" in out and "15.00" in out  # 10 + 5
+        assert "b" in out and "1.00" in out
+
+
+class TestChunkSizeArg:
+    def test_chunk_size_defaults_to_25(self):
+        ap = rr._build_arg_parser()
+        ns = ap.parse_args(["--kind", "binary", "--start", "x", "--end", "y", "--out-base", "/o", "--slot", "v31"])
+        assert ns.chunk_size == 25
+
+    def test_worker_chunk_args_parse(self):
+        ap = rr._build_arg_parser()
+        ns = ap.parse_args(
+            [
+                "--kind",
+                "binary",
+                "--start",
+                "x",
+                "--end",
+                "y",
+                "--out-base",
+                "/o",
+                "--_worker-chunk",
+                "3",
+                "--n-questions",
+                "40",
+                "--configs",
+                "/c.json",
+            ]
+        )
+        assert ns.worker_chunk == 3 and ns.n_questions == 40
