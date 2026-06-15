@@ -118,16 +118,15 @@ class Config:
 
 
 @dataclass
-class JobState:
-    config_id: str
-    idx: int
+class ChunkState:
+    chunk_idx: int
     status: str = "pending"  # pending | running | done | failed
     attempts: int = 0
     wall_s: float = 0.0
     last_class: str = ""
     last_error: str = ""
-    pnl: float | None = None
-    n_trades: int | None = None
+    n_cells: int = 0  # configs × questions-in-chunk
+    n_done: int = 0  # cells with a .done marker
 
 
 # --- per-job command + result parsing -------------------------------------
@@ -232,35 +231,47 @@ def discover_count(args) -> int:
 class Driver:
     def __init__(self, args, configs: list[Config], n_questions: int):
         self.args = args
-        self.configs = {c.id: c for c in configs}
+        self.configs = configs
         self.out_base = Path(args.out_base)
         self.out_base.mkdir(parents=True, exist_ok=True)
         self.manifest_path = self.out_base / "manifest.json"
-        # state keyed by (config_id, idx)
-        self.states: dict[tuple[str, int], JobState] = {
-            (c.id, i): JobState(config_id=c.id, idx=i) for c in configs for i in range(n_questions)
-        }
+        self.n_questions = n_questions
+        self.chunk_size = max(1, int(getattr(args, "chunk_size", 1) or 1))
+        self.configs_path = write_configs_file(self.out_base, configs)
+        n_chunks = num_chunks(n_questions, self.chunk_size)
+        # state keyed by chunk index; one job = one chunk = all configs over K questions
+        self.states: dict[int, ChunkState] = {c: ChunkState(chunk_idx=c) for c in range(n_chunks)}
         self._load_manifest()
-        for key, st in self.states.items():
-            if done_marker(self.qdir(*key)).exists():
+        for c, st in self.states.items():
+            cells = self.cells_for_chunk(c)
+            st.n_cells = len(cells)
+            st.n_done = sum(1 for (cid, q) in cells if done_marker(qdir(self.out_base, cid, q)).exists())
+            if st.n_cells > 0 and st.n_done == st.n_cells:
                 st.status = "done"
-                st.pnl, st.n_trades = parse_pnl(self.qdir(*key))
-        self.queue: list[tuple[str, int]] = [k for k, s in self.states.items() if s.status not in ("done", "failed")]
-        self.running: dict[tuple[str, int], tuple[subprocess.Popen, float, Path]] = {}
+        self.queue: list[int] = [c for c, s in self.states.items() if s.status not in ("done", "failed")]
+        self.running: dict[int, tuple[subprocess.Popen, float, Path]] = {}
         self._stop = False
 
     def qdir(self, config_id: str, q_global: int) -> Path:
         return qdir(self.out_base, config_id, q_global)
+
+    def cells_for_chunk(self, chunk_idx: int) -> list[tuple[str, int]]:
+        start, length = chunk_bounds(chunk_idx, self.n_questions, self.chunk_size)
+        return [(c.id, q) for q in range(start, start + length) for c in self.configs]
+
+    def chunk_done(self, chunk_idx: int) -> bool:
+        cells = self.cells_for_chunk(chunk_idx)
+        return bool(cells) and all(done_marker(qdir(self.out_base, cid, q)).exists() for cid, q in cells)
 
     def _load_manifest(self) -> None:
         if not self.manifest_path.exists():
             return
         try:
             data = json.loads(self.manifest_path.read_text())
-            for d in data.get("jobs", []):
-                key = (d["config_id"], d["idx"])
+            for d in data.get("chunks", []):
+                key = d["chunk_idx"]
                 if key in self.states:
-                    self.states[key] = JobState(**d)
+                    self.states[key] = ChunkState(**d)
         except (json.JSONDecodeError, KeyError, TypeError):
             pass
 
@@ -268,37 +279,67 @@ class Driver:
         done = sum(1 for s in self.states.values() if s.status == "done")
         failed = sum(1 for s in self.states.values() if s.status == "failed")
         payload = {
-            "n_jobs": len(self.states),
+            "n_chunks": len(self.states),
+            "chunk_size": self.chunk_size,
             "done": done,
             "failed": failed,
             "pending": len(self.states) - done - failed,
-            "configs": list(self.configs),
-            "jobs": [asdict(s) for s in self.states.values()],
+            "configs": [c.id for c in self.configs],
+            "chunks": [asdict(s) for s in self.states.values()],
         }
         tmp = self.manifest_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2))
         tmp.replace(self.manifest_path)
 
-    def _launch(self, key: tuple[str, int]) -> None:
-        config_id, idx = key
-        cfg = self.configs[config_id]
-        out_dir = self.qdir(config_id, idx)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        logf = open(out_dir / "run.log", "w")  # noqa: SIM115
+    def _launch(self, chunk_idx: int) -> None:
+        log_path = self.out_base / f"_chunk{chunk_idx:04d}.log"
+        logf = open(log_path, "w")  # noqa: SIM115
         env = dict(os.environ)
         env.setdefault("LOGURU_LEVEL", "ERROR")
-        env.update(cfg.env)  # per-config env (e.g. HLBT_DEPTH_BACKEND)
-        cmd = ["uv", "run", "hl-bt"] + build_run_argv(self.args, cfg, q_global=idx, out_dir=out_dir)
+        env["HLBT_INPROC_BUNDLE_MEMO"] = "1"
+        env["HLBT_INPROC_BUNDLE_MEMO_WORKERS"] = str(max(1, int(self.args.workers)))
+        cmd = [
+            sys.executable,
+            os.path.abspath(__file__),
+            "--_worker-chunk",
+            str(chunk_idx),
+            "--configs",
+            str(self.configs_path),
+            "--out-base",
+            str(self.out_base),
+            "--kind",
+            self.args.kind,
+            "--start",
+            self.args.start,
+            "--end",
+            self.args.end,
+            "--chunk-size",
+            str(self.chunk_size),
+            "--n-questions",
+            str(self.n_questions),
+        ]
+        if self.args.slot:
+            cmd += ["--slot", self.args.slot]
+        if self.args.slot_config:
+            cmd += ["--slot-config", self.args.slot_config]
+        if self.args.slot_class:
+            cmd += ["--slot-class", self.args.slot_class]
+        if self.args.strategy:
+            cmd += ["--strategy", self.args.strategy]
+        if self.args.scan_min is not None:
+            cmd += ["--scan-min", str(self.args.scan_min)]
+        if self.args.scan_max is not None:
+            cmd += ["--scan-max", str(self.args.scan_max)]
         # start_new_session=True → own process group, so we can kill the whole
-        # subtree (incl. uv/python children) on timeout/shutdown. No orphans.
+        # subtree (incl. python children) on timeout/shutdown. No orphans.
         p = subprocess.Popen(
             cmd, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True, cwd=os.getcwd(), env=env
         )
-        self.running[key] = (p, time.time(), out_dir)
-        st = self.states[key]
+        self.running[chunk_idx] = (p, time.time(), log_path)
+        st = self.states[chunk_idx]
         st.status = "running"
         st.attempts += 1
-        print(f"[launch] {config_id}/q{idx:04d} (attempt {st.attempts}) pid={p.pid}", flush=True)
+        print(f"[launch] chunk{chunk_idx:04d} (attempt {st.attempts}) pid={p.pid}", flush=True)
 
     def _kill(self, p: subprocess.Popen) -> None:
         try:
@@ -309,24 +350,24 @@ class Driver:
             except ProcessLookupError:
                 pass
 
-    def _finish(self, key: tuple[str, int], returncode: int) -> None:
-        config_id, idx = key
-        _p, t0, out_dir = self.running.pop(key)
-        st = self.states[key]
+    def _finish(self, chunk_idx: int, returncode: int) -> None:
+        _p, t0, log_path = self.running.pop(chunk_idx)
+        st = self.states[chunk_idx]
         st.wall_s = round(time.time() - t0, 1)
         log_text = ""
         try:
-            log_text = (out_dir / "run.log").read_text(errors="replace")[-4000:]
+            log_text = log_path.read_text(errors="replace")[-4000:]
         except OSError:
             pass
-        cls = classify(returncode, log_text, report_path(out_dir).exists())
+        cells = self.cells_for_chunk(chunk_idx)
+        st.n_done = sum(1 for (cid, q) in cells if done_marker(qdir(self.out_base, cid, q)).exists())
+        all_done = self.chunk_done(chunk_idx)
+        cls = classify(returncode, log_text, report_exists=all_done)
         st.last_class = cls
         if cls == SUCCESS:
-            done_marker(out_dir).write_text(str(int(time.time())))
             st.status = "done"
-            st.pnl, st.n_trades = parse_pnl(out_dir)
             print(
-                f"[done]   {config_id}/q{idx:04d} rc={returncode} wall={st.wall_s}s pnl={st.pnl} trades={st.n_trades}",
+                f"[done]   chunk{chunk_idx:04d} rc={returncode} wall={st.wall_s}s cells={st.n_done}/{st.n_cells}",
                 flush=True,
             )
         else:
@@ -334,16 +375,16 @@ class Driver:
             st.last_error = f"rc={returncode} class={cls}; {last_line}"
             if cls == RETRYABLE and st.attempts <= self.args.max_retries:
                 st.status = "pending"
-                self.queue.append(key)
+                self.queue.append(chunk_idx)
                 print(
-                    f"[retry]  {config_id}/q{idx:04d} rc={returncode} class={cls} "
+                    f"[retry]  chunk{chunk_idx:04d} rc={returncode} class={cls} "
                     f"attempt={st.attempts}/{self.args.max_retries + 1}",
                     flush=True,
                 )
             else:
                 st.status = "failed"
                 print(
-                    f"[FAILED] {config_id}/q{idx:04d} rc={returncode} class={cls} "
+                    f"[FAILED] chunk{chunk_idx:04d} rc={returncode} class={cls} "
                     f"attempts={st.attempts} :: {st.last_error}",
                     flush=True,
                 )
@@ -368,7 +409,7 @@ class Driver:
                     if rc is not None:
                         self._finish(key, rc)
                     elif now - t0 > self.args.timeout:
-                        print(f"[timeout] {key[0]}/q{key[1]:04d} > {self.args.timeout}s — killing", flush=True)
+                        print(f"[timeout] chunk{key:04d} > {self.args.timeout}s — killing", flush=True)
                         self._kill(p)
                         try:
                             p.wait(timeout=10)

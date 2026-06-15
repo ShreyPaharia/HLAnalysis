@@ -97,6 +97,7 @@ def _args(out_base: Path, **kw) -> SimpleNamespace:
         timeout=3600.0,
         scan_min=None,
         scan_max=None,
+        chunk_size=25,
     )
     base.update(kw)
     return SimpleNamespace(**base)
@@ -111,79 +112,80 @@ class _P:
         self.pid = pid
 
 
-# --- Driver resume --------------------------------------------------------
+# --- Driver chunk queue + resume ------------------------------------------
 
 
-class TestDriverResume:
-    def test_completed_cells_are_skipped(self, tmp_path):
-        drv0 = rr.Driver(_args(tmp_path), _one_cfg(), n_questions=3)
-        d0 = drv0.qdir("base", 0)
-        _write_report(d0, "100.00", 5)
-        (d0 / ".done").write_text("1")
-        drv = rr.Driver(_args(tmp_path), _one_cfg(), n_questions=3)
-        assert drv.states[("base", 0)].status == "done"
-        assert drv.states[("base", 0)].pnl == pytest.approx(100.0)
-        assert ("base", 0) not in drv.queue
-        assert drv.queue == [("base", 1), ("base", 2)]
+class TestDriverChunkQueue:
+    def test_fresh_run_queues_all_chunks(self, tmp_path):
+        # 3 questions, K=2 → 2 chunks; queue holds chunk indices
+        drv = rr.Driver(_args(tmp_path, chunk_size=2), _one_cfg(), n_questions=3)
+        assert drv.queue == [0, 1]
+        assert set(drv.states) == {0, 1}
 
-    def test_fresh_run_queues_all(self, tmp_path):
-        drv = rr.Driver(_args(tmp_path), _one_cfg(), n_questions=3)
-        assert drv.queue == [("base", 0), ("base", 1), ("base", 2)]
+    def test_chunk_done_when_all_cells_done(self, tmp_path):
+        cfgs = [rr.Config(id="a"), rr.Config(id="b")]
+        # chunk 0 (K=2) = questions 0,1 × configs a,b = 4 cells
+        for cid in ("a", "b"):
+            for q in (0, 1):
+                d = rr.qdir(Path(tmp_path), cid, q)
+                _write_report(d, "1.00", 1)
+                (d / ".done").write_text("1")
+        drv = rr.Driver(_args(tmp_path, chunk_size=2), cfgs, n_questions=3)
+        assert drv.states[0].status == "done"
+        assert 0 not in drv.queue
+        assert drv.queue == [1]
+
+    def test_chunk_pending_if_one_cell_missing(self, tmp_path):
+        cfgs = [rr.Config(id="a"), rr.Config(id="b")]
+        # only 3 of 4 cells done
+        for cid, q in [("a", 0), ("a", 1), ("b", 0)]:
+            d = rr.qdir(Path(tmp_path), cid, q)
+            _write_report(d, "1.00", 1)
+            (d / ".done").write_text("1")
+        drv = rr.Driver(_args(tmp_path, chunk_size=2), cfgs, n_questions=3)
+        assert drv.states[0].status == "pending"
+        assert 0 in drv.queue
 
 
-# --- Driver retry / fail / success ----------------------------------------
+# --- Driver retry / fail / success (chunk-keyed) --------------------------
 
 
-class TestDriverFinish:
-    def test_retryable_failure_requeues_then_fails(self, tmp_path):
-        drv = rr.Driver(_args(tmp_path, max_retries=1), _one_cfg(), n_questions=1)
-        key = ("base", 0)
-        out = drv.qdir(*key)
-        out.mkdir(parents=True, exist_ok=True)
-        (out / "run.log").write_text("opaque crash")
+class TestDriverFinishChunk:
+    def _running(self, drv, chunk_idx, out_log="opaque crash"):
+        log = Path(drv.out_base) / f"_chunk{chunk_idx:04d}.log"
+        log.write_text(out_log)
+        drv.running[chunk_idx] = (_P(), rr.time.time(), log)
+        drv.states[chunk_idx].status = "running"
+        drv.states[chunk_idx].attempts = 1
+
+    def test_retryable_then_fail(self, tmp_path):
+        drv = rr.Driver(_args(tmp_path, max_retries=1, chunk_size=2), _one_cfg(), n_questions=1)
+        drv.queue.clear()
+        self._running(drv, 0)
+        drv._finish(0, returncode=2)  # no cells done → not success
+        assert drv.states[0].status == "pending" and 0 in drv.queue
 
         drv.queue.clear()
-        drv.running[key] = (_P(), rr.time.time(), out)
-        drv.states[key].status = "running"
-        drv.states[key].attempts = 1
-        drv._finish(key, returncode=2)
-        assert drv.states[key].status == "pending"
-        assert key in drv.queue
-
-        drv.queue.clear()
-        drv.running[key] = (_P(), rr.time.time(), out)
-        drv.states[key].status = "running"
-        drv.states[key].attempts = 2
-        drv._finish(key, returncode=2)
-        assert drv.states[key].status == "failed"
-        assert key not in drv.queue
+        self._running(drv, 0)
+        drv.states[0].attempts = 2
+        drv._finish(0, returncode=2)
+        assert drv.states[0].status == "failed" and 0 not in drv.queue
 
     def test_deterministic_failure_not_retried(self, tmp_path):
-        drv = rr.Driver(_args(tmp_path, max_retries=5), _one_cfg(), n_questions=1)
-        key = ("base", 0)
-        out = drv.qdir(*key)
-        out.mkdir(parents=True, exist_ok=True)
-        (out / "run.log").write_text("Traceback (most recent call last):\nValueError: bad")
+        drv = rr.Driver(_args(tmp_path, max_retries=5, chunk_size=2), _one_cfg(), n_questions=1)
         drv.queue.clear()
-        drv.running[key] = (_P(), rr.time.time(), out)
-        drv.states[key].status = "running"
-        drv.states[key].attempts = 1
-        drv._finish(key, returncode=1)
-        assert drv.states[key].status == "failed"
-        assert key not in drv.queue
+        self._running(drv, 0, out_log="Traceback (most recent call last):\nValueError: bad")
+        drv._finish(0, returncode=1)
+        assert drv.states[0].status == "failed" and 0 not in drv.queue
 
-    def test_success_marks_done(self, tmp_path):
-        drv = rr.Driver(_args(tmp_path), _one_cfg(), n_questions=1)
-        key = ("base", 0)
-        out = drv.qdir(*key)
-        _write_report(out, "55.50", 7)
-        drv.running[key] = (_P(), rr.time.time(), out)
-        drv.states[key].status = "running"
-        drv.states[key].attempts = 1
-        drv._finish(key, returncode=0)
-        assert drv.states[key].status == "done"
-        assert (out / ".done").exists()
-        assert drv.states[key].pnl == pytest.approx(55.50)
+    def test_success_when_all_cells_done(self, tmp_path):
+        drv = rr.Driver(_args(tmp_path, chunk_size=2), _one_cfg(), n_questions=1)
+        d = rr.qdir(Path(tmp_path), "base", 0)
+        _write_report(d, "5.00", 1)
+        (d / ".done").write_text("1")
+        self._running(drv, 0, out_log="ok")
+        drv._finish(0, returncode=0)
+        assert drv.states[0].status == "done"
 
 
 # --- chunk math -----------------------------------------------------------
@@ -213,25 +215,6 @@ class TestChunkMath:
 
 
 class TestSweep2D:
-    def test_jobs_are_config_x_question(self, tmp_path):
-        cfgs = [rr.Config(id="a"), rr.Config(id="b")]
-        drv = rr.Driver(_args(tmp_path), cfgs, n_questions=3)
-        # 2 configs × 3 questions = 6 jobs
-        assert len(drv.states) == 6
-        assert set(drv.queue) == {(c, i) for c in ("a", "b") for i in range(3)}
-
-    def test_per_config_resume_independent(self, tmp_path):
-        cfgs = [rr.Config(id="a"), rr.Config(id="b")]
-        drv0 = rr.Driver(_args(tmp_path), cfgs, n_questions=2)
-        da = drv0.qdir("a", 1)
-        _write_report(da, "10.00", 1)
-        (da / ".done").write_text("1")
-        drv = rr.Driver(_args(tmp_path), cfgs, n_questions=2)
-        assert drv.states[("a", 1)].status == "done"
-        assert ("a", 1) not in drv.queue
-        # b's questions and a's other question still queued
-        assert set(drv.queue) == {("a", 0), ("b", 0), ("b", 1)}
-
     def test_build_run_argv_applies_config_slot_and_cadence(self, tmp_path):
         cfg = rr.Config(id="roi", slot_config="/tmp/variant.yaml", scan_min=1.0, scan_max=5.0)
         argv = rr.build_run_argv(_args(tmp_path), cfg, q_global=3, out_dir=tmp_path / "o")
