@@ -106,6 +106,50 @@ def test_compare_slot_skips_when_positions_unknown():
 from hlanalysis.engine.reconcile_report import format_report, Drift
 
 
+def test_compare_slot_paper_mode_divergence_is_not_drift():
+    # A paper_mode slot simulates fills into the LOCAL ledger while the VENUE
+    # position is always 0 by design. So db_qty>0 / venue_qty=0 is the EXPECTED
+    # steady state, NOT drift — it must be classified PAPER so a real orphan on a
+    # live slot still stands out. (v31_pm_eth_ms false-positive, 2026-06-15.)
+    r = compare_slot(
+        alias="v31_pm_eth_ms",
+        db_positions=[("0xETHTOK", 65.78)],
+        db_realized_pnl=-1.05,
+        venue=ClearinghouseState(positions=(), account_value_usd=0.0),
+        qty_tolerance=2e-2,
+        paper_mode=True,
+    )
+    assert r.paper_mode is True
+    assert r.has_drift is False  # paper-ledger divergence is expected, not drift
+    assert r.status == "PAPER"
+    # The divergence is still recorded (informational) but does not page.
+    assert any(d.kind == "vanished" and d.symbol == "0xETHTOK" for d in r.drift)
+    text = format_report([r])
+    assert "PAPER" in text
+    assert "DRIFT" not in text  # must NOT read as drift
+    assert "0xETHTOK" in text  # divergence still surfaced for context
+
+
+def test_compare_slot_live_mode_same_divergence_is_still_drift():
+    # The SAME db_qty>0 / venue_qty=0 divergence on a LIVE (paper_mode=False)
+    # slot is a genuine orphan and must still flag DRIFT — paper suppression must
+    # NOT leak into live detection (that detection is load-bearing).
+    r = compare_slot(
+        alias="v31_pm",
+        db_positions=[("0xETHTOK", 65.78)],
+        db_realized_pnl=-1.05,
+        venue=ClearinghouseState(positions=(), account_value_usd=0.0),
+        qty_tolerance=2e-2,
+        paper_mode=False,
+    )
+    assert r.paper_mode is False
+    assert r.has_drift is True
+    assert r.status == "DRIFT"
+    assert any(d.kind == "vanished" and d.symbol == "0xETHTOK" for d in r.drift)
+    text = format_report([r])
+    assert "DRIFT" in text
+
+
 def test_format_report_clean():
     recon = [
         SlotRecon(

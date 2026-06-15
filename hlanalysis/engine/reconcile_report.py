@@ -101,6 +101,13 @@ class SlotRecon:
     # klass_breakdown_window: per-class split for the trailing window (HL only).
     klass_breakdown_window: dict[str, KlassStat] | None = None
 
+    # paper_mode: this slot simulates fills into the LOCAL ledger only — the VENUE
+    # position is always 0 by design. So a db_qty>0 / venue_qty=0 divergence is the
+    # EXPECTED steady state, not drift. We still record the divergence in `drift`
+    # for context, but `has_drift`/`status` classify it as PAPER (not DRIFT) so it
+    # never pages and never masks a genuine orphan on a live slot (2026-06-15).
+    paper_mode: bool = False
+
     @property
     def total_true_pnl(self) -> float:
         """The STRATEGY's lifetime PnL: outcome-markets only.
@@ -130,8 +137,29 @@ class SlotRecon:
         return base + self.open_mtm
 
     @property
-    def has_drift(self) -> bool:
+    def has_divergence(self) -> bool:
+        """Raw DB-vs-venue divergence (position drift or windowed PnL mismatch),
+        regardless of mode. For a paper slot this is expected and informational;
+        for a live slot it is real drift (see has_drift)."""
         return len(self.drift) > 0 or self.pnl_mismatch
+
+    @property
+    def has_drift(self) -> bool:
+        # Paper slots diverge from the venue by design (local-only sim ledger), so
+        # their divergence is NEVER drift — it must not page or mask a live orphan.
+        if self.paper_mode:
+            return False
+        return self.has_divergence
+
+    @property
+    def status(self) -> str:
+        """Report status label: DRIFT (live + real divergence), PAPER (paper slot
+        with the expected local-ledger/venue divergence), else OK."""
+        if self.has_drift:
+            return "DRIFT"
+        if self.paper_mode and self.has_divergence:
+            return "PAPER"
+        return "OK"
 
 
 def compare_slot(
@@ -151,6 +179,7 @@ def compare_slot(
     realized_pnl_window: float = 0.0,
     fills_count_window: int | None = None,
     klass_breakdown_window: dict[str, KlassStat] | None = None,
+    paper_mode: bool = False,
 ) -> SlotRecon:
     """Pure three-way-ish compare: DB positions vs venue positions, plus PnL.
 
@@ -213,6 +242,7 @@ def compare_slot(
         realized_pnl_window=realized_pnl_window,
         fills_count_window=fills_count_window,
         klass_breakdown_window=klass_breakdown_window,
+        paper_mode=paper_mode,
     )
 
 
@@ -259,8 +289,7 @@ def format_report(recon: list[SlotRecon]) -> str:
     """
     lines: list[str] = ["Engine reconciliation report", ""]
     for r in recon:
-        status = "DRIFT" if r.has_drift else "OK"
-        lines.append(f"[{r.alias}] {status}")
+        lines.append(f"[{r.alias}] {r.status}")
         venue_str = f"{r.venue_realized_pnl:+.2f}" if r.venue_realized_pnl is not None else "n/a"
         lines.append(f"  strategy_pnl(outcome-only)={r.total_true_pnl:+.2f}  acct_value={r.account_value_usd:.2f}")
         lines.append(f"    venue_outcome_realized={venue_str}  local={r.realized_pnl:+.2f}  open_mtm={r.open_mtm:+.2f}")
@@ -268,13 +297,19 @@ def format_report(recon: list[SlotRecon]) -> str:
             lines.append(f"    full_account_pnl(all-time, incl non-strategy perp/spot)={r.account_pnl_all_time:+.2f}")
         if not r.positions_known:
             lines.append("  (positions unknown — recon skipped this cycle)")
+        # Paper slots diverge from the venue by design — surface the divergence as
+        # informational ('~') context, not a drift ('!') alert, so a real live
+        # orphan still stands out. Live slots keep the '!' drift markers.
+        marker = "~" if r.paper_mode else "!"
+        if r.paper_mode and r.has_divergence:
+            lines.append("  (paper-ledger; DB-vs-venue divergence expected, venue position is 0 by design)")
         if r.pnl_mismatch:
             lines.append(
-                f"  ! pnl_mismatch: local={r.realized_pnl:+.2f} vs venue={venue_str} "
+                f"  {marker} pnl_mismatch: local={r.realized_pnl:+.2f} vs venue={venue_str} "
                 f"(local ledger diverges from venue truth)"
             )
         for d in r.drift:
-            lines.append(f"  ! {d.kind} {d.symbol}: db_qty={d.db_qty} venue_qty={d.venue_qty}")
+            lines.append(f"  {marker} {d.kind} {d.symbol}: db_qty={d.db_qty} venue_qty={d.venue_qty}")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -306,7 +341,12 @@ def format_daily_summary(recon: list[SlotRecon], *, date_str: str | None = None)
     total_alltime = 0.0
     drifting: list[str] = []
     for r in recon:
-        status = "⚠️ DRIFT" if r.has_drift else "✅"
+        if r.has_drift:
+            status = "⚠️ DRIFT"
+        elif r.paper_mode:
+            status = "📝 PAPER"
+        else:
+            status = "✅"
         # Fill counts: prefer windowed/total pair; fall back to "?" when unknown.
         fills_win: int | str = r.fills_count_window if r.fills_count_window is not None else "?"
         fills_tot: int | str = r.fills_count if r.fills_count is not None else "?"
@@ -364,6 +404,7 @@ def gather_slot(
     fetch_venue_realized: bool = True,
     now_ns: int | None = None,
     window_hours: float = 24.0,
+    paper_mode: bool = False,
 ) -> SlotRecon:
     """IO: pull local + venue realized PnL + DB positions + venue state for one
     slot and run the pure compare. clearinghouse_state()/realized_pnl_since() are
@@ -471,6 +512,7 @@ def gather_slot(
         realized_pnl_window=realized_pnl_window,
         fills_count_window=fills_count_window,
         klass_breakdown_window=klass_breakdown_window,
+        paper_mode=paper_mode,
     )
 
 
@@ -543,6 +585,7 @@ def build_report(
                     fetch_venue_realized=fetch_venue_realized,
                     now_ns=now_ns,
                     window_hours=window_hours,
+                    paper_mode=bool(getattr(s_cfg, "paper_mode", False)),
                 )
             )
         except Exception as e:  # noqa: BLE001 — a bad slot must not abort the report
@@ -672,6 +715,8 @@ def main() -> None:
                     "slots": [
                         {
                             "alias": r.alias,
+                            "status": r.status,
+                            "paper_mode": r.paper_mode,
                             "realized_pnl": r.realized_pnl,
                             "venue_realized_pnl": r.venue_realized_pnl,
                             "account_pnl_all_time": r.account_pnl_all_time,
