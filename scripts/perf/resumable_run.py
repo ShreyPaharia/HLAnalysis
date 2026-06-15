@@ -132,38 +132,41 @@ class JobState:
 # --- per-job command + result parsing -------------------------------------
 
 
-def build_cmd(args, cfg: Config, idx: int, out_dir: Path) -> list[str]:
-    cmd = [
-        "uv", "run", "hl-bt", "run",
+def build_run_argv(args, cfg: Config, q_global: int, out_dir: Path) -> list[str]:
+    """The ``hl-bt`` argv (sans the ``uv run hl-bt`` prefix) for ONE cell —
+    a single question (``--skip-markets q_global --max-markets 1``) under one
+    config. Worker mode passes this straight to ``cli.main``."""
+    argv = [
+        "run",
         "--data-source", "hl_hip4",
         "--kind", args.kind,
         "--start", args.start,
         "--end", args.end,
-        "--skip-markets", str(idx),
+        "--skip-markets", str(q_global),
         "--max-markets", "1",
         "--workers", "1",
         "--out-dir", str(out_dir),
     ]
     slot_config = cfg.slot_config or args.slot_config
     if args.slot:
-        cmd += ["--slot", args.slot]
+        argv += ["--slot", args.slot]
         if slot_config:
-            cmd += ["--slot-config", slot_config]
+            argv += ["--slot-config", slot_config]
         if args.slot_class:
-            cmd += ["--slot-class", args.slot_class]
+            argv += ["--slot-class", args.slot_class]
     elif args.strategy:
-        cmd += ["--strategy", args.strategy]
-        if slot_config:  # for non-slot runs a JSON param file via --config
-            cmd += ["--config", slot_config]
+        argv += ["--strategy", args.strategy]
+        if slot_config:
+            argv += ["--config", slot_config]
     scan_min = cfg.scan_min if cfg.scan_min is not None else args.scan_min
     scan_max = cfg.scan_max if cfg.scan_max is not None else args.scan_max
     if scan_min is not None:
-        cmd += [
+        argv += [
             "--scan-mode", "event",
             "--scan-min-interval-seconds", str(scan_min),
             "--scan-max-interval-seconds", str(scan_max if scan_max is not None else 2.0),
         ]
-    return cmd
+    return argv
 
 
 def report_path(out_dir: Path) -> Path:

@@ -232,14 +232,18 @@ class TestSweep2D:
         # b's questions and a's other question still queued
         assert set(drv.queue) == {("a", 0), ("b", 0), ("b", 1)}
 
-    def test_build_cmd_applies_config_slot_and_cadence(self, tmp_path):
-        cfg = rr.Config(id="roi", slot_config="/tmp/variant.yaml", env={"HLBT_DEPTH_BACKEND": "roi"}, scan_min=1.0, scan_max=5.0)
-        cmd = rr.build_cmd(_args(tmp_path), cfg, idx=3, out_dir=tmp_path / "o")
-        assert "--slot" in cmd and "v31" in cmd
-        assert cmd[cmd.index("--slot-config") + 1] == "/tmp/variant.yaml"
-        assert cmd[cmd.index("--skip-markets") + 1] == "3"
-        assert cmd[cmd.index("--scan-min-interval-seconds") + 1] == "1.0"
-        assert cmd[cmd.index("--scan-max-interval-seconds") + 1] == "5.0"
+    def test_build_run_argv_applies_config_slot_and_cadence(self, tmp_path):
+        cfg = rr.Config(id="roi", slot_config="/tmp/variant.yaml", scan_min=1.0, scan_max=5.0)
+        argv = rr.build_run_argv(_args(tmp_path), cfg, q_global=3, out_dir=tmp_path / "o")
+        assert argv[0] == "run"
+        assert "uv" not in argv and "hl-bt" not in argv
+        assert argv[argv.index("--slot") + 1] == "v31"
+        assert argv[argv.index("--slot-config") + 1] == "/tmp/variant.yaml"
+        assert argv[argv.index("--skip-markets") + 1] == "3"
+        assert argv[argv.index("--max-markets") + 1] == "1"
+        assert argv[argv.index("--out-dir") + 1] == str(tmp_path / "o")
+        assert argv[argv.index("--scan-min-interval-seconds") + 1] == "1.0"
+        assert argv[argv.index("--scan-max-interval-seconds") + 1] == "5.0"
 
     def test_load_configs_single_vs_sweep(self, tmp_path):
         # single config (no --configs)
