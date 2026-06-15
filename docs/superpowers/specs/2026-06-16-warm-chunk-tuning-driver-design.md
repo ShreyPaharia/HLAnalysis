@@ -86,14 +86,17 @@ startup amortization — without changing fidelity (same per-`(config, question)
 
 ## Components
 
-### 1. Chunk worker (new) — the in-process multi-config loop
+### 1. Chunk worker — in-process multi-config loop, folded into `resumable_run.py`
 
-A new entrypoint the supervisor shells into **once per chunk** (kept as its own
-isolated subprocess for crash/OOM containment). Proposed location:
-`scripts/perf/_chunk_worker.py` with a `python -m`-style CLI (perf/ops tooling, not
-a user-facing `hl-bt` analysis subcommand — keeps the four-CLI surface unchanged).
+`resumable_run.py` gains a **worker mode**: an internal flag (e.g.
+`--_worker-chunk <chunk_idx>`) makes the script run *one chunk* in-process and
+exit. The supervisor shells into **itself** once per chunk
+(`subprocess.Popen([sys.executable, __file__, "--_worker-chunk", ...])`), so the
+crash/OOM isolation (own process group) is preserved while everything lives in one
+file — no separate entrypoint, no new CLI surface. The worker-mode branch is
+hidden from normal `--help` usage (underscore-prefixed flag).
 
-Responsibilities:
+Worker-mode responsibilities:
 
 - Parse: chunk bounds (`--skip-markets`, `--max-markets`), `--configs` (the same
   JSON the supervisor already loads), data-source + `--slot`/`--start`/`--end`/
@@ -119,10 +122,12 @@ new fill/decision code, so the `--slot` parity guarantee is untouched.
 ### 2. Supervisor (`resumable_run.py`) — rework the job unit
 
 - **Queue keyed by chunk index** (not `(config_id, idx)`). One job = one chunk =
-  all configs over `K` questions. `--chunk-size K` (default `K=1` reproduces the
-  historical per-question granularity for resume, just warm instead of cold).
-- `_launch` builds the chunk-worker command (passes the full configs.json + chunk
-  bounds) instead of a single-config `hl-bt run`.
+  all configs over `K` questions. `--chunk-size K` **defaults to 25** (amortizes
+  startup over a full chunk); `--chunk-size 1` reproduces the historical
+  per-question granularity for resume, just warm instead of cold.
+- `_launch` builds the **worker-mode self-invocation**
+  (`[sys.executable, __file__, "--_worker-chunk", idx, ...]`, passing the full
+  configs.json + chunk bounds) instead of a single-config `hl-bt run`.
 - Resume: a chunk is `done` when its `.done` markers exist; partial chunks re-run
   in full (per-chunk resume — accepted tradeoff).
 - `_finish` / `classify` / retry / timeout / orphan-reaping logic **unchanged**
@@ -142,7 +147,7 @@ resumable_run.py (supervisor)
   ├─ discover N questions (once)            [config-independent]
   ├─ build chunk queue: ⌈N/K⌉ chunks
   ├─ pool of `--workers` slots:
-  │    each slot → subprocess: _chunk_worker --skip i*K --max K --configs cfg.json
+  │    each slot → subprocess: resumable_run.py --_worker-chunk i --configs cfg.json
   │         ├─ HLBT_INPROC_BUNDLE_MEMO=1
   │         ├─ discover + slice to chunk
   │         └─ for q in chunk: for cfg in configs:
@@ -189,8 +194,10 @@ resumable_run.py (supervisor)
 - **Memo memory:** bounded by `total/N` per worker via the worker-aware budget;
   question-outer loop keeps only ~one bundle resident. Reuses `tune`'s proven
   bound, so no new OOM surface.
-- **New entrypoint** (`_chunk_worker.py`): kept out of the four user-facing CLIs;
-  reuses run-path internals so no parity/fidelity surface is added.
+- **Worker mode in `resumable_run.py`**: a hidden self-invoked subprocess flag,
+  not a new CLI surface; reuses run-path internals so no parity/fidelity surface
+  is added. `resumable_run.py` grows — keep supervisor vs worker-mode code in
+  clearly separated sections/functions.
 
 ## Out of scope
 
