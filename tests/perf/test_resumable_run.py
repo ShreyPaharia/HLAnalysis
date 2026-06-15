@@ -258,3 +258,27 @@ class TestSweep2D:
         assert [c.id for c in cfgs] == ["a", "b"]
         assert cfgs[0].slot_config == "/a.yaml"
         assert cfgs[1].env == {"K": "v"}
+
+
+# --- config persistence ---------------------------------------------------
+
+
+class TestConfigPersistence:
+    def test_roundtrip_single(self, tmp_path):
+        cfgs = [rr.Config(id="base", slot_config="/x.yaml")]
+        p = rr.write_configs_file(tmp_path, cfgs)
+        assert p == tmp_path / "_configs.json"
+        back = rr.load_configs_file(p)
+        assert [c.id for c in back] == ["base"]
+        assert back[0].slot_config == "/x.yaml"
+
+    def test_roundtrip_sweep_with_env_and_scan(self, tmp_path):
+        cfgs = [
+            rr.Config(id="a", slot_config="/a.yaml", scan_min=1.0, scan_max=5.0),
+            rr.Config(id="b", env={"K": "v"}),
+        ]
+        p = rr.write_configs_file(tmp_path, cfgs)
+        back = rr.load_configs_file(p)
+        assert [c.id for c in back] == ["a", "b"]
+        assert back[0].scan_min == 1.0 and back[0].scan_max == 5.0
+        assert back[1].env == {"K": "v"}

@@ -382,6 +382,18 @@ def load_configs(args) -> list[Config]:
     return [Config(id="base", slot_config=args.slot_config)]
 
 
+def write_configs_file(out_base: Path, configs: list[Config]) -> Path:
+    """Persist the resolved config list so every worker subprocess reads the
+    SAME cells (single-config and sweep share one path)."""
+    path = out_base / "_configs.json"
+    path.write_text(json.dumps([asdict(c) for c in configs], indent=2))
+    return path
+
+
+def load_configs_file(path: Path) -> list[Config]:
+    return [Config(**c) for c in json.loads(Path(path).read_text())]
+
+
 def aggregate(out_base: Path) -> None:
     """Per-config totals from completed cells (reads the manifest)."""
     mp = out_base / "manifest.json"
