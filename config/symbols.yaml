@@ -6,6 +6,27 @@ subscriptions:
     symbol: BTC
     channels: [trades, book, bbo, mark, funding, oracle]
 
+  # Hyperliquid ETH / SOL / HYPE perps — reference (mark/oracle settle the
+  # HIP-4 binaries below) + future hedge legs. Same full channel set as BTC.
+  # HYPE is not listed on Binance, so its HL perp is the only reference source.
+  - venue: hyperliquid
+    product_type: perp
+    mechanism: clob
+    symbol: ETH
+    channels: [trades, book, bbo, mark, funding, oracle]
+
+  - venue: hyperliquid
+    product_type: perp
+    mechanism: clob
+    symbol: SOL
+    channels: [trades, book, bbo, mark, funding, oracle]
+
+  - venue: hyperliquid
+    product_type: perp
+    mechanism: clob
+    symbol: HYPE
+    channels: [trades, book, bbo, mark, funding, oracle]
+
   # ── HIP-4 BTC binary ────────────────────────────────────────────────
   - venue: hyperliquid
     product_type: prediction_binary
@@ -25,6 +46,67 @@ subscriptions:
     channels: [trades, book, bbo]
     match:
       underlying: BTC
+      class: priceBucket
+
+  # ── HIP-4 ETH / SOL / HYPE outcome markets ──────────────────────────
+  # Same wildcard auto-discovery as BTC; only `match` differs. Each coin
+  # gets a priceBinary (above/below) and a priceBucket (range) filter.
+  # As of 2026-06-16 only the binaries are live for these three — the
+  # priceBucket filters are pre-armed so we auto-capture buckets the day
+  # HL launches them (HL L2 is not backfillable). These are recorder-side
+  # only: engine slot allowlists are unchanged, so nothing trades them.
+  - venue: hyperliquid
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book, bbo]
+    match:
+      underlying: ETH
+      class: priceBinary
+
+  - venue: hyperliquid
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book, bbo]
+    match:
+      underlying: ETH
+      class: priceBucket
+
+  - venue: hyperliquid
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book, bbo]
+    match:
+      underlying: SOL
+      class: priceBinary
+
+  - venue: hyperliquid
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book, bbo]
+    match:
+      underlying: SOL
+      class: priceBucket
+
+  - venue: hyperliquid
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book, bbo]
+    match:
+      underlying: HYPE
+      class: priceBinary
+
+  - venue: hyperliquid
+    product_type: prediction_binary
+    mechanism: clob
+    symbol: "*"
+    channels: [trades, book, bbo]
+    match:
+      underlying: HYPE
       class: priceBucket
 
   # Hyperliquid spot BTC (UBTC/USDC, "@142" in spotMeta, displayed as BTC/USDC in UI).
