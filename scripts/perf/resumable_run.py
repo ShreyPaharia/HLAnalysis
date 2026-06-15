@@ -85,6 +85,23 @@ def classify(returncode: int, log_text: str, report_exists: bool) -> str:
     return RETRYABLE
 
 
+# --- chunk math -----------------------------------------------------------
+
+
+def num_chunks(n_questions: int, chunk_size: int) -> int:
+    """ceil(n / K). K==1 → one chunk per question. n==0 → 0."""
+    if n_questions <= 0:
+        return 0
+    return (n_questions + chunk_size - 1) // chunk_size
+
+
+def chunk_bounds(chunk_idx: int, n_questions: int, chunk_size: int) -> tuple[int, int]:
+    """(chunk_start, chunk_len) for chunk c: questions [c*K, min((c+1)*K, n))."""
+    start = chunk_idx * chunk_size
+    length = min(chunk_size, n_questions - start)
+    return start, length
+
+
 # --- config + job state ---------------------------------------------------
 
 

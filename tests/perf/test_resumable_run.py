@@ -186,6 +186,29 @@ class TestDriverFinish:
         assert drv.states[key].pnl == pytest.approx(55.50)
 
 
+# --- chunk math -----------------------------------------------------------
+
+
+class TestChunkMath:
+    def test_num_chunks_exact_multiple(self):
+        assert rr.num_chunks(50, 25) == 2
+
+    def test_num_chunks_partial_last(self):
+        assert rr.num_chunks(51, 25) == 3
+        assert rr.num_chunks(1, 25) == 1
+
+    def test_num_chunks_zero(self):
+        assert rr.num_chunks(0, 25) == 0
+
+    def test_num_chunks_size_one_is_per_question(self):
+        assert rr.num_chunks(7, 1) == 7
+
+    def test_chunk_bounds_full_and_partial(self):
+        assert rr.chunk_bounds(0, 51, 25) == (0, 25)
+        assert rr.chunk_bounds(1, 51, 25) == (25, 25)
+        assert rr.chunk_bounds(2, 51, 25) == (50, 1)
+
+
 # --- 2D sweep -------------------------------------------------------------
 
 
