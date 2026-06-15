@@ -46,6 +46,7 @@ Usage
     # aggregate completed cells without running:
     ... --aggregate-only
 """
+
 from __future__ import annotations
 
 import argparse
@@ -138,14 +139,22 @@ def build_run_argv(args, cfg: Config, q_global: int, out_dir: Path) -> list[str]
     config. Worker mode passes this straight to ``cli.main``."""
     argv = [
         "run",
-        "--data-source", "hl_hip4",
-        "--kind", args.kind,
-        "--start", args.start,
-        "--end", args.end,
-        "--skip-markets", str(q_global),
-        "--max-markets", "1",
-        "--workers", "1",
-        "--out-dir", str(out_dir),
+        "--data-source",
+        "hl_hip4",
+        "--kind",
+        args.kind,
+        "--start",
+        args.start,
+        "--end",
+        args.end,
+        "--skip-markets",
+        str(q_global),
+        "--max-markets",
+        "1",
+        "--workers",
+        "1",
+        "--out-dir",
+        str(out_dir),
     ]
     slot_config = cfg.slot_config or args.slot_config
     if args.slot:
@@ -162,9 +171,12 @@ def build_run_argv(args, cfg: Config, q_global: int, out_dir: Path) -> list[str]
     scan_max = cfg.scan_max if cfg.scan_max is not None else args.scan_max
     if scan_min is not None:
         argv += [
-            "--scan-mode", "event",
-            "--scan-min-interval-seconds", str(scan_min),
-            "--scan-max-interval-seconds", str(scan_max if scan_max is not None else 2.0),
+            "--scan-mode",
+            "event",
+            "--scan-min-interval-seconds",
+            str(scan_min),
+            "--scan-max-interval-seconds",
+            str(scan_max if scan_max is not None else 2.0),
         ]
     return argv
 
@@ -272,7 +284,7 @@ class Driver:
         env = dict(os.environ)
         env.setdefault("LOGURU_LEVEL", "ERROR")
         env.update(cfg.env)  # per-config env (e.g. HLBT_DEPTH_BACKEND)
-        cmd = build_cmd(self.args, cfg, idx, out_dir)
+        cmd = ["uv", "run", "hl-bt"] + build_run_argv(self.args, cfg, q_global=idx, out_dir=out_dir)
         # start_new_session=True → own process group, so we can kill the whole
         # subtree (incl. uv/python children) on timeout/shutdown. No orphans.
         p = subprocess.Popen(
@@ -310,8 +322,7 @@ class Driver:
             st.status = "done"
             st.pnl, st.n_trades = parse_pnl(out_dir)
             print(
-                f"[done]   {config_id}/q{idx:04d} rc={returncode} wall={st.wall_s}s "
-                f"pnl={st.pnl} trades={st.n_trades}",
+                f"[done]   {config_id}/q{idx:04d} rc={returncode} wall={st.wall_s}s pnl={st.pnl} trades={st.n_trades}",
                 flush=True,
             )
         else:
@@ -367,7 +378,10 @@ class Driver:
 
         done = sum(1 for s in self.states.values() if s.status == "done")
         failed = [k for k, s in self.states.items() if s.status == "failed"]
-        print(f"\n=== SUMMARY === done={done}/{len(self.states)} failed={len(failed)} {failed if failed else ''}", flush=True)
+        print(
+            f"\n=== SUMMARY === done={done}/{len(self.states)} failed={len(failed)} {failed if failed else ''}",
+            flush=True,
+        )
         return 1 if failed else 0
 
 
@@ -429,7 +443,9 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--max-retries", type=int, default=2, help="retries AFTER the first attempt")
     ap.add_argument("--timeout", type=float, default=3600.0, help="per-job wall timeout (s)")
-    ap.add_argument("--scan-min", type=float, default=None, help="event-mode min interval (s); omit to use slot default")
+    ap.add_argument(
+        "--scan-min", type=float, default=None, help="event-mode min interval (s); omit to use slot default"
+    )
     ap.add_argument("--scan-max", type=float, default=None)
     ap.add_argument("--aggregate-only", action="store_true")
     args = ap.parse_args()
