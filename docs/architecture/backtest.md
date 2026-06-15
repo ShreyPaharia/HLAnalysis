@@ -28,6 +28,7 @@ to live); `slot_config.py` is the live-slot → params bridge, guarded by
 | Caches | `data/_event_array_cache.py` (npz memo, ~5.7× compression), `data/_parquet_schema.py` (shared column constants + contract tests) |
 | Runner (sim loop) | `runner/hftbt_runner.py` (per-question loop, `hftbacktest` fills), `runner/parallel.py` (worker init, shared inventory ledger), `runner/_fills.py`, `runner/_routing.py`, `runner/_fees.py`, `runner/_latency.py`, `runner/market_state.py` (wraps the shared `MarketState`) |
 | Tuning | `tuning.py` (walk-forward grid, ProcessPool fan-out), `runner/walkforward.py` |
+| Resumable sweep driver | `scripts/perf/resumable_run.py` — crash-tolerant **warm-chunk** sweep driver: runs K questions × all configs per warm subprocess (in-process bundle-memo reuse, `--chunk-size` default 25), per-chunk resume, no-OOM/no-orphan. Use for big sweeps on the memory-constrained box; supports `--scan-mode event` cadence |
 | Halt replay | `halt_replay.py` (replays engine halt windows + caps in sim) |
 | Output | `report.py` (markdown), `runner/result.py` (Sharpe/hit/DD), `plots/` |
 

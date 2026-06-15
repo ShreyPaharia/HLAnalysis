@@ -1,11 +1,14 @@
-"""Tests for the resumable parallel backtest driver's supervisor logic.
+"""Tests for the warm-chunk resumable backtest driver (no real backtests run).
 
-Covers the crash-tolerance core (no real backtests run):
+Covers the supervisor + worker-mode logic:
   - classify(): success / retryable / deterministic decisions
   - parse_pnl(): reading total PnL + trades from a report.md
-  - Driver resume: a (config, question) with a .done marker is skipped
-  - Driver retry/fail: retryable failures requeue up to max_retries, then fail
-  - 2D sweep: jobs = configs × questions; per-config env/slot_config wiring
+  - chunk math: num_chunks / chunk_bounds
+  - chunk-keyed supervisor: queue of chunk indices, chunk done when all cells
+    (.done) exist, per-chunk retry/fail
+  - worker mode: question-outer/config-inner loop, memo env, per-cell skip,
+    per-config env overlay, non-zero rc on cell failure
+  - aggregate from report dirs; build_run_argv / config persistence / CLI args
 """
 
 from __future__ import annotations

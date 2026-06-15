@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Parallel, resumable, crash-tolerant driver for per-question HL backtests —
-single config OR a (config × question) tuning sweep.
+"""Parallel, resumable, crash-tolerant driver for HL backtests — single config
+OR a (config × question) tuning sweep, executed in **warm chunks**.
 
 Why this exists
 ---------------
@@ -9,42 +9,57 @@ memory-constrained box, can hang or OOM mid-corpus — and `pkill` on the parent
 leaves orphaned pool workers. There is also no resume: a crashed run re-replays
 every question from scratch.
 
-This driver runs **each (config, question) as its own isolated subprocess**
-(`--skip-markets i --max-markets 1 --workers 1`, i.e. in-process, no nested pool
-→ tiny memory footprint), supervised by a bounded **work-queue pool**:
+The warm-chunk model
+--------------------
+The unit of parallel work is a **chunk** = K consecutive questions run against
+the **whole config list** inside ONE warm subprocess (worker mode, below). Within
+that process the loop is question-outer / config-inner with the in-process bundle
+memo on (`HLBT_INPROC_BUNDLE_MEMO=1`): the first config to touch a question
+decodes its event bundle, the other M-1 configs reuse it from the memo. So for an
+M-config × N-question sweep the expensive data-decode + settlement work drops from
+M·N → ~N, and the `uv`/import cold-start from M·N → ~⌈N/K⌉ — typically an ~M×
+speedup on the data path, with no change to results (each cell is the same
+live-faithful `--slot` run → bit-identical to live).
 
-* a flat queue of M configs × N questions = M·N independent jobs; workers pick up
-  the next undone job as each finishes (work-stealing, full core utilisation),
-* a job whose result already exists is **skipped** (resume — re-running an
-  overlapping/larger grid continues where it left off),
-* a crashed/timed-out subprocess is **classified and retried** if retryable,
-* every attempt is logged to a JSON manifest,
-* the driver **reaps all child subprocess groups on exit** (no orphans).
+The supervisor runs each chunk as its OWN process group (own subprocess, so an
+OOM/crash kills one chunk, not the run), supervised by a bounded **work-queue
+pool**:
 
-Each job is the live-faithful `--slot` single-question run → **bit-identical to
-live**; only the per-config knobs vary. Memory is bounded by the pool size, not
-by M·N, so it doesn't OOM like the monolithic ProcessPool.
+* a queue of ⌈N/K⌉ chunk jobs; workers pick up the next undone chunk as each
+  finishes (work-stealing, full core utilisation),
+* `--workers N` runs N chunks concurrently, each with memo budget total/N
+  (`HLBT_INPROC_BUNDLE_MEMO_WORKERS`), so aggregate memo RAM stays bounded,
+* a chunk is **done** when every per-(config, question) `.done` marker exists;
+  cells already done are **skipped** (per-chunk resume, per-cell skip),
+* a crashed/timed-out chunk is **classified and retried** if retryable,
+* every attempt is logged to a JSON manifest; the driver **reaps all child
+  subprocess groups on exit** (no orphans).
 
-NOTE (intentional): per-question isolation does NOT enforce the cross-market
+Per-(config, question) report dirs (`out_base/<config_id>/qNNNN/`) are unchanged —
+the chunk only governs which subprocess computes them.
+
+NOTE (intentional): a chunk's per-question runs do NOT enforce the cross-market
 `max_total_inventory` / `max_concurrent_positions` caps. Accepted fidelity trade
 for HL binary; validate against a shared-ledger run if it matters (buckets).
 
 Usage
 -----
-    # single config (1D):
-    HLBT_HL_DATA_ROOT=../../../data uv run python scripts/perf/resumable_run.py \
+    # single config (warm chunks of 25 questions/subprocess by default):
+    HLBT_HL_DATA_ROOT=../../data uv run python scripts/perf/resumable_run.py \
         --slot v31 --kind binary --start 2026-05-06 --end 2026-06-11 \
-        --out-base /tmp/run_binary --workers 6
+        --out-base /tmp/run_binary --workers 6 --chunk-size 25 --scan-min 0.5 --scan-max 2.0
 
-    # sweep (2D): configs.json = [{"id":"fav085","slot_config":".../a.yaml"},
-    #                             {"id":"fav095","slot_config":".../b.yaml",
-    #                              "env":{"HLBT_DEPTH_BACKEND":"roi"},
-    #                              "scan_min":1.0,"scan_max":5.0}]
+    # sweep: configs.json = [{"id":"fav085","slot_config":".../a.yaml"},
+    #                        {"id":"fav095","slot_config":".../b.yaml",
+    #                         "scan_min":1.0,"scan_max":5.0}]
     ... --kind binary --start ... --end ... --out-base /tmp/sweep --configs configs.json --workers 6
 
-    # resume after a crash: re-run the same command.
+    # resume after a crash: re-run the same command (done chunks are skipped).
     # aggregate completed cells without running:
     ... --aggregate-only
+
+    # --chunk-size 1 reproduces the historical per-question resume granularity
+    # (still warm — imports paid once per question-subprocess).
 """
 
 from __future__ import annotations
