@@ -728,30 +728,39 @@ class StateDAL:
             row = s.exec(stmt).first()
         return row.model_dump() if row is not None else None
 
-    def prune_events(self, *, max_age_ns: int, max_rows: int) -> None:
+    def prune_events(self, *, max_age_ns: int, max_rows: int, _batch: int = 50_000) -> None:
         """Delete events older than max_age_ns, then enforce max_rows ceiling.
 
         Age prune runs first (primary). Row-count prune is a burst backstop:
         if a reject storm or heartbeat flood writes more rows than the age
         prune removes, the oldest rows above the ceiling are deleted.
         Both bounds apply on every call — caller decides the frequency.
+
+        Deletes are BATCHED (``_batch`` rows per transaction). A single delete of
+        a huge excess (e.g. a 3.7M-row backlog after a DB merge) ran for a long
+        time under one lock and blocked the synchronous events-persist loop;
+        batching bounds each transaction's cost and releases the lock between
+        passes. Steady-state excess is tiny (one batch), so this is a no-op cost.
         """
         cutoff_ns = time.time_ns() - max_age_ns
         with _Session(self._engine) as s:
-            # 1) Age prune
-            s.exec(delete(Event).where(Event.ts_ns < cutoff_ns))
-            # 2) Row-count ceiling: keep only the newest max_rows rows.
-            # We count current rows; if count > max_rows, delete the oldest
-            # (count - max_rows) rows. Using COUNT avoids the NULL-subquery
-            # problem when OFFSET >= row count (LIMIT 1 OFFSET N returns NULL
-            # when N >= count, causing `id <= NULL` to silently delete nothing
-            # or everything depending on the DB).
-            count = s.exec(select(func.count()).select_from(Event)).one()
-            excess = count - max_rows
-            if excess > 0:
-                oldest_ids = select(Event.id).order_by(Event.id.asc()).limit(excess)
+            # 1) Age prune (batched: delete oldest expired rows _batch at a time).
+            while True:
+                expired = select(Event.id).where(Event.ts_ns < cutoff_ns).limit(_batch)
+                deleted = s.exec(delete(Event).where(Event.id.in_(expired))).rowcount
+                s.commit()
+                if not deleted:
+                    break
+            # 2) Row-count ceiling: delete the oldest (count - max_rows) rows,
+            # _batch at a time. Recount each pass so we stop exactly at the cap.
+            while True:
+                count = s.exec(select(func.count()).select_from(Event)).one()
+                excess = count - max_rows
+                if excess <= 0:
+                    break
+                oldest_ids = select(Event.id).order_by(Event.id.asc()).limit(min(excess, _batch))
                 s.exec(delete(Event).where(Event.id.in_(oldest_ids)))
-            s.commit()
+                s.commit()
 
     # ---- trade journal (SHR-83) ----
 
@@ -829,25 +838,39 @@ class StateDAL:
                 s.exec(delete(TradeJournalRow).where(TradeJournalRow.cloid == cloid))
             s.commit()
 
-    def prune_trade_journal(self, *, max_age_ns: int, max_rows: int) -> None:
+    def prune_trade_journal(self, *, max_age_ns: int, max_rows: int, _batch: int = 50_000) -> None:
         """Delete journal rows older than max_age_ns, then enforce max_rows.
 
         Mirrors ``prune_events``: age prune is primary (rows older than the
         retention window are dropped — they are archived in the daily S3
         state.db snapshot), and the row-count ceiling is a burst backstop for a
         high-fan-out slot that journals faster than the age prune removes. Rows
-        are ordered by decision_ts_ns; the newest max_rows are kept."""
+        are ordered by decision_ts_ns; the newest max_rows are kept.
+
+        Deletes are BATCHED (``_batch`` per transaction) so a huge one-shot
+        delete can't block the synchronous persist loop (see prune_events)."""
         cutoff_ns = time.time_ns() - max_age_ns
         with _Session(self._engine) as s:
-            # 1) Age prune
-            s.exec(delete(TradeJournalRow).where(TradeJournalRow.decision_ts_ns < cutoff_ns))
-            # 2) Row-count ceiling: keep only the newest max_rows by decision_ts.
-            count = s.exec(select(func.count()).select_from(TradeJournalRow)).one()
-            excess = count - max_rows
-            if excess > 0:
-                oldest = select(TradeJournalRow.cloid).order_by(TradeJournalRow.decision_ts_ns.asc()).limit(excess)
+            # 1) Age prune (batched).
+            while True:
+                expired = select(TradeJournalRow.cloid).where(TradeJournalRow.decision_ts_ns < cutoff_ns).limit(_batch)
+                deleted = s.exec(delete(TradeJournalRow).where(TradeJournalRow.cloid.in_(expired))).rowcount
+                s.commit()
+                if not deleted:
+                    break
+            # 2) Row-count ceiling: delete the oldest excess by decision_ts, batched.
+            while True:
+                count = s.exec(select(func.count()).select_from(TradeJournalRow)).one()
+                excess = count - max_rows
+                if excess <= 0:
+                    break
+                oldest = (
+                    select(TradeJournalRow.cloid)
+                    .order_by(TradeJournalRow.decision_ts_ns.asc())
+                    .limit(min(excess, _batch))
+                )
                 s.exec(delete(TradeJournalRow).where(TradeJournalRow.cloid.in_(oldest)))
-            s.commit()
+                s.commit()
 
     # ---- realized pnl helpers ----
 

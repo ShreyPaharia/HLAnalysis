@@ -546,3 +546,30 @@ async def test_event_written_once_tagged_by_alias(tmp_path):
     by_sid = dict(c.execute("SELECT strategy_id, COUNT(*) FROM events GROUP BY strategy_id").fetchall())
     c.close()
     assert by_sid == {"v1": 1, "v31": 1}
+
+
+def test_prune_events_row_cap_batched(dal):
+    """Row-cap prune deletes in bounded batches (no single giant delete that
+    would block the persist loop), still leaving exactly the newest max_rows."""
+    base = time.time_ns()  # realistic ts so the age-prune doesn't fire
+    for i in range(25):
+        dal.append_event(ts_ns=base + i, alias="v1", kind="e", question_idx=i, reason=None, payload_json=None)
+    # tiny batch forces multiple delete passes; excess = 25 - 5 = 20
+    dal.prune_events(max_age_ns=14 * 24 * 3600 * 10**9, max_rows=5, _batch=4)
+    rows = dal.events_since(since_ts_ns=0)
+    assert len(rows) == 5
+    assert min(r["ts_ns"] for r in rows) == base + 20  # newest 5 kept
+
+
+def test_prune_events_age_batched(dal):
+    """Age prune also batches; all expired rows removed across passes."""
+    import time as _t
+
+    now = _t.time_ns()
+    old = now - 30 * 24 * 3600 * 10**9
+    for i in range(12):
+        dal.append_event(ts_ns=old + i, alias="v1", kind="old", question_idx=i, reason=None, payload_json=None)
+    dal.append_event(ts_ns=now, alias="v1", kind="new", question_idx=99, reason=None, payload_json=None)
+    dal.prune_events(max_age_ns=14 * 24 * 3600 * 10**9, max_rows=1_000_000, _batch=5)
+    rows = dal.events_since(since_ts_ns=0)
+    assert len(rows) == 1 and rows[0]["kind"] == "new"

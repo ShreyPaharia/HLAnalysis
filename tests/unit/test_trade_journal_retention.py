@@ -202,3 +202,13 @@ async def test_persist_loop_prunes_trade_journal(tmp_path):
 
     survivors = {f"j{i}" for i in range(6) if d.get_journal_row(f"j{i}") is not None}
     assert survivors == {"j4", "j5"}
+
+
+def test_prune_trade_journal_row_cap_batched(dal):
+    """Row-cap prune batches its deletes, still keeping exactly the newest max_rows."""
+    now = time.time_ns()
+    for i in range(25):
+        _decision(dal, f"b{i}", now + i)
+    dal.prune_trade_journal(max_age_ns=9999 * 24 * 3600 * 10**9, max_rows=5, _batch=4)
+    survivors = {f"b{i}" for i in range(25) if dal.get_journal_row(f"b{i}") is not None}
+    assert survivors == {f"b{i}" for i in range(20, 25)}
