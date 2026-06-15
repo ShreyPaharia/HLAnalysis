@@ -474,6 +474,28 @@ def gather_slot(
     )
 
 
+def _build_recon_dal(deploy_cfg, alias: str, *, strategy_id: str | None = None):
+    """Return the DAL to read a slot's state from.
+
+    Post-unification the engine writes ONE shared state.db whose rows are tagged
+    by strategy_id; read it via a StrategyScopedDAL scoped to this slot so
+    realized_pnl_since/all_positions are attributed correctly. Pre-unification
+    (no unified DB on disk yet) fall back to the legacy per-slot path. Mirrors
+    the unified-vs-legacy detection in diag.py / engine_events.py — opening a
+    stale per-slot DB (schema 0005, no fill.strategy_id) with the current ORM
+    raises "no such column" (the 2026-06-15 reconcile-report bug)."""
+    from pathlib import Path
+
+    from .diag import _is_unified_db
+    from .scoped_dal import StrategyScopedDAL
+    from .state import StateDAL
+
+    shared = Path(deploy_cfg.state_db_path_shared())
+    if shared.exists() and _is_unified_db(shared):
+        return StrategyScopedDAL(StateDAL(shared), strategy_id=strategy_id or alias, account=alias)
+    return StateDAL(Path(deploy_cfg.state_db_path_for(alias)))
+
+
 def build_report(
     deploy_cfg,
     strategies_cfg,
@@ -492,7 +514,6 @@ def build_report(
     window_hours controls the trailing PnL window (default 24h)."""
     from .config import HyperliquidAccount
     from .config_builders import build_exec_client
-    from .state import StateDAL
 
     if now_ns is None:
         now_ns = time.time_ns()
@@ -508,7 +529,7 @@ def build_report(
             # empty stub (account_value_usd=0, no positions) which would make the
             # report show false "vanished" drift and a zero account value.
             client = build_exec_client(alias, acct, paper_mode=False)
-            dal = StateDAL(Path(deploy_cfg.state_db_path_for(alias)))
+            dal = _build_recon_dal(deploy_cfg, alias, strategy_id=getattr(s_cfg, "strategy_id", None))
             # Only HL exposes an authoritative venue realized (user_fills
             # closedPnl); PM realized lives in our local settlement/fill ledger.
             fetch_venue_realized = isinstance(acct, HyperliquidAccount)
