@@ -3,15 +3,19 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
 from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
+from loguru import logger
 from sqlalchemy import delete, func
 from sqlmodel import Field, SQLModel, create_engine, select
 from sqlmodel import Session as _Session
+
+from hlanalysis.marketdata.position_math import DUST_QTY_ABS_TOL
 
 # Fill provenance (SHR-74). See Fill.source / 0004_fill_source.
 FILL_SOURCE_ROUTER = "router"
@@ -398,6 +402,22 @@ class StateDAL:
         with _Session(self._engine) as s:
             p = s.get(Position, (strategy_id, question_idx))
             if p is not None:
+                # DIAG (temporary, 2026-06-16): a still-held PM position (qty far
+                # above dust) vanishing without a sell fill or Exit event is the
+                # eth_ms paper-PM leak under investigation. None of the known
+                # delete paths can produce it, so log the caller chain + qty on
+                # the next live de-track to reveal which code path deletes a
+                # still-open position. Remove once root-caused.
+                if abs(p.qty) > DUST_QTY_ABS_TOL:
+                    callers = " <- ".join(f"{fr.name}:{fr.lineno}" for fr in traceback.extract_stack(limit=10)[:-1])
+                    logger.warning(
+                        "DIAG delete_position non-dust qty={:g} sid={} qidx={} symbol={} callers={}",
+                        p.qty,
+                        strategy_id,
+                        question_idx,
+                        p.symbol,
+                        callers,
+                    )
                 s.delete(p)
                 s.commit()
 
