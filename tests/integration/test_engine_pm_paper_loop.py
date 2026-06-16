@@ -9,7 +9,6 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
@@ -428,13 +427,16 @@ async def test_pm_updown_strike_captured_from_spot_close(cfgs):
 async def test_pm_updown_strike_reloaded_from_db_after_restart(cfgs):
     # Open was missed (strike_ref_ts 6h ago) so live capture can't fire; the
     # engine must reload the previously-persisted strike instead of skipping.
+    from hlanalysis.engine.scoped_dal import StrategyScopedDAL
     from hlanalysis.engine.state import StateDAL
 
     strategy_cfg, deploy_cfg = cfgs
-    # Pre-seed the slot's state DB as if a prior run had captured the open.
-    db_path = Path(deploy_cfg.state_db_path_for("v31_pm"))
-    seed = StateDAL(db_path)
-    seed.run_migrations()
+    # Pre-seed the SHARED state DB (scoped to the v31_pm slot) as if a prior run
+    # had captured the open. Unified DB: all slots share one file, and the slot's
+    # scoped DAL stamps strategy_id so the engine's reload read finds it.
+    base = StateDAL(deploy_cfg.state_db_path_shared())
+    base.run_migrations()
+    seed = StrategyScopedDAL(base, strategy_id="v31_pm", account="v31_pm")
     seed.set_pm_strike(909003, 71_000.0)
 
     runtime = EngineRuntime(

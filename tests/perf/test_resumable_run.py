@@ -36,6 +36,7 @@ def _restore_memo_env():
         else:
             os.environ[k] = v
 
+
 _SPEC = importlib.util.spec_from_file_location(
     "resumable_run",
     Path(__file__).resolve().parents[2] / "scripts" / "perf" / "resumable_run.py",

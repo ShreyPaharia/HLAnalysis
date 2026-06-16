@@ -1,7 +1,7 @@
 """Two strategies on two accounts, sharing one MarketState feed.
 
 Verifies the multi-account engine wiring:
-  - Each slot writes to its own state.db (per-account isolation)
+  - All slots share ONE state.db; per-strategy isolation via StrategyScopedDAL
   - Each slot's router stamps cloids with its account prefix
   - Daily-loss / kill-switch on one account does not halt the other
   - Both strategies observe entries on the same paper question
@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
@@ -28,6 +27,7 @@ from hlanalysis.engine.config import (
 )
 from hlanalysis.engine.hl_client import HLClient
 from hlanalysis.engine.runtime import EngineRuntime
+from hlanalysis.engine.scoped_dal import StrategyScopedDAL
 from hlanalysis.engine.state import StateDAL
 from hlanalysis.events import (
     BboEvent,
@@ -208,21 +208,21 @@ async def test_two_strategies_isolated_state(deploy_cfg, tmp_path):
     runtime.stop_event.set()
     await asyncio.wait_for(runtime_task, timeout=5.0)
 
-    # Per-account state DBs were created and ARE distinct files.
-    v1_db = tmp_path / "v1" / "state.db"
-    v31_db = tmp_path / "v31" / "state.db"
-    assert v1_db.exists(), "v1 state.db should be created under its alias subdir"
-    assert v31_db.exists(), "v31 state.db should be created under its alias subdir"
-    assert v1_db != v31_db
+    # Unified state DB: ONE shared file for the whole engine. Per-strategy
+    # isolation is provided by StrategyScopedDAL (strategy_id-keyed rows), not by
+    # separate per-alias files.
+    shared_db = tmp_path / "state.db"
+    assert shared_db.exists(), "shared state.db should be created"
+    base_dal = StateDAL(shared_db)
+    v1_dal = StrategyScopedDAL(base_dal, strategy_id="v1", account="v1")
+    v31_dal = StrategyScopedDAL(base_dal, strategy_id="v31", account="v31")
 
-    # Each DAL only sees ITS account's orders. Inspect the cloid prefixes on
-    # any order that was placed during the run — they must be account-tagged.
-    v1_dal = StateDAL(v1_db)
-    v31_dal = StateDAL(v31_db)
-    v1_orders = v1_dal.live_orders()
-    v31_orders = v31_dal.live_orders()
-    # At least one of the two should have placed an order (paper fills are
-    # immediate, so 'live_orders' is empty post-fill; check fills via paper HL).
+    # Each scoped DAL sees ONLY its strategy's rows. Both slots traded qidx 99,
+    # but each sees only its own position in the shared DB — no cross-talk.
+    assert v1_dal.get_position(99) is not None, "v1 should have a scoped position on qidx 99"
+    assert v31_dal.get_position(99) is not None, "v31 should have a scoped position on qidx 99"
+    # Paper fills are immediate, so 'live_orders' is empty post-fill; the actual
+    # cross-talk check is on the paper-book fills (cloid prefixes) below.
     v1_paper_fills = hl_clients["v1"]._paper_fills
     v31_paper_fills = hl_clients["v31"]._paper_fills
     # Both slots see the same market data and identical configs, so both
