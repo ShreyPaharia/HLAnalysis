@@ -149,6 +149,24 @@ class TestDriverChunkQueue:
         assert drv.states[0].status == "pending"
         assert 0 in drv.queue
 
+    def test_stale_manifest_done_requeues_when_cell_missing(self, tmp_path):
+        # All cells done → first Driver writes a manifest marking chunk 0 "done".
+        cfgs = [rr.Config(id="a"), rr.Config(id="b")]
+        for cid in ("a", "b"):
+            for q in (0, 1):
+                d = rr.qdir(Path(tmp_path), cid, q)
+                _write_report(d, "1.00", 1)
+                (d / ".done").write_text("1")
+        drv0 = rr.Driver(_args(tmp_path, chunk_size=2), cfgs, n_questions=3)
+        drv0.save_manifest()
+        assert drv0.states[0].status == "done"
+        # Now a cell's marker disappears; a fresh Driver must re-queue the chunk
+        # even though the manifest still says "done" (disk is authoritative).
+        (rr.qdir(Path(tmp_path), "b", 1) / ".done").unlink()
+        drv = rr.Driver(_args(tmp_path, chunk_size=2), cfgs, n_questions=3)
+        assert drv.states[0].status == "pending"
+        assert 0 in drv.queue
+
 
 # --- Driver retry / fail / success (chunk-keyed) --------------------------
 

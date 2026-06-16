@@ -261,8 +261,13 @@ class Driver:
             cells = self.cells_for_chunk(c)
             st.n_cells = len(cells)
             st.n_done = sum(1 for (cid, q) in cells if done_marker(qdir(self.out_base, cid, q)).exists())
+            # The on-disk .done markers are authoritative for completion. A chunk
+            # is done iff every cell is present; otherwise it must run — even if a
+            # stale manifest marked it "done" but a cell was since deleted.
             if st.n_cells > 0 and st.n_done == st.n_cells:
                 st.status = "done"
+            elif st.status == "done":
+                st.status = "pending"
         self.queue: list[int] = [c for c, s in self.states.items() if s.status not in ("done", "failed")]
         self.running: dict[int, tuple[subprocess.Popen, float, Path]] = {}
         self._stop = False
