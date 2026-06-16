@@ -679,3 +679,137 @@ async def test_pm_strike_mismatch_renders_to_telegram():
     _alias, body = rendered
     assert "strike" in body.lower()
     assert "73644.92" in body and "73501" in body
+
+
+@pytest.mark.asyncio
+async def test_venue_orphan_unattributed_uses_long_window():
+    # Incident 2026-06-16 (v31_pm_eth_ms): a venue CTF position the engine can't
+    # map to a question_idx (no QuestionMeta yet) emits `venue_orphan_unattributed`
+    # every 15s reconcile cycle for the WHOLE lifetime of the orphan — it can
+    # never auto-resolve live (we can't invent a PK). It is the exact sibling of
+    # `venue_orphan_alert_only` (an untracked venue position we keep visible but
+    # can't action live) and must share its long persistent window, else it pages
+    # ~240/h indefinitely. Default window 0 → only the persistent window can
+    # collapse the repeats to a single page.
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(
+        bus=bus,
+        telegram=tg,
+        dedupe_window_s=0,
+        persistent_dedupe_window_s=3600,
+    )
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    for i in range(5):
+        await bus.publish(
+            ReconcileDrift(
+                ts_ns=i,
+                account_alias="v31_pm_eth_ms",
+                case="position_mismatch",
+                question_idx=0,
+                detail={
+                    "resolution": "venue_orphan_unattributed",
+                    "symbol": "70157659436993854044046932311849719442991346126538747232925674511717196131500",
+                    "qty": "60.02",
+                },
+            )
+        )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    drift_msgs = [m for m in tg.messages if "DRIFT" in m]
+    assert len(drift_msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_max_concurrent_positions_veto_is_suppressed():
+    # Incident 2026-06-16 (v31_pm_eth_ms): when a slot is at its concurrent-position
+    # cap and the strategy keeps proposing entries on a question every scan, the
+    # `max_concurrent_positions` veto re-fires every tick with no operator action
+    # possible (the cap is the gate working as designed). Like the market-condition
+    # vetoes it must NOT page — it is still logged + journaled in the router. A
+    # genuinely actionable risk-state veto (daily_loss_cap, kill_switch_active)
+    # still pages.
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    await bus.publish(
+        RiskVeto(
+            ts_ns=1,
+            account_alias="v31_pm_eth_ms",
+            reason="max_concurrent_positions",
+            question_idx=2026151396,
+        )
+    )
+    await bus.publish(
+        RiskVeto(
+            ts_ns=2,
+            account_alias="v31_pm_eth_ms",
+            reason="daily_loss_cap",
+            question_idx=743427003,
+        )
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert not any("max_concurrent_positions" in m for m in tg.messages)
+    assert any("daily_loss_cap" in m for m in tg.messages)
+
+
+@pytest.mark.asyncio
+async def test_order_rejected_hl_no_match_is_suppressed():
+    # Incident 2026-06-16 (v1 / v31): an HL IOC order priced through a thin/empty
+    # book is rejected by HL with "Order could not immediately match against any
+    # resting orders" — the venue-side equivalent of PM's FAK no-match. It is the
+    # same self-healing microstructure (the next scan re-prices) and the
+    # pathological case is caught by the per-(question, side) reject
+    # circuit-breaker, so the single reject must NOT page. A genuine reject on the
+    # same leg still alerts.
+    tg = _FakeTelegram()
+    bus = EventBus()
+    rules = AlertRules(bus=bus, telegram=tg, dedupe_window_s=60)
+    sub = bus.subscribe()
+    task = asyncio.create_task(rules.run(sub))
+    await bus.publish(
+        OrderRejected(
+            ts_ns=1,
+            cloid="hla-v1-1",
+            question_idx=73,
+            symbol="#4070",
+            side="buy",
+            size=326.08,
+            price=0.92,
+            error="Order could not immediately match against any resting orders. asset=100004070",
+        )
+    )
+    await bus.publish(
+        OrderRejected(
+            ts_ns=2,
+            cloid="hla-v1-2",
+            question_idx=73,
+            symbol="#4070",
+            side="buy",
+            size=326.08,
+            price=0.92,
+            error="Insufficient margin",
+        )
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    rej_msgs = [m for m in tg.messages if "REJECTED" in m]
+    assert len(rej_msgs) == 1  # HL IOC no-match suppressed
+    assert "Insufficient margin" in rej_msgs[0]
+    assert not any("could not immediately match" in m for m in tg.messages)

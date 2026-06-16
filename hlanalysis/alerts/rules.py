@@ -73,6 +73,13 @@ _BENIGN_VETO_REASONS = frozenset(
         "depth_walk_slip",  # at-limit fill would exceed the slippage cap
         "order_below_min_notional",  # effective size clamped below the min-notional floor
         "post_exit_cooldown",  # churn guard — re-entry too soon after an exit
+        # Slot at its concurrent-position cap while the strategy keeps proposing
+        # entries every scan — the cap is the gate working as designed and
+        # re-fires every tick with no operator action possible (incident
+        # 2026-06-16 v31_pm_eth_ms q=2026151396). An untracked position eating a
+        # slot still surfaces via the venue_orphan/qty_mismatch drift alerts, so
+        # suppressing this page loses no visibility.
+        "max_concurrent_positions",
         "settled",  # market already cash-settled
         "allowlist_no_match",  # question not in this slot's allowlist
         "blocklist",  # question explicitly blocked
@@ -98,6 +105,13 @@ _PERSISTENT_DRIFT_RESOLUTIONS = frozenset(
         "venue_orphan_alert_only",
         "venue_absent_alert_only",
         "qty_mismatch_alert_only",
+        # A venue position whose symbol can't be mapped to a question_idx yet
+        # (no QuestionMeta ingested) — the reconciler can't invent a PK to adopt
+        # it, so it re-fires every cycle for the orphan's whole lifetime, exactly
+        # like venue_orphan_alert_only (incident 2026-06-16 v31_pm_eth_ms, a
+        # 60.02-share CTF token). Kept visible (still needs eventual manual
+        # resolution / settlement) but on the long window, not every cycle.
+        "venue_orphan_unattributed",
     }
 )
 
@@ -284,18 +298,23 @@ class AlertRules:
                 lines.append(f"<code>q={ev.question_idx}</code> <code>{_e(ev.symbol)}</code>")
                 return f"exit:{ev.question_idx}:{ev.reason}", "\n".join(lines)
             case OrderRejected():
-                # A marketable IOC (FAK) order that finds no resting match is
-                # KILLED by PM ("no orders found to match with FAK order. FAK
-                # orders are partially filled or killed if no match is found").
-                # That is expected microstructure — the book ticked past our
-                # limit between read and send — and it self-heals: the next scan
-                # re-prices and the entry fills. Don't page on it. A genuine
+                # A marketable IOC order that finds no resting match is killed by
+                # the venue:
+                #   PM → "no orders found to match with FAK order. FAK orders are
+                #         partially filled or killed if no match is found."
+                #   HL → "Order could not immediately match against any resting
+                #         orders." (incident 2026-06-16 v1/v31 IOC through a thin
+                #         book)
+                # Both are expected microstructure — the book ticked past our
+                # limit between read and send — and self-heal: the next scan
+                # re-prices and the entry fills. Don't page on either. A genuine
                 # pathological case (price never marketable) trips the
                 # per-(question, side) reject circuit-breaker (SHR-45), which
                 # alerts separately, so suppressing the single reject is safe.
-                if ev.error and "no orders found to match" in ev.error.lower():
+                _err = (ev.error or "").lower()
+                if "no orders found to match" in _err or "could not immediately match" in _err:
                     logger.debug(
-                        "suppressing self-healing FAK no-match reject q={} sym={}",
+                        "suppressing self-healing IOC no-match reject q={} sym={}",
                         ev.question_idx,
                         _e(ev.symbol),
                     )
