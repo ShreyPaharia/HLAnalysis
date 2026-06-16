@@ -362,6 +362,12 @@ class EngineRuntime:
                     dal=slot.dal,
                     block_path=slot.kill_switch_path.parent / "restart_blocked",
                     account_alias=slot.alias,
+                    # Paper slots have a synthetic, always-empty venue after a
+                    # restart; applying venue truth there would silently vanish
+                    # every held DB position (orphaning shares, re-entering from
+                    # flat). Trust the paper ledger instead — mirrors the
+                    # steady-state reconcile loop's paper guard.
+                    paper_mode=getattr(slot.exec_client, "paper_mode", False),
                 )
                 venue_open, venue_state, all_fills = await self._venue_snapshot(slot)
                 drift_res = gate.run(

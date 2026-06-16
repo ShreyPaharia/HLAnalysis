@@ -36,11 +36,13 @@ class RestartDriftGate:
         block_path: Path,
         auto_clear_on_clean: bool = False,
         account_alias: str = "",
+        paper_mode: bool = False,
     ) -> None:
         self.dal = dal
         self.block_path = block_path
         self.auto_clear = auto_clear_on_clean
         self.account_alias = account_alias
+        self.paper_mode = paper_mode
 
     def run(
         self,
@@ -50,12 +52,22 @@ class RestartDriftGate:
         fills_lookup: Callable[[str], list[UserFillRow]],
         now_ns: int,
     ) -> RestartDriftResult:
-        # Restart is exactly when venue truth SHOULD win — the engine may have
-        # missed fills while down. apply_position_changes defaults True.
+        # Restart is exactly when venue truth SHOULD win for a LIVE slot — the
+        # engine may have missed fills while down, so apply_position_changes
+        # defaults True (vanish/adopt against the real venue). A PAPER slot has
+        # no real venue: its in-memory clearinghouse is empty after every
+        # restart, so applying would treat every held DB position as
+        # "vanished from venue" and delete it (silently — the startup path does
+        # not publish the settlement Exit the steady-state loop does), orphaning
+        # the shares and re-entering from flat. This is the exact failure the
+        # steady-state reconcile loop already guards against (see runtime.py
+        # "Paper PM slots have no real venue positions"); the startup gate must
+        # match it. Paper slots trust their own fill ledger exclusively.
         rec = Reconciler(
             self.dal,
             fills_lookup=fills_lookup,
             account_alias=self.account_alias,
+            apply_position_changes=not self.paper_mode,
         )
         res = rec.run(venue_open=venue_open, venue_state=venue_state, now_ns=now_ns)
 
@@ -79,7 +91,17 @@ class RestartDriftGate:
                 # reaches drift_events here. A real qty/avg_entry mismatch
                 # still flows through as a position_mismatch DRIFT with a
                 # hl_qty/db_qty detail and remains loud.
-                if (d.detail or {}).get("resolution") == "venue_orphan_unattributed":
+                # venue_orphan_unattributed: venue position with no local row +
+                #   no symbol→question map yet (adopted next tick).
+                # venue_absent_alert_only: a held LOCAL position the venue does
+                #   not report — emitted only in alert-only mode (paper slots at
+                #   restart, where the synthetic venue is always empty). The
+                #   ledger is authoritative there, so it must not block: a paper
+                #   slot holding anything would otherwise restart_block forever.
+                if (d.detail or {}).get("resolution") in (
+                    "venue_orphan_unattributed",
+                    "venue_absent_alert_only",
+                ):
                     return False
             return d.case in self.LOUD_CASES
 
