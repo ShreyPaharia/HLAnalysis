@@ -14,11 +14,27 @@ Covers the supervisor + worker-mode logic:
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_memo_env():
+    """run_worker_chunk sets HLBT_INPROC_BUNDLE_MEMO=1 on os.environ (fine in its
+    own worker subprocess, but it would leak into the shared pytest process and
+    flip the bundle memo ON for unrelated cache tests). Snapshot + restore."""
+    keys = ("HLBT_INPROC_BUNDLE_MEMO", "HLBT_INPROC_BUNDLE_MEMO_WORKERS")
+    saved = {k: os.environ.get(k) for k in keys}
+    yield
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 _SPEC = importlib.util.spec_from_file_location(
     "resumable_run",
