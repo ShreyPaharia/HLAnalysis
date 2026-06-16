@@ -157,6 +157,45 @@ async def test_halted_scan_loop_blocks_new_entries(tmp_path):
     assert place_calls == [], "halted slot must not place any orders — new entries are blocked"
 
 
+@pytest.mark.asyncio
+async def test_blocked_scan_loop_suspends_new_entries(tmp_path):
+    """A slot blocked mid-session by a drift gate (material_qty_drift / restart
+    drift) must STOP scanning for new entries.
+
+    slot.blocked can flip to True while the scan loop is ALREADY running, so the
+    loop must re-check it every iteration — not only at spawn time. The startup
+    gate (runtime _scan_loop is spawned only when ``not slot.blocked``) does NOT
+    cover a mid-session trip: the running task is never cancelled. Incident
+    2026-06-16 v31: tripped material_qty_drift at 20:17 yet kept entering #4010
+    for 7h because the scan loop ignored the freshly-set block flag."""
+    rt, slot = _build_runtime_with_recording(tmp_path)
+
+    scan_calls: list = []
+    _orig_scan = slot.scanner.scan
+    slot.scanner.scan = lambda *a, **kw: (  # type: ignore[assignment]
+        scan_calls.append((a, kw)) or _orig_scan(*a, **kw)
+    )
+
+    async def _burst() -> None:
+        task = asyncio.create_task(rt._scan_loop(slot))
+        await asyncio.sleep(0.15)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    # Control: an un-blocked slot DOES scan (proves the loop is actually driving
+    # the scanner, so the blocked assertion below isn't vacuously true).
+    slot.blocked = False
+    await _burst()
+    assert scan_calls, "control: an un-blocked slot must scan each tick"
+
+    # A slot blocked mid-session must NOT scan — the loop re-checks slot.blocked.
+    scan_calls.clear()
+    slot.blocked = True
+    await _burst()
+    assert scan_calls == [], "blocked slot must suspend scanning (no new entries)"
+
+
 # ---------------------------------------------------------------------------
 # B) Stop-loss exits still work while halted
 # ---------------------------------------------------------------------------
@@ -224,6 +263,68 @@ async def test_stop_loss_enforced_while_halted(tmp_path):
     assert place_calls, (
         "_enforce_stop_losses must place a stop-exit even while slot is halted — "
         "the latch blocks new entries, not protective exits"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_enforced_while_blocked(tmp_path):
+    """While slot.blocked is True (drift gate), stop-loss enforcement must STILL
+    run so an open position is defended. The drift block suspends NEW entries
+    (scan loop) but must not abandon an existing position to an unmanaged drift
+    to zero — protective exits keep running. This pins that _enforce_stop_losses
+    does not gain a slot.blocked short-circuit (the companion to the scan-loop
+    suspension)."""
+    from hlanalysis.engine.state import Position as _Pos
+
+    rt, slot = _build_runtime_with_recording(tmp_path)
+    slot.blocked = True  # drift-gate block, NOT a daily-loss halt
+    slot.halted = False
+
+    stop_price = 0.9
+    slot.dal.upsert_position(
+        _Pos(
+            question_idx=42,
+            symbol="@30",
+            qty=10.0,
+            avg_entry=0.95,
+            stop_loss_price=stop_price,
+            realized_pnl=0.0,
+            last_update_ts_ns=_NOW,
+        )
+    )
+
+    from hlanalysis.events import (
+        BboEvent,
+        Mechanism,
+        ProductType,
+    )
+    import time as _t
+
+    ts = _t.time_ns()
+    rt.market_state.apply(
+        BboEvent(
+            venue="hyperliquid",
+            product_type=ProductType.PREDICTION_BINARY,
+            mechanism=Mechanism.CLOB,
+            symbol="@30",
+            exchange_ts=ts,
+            local_recv_ts=ts,
+            bid_px=0.50,
+            bid_sz=5.0,
+            ask_px=0.51,
+            ask_sz=5.0,
+        )
+    )
+
+    place_calls: list = []
+    _orig_place = slot.exec_client.place
+    slot.exec_client.place = lambda *a, **kw: place_calls.append((a, kw)) or _orig_place(*a, **kw)
+
+    await rt._enforce_stop_losses(slot, now_ns=_t.time_ns())
+
+    assert place_calls, (
+        "_enforce_stop_losses must place a stop-exit even while slot is blocked — "
+        "the drift gate suspends new entries, not protective exits"
     )
 
 

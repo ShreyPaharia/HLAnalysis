@@ -196,6 +196,15 @@ class AccountSlot:
     # Restart-drift gate result for this slot — if True, the scanner does NOT
     # run for this slot but other slots may still trade.
     blocked: bool = False
+    # Material qty-drift debounce + auto-clear state (incident 2026-06-16 v31).
+    # material_drift_streak = consecutive reconciles showing material qty drift
+    # (debounce before blocking); material_clean_streak = consecutive clean
+    # reconciles while blocked (auto-clear). material_drift_blocked marks a block
+    # that was set BY material_qty_drift, so only those auto-clear — a startup
+    # restart-drift block stays latched for the operator.
+    material_drift_streak: int = 0
+    material_clean_streak: int = 0
+    material_drift_blocked: bool = False
     last_reconcile_ns: int = 0
     scans_completed: int = 0
     decisions_emitted: int = 0
@@ -281,6 +290,18 @@ class EngineRuntime:
     # before the kernel OOM-killer fires. Default is ~85% of a 1 GB box.
     # Override on EngineRuntime for different box sizes.
     rss_halt_kb: int = 850_000
+    # Material qty-drift debounce + auto-clear (incident 2026-06-16 v31). A single
+    # reconcile sample can show a transient >material qty gap during HFT churn (a
+    # large in-flight order counted on the venue clearinghouse but not yet in the
+    # local hot-path counter, or vice-versa). Require the material drift to
+    # PERSIST this many consecutive reconciles before blocking, and auto-RESUME a
+    # material-drift block once it has been clean for this many consecutive
+    # reconciles — so a transient/recovered drift self-heals instead of wedging
+    # the slot until an operator restart. The startup restart-drift block is NOT
+    # auto-cleared (it stays latched for inspection); only runtime
+    # material_qty_drift blocks debounce/auto-clear.
+    material_drift_debounce_cycles: int = 3
+    material_drift_clear_cycles: int = 3
 
     # ---------- legacy single-strategy compatibility ----------
 
@@ -640,7 +661,15 @@ class EngineRuntime:
         min_iv = float(getattr(g, "scan_min_interval_seconds", 1.0))
         max_iv = float(getattr(g, "scan_max_interval_seconds", 1.0))
         while not self.stop_event.is_set():
-            if slot.halted:
+            # Suspend new entries while the slot is halted (daily-loss latch) OR
+            # blocked (drift gate). slot.blocked can flip to True mid-session —
+            # material_qty_drift / restart-drift set it on the reconcile loop
+            # while THIS task is already running — so it must be re-checked every
+            # iteration, not only at spawn time. Without this re-check a slot that
+            # tripped a drift halt keeps placing entries against an untrusted
+            # ledger (incident 2026-06-16 v31 #4010). Exits/stop-loss run in a
+            # separate loop and are intentionally not gated here.
+            if slot.halted or slot.blocked:
                 await self._sleep_or_stop(1.0)
                 continue
             try:
@@ -648,9 +677,9 @@ class EngineRuntime:
                 slot.scanner.last_reconcile_ns = slot.last_reconcile_ns
                 realized_today = await self._realized_pnl_today(slot, now_ns=now)
                 # SHR-83: slot halt-state at decision time for the journal. The
-                # scan loop only runs for an un-blocked, un-halted slot (blocked
-                # slots get no scan loop; halted slots skip above), so those flags
-                # are False here — but realized_pnl_today vs the cap is the live
+                # scan loop only runs for an un-blocked, un-halted slot (both are
+                # skipped above), so those flags are False here — but
+                # realized_pnl_today vs the cap is the live
                 # margin the sim's halt-replay needs. The router augments this with
                 # the per-(question,side) reject-breaker + stale-reference bits.
                 halt = HaltSnapshot(
@@ -824,6 +853,39 @@ class EngineRuntime:
             venue_pnl_failures=self._venue_pnl_failures,
             daily_loss_venue_fail_halt=self.daily_loss_venue_fail_halt,
         )
+
+    def _gate_material_drift(self, slot: AccountSlot, material_drift: bool) -> str | None:
+        """Debounce a material qty drift before halting, and auto-clear the block
+        once it resolves.
+
+        Called once per reconcile with the cycle's ``res.material_qty_drift``.
+        Mutates the slot's streak counters and ``blocked`` /
+        ``material_drift_blocked``. Returns ``"blocked"`` when THIS call newly
+        blocks the slot (the drift just persisted past the debounce), ``"cleared"``
+        when it auto-resumes a material-drift block (clean past the clear count),
+        else ``None``.
+
+        Only a block this gate set (``material_drift_blocked``) auto-clears — a
+        startup restart-drift block stays latched for the operator. See the
+        EngineRuntime ``material_drift_*_cycles`` fields for the rationale
+        (incident 2026-06-16 v31: one transient HFT sample wedged the slot 7h)."""
+        if material_drift:
+            slot.material_clean_streak = 0
+            slot.material_drift_streak += 1
+            if slot.material_drift_streak >= self.material_drift_debounce_cycles and not slot.blocked:
+                slot.blocked = True
+                slot.material_drift_blocked = True
+                return "blocked"
+            return None
+        slot.material_drift_streak = 0
+        if slot.blocked and slot.material_drift_blocked:
+            slot.material_clean_streak += 1
+            if slot.material_clean_streak >= self.material_drift_clear_cycles:
+                slot.blocked = False
+                slot.material_drift_blocked = False
+                slot.material_clean_streak = 0
+                return "cleared"
+        return None
 
     async def _reconcile_loop(self, slot: AccountSlot) -> None:
         interval = slot.cfg.global_.reconcile_interval_seconds
@@ -1013,11 +1075,13 @@ class EngineRuntime:
                 # natural "halt new entries" mechanism for reconcile-discovered
                 # problems — it's what the restart-drift gate uses — so we set
                 # it here and publish a RiskHalt for the Telegram alert channel.
-                if res.material_qty_drift and not slot.blocked:
-                    slot.blocked = True
+                action = self._gate_material_drift(slot, res.material_qty_drift)
+                if action == "blocked":
                     logger.error(
-                        "MATERIAL QTY DRIFT alias={} — blocking new entries (scanner suspended)",
+                        "MATERIAL QTY DRIFT alias={} persisted {} reconciles — "
+                        "blocking new entries (scanner suspended)",
                         slot.alias,
+                        slot.material_drift_streak,
                     )
                     await self.bus.publish(
                         RiskHalt(
@@ -1025,6 +1089,17 @@ class EngineRuntime:
                             account_alias=slot.alias,
                             reason="material_qty_drift",
                         )
+                    )
+                elif action == "cleared":
+                    # Auto-resume: the drift the gate flagged has been clean for
+                    # material_drift_clear_cycles reconciles, so the slot un-blocks
+                    # itself and the next pass adopts venue truth (apply=True) +
+                    # respawns trading. Logged loudly (no RiskHalt page — that text
+                    # reads as a NEW halt) so `make engine-logs` shows the resume.
+                    logger.warning(
+                        "MATERIAL QTY DRIFT alias={} auto-cleared after {} clean reconciles — resuming scanner",
+                        slot.alias,
+                        self.material_drift_clear_cycles,
                     )
                 for cloid, symbol in res.orphans_to_cancel:
                     await asyncio.to_thread(
