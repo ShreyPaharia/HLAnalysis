@@ -63,7 +63,7 @@ def _read_book_columns(
     tbl = con.sql(
         f"""
         SELECT exchange_ts, bid_px, bid_sz, ask_px, ask_sz
-        FROM read_parquet('{glob}', hive_partitioning=1)
+        FROM read_parquet('{glob}', hive_partitioning=1, union_by_name=true)
         WHERE date IN ({",".join(repr(d) for d in date_list)})
           AND exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
         ORDER BY exchange_ts
@@ -96,7 +96,7 @@ def _read_trade_columns(
     tbl = con.sql(
         f"""
         SELECT exchange_ts, price, size, side
-        FROM read_parquet('{glob}', hive_partitioning=1)
+        FROM read_parquet('{glob}', hive_partitioning=1, union_by_name=true)
         WHERE date IN ({",".join(repr(d) for d in date_list)})
           AND exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
         ORDER BY exchange_ts
@@ -144,6 +144,88 @@ def _read_settlement_columns(
 # ---------------------------------------------------------------------------
 
 
+def _leg_best_bid_ask_maxima(
+    con: duckdb.DuckDBPyConnection,
+    glob: str,
+    date_list: list[str],
+    start_ns: int,
+    end_ns: int,
+) -> tuple[float, float] | None:
+    """Return ``(max_best_bid, max_best_ask)`` over the question window, or None
+    when the leg has no in-window snapshots.
+
+    ``max_best_bid`` = the highest the best (top-of-book) bid ever reached;
+    ``max_best_ask`` = the highest the best (lowest) ask ever reached. These are
+    the only book quantities the favorite gate can depend on (see
+    ``_is_prunable_bucket_leg``). The aggregate is a metadata-light scan — no
+    Arrow materialisation of the 20-level book — so it is far cheaper than the
+    full ``_read_book_columns`` + event-array build it lets us skip.
+
+    ``union_by_name=true`` tolerates empty-book leg files whose ``bid_px`` /
+    ``ask_px`` arrays are NULL-typed (DuckDB infers the union schema from the
+    first file otherwise and fails to cast a real ``DOUBLE[]`` to ``NULL[]``).
+    """
+    df = ",".join(repr(d) for d in date_list)
+    sql = f"""
+        SELECT max(list_max(bid_px)) AS max_best_bid,
+               max(list_min(ask_px)) AS max_best_ask
+        FROM read_parquet('{glob}', hive_partitioning=1, union_by_name=true)
+        WHERE date IN ({df})
+          AND exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
+        """
+    row = con.sql(sql).fetchone()
+    if row is None:
+        return None
+    mbid, mask = row
+    if mbid is None and mask is None:
+        return None
+    return (
+        float(mbid) if mbid is not None else float("-inf"),
+        float(mask) if mask is not None else float("-inf"),
+    )
+
+
+def _is_prunable_bucket_leg(
+    con: duckdb.DuckDBPyConnection,
+    leg: str,
+    idx: int,
+    q: QuestionDescriptor,
+    date_list: list[str],
+    threshold: float,
+    book_glob_for: Any,
+) -> bool:
+    """True iff this bucket leg can NEVER be entered/held/exited, so loading its
+    book is wasted work and emitting an empty (no-quote) leg is decision-identical.
+
+    Two provably-safe cases:
+
+    1. **Odd index = NO leg.** ``theta_harvester._evaluate_entry`` restricts
+       bucket candidate legs to even (YES) indices, so a NO leg is never entered
+       → never held → never exited. Its book is only ever read by ``books.get``
+       for a held leg or a candidate leg, neither of which a NO leg can be. Prune
+       unconditionally. (The bucket settlement winner is derived from BTC +
+       priceThresholds read straight from parquet in ``leg_payoff`` — independent
+       of the bundle — so dropping a NO leg's events changes no payoff either.)
+
+    2. **YES leg whose best bid AND best ask both stay below ``threshold``.** The
+       favorite gate is ``_mid(book) >= favorite_threshold`` and in every branch
+       ``_mid <= max(best_bid, best_ask)``. So if, over the whole window, the best
+       bid and best ask never reach ``threshold``, the gate never fires → the leg
+       is never entered. A leg with no book files / no in-window rows is likewise
+       untradeable.
+    """
+    if idx % 2 == 1:
+        return True
+    glob = book_glob_for(leg)
+    if not _glob_has_files(glob):
+        return True
+    maxima = _leg_best_bid_ask_maxima(con, glob, date_list, q.start_ts_ns, q.end_ts_ns)
+    if maxima is None:
+        return True
+    max_best_bid, max_best_ask = maxima
+    return max_best_bid < threshold and max_best_ask < threshold
+
+
 def build_fast_path_bundle(
     *,
     con: duckdb.DuckDBPyConnection,
@@ -156,17 +238,40 @@ def build_fast_path_bundle(
     ref_event_kind: Literal["bbo", "mark"],
     reference_resample_ns: int = _DEFAULT_REFERENCE_RESAMPLE_NS,
     reference_ticks: Literal["bars", "raw"] = "bars",
+    leg_prune_favorite_threshold: float | None = None,
 ) -> FastPathBundle:
     """Assemble the per-leg event arrays + reference + settlement events.
 
     The ``*_glob_for`` callables map a symbol to its parquet glob; they're
     passed in so we don't depend on the data source's private helpers.
+
+    ``leg_prune_favorite_threshold`` (priceBucket only): when set, legs that can
+    never be entered at this favorite threshold are emitted as empty (no-quote)
+    legs WITHOUT decoding/replaying their book — a behavior-preserving speed-up
+    for many-leg bucket questions (most middle/tail buckets never become
+    favorites). See ``_is_prunable_bucket_leg`` for the safety argument. ``None``
+    (default) loads every leg, exactly as before.
     """
+    do_prune = leg_prune_favorite_threshold is not None and q.klass == "priceBucket"
     leg_arrays: dict[str, LegArrays] = {}
     # Trade events per leg: built alongside the event arrays so the runner can
     # drain them into MarketState for the recent_volume_usd gate (SHR-78).
     trade_events_per_leg: dict[str, list[TradeEvent]] = {}
-    for leg in q.leg_symbols:
+    for leg_idx, leg in enumerate(q.leg_symbols):
+        if do_prune and _is_prunable_bucket_leg(
+            con, leg, leg_idx, q, date_list, leg_prune_favorite_threshold, book_glob_for
+        ):
+            # Untradeable leg → emit exactly what a no-book leg produces (empty
+            # event array, empty book_ts / snap_best). Skips the expensive
+            # DuckDB read + diff_clears + event assembly for this leg.
+            leg_arrays[leg] = LegArrays(
+                events=build_leg_event_array_from_columns(None, None),
+                book_ts=np.zeros(0, dtype=np.int64),
+                snap_best_ask=snap_best_from_columns(None)[0],
+                snap_best_bid=snap_best_from_columns(None)[1],
+            )
+            trade_events_per_leg[leg] = []
+            continue
         book_glob = book_glob_for(leg)
         trade_glob = trade_glob_for(leg)
         book_cols = (
@@ -266,4 +371,6 @@ __all__ = [
     "FastPathBundle",
     "build_leg_event_array_from_columns",
     "build_fast_path_bundle",
+    "_is_prunable_bucket_leg",
+    "_leg_best_bid_ask_maxima",
 ]

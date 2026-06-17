@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import heapq
 import logging
+import os
 import re
 import time
 from collections.abc import Iterator
@@ -213,6 +214,7 @@ class HLHip4DataSource:
         reference_resample_seconds: int = 60,
         reference_warmup_seconds: int = 0,
         reference_ticks: Literal["bars", "raw"] = "bars",
+        leg_prune_favorite_threshold: float | None = None,
     ) -> None:
         self.data_root = Path(data_root)
         self.ref_event = ref_event
@@ -245,6 +247,20 @@ class HLHip4DataSource:
         if reference_ticks not in ("bars", "raw"):
             raise ValueError(f"reference_ticks must be 'bars' or 'raw', got {reference_ticks!r}")
         self.reference_ticks: Literal["bars", "raw"] = reference_ticks
+        # Bucket leg pruning (priceBucket only): skip decoding/replaying legs
+        # that can never be entered/held/exited (NO legs + YES legs whose best
+        # bid/ask never reach the favorite threshold). Decision-identical to a
+        # full load — see _hl_hip4_fastpath._is_prunable_bucket_leg. None (default)
+        # = no pruning, bit-identical to legacy. Falls back to the
+        # HLBT_HL_BUCKET_LEG_PRUNE env var (a float favorite threshold) when the
+        # kwarg is unset, so the optimisation propagates to spawn/chunk workers
+        # without threading a new SourceConfig field. Must be folded into
+        # _bundle_config_sig so a pruned bundle is never served for an unpruned
+        # request (and vice versa).
+        if leg_prune_favorite_threshold is None:
+            _env = os.environ.get("HLBT_HL_BUCKET_LEG_PRUNE")
+            leg_prune_favorite_threshold = float(_env) if _env else None
+        self.leg_prune_favorite_threshold = leg_prune_favorite_threshold
         # Cached per-instance: question_id -> parsed metadata bundle.
         self._meta_cache: dict[str, _QuestionMeta] = {}
         # Cached per-instance: question_id -> settled outcome. resolved_outcome
@@ -405,6 +421,7 @@ class HLHip4DataSource:
                     ref_event_kind=evt,
                     reference_resample_ns=self._reference_resample_ns,
                     reference_ticks=self.reference_ticks,
+                    leg_prune_favorite_threshold=self.leg_prune_favorite_threshold,
                 )
             finally:
                 con.close()
@@ -440,6 +457,7 @@ class HLHip4DataSource:
             f"|refsrc={self.ref_source}"
             f"|warmup={self._reference_warmup_ns}"
             f"|refticks={self.reference_ticks}"
+            f"|prune={self.leg_prune_favorite_threshold}"
         )
 
     def _fastpath_source_files(self, q: QuestionDescriptor) -> list[Path]:
