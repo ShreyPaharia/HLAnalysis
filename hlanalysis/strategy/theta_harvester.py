@@ -302,6 +302,21 @@ class ThetaHarvesterStrategy(Strategy):
             if pp is None:
                 continue  # NO leg of a middle bucket — no contiguous winning region
             p_win, phi_d = pp
+            # Entry-side safety_d floor (hysteresis with exit_safety_d). Skip a
+            # leg whose σ√τ distance to its nearest adverse boundary is below the
+            # floor — this blocks the immediate re-buy after an exit_safety_d cut
+            # (price still near the strike) that drives the v31 churn loop.
+            if self.cfg.min_safety_d > 0.0:
+                entry_safety_d = _safety_d_for_region(
+                    reference_price=reference_price,
+                    lo=lo,
+                    hi=hi,
+                    sigma=sigma,
+                    mu_eff=mu_eff,
+                    tau_yr=tau_yr,
+                )
+                if entry_safety_d is not None and entry_safety_d < self.cfg.min_safety_d:
+                    continue
             fee = fee_per_share(self.cfg, p_win, side="entry")
             edge = p_win - book.ask_px - fee - self.cfg.half_spread_assumption
             per_leg.append((sym, p_win, edge, book, phi_d))

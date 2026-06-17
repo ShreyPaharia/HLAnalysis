@@ -63,6 +63,9 @@ class ThetaHarvesterParams(BaseModel):
     topup_min_notional_usd: float = 11.0
     # === optional: exit extras / vol estimator / jump gate ===
     exit_safety_d: float = 0.0
+    # Entry-side safety_d floor (mirrors v1's min_safety_d). Forms a hysteresis
+    # band with exit_safety_d to stop enter→exit→re-enter churn. 0 disables.
+    min_safety_d: float = 0.0
     vol_estimator: str = "sample_std"
     lm_threshold: float | None = None
     exit_take_profit_mode: bool = False
@@ -193,6 +196,15 @@ class ThetaHarvesterConfig:
     # drifting toward the boundary, catching long-TTE losers earlier.
     # 0.0 disables (legacy behavior). Typical values: 0.25-1.0 (σ-units).
     exit_safety_d: float = 0.0
+    # Entry-side safety_d floor — the gate v1 (late_resolution) has but theta
+    # historically lacked. Requires the candidate leg's σ√τ distance from its
+    # nearest adverse boundary to be ≥ this before entering. Paired with a
+    # lower exit_safety_d it forms a hysteresis band [exit_safety_d, min_safety_d]:
+    # enter only when safely distant, exit when it drifts close, HOLD in between.
+    # This breaks the post-exit_safety_d re-entry churn (a cut at safety_d<1.0
+    # immediately re-bought on edge) while preserving the protective exit.
+    # Should be > exit_safety_d to avoid thrashing on the boundary. 0 disables.
+    min_safety_d: float = 0.0
     # v3.2-volclock: vol estimator selector. "sample_std" preserves the v3.1
     # baseline (rolling sample stdev, ddof=1). "bipower" swaps in the jump-
     # robust Barndorff-Nielsen bipower variation σ — single-bar wicks no longer
@@ -367,6 +379,7 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         topup_threshold_pct=float(params.get("topup_threshold_pct", _D.topup_threshold_pct)),
         topup_min_notional_usd=float(params.get("topup_min_notional_usd", _D.topup_min_notional_usd)),
         exit_safety_d=float(params.get("exit_safety_d", _D.exit_safety_d)),
+        min_safety_d=float(params.get("min_safety_d", _D.min_safety_d)),
         vol_estimator=str(params.get("vol_estimator", _D.vol_estimator)),
         lm_threshold=(float(params["lm_threshold"]) if params.get("lm_threshold") is not None else _D.lm_threshold),
         exit_take_profit_mode=bool(params.get("exit_take_profit_mode", _D.exit_take_profit_mode)),
