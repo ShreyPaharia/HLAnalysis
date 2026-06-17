@@ -65,6 +65,28 @@ class ThetaHarvesterStrategy(Strategy):
     def _cfg_for(self, question: QuestionView) -> ThetaHarvesterConfig:
         return self._cfg_by_class.get(question.klass, self._default_cfg)
 
+    def decision_lookback_seconds(self) -> int | None:
+        """Max seconds of ``recent_returns`` theta consumes, across the default
+        cfg AND every per-class override (so no class is under-provisioned).
+
+        Per-cfg consumption is the largest of the count-based tail slices the
+        evaluator takes:
+          * σ / LM gate     → ``vol_lookback_seconds`` (``[-vol_lookback//dt:]``)
+          * drift μ         → ``drift_lookback_seconds`` (``[-drift_lookback//dt:]``)
+          * momentum/MR gate→ ``momentum_mr_lookback_min`` SAMPLES, i.e.
+                              ``momentum_mr_lookback_min · vol_sampling_dt_seconds``
+                              seconds — only when ``momentum_mr_enabled``.
+        The lead-lag veto reads only ``recent_returns[-1]`` (covered by any of
+        the above). See Strategy.decision_lookback_seconds.
+        """
+        need = 0
+        for c in (self._default_cfg, *self._cfg_by_class.values()):
+            n = max(int(c.vol_lookback_seconds), int(c.drift_lookback_seconds))
+            if c.momentum_mr_enabled:
+                n = max(n, int(c.momentum_mr_lookback_min) * int(c.vol_sampling_dt_seconds))
+            need = max(need, n)
+        return need or None
+
     def evaluate(
         self,
         *,

@@ -27,6 +27,26 @@ class Strategy(ABC):
     # True is the safe/legacy behaviour (always build it).
     consumes_hl_bars: bool = True
 
+    def decision_lookback_seconds(self) -> int | None:
+        """Seconds of ``recent_returns``/``recent_hl_bars`` history this strategy
+        actually consumes per ``evaluate()``, or ``None`` to use the caller's
+        default window.
+
+        The backtest runner reads the σ/drift inputs over the RunConfig default
+        (86_400s ≈ a full day), then re-tuples that array every scan tick — at
+        dt=5 a 17 280-element array, the single biggest sim cost. A strategy that
+        only ever slices the most-recent ``N`` samples can report ``N·dt`` here so
+        the runner bounds the array to what matters. ``None`` (default) keeps the
+        legacy full window — correct for range-σ strategies (late_resolution's
+        Parkinson) until they declare their own bound.
+
+        Mirrors the live scanner's ``_lookback_secs`` derivation. The runner
+        provisions a safety margin over the reported value (the time-bounded
+        window is re-sliced by COUNT downstream), so report the strategy's true
+        consumption, not a padded value.
+        """
+        return None
+
     @abstractmethod
     def evaluate(
         self,
