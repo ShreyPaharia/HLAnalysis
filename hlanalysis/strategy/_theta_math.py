@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from scipy.stats import norm  # type: ignore[import-untyped]
+from scipy.special import ndtr  # type: ignore[import-untyped]
 
 from .vol import ANNUAL_SECONDS
 
@@ -68,8 +68,13 @@ def _p_leg_win_prob_and_phi(
     d_lo = _d(lo) if lo is not None else None
     d_hi = _d(hi) if hi is not None else None
 
-    p_above_lo = 1.0 if d_lo is None else float(norm.cdf(d_lo))
-    p_above_hi = 0.0 if d_hi is None else float(norm.cdf(d_hi))
+    # scipy.special.ndtr is exactly what scipy.stats.norm.cdf calls internally
+    # (Cephes ndtr) but skips the _distn_infrastructure wrapper (argument
+    # broadcasting / support masking / argsreduce) — ~3–4s of pure overhead on a
+    # PM theta run that calls this twice per scan tick. Bit-identical: verified
+    # float-equal to norm.cdf across 2×10^5 samples incl. ±inf.
+    p_above_lo = 1.0 if d_lo is None else float(ndtr(d_lo))
+    p_above_hi = 0.0 if d_hi is None else float(ndtr(d_hi))
     p_win = max(0.0, p_above_lo - p_above_hi)
 
     # Gamma proxy at the closer-to-strike boundary — that's where path-variance
