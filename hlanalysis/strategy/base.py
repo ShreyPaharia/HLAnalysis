@@ -18,6 +18,15 @@ class Strategy(ABC):
 
     name: str = "base"
 
+    # Whether evaluate() actually reads ``recent_hl_bars``. Only range-based σ
+    # estimators (Parkinson, Garman-Klass — used by late_resolution) need the
+    # per-bar (high, low) side-channel; return-based strategies (theta_harvester)
+    # ignore it. The runner/engine use this to SKIP materialising the HL-bar
+    # tuple (a ~1350-element tuple-of-tuples rebuilt every scan tick — ~79% of
+    # sim runtime at 1s cadence) for strategies that don't consume it. Default
+    # True is the safe/legacy behaviour (always build it).
+    consumes_hl_bars: bool = True
+
     @abstractmethod
     def evaluate(
         self,

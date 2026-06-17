@@ -482,6 +482,12 @@ def run_one_question(
     _ref_dt_s: int = int(getattr(data_source, "reference_resample_seconds", 60))
     state.set_reference_cadence(_ref_dt_s)
     stop_pct = _strategy_stop_loss_pct(strategy)
+    # Skip materialising recent_hl_bars for strategies that never read it
+    # (theta_harvester). Building that ~1350-element tuple-of-tuples every scan
+    # tick is ~79% of the 1s-cadence scan-loop runtime; passing () is bit-identical
+    # for a non-consumer. Range-based σ strategies (late_resolution/Parkinson)
+    # leave consumes_hl_bars=True and get the full tuple. See Strategy.consumes_hl_bars.
+    _consumes_hl_bars = getattr(strategy, "consumes_hl_bars", True)
     scan_interval_ns = cfg.scanner_interval_seconds * 1_000_000_000
 
     # Reference events are kept sorted and consumed incrementally.
@@ -695,8 +701,11 @@ def run_one_question(
         recent_returns: tuple[float, ...] = tuple(_rets_arr.tolist())
         # FIX B: bulk C-level unbox via .tolist() then build inner tuples —
         # bit-identical to float(h)/float(lo) but avoids per-element numpy
-        # scalar boxing in the Python loop (~68% of backtest runtime).
-        recent_hl_bars: tuple[tuple[float, float], ...] = tuple((h, lo) for h, lo in _hl_arr.tolist())
+        # scalar boxing in the Python loop (~68% of backtest runtime). Built
+        # ONLY when the strategy consumes it (skip for theta — see above).
+        recent_hl_bars: tuple[tuple[float, float], ...] = (
+            tuple((h, lo) for h, lo in _hl_arr.tolist()) if _consumes_hl_bars else ()
+        )
         ref_close = state.latest_btc_close() or qv.strike
 
         decision = strategy.evaluate(

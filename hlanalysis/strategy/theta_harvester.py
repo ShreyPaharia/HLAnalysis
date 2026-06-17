@@ -43,6 +43,10 @@ from .vol import annualized_sigma, bipower_variation_sigma
 
 class ThetaHarvesterStrategy(Strategy):
     name = "theta_harvester"
+    # theta derives σ from recent_returns only; it never reads recent_hl_bars
+    # (the param is accepted for the shared evaluate() contract but unused). Tell
+    # the runner/engine to skip building the HL-bar tuple — see Strategy.consumes_hl_bars.
+    consumes_hl_bars = False
 
     def __init__(
         self,
