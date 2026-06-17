@@ -60,6 +60,19 @@ Usage
 
     # --chunk-size 1 reproduces the historical per-question resume granularity
     # (still warm — imports paid once per question-subprocess).
+
+    # Polymarket: same driver, --data-source polymarket. Recorded (live-faithful)
+    # path:
+    HLBT_HL_DATA_ROOT=../../data HLBT_PM_CACHE_ROOT=../../data/sim \
+        uv run python scripts/perf/resumable_run.py \
+        --data-source polymarket --slot v31_pm --kind binary \
+        --start 2026-05-27 --end 2026-06-17 --out-base /tmp/pm_sweep \
+        --pm-book-source recorded --pm-reference-source binance_bbo \
+        --pm-binance-bbo-product-type spot --fee-model pm_binary --fee-rate 0.07 \
+        --workers 6 --chunk-size 25
+    # …or the klines/pulled path: --pm-reference-source klines (synthetic book).
+    # PM/fee flags are per-config overridable in configs.json just like
+    # scan_min/scan_max (e.g. {"id":"rec","pm_book_source":"recorded"}).
 """
 
 from __future__ import annotations
@@ -123,13 +136,30 @@ def chunk_bounds(chunk_idx: int, n_questions: int, chunk_size: int) -> tuple[int
 
 @dataclass
 class Config:
-    """One tuning cell: a variant slot config and/or per-config env + cadence."""
+    """One tuning cell: a variant slot config and/or per-config env + cadence.
+
+    The PM / fee knobs (``pm_*``, ``fee_*``, ``cache_root``) are per-config
+    overrides of the corresponding driver-level flags: ``None`` falls back to
+    the ``args`` value, mirroring how ``scan_min``/``scan_max``/``slot_config``
+    already work. They only affect the inner ``hl-bt run`` argv when the run is
+    ``--data-source polymarket`` (``cache_root`` aside, which is emitted for PM).
+    ``--data-source`` itself is driver-global (it governs question discovery,
+    which is config-independent), so it is NOT per-config.
+    """
 
     id: str
     slot_config: str | None = None  # variant strategy.yaml; None → use --slot-config / base
     env: dict[str, str] = field(default_factory=dict)  # e.g. {"HLBT_DEPTH_BACKEND": "roi"}
     scan_min: float | None = None  # event-mode min interval; None → slot default
     scan_max: float | None = None
+    # PM / fee per-config overrides (None → fall back to the driver-level arg).
+    pm_flavor: str | None = None
+    pm_book_source: str | None = None
+    pm_reference_source: str | None = None
+    pm_binance_bbo_product_type: str | None = None
+    fee_model: str | None = None
+    fee_rate: float | None = None
+    cache_root: str | None = None
 
 
 @dataclass
@@ -150,11 +180,20 @@ class ChunkState:
 def build_run_argv(args, cfg: Config, q_global: int, out_dir: Path) -> list[str]:
     """The ``hl-bt`` argv (sans the ``uv run hl-bt`` prefix) for ONE cell —
     a single question (``--skip-markets q_global --max-markets 1``) under one
-    config. Worker mode passes this straight to ``cli.main``."""
+    config. Worker mode passes this straight to ``cli.main``.
+
+    HL (``--data-source hl_hip4``) argv is byte-identical to the legacy driver;
+    the PM (``--data-source polymarket``) branch additionally emits the PM
+    source flags (``--pm-flavor`` / ``--pm-book-source`` /
+    ``--pm-reference-source`` / ``--pm-binance-bbo-product-type``) and the fee
+    flags (``--fee-model`` / ``--fee-rate``), so PM backtests run through the
+    same warm-chunk/resume/no-orphan driver as HL.
+    """
+    data_source = getattr(args, "data_source", None) or "hl_hip4"
     argv = [
         "run",
         "--data-source",
-        "hl_hip4",
+        data_source,
         "--kind",
         args.kind,
         "--start",
@@ -192,7 +231,46 @@ def build_run_argv(args, cfg: Config, q_global: int, out_dir: Path) -> list[str]
             "--scan-max-interval-seconds",
             str(scan_max if scan_max is not None else 2.0),
         ]
+    if data_source == "polymarket":
+        argv += _pm_fee_argv(args, cfg)
     return argv
+
+
+def _resolve(cfg: Config, args, name: str):
+    """Per-config override of a driver-level arg: ``cfg.<name>`` when set, else
+    ``args.<name>`` (mirrors the scan_min/scan_max fallback)."""
+    cfg_val = getattr(cfg, name, None)
+    if cfg_val is not None:
+        return cfg_val
+    return getattr(args, name, None)
+
+
+def _pm_fee_argv(args, cfg: Config) -> list[str]:
+    """PM source + fee flags for the inner ``hl-bt run`` argv (polymarket only).
+
+    Each knob is a per-config override of the driver-level arg. ``--cache-root``
+    is emitted only when set (PM cache root is otherwise read from
+    ``HLBT_PM_CACHE_ROOT`` in the inherited environment); HL never gets a
+    ``--cache-root`` here so its argv stays byte-identical.
+    """
+    out: list[str] = []
+    pm_flavor = _resolve(cfg, args, "pm_flavor") or "btc_updown"
+    pm_book_source = _resolve(cfg, args, "pm_book_source") or "synthetic"
+    pm_reference_source = _resolve(cfg, args, "pm_reference_source") or "klines"
+    pm_bbo_product = _resolve(cfg, args, "pm_binance_bbo_product_type") or "perp"
+    fee_model = _resolve(cfg, args, "fee_model") or "flat"
+    fee_rate = _resolve(cfg, args, "fee_rate")
+    out += ["--pm-flavor", str(pm_flavor)]
+    out += ["--pm-book-source", str(pm_book_source)]
+    out += ["--pm-reference-source", str(pm_reference_source)]
+    out += ["--pm-binance-bbo-product-type", str(pm_bbo_product)]
+    out += ["--fee-model", str(fee_model)]
+    if fee_rate is not None:
+        out += ["--fee-rate", str(fee_rate)]
+    cache_root = _resolve(cfg, args, "cache_root")
+    if cache_root:
+        out += ["--cache-root", str(cache_root)]
+    return out
 
 
 def report_path(out_dir: Path) -> Path:
@@ -231,11 +309,26 @@ def parse_pnl(out_dir: Path) -> tuple[float | None, int | None]:
 
 
 def discover_count(args) -> int:
-    """Number of questions in [start,end) for the kind — config-independent."""
-    from hlanalysis.backtest.data.hl_hip4 import HLHip4DataSource
+    """Number of questions in [start,end) for the kind — config-independent.
+
+    Branches on ``--data-source``: PM enumerates via ``PolymarketDataSource``
+    (manifest-backed), HL via ``HLHip4DataSource`` (recorded parquet). The HL
+    path is unchanged from the legacy driver.
+    """
+    data_source = getattr(args, "data_source", None) or "hl_hip4"
+    if data_source == "polymarket":
+        import hlanalysis.backtest.data.polymarket as pm_mod
+        from hlanalysis.backtest.core.source_config import PM_FLAVORS
+
+        cache_root = getattr(args, "cache_root", None) or os.environ.get("HLBT_PM_CACHE_ROOT", "data/sim")
+        flavor = getattr(args, "pm_flavor", None) or "btc_updown"
+        ds = pm_mod.PolymarketDataSource(cache_root=Path(cache_root), **PM_FLAVORS[flavor])
+        return len(ds.discover(start=args.start, end=args.end, kind=args.kind))
+
+    import hlanalysis.backtest.data.hl_hip4 as hl_mod
 
     data_root = os.environ.get("HLBT_HL_DATA_ROOT", "data")
-    ds = HLHip4DataSource(data_root)
+    ds = hl_mod.HLHip4DataSource(data_root)
     klass = "priceBucket" if args.kind == "bucket" else "priceBinary"
     return len(ds.discover(start=args.start, end=args.end, kinds=(klass,)))
 
@@ -337,7 +430,26 @@ class Driver:
             str(self.chunk_size),
             "--n-questions",
             str(self.n_questions),
+            # Track + PM/fee defaults: the worker reconstructs the inner argv via
+            # build_run_argv, which reads these off its own parsed args (per-config
+            # overrides still come from the persisted _configs.json).
+            "--data-source",
+            self.args.data_source,
+            "--pm-flavor",
+            self.args.pm_flavor,
+            "--pm-book-source",
+            self.args.pm_book_source,
+            "--pm-reference-source",
+            self.args.pm_reference_source,
+            "--pm-binance-bbo-product-type",
+            self.args.pm_binance_bbo_product_type,
+            "--fee-model",
+            self.args.fee_model,
+            "--fee-rate",
+            str(self.args.fee_rate),
         ]
+        if self.args.cache_root:
+            cmd += ["--cache-root", self.args.cache_root]
         if self.args.slot:
             cmd += ["--slot", self.args.slot]
         if self.args.slot_config:
@@ -502,10 +614,63 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--end", required=True)
     ap.add_argument("--out-base", required=True)
     ap.add_argument("--configs", default=None, help="JSON list of config cells for a sweep; omit for single config")
+    ap.add_argument(
+        "--data-source",
+        choices=["hl_hip4", "polymarket"],
+        default="hl_hip4",
+        help="Question track. hl_hip4 (default) = HL HIP-4 recorded binaries/buckets; "
+        "polymarket = PM L2 (mirrors `hl-bt run --data-source polymarket`).",
+    )
     ap.add_argument("--slot", default=None)
     ap.add_argument("--slot-config", default=None)
     ap.add_argument("--slot-class", default=None)
     ap.add_argument("--strategy", default=None)
+    # PM source flags (polymarket only) — mirror `hl-bt run`. Per-config
+    # overridable via configs.json (same mechanism as scan_min/scan_max).
+    ap.add_argument(
+        "--pm-flavor",
+        default="btc_updown",
+        help="(polymarket only) Which PM series + reference asset to load.",
+    )
+    ap.add_argument(
+        "--pm-book-source",
+        choices=["synthetic", "recorded"],
+        default="synthetic",
+        help="(polymarket only) Fill-book source. `recorded` feeds the real L2 book.",
+    )
+    ap.add_argument(
+        "--pm-reference-source",
+        choices=["klines", "binance_bbo", "klines_1s"],
+        default="klines",
+        help="(polymarket only) Reference-feed source. `klines` = cached 1m Binance "
+        "klines (pulled path); `binance_bbo` = recorded Binance BBO ticks (live-faithful).",
+    )
+    ap.add_argument(
+        "--pm-binance-bbo-product-type",
+        choices=["perp", "spot"],
+        default="perp",
+        dest="pm_binance_bbo_product_type",
+        help="(polymarket binance_bbo only) Binance product type. `spot` matches PM's "
+        "settlement instrument (Binance SPOT 1m close).",
+    )
+    # Fee model (mirrors `hl-bt run`). PM uses pm_binary; HL uses flat.
+    ap.add_argument(
+        "--fee-model",
+        choices=["flat", "pm_binary"],
+        default="flat",
+        help="Binary-leg fee model. `flat` (HL) vs `pm_binary` (Polymarket curve).",
+    )
+    ap.add_argument(
+        "--fee-rate",
+        type=float,
+        default=0.07,
+        help="feeRate for --fee-model pm_binary (PM crypto = 0.07).",
+    )
+    ap.add_argument(
+        "--cache-root",
+        default=None,
+        help="(polymarket only) Override the PM cache/data root (env: HLBT_PM_CACHE_ROOT).",
+    )
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument(
         "--chunk-size",

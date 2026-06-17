@@ -118,6 +118,15 @@ def _args(out_base: Path, **kw) -> SimpleNamespace:
         scan_min=None,
         scan_max=None,
         chunk_size=25,
+        # PM / fee / data-source knobs (defaults mirror the CLI).
+        data_source="hl_hip4",
+        pm_flavor="btc_updown",
+        pm_book_source="synthetic",
+        pm_reference_source="klines",
+        pm_binance_bbo_product_type="perp",
+        fee_model="flat",
+        fee_rate=0.07,
+        cache_root=None,
     )
     base.update(kw)
     return SimpleNamespace(**base)
@@ -279,6 +288,220 @@ class TestSweep2D:
         assert [c.id for c in cfgs] == ["a", "b"]
         assert cfgs[0].slot_config == "/a.yaml"
         assert cfgs[1].env == {"K": "v"}
+
+
+# --- Polymarket support ---------------------------------------------------
+
+
+class TestPMSupport:
+    def test_hl_argv_byte_identical_to_legacy(self, tmp_path):
+        """HL argv must not gain any PM/fee flags — the byte-identical guarantee."""
+        cfg = rr.Config(id="roi", slot_config="/tmp/variant.yaml", scan_min=1.0, scan_max=5.0)
+        argv = rr.build_run_argv(_args(tmp_path), cfg, q_global=3, out_dir=tmp_path / "o")
+        assert argv == [
+            "run",
+            "--data-source",
+            "hl_hip4",
+            "--kind",
+            "binary",
+            "--start",
+            "2026-05-06",
+            "--end",
+            "2026-06-11",
+            "--skip-markets",
+            "3",
+            "--max-markets",
+            "1",
+            "--workers",
+            "1",
+            "--out-dir",
+            str(tmp_path / "o"),
+            "--slot",
+            "v31",
+            "--slot-config",
+            "/tmp/variant.yaml",
+            "--scan-mode",
+            "event",
+            "--scan-min-interval-seconds",
+            "1.0",
+            "--scan-max-interval-seconds",
+            "5.0",
+        ]
+
+    def test_pm_argv_emits_pm_and_fee_flags(self, tmp_path):
+        a = _args(
+            tmp_path,
+            data_source="polymarket",
+            slot="v31_pm",
+            pm_flavor="btc_updown",
+            pm_book_source="recorded",
+            pm_reference_source="binance_bbo",
+            pm_binance_bbo_product_type="spot",
+            fee_model="pm_binary",
+            fee_rate=0.07,
+        )
+        argv = rr.build_run_argv(a, rr.Config(id="base"), q_global=0, out_dir=tmp_path / "o")
+        assert argv[argv.index("--data-source") + 1] == "polymarket"
+        assert argv[argv.index("--slot") + 1] == "v31_pm"
+        assert argv[argv.index("--pm-flavor") + 1] == "btc_updown"
+        assert argv[argv.index("--pm-book-source") + 1] == "recorded"
+        assert argv[argv.index("--pm-reference-source") + 1] == "binance_bbo"
+        assert argv[argv.index("--pm-binance-bbo-product-type") + 1] == "spot"
+        assert argv[argv.index("--fee-model") + 1] == "pm_binary"
+        assert argv[argv.index("--fee-rate") + 1] == "0.07"
+
+    def test_pm_argv_per_config_overrides(self, tmp_path):
+        a = _args(
+            tmp_path,
+            data_source="polymarket",
+            slot="v31_pm",
+            pm_reference_source="klines",
+            pm_book_source="synthetic",
+            fee_model="flat",
+            fee_rate=0.07,
+        )
+        cfg = rr.Config(
+            id="variant",
+            pm_reference_source="binance_bbo",
+            pm_book_source="recorded",
+            pm_binance_bbo_product_type="spot",
+            fee_model="pm_binary",
+            fee_rate=0.03,
+        )
+        argv = rr.build_run_argv(a, cfg, q_global=0, out_dir=tmp_path / "o")
+        assert argv[argv.index("--pm-reference-source") + 1] == "binance_bbo"
+        assert argv[argv.index("--pm-book-source") + 1] == "recorded"
+        assert argv[argv.index("--pm-binance-bbo-product-type") + 1] == "spot"
+        assert argv[argv.index("--fee-model") + 1] == "pm_binary"
+        assert argv[argv.index("--fee-rate") + 1] == "0.03"
+
+    def test_pm_argv_emits_cache_root_when_set(self, tmp_path):
+        a = _args(tmp_path, data_source="polymarket", slot="v31_pm", cache_root="../../data/sim")
+        argv = rr.build_run_argv(a, rr.Config(id="base"), q_global=0, out_dir=tmp_path / "o")
+        assert argv[argv.index("--cache-root") + 1] == "../../data/sim"
+
+    def test_hl_argv_omits_cache_root_even_when_set(self, tmp_path):
+        # cache_root override is PM-only here; HL stays byte-identical (env-driven).
+        a = _args(tmp_path, cache_root="../../data")
+        argv = rr.build_run_argv(a, rr.Config(id="base"), q_global=0, out_dir=tmp_path / "o")
+        assert "--cache-root" not in argv
+
+    def test_cli_data_source_default_is_hl(self):
+        ap = rr._build_arg_parser()
+        ns = ap.parse_args(["--kind", "binary", "--start", "x", "--end", "y", "--out-base", "/o", "--slot", "v31"])
+        assert ns.data_source == "hl_hip4"
+        assert ns.pm_flavor == "btc_updown"
+        assert ns.fee_model == "flat"
+
+    def test_cli_pm_args_parse(self):
+        ap = rr._build_arg_parser()
+        ns = ap.parse_args(
+            [
+                "--data-source",
+                "polymarket",
+                "--kind",
+                "binary",
+                "--start",
+                "x",
+                "--end",
+                "y",
+                "--out-base",
+                "/o",
+                "--slot",
+                "v31_pm",
+                "--pm-book-source",
+                "recorded",
+                "--pm-reference-source",
+                "binance_bbo",
+                "--pm-binance-bbo-product-type",
+                "spot",
+                "--fee-model",
+                "pm_binary",
+                "--fee-rate",
+                "0.07",
+            ]
+        )
+        assert ns.data_source == "polymarket"
+        assert ns.pm_book_source == "recorded"
+        assert ns.pm_reference_source == "binance_bbo"
+        assert ns.pm_binance_bbo_product_type == "spot"
+        assert ns.fee_model == "pm_binary"
+        assert ns.fee_rate == 0.07
+
+    def test_config_roundtrip_pm_fields(self, tmp_path):
+        cfgs = [
+            rr.Config(
+                id="a",
+                pm_book_source="recorded",
+                pm_reference_source="binance_bbo",
+                pm_binance_bbo_product_type="spot",
+                fee_model="pm_binary",
+                fee_rate=0.03,
+            )
+        ]
+        p = rr.write_configs_file(tmp_path, cfgs)
+        back = rr.load_configs_file(p)
+        assert back[0].pm_book_source == "recorded"
+        assert back[0].pm_reference_source == "binance_bbo"
+        assert back[0].pm_binance_bbo_product_type == "spot"
+        assert back[0].fee_model == "pm_binary"
+        assert back[0].fee_rate == 0.03
+
+    def test_load_configs_sweep_with_pm_overrides(self, tmp_path):
+        import json
+
+        cfg_json = tmp_path / "configs.json"
+        cfg_json.write_text(
+            json.dumps(
+                [
+                    {"id": "base"},
+                    {"id": "recorded", "pm_book_source": "recorded", "fee_model": "pm_binary"},
+                ]
+            )
+        )
+        cfgs = rr.load_configs(_args(tmp_path, configs=str(cfg_json)))
+        assert [c.id for c in cfgs] == ["base", "recorded"]
+        assert cfgs[0].pm_book_source is None  # falls back to args
+        assert cfgs[1].pm_book_source == "recorded"
+        assert cfgs[1].fee_model == "pm_binary"
+
+    def test_discover_count_uses_polymarket_source(self, tmp_path, monkeypatch):
+        captured = {}
+
+        class _FakePM:
+            def __init__(self, **kw):
+                captured["ctor"] = kw
+
+            def discover(self, *, start, end, kind="both", **_):
+                captured["discover"] = dict(start=start, end=end, kind=kind)
+                return ["q0", "q1", "q2"]
+
+        import hlanalysis.backtest.data.polymarket as pm_mod
+
+        monkeypatch.setattr(pm_mod, "PolymarketDataSource", _FakePM)
+        a = _args(tmp_path, data_source="polymarket", kind="binary", cache_root="/tmp/sim")
+        n = rr.discover_count(a)
+        assert n == 3
+        assert captured["discover"]["kind"] == "binary"
+        assert str(captured["ctor"]["cache_root"]) == "/tmp/sim"
+
+    def test_discover_count_uses_hl_source_by_default(self, tmp_path, monkeypatch):
+        captured = {}
+
+        class _FakeHL:
+            def __init__(self, data_root):
+                captured["data_root"] = data_root
+
+            def discover(self, *, start, end, kinds):
+                captured["kinds"] = kinds
+                return ["a", "b"]
+
+        import hlanalysis.backtest.data.hl_hip4 as hl_mod
+
+        monkeypatch.setattr(hl_mod, "HLHip4DataSource", _FakeHL)
+        n = rr.discover_count(_args(tmp_path, kind="binary"))
+        assert n == 2
+        assert captured["kinds"] == ("priceBinary",)
 
 
 # --- config persistence ---------------------------------------------------
