@@ -115,8 +115,15 @@ _BASELINE_MATCH_RATE = 0.90  # measured 1.0000; floor at 90% catches regressions
 # p90 = 0.004 is non-zero only at a few ticks before the σ lookback is fully warm.
 _BASELINE_SIGMA_REL = 0.05  # measured 0.00; ceiling allows small warm-up drift
 
-# Measured 2026-06-12: n_sim_actions=3. Floor catches "sim never enters" regressions.
-_BASELINE_N_SIM_MIN = 2  # measured 3; floor is conservative
+# Liveness floor — catches "sim never enters at all" regressions (broken fixture
+# loading), NOT a parity check (parity is engine_sig==sim_sig + match_rate above).
+# 2026-06-17: the live v31 binary slot moved to buy-and-hold (exit_safety_d=0,
+# exit_edge off, min_safety_d=2), so on this 2h fixture the sim now takes 1 action
+# (a single enter held to settle) instead of the old 3 (2 enters + 1 mid-hold exit).
+# Floor lowered 2→1 to track the live config; 0 still fails (sim entered nothing).
+# engine_sig==sim_sig (the real parity assertion) PASSES under the new config —
+# verified — so sim≡live equivalence is intact; this is purely fixture richness.
+_BASELINE_N_SIM_MIN = 1
 
 # Measured 2026-06-12: 0. With positions fed, every sim action had an engine
 # counterpart in the ±5s window. Ceiling=0 asserts perfect phantom elimination.
