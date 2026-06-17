@@ -293,7 +293,11 @@ strategies:
       # and never binds on HL. Both PM walk-forward and HL kill-only ablation
       # produced bit-identical results to prod. See docs/research/2026-05-23-v31-final-state.md.
       edge_max: null
-      exit_edge_threshold: 0.0
+      # 2026-06-17 buy-and-hold: disable exit_edge (take-profit exit). Corpus
+      # walk-forward (38 HL binary q) showed mid-hold exits churn winners — the
+      # churn destroyed ~$900 of edge vs holding to settlement. Threshold 1.0 is
+      # unreachable in take-profit mode (bid-held_p-fee never >1.0) → never fires.
+      exit_edge_threshold: 1.0
       time_stop_seconds: 0
       # 2026-05-22: take-profit-style exit edge.
       # Legacy formula `edge_held = held_p - bid - fee_taker; exit if < 0`
@@ -329,7 +333,15 @@ strategies:
       # validated +50-68% PnL OOS over d=0.0 baseline; HL post-σ-fix at
       # d=1.0 / tte=12h: $177 PnL / Sharpe 16. 1.0 is the production
       # ceiling — d=1.5 triggers a re-entry cascade (see summary).
-      exit_safety_d: 1.0
+      # 2026-06-17 buy-and-hold: disabled mid-hold safety exit. Protection moves
+      # to ENTRY via min_safety_d below (avoid near-strike "fake favorites" that
+      # flip to lose) — strictly better than cutting mid-hold, which whipsaws
+      # winners that dip-and-recover. Corpus (38q): hold+min_safety_d=2 → $1816
+      # PnL / Sharpe 32 / maxDD $0 vs prod $1017 / DD $251.
+      exit_safety_d: 0.0
+      # Entry-side safety_d floor (hysteresis vs the now-disabled exit): only
+      # enter when the favorite is ≥2 σ√τ from its adverse boundary.
+      min_safety_d: 2.0
 
     # Per-question.klass theta overrides. Each class maps to a PARTIAL theta
     # block: only the listed fields override the shared `theta:` defaults above
@@ -364,6 +376,12 @@ strategies:
         favorite_threshold: 0.85       # C3: restored to binary (was 0.80 overfit)
         edge_buffer: 0.02              # C3: restored to binary (was 0.005 overfit)
         exit_safety_d: 1.0             # C3: restored mid-hold exit (was 0.0; inert but defensive)
+        # 2026-06-17: pin to pre-buy-and-hold values so the binary slot's
+        # buy-and-hold change (exit_edge off + min_safety_d=2) does NOT leak into
+        # buckets via inheritance. Buckets keep their C3 tune untouched; the
+        # buy-and-hold change is binary-only and not yet validated for buckets.
+        exit_edge_threshold: 0.0
+        min_safety_d: 0.0
         vol_lookback_seconds: 2700     # mechanical tilt (vs binary 900)
         vol_sampling_dt_seconds: 2     # per-class mechanical tilt; binary + v1 stay dt=5
         exit_spread_hold: 0.04         # SHR-102: hold favorite to settle when held half-spread > 0.04

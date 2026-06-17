@@ -72,14 +72,19 @@ def test_live_strategy_yaml_forwards_exit_safety_d() -> None:
             f"slot {c.account_alias}: exit_safety_d forwarded as "
             f"{built.exit_safety_d}, expected YAML value {c.theta.exit_safety_d}"
         )
-    # Pin the original always-on slots to 1.0 so a silent regression to the 0.0
-    # default on the core slots still fails (the headline SHR-65 bug).
+    # Pin v31_pm to 1.0 so a silent regression to the 0.0 default still fails
+    # (the headline SHR-65 bug). v31 (HL binary) intentionally runs 0.0 as of the
+    # 2026-06-17 buy-and-hold change (mid-hold exit disabled; protection moved to
+    # entry via min_safety_d) — assert that explicitly so a silent flip is caught.
     by_alias = {c.account_alias: c for c in theta_slots}
-    for alias in ("v31", "v31_pm"):
-        if alias in by_alias:
-            assert build_theta_harvester_config(by_alias[alias]).exit_safety_d == 1.0, (
-                f"slot {alias}: exit_safety_d must stay 1.0 (SHR-65 regression guard)"
-            )
+    if "v31_pm" in by_alias:
+        assert build_theta_harvester_config(by_alias["v31_pm"]).exit_safety_d == 1.0, (
+            "slot v31_pm: exit_safety_d must stay 1.0 (SHR-65 regression guard)"
+        )
+    if "v31" in by_alias:
+        assert build_theta_harvester_config(by_alias["v31"]).exit_safety_d == 0.0, (
+            "slot v31: exit_safety_d must be 0.0 (buy-and-hold; protection via min_safety_d)"
+        )
 
 
 def test_build_forwards_all_declared_theta_fields() -> None:

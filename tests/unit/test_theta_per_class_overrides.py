@@ -151,12 +151,19 @@ def test_live_strategy_yaml_bucket_override_matches_tune() -> None:
     assert bucket.favorite_threshold == 0.85  # restored (was 0.80 overfit)
     assert bucket.edge_buffer == 0.02  # restored (was 0.005 overfit)
     assert bucket.exit_safety_d == 1.0  # restored (was 0.0 overfit)
-    # binary (the instance default): only vol_lookback diverges to the binary
-    # tune (3600→900 @dt5); fav/dt/esd/eb stay at prod (eb=0 does not stack).
+    # bucket is pinned to pre-buy-and-hold values so the binary buy-and-hold
+    # change does NOT leak in via inheritance (binary-only change).
+    assert bucket.exit_edge_threshold == 0.0
+    assert bucket.min_safety_d == 0.0
+    # binary (the instance default): 2026-06-17 buy-and-hold — mid-hold exits
+    # disabled (exit_safety_d 1.0→0.0, exit_edge_threshold 0.0→1.0), protection
+    # moved to entry (min_safety_d 0.0→2.0). vol_lookback stays 900 @dt5.
     assert base.favorite_threshold == 0.85
     assert base.vol_lookback_seconds == 900
     assert base.vol_sampling_dt_seconds == 5
-    assert base.exit_safety_d == 1.0
+    assert base.exit_safety_d == 0.0
+    assert base.exit_edge_threshold == 1.0
+    assert base.min_safety_d == 2.0
     assert base.edge_buffer == 0.02
     # only priceBucket diverges; binary falls through to the default
     assert set(build_theta_harvester_configs_by_class(v31)) == {"priceBucket"}
