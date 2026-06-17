@@ -869,6 +869,15 @@ class EngineRuntime:
         startup restart-drift block stays latched for the operator. See the
         EngineRuntime ``material_drift_*_cycles`` fields for the rationale
         (incident 2026-06-16 v31: one transient HFT sample wedged the slot 7h)."""
+        # Paper slots reconcile their DB against the real (empty-by-design) venue,
+        # so a material qty gap is STRUCTURAL and permanent — never escalate it to
+        # a block. A blocked paper slot could never satisfy the clean-streak to
+        # auto-clear (the venue stays empty forever), so it would wedge the paper
+        # burn-in indefinitely (incident 2026-06-16 v31_pm_eth_ms: a 54-share paper
+        # position blocked the scanner 11h+). Treating drift as clean here also
+        # self-heals a slot already wedged before this fix landed.
+        if getattr(slot.exec_client, "paper_mode", False):
+            material_drift = False
         if material_drift:
             slot.material_clean_streak = 0
             slot.material_drift_streak += 1

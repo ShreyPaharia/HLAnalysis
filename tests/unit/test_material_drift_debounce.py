@@ -115,3 +115,36 @@ async def test_auto_clear_does_not_touch_startup_block(tmp_path):
 
     assert rt._gate_material_drift(slot, False) is None
     assert slot.blocked is True, "startup restart-drift block must stay latched"
+
+
+@pytest.mark.asyncio
+async def test_paper_slot_material_drift_never_blocks(tmp_path):
+    """A paper slot reconciles its DB against the real (empty-by-design) venue,
+    so a material qty gap is STRUCTURAL and permanent — it must never escalate
+    to a block. Otherwise the paper burn-in wedges forever, unable to ever
+    satisfy the clean-streak to auto-clear (incident 2026-06-16 v31_pm_eth_ms)."""
+    rt, slot = _build_runtime_with_recording(tmp_path)
+    slot.exec_client.paper_mode = True
+    rt.material_drift_debounce_cycles = 1  # would block on the first drift if live
+
+    assert rt._gate_material_drift(slot, True) is None
+    assert rt._gate_material_drift(slot, True) is None
+    assert rt._gate_material_drift(slot, True) is None
+    assert slot.blocked is False, "paper slot must never block on material drift"
+
+
+@pytest.mark.asyncio
+async def test_paper_slot_existing_material_block_self_heals(tmp_path):
+    """A paper slot already wedged by a material_qty_drift block (the live
+    v31_pm_eth_ms state) must auto-resume on the next reconcile even while the
+    structural drift is still present — paper treats venue divergence as clean."""
+    rt, slot = _build_runtime_with_recording(tmp_path)
+    slot.exec_client.paper_mode = True
+    rt.material_drift_clear_cycles = 1
+    slot.blocked = True
+    slot.material_drift_blocked = True  # wedged by the gate before the paper fix
+
+    # Drift is STILL present on the venue, but paper exempts it → resume.
+    assert rt._gate_material_drift(slot, True) == "cleared"
+    assert slot.blocked is False
+    assert slot.material_drift_blocked is False
