@@ -85,6 +85,7 @@ from .risk_events import (
     KillSwitchActivated,
     MemoryHalt,
     NewQuestion,
+    ReconcileDrift,
     RiskHalt,
     StaleDataHalt,
     StopLossTriggered,
@@ -854,6 +855,23 @@ class EngineRuntime:
             daily_loss_venue_fail_halt=self.daily_loss_venue_fail_halt,
         )
 
+    async def _publish_drift_events(self, slot: AccountSlot, drift_events: list[ReconcileDrift]) -> None:
+        """Publish reconcile-drift events — except for paper slots.
+
+        A paper slot has no real venue: ``clearinghouse_state`` returns the paper
+        client's own in-memory shadow ledger, so reconcile compares the DB ledger
+        against a second copy of the same fake positions. They diverge on every
+        open/close, flipping venue_absent ↔ venue_orphan — each flip a fresh
+        Telegram dedupe key — so a churning paper slot pages on every transition
+        and spams the event table at INFO every cycle, with nothing actionable
+        behind it (incident 2026-06-17 v31_pm_eth_ms). The gate already ignores
+        paper material drift; suppress the alert/event stream at the source too.
+        """
+        if getattr(slot.exec_client, "paper_mode", False):
+            return
+        for ev in drift_events:
+            await self.bus.publish(ev)
+
     def _gate_material_drift(self, slot: AccountSlot, material_drift: bool) -> str | None:
         """Debounce a material qty drift before halting, and auto-clear the block
         once it resolves.
@@ -1071,8 +1089,7 @@ class EngineRuntime:
                             outcome_description=outcome_description(qv, sym) if qv else "",
                         )
                     )
-                for ev in res.drift_events:
-                    await self.bus.publish(ev)
+                await self._publish_drift_events(slot, res.drift_events)
                 # Finding #26: escalate material qty drift from alert → halt.
                 # Small noise-level differences (rounding, sub-precision PM dust)
                 # are already filtered by _QTY_MISMATCH_ABS_TOL before they
