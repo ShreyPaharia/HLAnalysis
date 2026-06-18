@@ -41,12 +41,17 @@ _MIN_SAFETY_ON = (
     "        min_safety_d: 0.0\n",
     "        min_safety_d: 2.0              # entry safety_d floor (selective entry)\n",
 )
+_MIN_SAFETY_3 = (
+    "        min_safety_d: 0.0\n",
+    "        min_safety_d: 3.0              # entry safety_d floor (selective entry)\n",
+)
 
 _VARIANTS = {
     # buy-and-hold: exits off + entry floor
     "hold_msd2": [_EXIT_SAFETY_OFF, _EXIT_EDGE_OFF, _MIN_SAFETY_ON],
     # entry floor only; keep the protective exits
     "msd2": [_MIN_SAFETY_ON],
+    "msd3": [_MIN_SAFETY_3],
 }
 
 
