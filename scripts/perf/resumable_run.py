@@ -220,17 +220,30 @@ def build_run_argv(args, cfg: Config, q_global: int, out_dir: Path) -> list[str]
         argv += ["--strategy", args.strategy]
         if slot_config:
             argv += ["--config", slot_config]
-    scan_min = cfg.scan_min if cfg.scan_min is not None else args.scan_min
-    scan_max = cfg.scan_max if cfg.scan_max is not None else args.scan_max
-    if scan_min is not None:
+    # Cadence: `--inner-scan-mode fixed` forces the inner run onto a fixed grid
+    # (--scanner-interval-seconds), overriding the slot's event-mode default —
+    # used for churn-fidelity bucket sweeps. Otherwise fall through to event mode
+    # when a scan_min is supplied (legacy behaviour).
+    inner_scan_mode = getattr(args, "inner_scan_mode", None)
+    if inner_scan_mode == "fixed":
         argv += [
             "--scan-mode",
-            "event",
-            "--scan-min-interval-seconds",
-            str(scan_min),
-            "--scan-max-interval-seconds",
-            str(scan_max if scan_max is not None else 2.0),
+            "fixed",
+            "--scanner-interval-seconds",
+            str(int(getattr(args, "inner_scan_interval", 1) or 1)),
         ]
+    else:
+        scan_min = cfg.scan_min if cfg.scan_min is not None else args.scan_min
+        scan_max = cfg.scan_max if cfg.scan_max is not None else args.scan_max
+        if scan_min is not None:
+            argv += [
+                "--scan-mode",
+                "event",
+                "--scan-min-interval-seconds",
+                str(scan_min),
+                "--scan-max-interval-seconds",
+                str(scan_max if scan_max is not None else 2.0),
+            ]
     if data_source == "polymarket":
         argv += _pm_fee_argv(args, cfg)
     return argv
@@ -462,6 +475,13 @@ class Driver:
             cmd += ["--scan-min", str(self.args.scan_min)]
         if self.args.scan_max is not None:
             cmd += ["--scan-max", str(self.args.scan_max)]
+        if getattr(self.args, "inner_scan_mode", None) is not None:
+            cmd += [
+                "--inner-scan-mode",
+                self.args.inner_scan_mode,
+                "--inner-scan-interval",
+                str(self.args.inner_scan_interval),
+            ]
         # start_new_session=True → own process group, so we can kill the whole
         # subtree (incl. python children) on timeout/shutdown. No orphans.
         p = subprocess.Popen(
@@ -684,6 +704,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--scan-min", type=float, default=None, help="event-mode min interval (s); omit to use slot default"
     )
     ap.add_argument("--scan-max", type=float, default=None)
+    ap.add_argument(
+        "--inner-scan-mode",
+        choices=["event", "fixed"],
+        default=None,
+        dest="inner_scan_mode",
+        help="force the inner hl-bt run cadence. 'fixed' → --scan-mode fixed --scanner-interval-seconds "
+        "(--inner-scan-interval), overriding the slot's event-mode default (churn-fidelity sweeps).",
+    )
+    ap.add_argument(
+        "--inner-scan-interval",
+        type=int,
+        default=1,
+        dest="inner_scan_interval",
+        help="fixed-mode scanner interval seconds (with --inner-scan-mode fixed).",
+    )
     ap.add_argument("--aggregate-only", action="store_true")
     # hidden worker-mode args (the supervisor self-invokes with these)
     ap.add_argument("--_worker-chunk", type=int, default=None, dest="worker_chunk", help=argparse.SUPPRESS)
