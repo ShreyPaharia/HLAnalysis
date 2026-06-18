@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+import os
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -144,6 +145,7 @@ class PolymarketDataSource:
         book_source: Literal["synthetic", "recorded"] = "synthetic",
         pm_book_root: Path | str | None = None,
         liquidity_profile_path: Path | str | None = None,
+        leg_prune_favorite_threshold: float | None = None,
     ) -> None:
         self._cache_root = Path(cache_root)
         self._stream_cfg = _StreamCfg(half_spread=half_spread, depth=depth)
@@ -219,6 +221,20 @@ class PolymarketDataSource:
         # Lazy caches populated on first read. Significant for tuning workers
         # that backtest dozens of markets per cell — without caches each
         # market would re-parse the manifest + the (large) BTC klines JSON.
+        # Bucket leg pruning (priceBucket only): skip reading/replaying legs that
+        # can never be entered/held/exited (NO/odd legs + YES legs whose best
+        # bid/ask never reach the favorite threshold). Decision-identical to a
+        # full load — see _pm_fastpath._is_prunable_pm_bucket_leg. None (default)
+        # = no pruning, bit-identical to legacy. Falls back to the
+        # HLBT_PM_BUCKET_LEG_PRUNE env var (a float favorite threshold) when the
+        # kwarg is unset, so the optimisation propagates to spawn/chunk workers
+        # without threading a new SourceConfig field. Folded into
+        # _bundle_config_sig so a pruned bundle is never served for an unpruned
+        # request (and vice versa).
+        if leg_prune_favorite_threshold is None:
+            _env = os.environ.get("HLBT_PM_BUCKET_LEG_PRUNE")
+            leg_prune_favorite_threshold = float(_env) if _env else None
+        self._leg_prune_favorite_threshold = leg_prune_favorite_threshold
         self._manifest_cache: dict | None = None
         self._klines_cache: list[dict] | None = None
         self._klines_1s_cache: list[dict] | None = None
@@ -389,6 +405,7 @@ class PolymarketDataSource:
                 trades=trades,
                 reference_events=ref_events,
                 settlement_events=settle_events,
+                leg_prune_favorite_threshold=self._leg_prune_favorite_threshold,
             )
 
         from ._event_array_cache import cached_bundle
@@ -422,6 +439,7 @@ class PolymarketDataSource:
             f"|bbo={self._binance_bbo_product_type}"
             f"|lp={lp_sig}"
             f"|k1m={self._klines_subdir}|k1s={self._klines_1s_subdir}"
+            f"|prune={self._leg_prune_favorite_threshold}"
         )
 
     def _fastpath_source_files(self, q: QuestionDescriptor) -> list[Path]:
