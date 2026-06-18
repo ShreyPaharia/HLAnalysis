@@ -327,6 +327,16 @@ class PolymarketDataSource:
 
         force_rebuild = getattr(self, "_force_rebuild_cache", False)
         config_sig = self._bundle_config_sig()
+        if self._recorded_buckets:
+            # Recorder-native bucket windows are DERIVED (min pre-expiry book ts →
+            # expiry), not fixed in the manifest. The cached bundle's contents
+            # depend on that window (books are read over [start, end]), but the
+            # window isn't otherwise in the cache key — so a change to the window
+            # (e.g. a builder-logic revision) would silently serve a stale bundle
+            # for the same question_id. Fold the window into the sig so the cache
+            # invalidates correctly. No-op for binaries / manifest buckets (their
+            # window is fixed per question_id).
+            config_sig = f"{config_sig}|win={q.start_ts_ns}-{q.end_ts_ns}"
         # Short-circuit BEFORE the manifest load + source-file glob on a
         # process-memo hit (tune replays the same question across param cells).
         memo_hit = inproc_lookup(q.question_id, config_sig, force_rebuild=force_rebuild)
