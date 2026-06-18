@@ -531,6 +531,18 @@ def run_one_question(
     # _book_idx field can alias the same dict.
     book_idx: dict[str, int] = {sym: 0 for sym in q.leg_symbols}
 
+    # Per-tick book build only needs legs that EVER carry a recorded book
+    # snapshot. A leg with no book_ts entries keeps an empty hftbacktest depth,
+    # so _book_state returns None every tick and it never enters `books` — so
+    # skipping its per-tick depth read (a numba jitclass boundary crossing) +
+    # apply_l2 is bit-identical. This removes the dominant per-tick cost on
+    # many-leg bucket questions, where most legs are untradeable (no/empty book)
+    # and, with leg-pruning on, are emitted with empty arrays on purpose. Binary
+    # legs (both quoted) are unaffected. The hedge leg is handled separately.
+    _active_leg_to_asset: dict[str, int] = {
+        sym: asset_no for sym, asset_no in leg_to_asset.items() if len(book_ts_per_leg.get(sym, ())) > 0
+    }
+
     # All mutable position/fill bookkeeping lives in one struct so the routing
     # helpers (_route_enter/_route_exit/_route_hedge/_route_stop_loss/_settle)
     # can mutate it without a forest of nonlocal closures.
@@ -662,9 +674,11 @@ def run_one_question(
                 i += 1
             book_idx[sym] = i
 
-        # Build per-leg books.
+        # Build per-leg books. Iterate only legs that ever have a book snapshot
+        # (see _active_leg_to_asset): an empty leg's depth is always empty so
+        # _book_state would return None — skipping it is bit-identical.
         books: dict[str, BookState] = {}
-        for sym, asset_no in leg_to_asset.items():
+        for sym, asset_no in _active_leg_to_asset.items():
             ts_arr = book_ts_per_leg.get(sym)
             i = book_idx[sym]
             if ts_arr is not None and i > 0:
