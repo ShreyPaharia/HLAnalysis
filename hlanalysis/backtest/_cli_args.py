@@ -245,6 +245,16 @@ def _build_run_parser(sp) -> None:
         "coverage from 2026-05-27).",
     )
     pr.add_argument(
+        "--pm-recorded-buckets",
+        action="store_true",
+        dest="pm_recorded_buckets",
+        help="(polymarket bucket only) Build priceBucket questions from the "
+        "recorded question_meta (token IDs that match the recorded book_snapshot) "
+        "instead of the Gamma cache manifest, with oracle leg resolution. Fixes "
+        "PM bucket backtests that otherwise see 0 decisions because the manifest "
+        "bucket tokens don't match the recorded books.",
+    )
+    pr.add_argument(
         "--pm-liquidity-profile",
         default=None,
         dest="pm_liquidity_profile",
@@ -391,6 +401,14 @@ def _build_tune_parser(sp) -> None:
         help="(polymarket only) Fill-book source for the sweep. `synthetic` "
         "(default) builds a flat 1-level book per trade print + `1−p` parity "
         "(calibratable via --pm-liquidity-profile). `recorded` feeds real L2.",
+    )
+    pt.add_argument(
+        "--pm-recorded-buckets",
+        action="store_true",
+        dest="pm_recorded_buckets",
+        help="(polymarket bucket only) Build priceBucket questions from the "
+        "recorded question_meta instead of the Gamma cache manifest (oracle leg "
+        "resolution). Token IDs then match the recorded book_snapshot.",
     )
     pt.add_argument(
         "--reference-warmup-seconds",

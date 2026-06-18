@@ -87,6 +87,10 @@ class SourceConfig:
     pm_book_source: str = "synthetic"
     pm_binance_bbo_product_type: str = "perp"
     pm_liquidity_profile_path: str | None = None
+    # Recorder-native PM bucket discovery: build priceBucket questions from the
+    # recorded question_meta (token IDs that match recorded books) instead of the
+    # stale Gamma manifest. Default False = manifest-only, unchanged.
+    pm_recorded_buckets: bool = False
     # Shared reference-resample cadence (HL + PM). The CLI couples this to the
     # strategy's ``vol_sampling_dt_seconds``; ``tune`` overrides it per grid cell
     # via :meth:`with_reference_resample` because dt is a sweepable param.
@@ -141,6 +145,7 @@ class SourceConfig:
                 book_source=self.pm_book_source,  # type: ignore[arg-type]
                 binance_bbo_product_type=self.pm_binance_bbo_product_type,  # type: ignore[arg-type]
                 liquidity_profile_path=self.pm_liquidity_profile_path,
+                recorded_buckets=self.pm_recorded_buckets,
                 **PM_FLAVORS[self.pm_flavor],
             )
         if self.kind == "hl_hip4":
