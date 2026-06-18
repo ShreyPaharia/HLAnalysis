@@ -73,17 +73,19 @@ def test_live_strategy_yaml_forwards_exit_safety_d() -> None:
             f"{built.exit_safety_d}, expected YAML value {c.theta.exit_safety_d}"
         )
     # Pin v31_pm to 1.0 so a silent regression to the 0.0 default still fails
-    # (the headline SHR-65 bug). v31 (HL binary) intentionally runs 0.0 as of the
-    # 2026-06-17 buy-and-hold change (mid-hold exit disabled; protection moved to
-    # entry via min_safety_d) — assert that explicitly so a silent flip is caught.
+    # (the headline SHR-65 bug). v31 (HL binary) runs 1.0 as of 2026-06-18, when
+    # the 2026-06-17 buy-and-hold (exit_safety_d 0.0) was REVERTED to "msd2" — a
+    # loss-injection stress showed buy-and-hold's maxDD $0 was tail-blind (the
+    # corpus never sampled a losing favorite); the σ-based mid-hold exit is the
+    # tail protector. Assert explicitly so a silent flip back to 0.0 is caught.
     by_alias = {c.account_alias: c for c in theta_slots}
     if "v31_pm" in by_alias:
         assert build_theta_harvester_config(by_alias["v31_pm"]).exit_safety_d == 1.0, (
             "slot v31_pm: exit_safety_d must stay 1.0 (SHR-65 regression guard)"
         )
     if "v31" in by_alias:
-        assert build_theta_harvester_config(by_alias["v31"]).exit_safety_d == 0.0, (
-            "slot v31: exit_safety_d must be 0.0 (buy-and-hold; protection via min_safety_d)"
+        assert build_theta_harvester_config(by_alias["v31"]).exit_safety_d == 1.0, (
+            "slot v31: exit_safety_d must be 1.0 (msd2 — mid-hold exit re-enabled; buy-and-hold reverted as tail-blind)"
         )
 
 

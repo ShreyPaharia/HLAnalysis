@@ -150,19 +150,23 @@ def test_live_strategy_yaml_bucket_override_matches_tune() -> None:
     assert bucket.vol_sampling_dt_seconds == 2
     assert bucket.favorite_threshold == 0.85  # restored (was 0.80 overfit)
     assert bucket.edge_buffer == 0.02  # restored (was 0.005 overfit)
-    assert bucket.exit_safety_d == 1.0  # restored (was 0.0 overfit)
-    # bucket is pinned to pre-buy-and-hold values so the binary buy-and-hold
-    # change does NOT leak in via inheritance (binary-only change).
+    assert bucket.exit_safety_d == 1.0  # restored (was 0.0 overfit); kept on
     assert bucket.exit_edge_threshold == 0.0
-    assert bucket.min_safety_d == 0.0
-    # binary (the instance default): 2026-06-17 buy-and-hold — mid-hold exits
-    # disabled (exit_safety_d 1.0→0.0, exit_edge_threshold 0.0→1.0), protection
-    # moved to entry (min_safety_d 0.0→2.0). vol_lookback stays 900 @dt5.
+    # 2026-06-18: buckets moved to "msd2" — added the entry safety_d floor (was
+    # 0.0). The protective exits stay ON (esd 1.0) — buy-and-hold doubled the
+    # bucket maxDD via full-stake blowups, so do NOT disable exits on buckets.
+    assert bucket.min_safety_d == 2.0
+    # binary (the instance default): 2026-06-18 REVERTED the 2026-06-17
+    # buy-and-hold back to "msd2" — re-enabled both exits (exit_safety_d 0.0→1.0,
+    # exit_edge_threshold 1.0→0.0), KEPT the entry gate (min_safety_d 2.0). A
+    # loss-injection stress showed buy-and-hold's maxDD $0 was tail-blind (EV ≈ $0,
+    # P(loss) 48%); the σ-based soft exits cap a flipping favorite at ~$50-150.
+    # vol_lookback stays 900 @dt5.
     assert base.favorite_threshold == 0.85
     assert base.vol_lookback_seconds == 900
     assert base.vol_sampling_dt_seconds == 5
-    assert base.exit_safety_d == 0.0
-    assert base.exit_edge_threshold == 1.0
+    assert base.exit_safety_d == 1.0
+    assert base.exit_edge_threshold == 0.0
     assert base.min_safety_d == 2.0
     assert base.edge_buffer == 0.02
     # only priceBucket diverges; binary falls through to the default

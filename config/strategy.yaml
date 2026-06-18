@@ -293,11 +293,18 @@ strategies:
       # and never binds on HL. Both PM walk-forward and HL kill-only ablation
       # produced bit-identical results to prod. See docs/research/2026-05-23-v31-final-state.md.
       edge_max: null
-      # 2026-06-17 buy-and-hold: disable exit_edge (take-profit exit). Corpus
-      # walk-forward (38 HL binary q) showed mid-hold exits churn winners — the
-      # churn destroyed ~$900 of edge vs holding to settlement. Threshold 1.0 is
-      # unreachable in take-profit mode (bid-held_p-fee never >1.0) → never fires.
-      exit_edge_threshold: 1.0
+      # 2026-06-18: REVERTED to msd2 (re-enable exits). The 2026-06-17 buy-and-hold
+      # (exit_edge off + exit_safety_d off, keeping min_safety_d=2) looked best on
+      # REALIZED PnL ($1404 / maxDD $0), but that maxDD is tail-blind — the corpus
+      # never sampled a losing favorite. A loss-injection stress (each favorite
+      # flips at its implied rate ~10%) collapsed buy-and-hold to EV ≈ $0 / P(net
+      # loss) 48% / 5th-pct −$1.7k (a flipped favorite loses the FULL stake with no
+      # exit), vs msd2 (exits kept) EV ≈ $500-600 / P(loss) <1% / 5th-pct +$200.
+      # A hard bid stop-loss was WORSE (it churns on volatile favorites that
+      # dip-and-recover: −$2.6k at 15% / leaks badly even at 50%). The σ-based
+      # soft exits are the efficient tail protector → keep them on. See
+      # docs/research/2026-06-18-hl-buy-and-hold-tail-stress.md.
+      exit_edge_threshold: 0.0
       time_stop_seconds: 0
       # 2026-05-22: take-profit-style exit edge.
       # Legacy formula `edge_held = held_p - bid - fee_taker; exit if < 0`
@@ -333,14 +340,18 @@ strategies:
       # validated +50-68% PnL OOS over d=0.0 baseline; HL post-σ-fix at
       # d=1.0 / tte=12h: $177 PnL / Sharpe 16. 1.0 is the production
       # ceiling — d=1.5 triggers a re-entry cascade (see summary).
-      # 2026-06-17 buy-and-hold: disabled mid-hold safety exit. Protection moves
-      # to ENTRY via min_safety_d below (avoid near-strike "fake favorites" that
-      # flip to lose) — strictly better than cutting mid-hold, which whipsaws
-      # winners that dip-and-recover. Corpus (38q): hold+min_safety_d=2 → $1816
-      # PnL / Sharpe 32 / maxDD $0 vs prod $1017 / DD $251.
-      exit_safety_d: 0.0
-      # Entry-side safety_d floor (hysteresis vs the now-disabled exit): only
-      # enter when the favorite is ≥2 σ√τ from its adverse boundary.
+      # 2026-06-18: RE-ENABLED (revert of the 2026-06-17 buy-and-hold). This
+      # σ√τ-distance mid-hold exit is the load-bearing tail protector on a
+      # cliff-payoff instrument: it fires on genuine adverse drift toward the
+      # adverse boundary (not on bid noise), capping a flipping favorite at
+      # ~$50-150 instead of the full ~$500 stake. The loss-injection stress
+      # (see exit_edge_threshold note) makes msd2 (this on + entry gate) the
+      # risk-adjusted winner; buy-and-hold's higher realized PnL was a tail-blind
+      # sample. 1.0 is the production ceiling (d=1.5 → re-entry cascade).
+      exit_safety_d: 1.0
+      # Entry-side safety_d floor, kept from the buy-and-hold change: only enter
+      # when the favorite is ≥2 σ√τ from its adverse boundary (avoids near-strike
+      # fake favorites). Forms a hysteresis band [exit_safety_d, min_safety_d].
       min_safety_d: 2.0
 
     # Per-question.klass theta overrides. Each class maps to a PARTIAL theta
@@ -376,12 +387,17 @@ strategies:
         favorite_threshold: 0.85       # C3: restored to binary (was 0.80 overfit)
         edge_buffer: 0.02              # C3: restored to binary (was 0.005 overfit)
         exit_safety_d: 1.0             # C3: restored mid-hold exit (was 0.0; inert but defensive)
-        # 2026-06-17: pin to pre-buy-and-hold values so the binary slot's
-        # buy-and-hold change (exit_edge off + min_safety_d=2) does NOT leak into
-        # buckets via inheritance. Buckets keep their C3 tune untouched; the
-        # buy-and-hold change is binary-only and not yet validated for buckets.
+        # exit_edge_threshold pinned to C3 (take-profit exit kept on); the
+        # protective mid-hold exit_safety_d above is KEPT (1.0) — load-bearing on
+        # the cliff-payoff bucket tail (1s sweep: buy-and-hold doubled maxDD
+        # $284→$480 via two −$460 full-stake blowups). Do NOT buy-and-hold buckets.
         exit_edge_threshold: 0.0
-        min_safety_d: 0.0
+        # 2026-06-18: move buckets to "msd2" — add the entry safety_d floor (was
+        # 0.0). 1s 3-config sweep: msd2 ≈ baseline PnL ($651 vs $657) with better
+        # Sharpe (6.33 vs 6.09) / lower maxDD ($273 vs $284), and on the churniest
+        # markets msd2 made MORE ($103 vs $81) while cutting entries 67% — it culls
+        # marginal near-boundary entries. =2 keeps it ≥ binary baseline (guardrail).
+        min_safety_d: 2.0
         vol_lookback_seconds: 2700     # mechanical tilt (vs binary 900)
         vol_sampling_dt_seconds: 2     # per-class mechanical tilt; binary + v1 stay dt=5
         exit_spread_hold: 0.04         # SHR-102: hold favorite to settle when held half-spread > 0.04
