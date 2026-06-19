@@ -66,6 +66,7 @@ def _source_config_from_args(
             pm_book_source=getattr(args, "pm_book_source", None) or "synthetic",
             pm_binance_bbo_product_type=(getattr(args, "pm_binance_bbo_product_type", None) or "perp"),
             pm_liquidity_profile_path=getattr(args, "pm_liquidity_profile", None),
+            pm_recorded_buckets=bool(getattr(args, "pm_recorded_buckets", False)),
             reference_resample_seconds=reference_resample_seconds,
         )
     if name == "hl_hip4":

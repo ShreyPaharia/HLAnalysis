@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+import os
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -144,6 +145,8 @@ class PolymarketDataSource:
         book_source: Literal["synthetic", "recorded"] = "synthetic",
         pm_book_root: Path | str | None = None,
         liquidity_profile_path: Path | str | None = None,
+        leg_prune_favorite_threshold: float | None = None,
+        recorded_buckets: bool = False,
     ) -> None:
         self._cache_root = Path(cache_root)
         self._stream_cfg = _StreamCfg(half_spread=half_spread, depth=depth)
@@ -219,6 +222,31 @@ class PolymarketDataSource:
         # Lazy caches populated on first read. Significant for tuning workers
         # that backtest dozens of markets per cell — without caches each
         # market would re-parse the manifest + the (large) BTC klines JSON.
+        # Bucket leg pruning (priceBucket only): skip reading/replaying legs that
+        # can never be entered/held/exited (NO/odd legs + YES legs whose best
+        # bid/ask never reach the favorite threshold). Decision-identical to a
+        # full load — see _pm_fastpath._is_prunable_pm_bucket_leg. None (default)
+        # = no pruning, bit-identical to legacy. Falls back to the
+        # HLBT_PM_BUCKET_LEG_PRUNE env var (a float favorite threshold) when the
+        # kwarg is unset, so the optimisation propagates to spawn/chunk workers
+        # without threading a new SourceConfig field. Folded into
+        # _bundle_config_sig so a pruned bundle is never served for an unpruned
+        # request (and vice versa).
+        if leg_prune_favorite_threshold is None:
+            _env = os.environ.get("HLBT_PM_BUCKET_LEG_PRUNE")
+            leg_prune_favorite_threshold = float(_env) if _env else None
+        self._leg_prune_favorite_threshold = leg_prune_favorite_threshold
+        # Recorder-native bucket discovery (priceBucket): when True, build bucket
+        # questions from the recorded `question_meta` event (token IDs that match
+        # the recorded books) instead of the stale Gamma manifest, and merge them
+        # into the manifest in-memory. Fixes PM bucket backtests producing 0
+        # decisions (manifest bucket tokens don't match recorded books). Falls
+        # back to the HLBT_PM_RECORDED_BUCKETS env var so the mode propagates to
+        # spawn/chunk workers. None/False (default) = manifest-only, unchanged.
+        if not recorded_buckets:
+            recorded_buckets = bool(os.environ.get("HLBT_PM_RECORDED_BUCKETS"))
+        self._recorded_buckets = recorded_buckets
+        self._recorded_bucket_overlay_cache: dict | None = None
         self._manifest_cache: dict | None = None
         self._klines_cache: list[dict] | None = None
         self._klines_1s_cache: list[dict] | None = None
@@ -299,6 +327,16 @@ class PolymarketDataSource:
 
         force_rebuild = getattr(self, "_force_rebuild_cache", False)
         config_sig = self._bundle_config_sig()
+        if self._recorded_buckets:
+            # Recorder-native bucket windows are DERIVED (min pre-expiry book ts →
+            # expiry), not fixed in the manifest. The cached bundle's contents
+            # depend on that window (books are read over [start, end]), but the
+            # window isn't otherwise in the cache key — so a change to the window
+            # (e.g. a builder-logic revision) would silently serve a stale bundle
+            # for the same question_id. Fold the window into the sig so the cache
+            # invalidates correctly. No-op for binaries / manifest buckets (their
+            # window is fixed per question_id).
+            config_sig = f"{config_sig}|win={q.start_ts_ns}-{q.end_ts_ns}"
         # Short-circuit BEFORE the manifest load + source-file glob on a
         # process-memo hit (tune replays the same question across param cells).
         memo_hit = inproc_lookup(q.question_id, config_sig, force_rebuild=force_rebuild)
@@ -389,6 +427,7 @@ class PolymarketDataSource:
                 trades=trades,
                 reference_events=ref_events,
                 settlement_events=settle_events,
+                leg_prune_favorite_threshold=self._leg_prune_favorite_threshold,
             )
 
         from ._event_array_cache import cached_bundle
@@ -422,6 +461,8 @@ class PolymarketDataSource:
             f"|bbo={self._binance_bbo_product_type}"
             f"|lp={lp_sig}"
             f"|k1m={self._klines_subdir}|k1s={self._klines_1s_subdir}"
+            f"|prune={self._leg_prune_favorite_threshold}"
+            f"|recbkt={self._recorded_buckets}"
         )
 
     def _fastpath_source_files(self, q: QuestionDescriptor) -> list[Path]:
@@ -922,11 +963,58 @@ class PolymarketDataSource:
         if self._manifest_cache is not None:
             return self._manifest_cache
         path = self._manifest_path()
-        if not path.exists():
-            self._manifest_cache = {}
-            return self._manifest_cache
-        self._manifest_cache = json.loads(path.read_text())
+        base = json.loads(path.read_text()) if path.exists() else {}
+        if self._recorded_buckets:
+            # Recorder-native bucket discovery REPLACES the Gamma manifest's
+            # bucket entries (those are the stale "above-on-DATE" markets whose
+            # token IDs don't match the recorded books — they backtest to 0
+            # decisions). Binary entries are kept untouched. In-memory only;
+            # never written to disk.
+            base = {qid: e for qid, e in base.items() if e.get("kind", "binary") != "bucket"}
+            base = {**base, **self._recorded_bucket_overlay()}
+        self._manifest_cache = base
         return self._manifest_cache
+
+    def _recorded_question_meta_glob(self) -> str:
+        """Glob for the recorder's ``question_meta`` parquet across all legs."""
+        return str(
+            self._pm_book_root
+            / "venue=polymarket/product_type=prediction_binary/mechanism=clob/event=question_meta"
+            / "**"
+            / "*.parquet"
+        )
+
+    def _recorded_bucket_overlay(self) -> dict:
+        """Manifest-schema bucket entries built from recorded ``question_meta``
+        for this source's ``bucket_series_slug`` (cached per instance)."""
+        if self._recorded_bucket_overlay_cache is not None:
+            return self._recorded_bucket_overlay_cache
+        from ._pm_recorded_buckets import build_recorded_bucket_entries
+
+        self._recorded_bucket_overlay_cache = build_recorded_bucket_entries(
+            question_meta_glob=self._recorded_question_meta_glob(),
+            series_slug=self._bucket_series_slug,
+            book_glob_for=self._recorded_book_glob,
+            oracle_close_at=self._oracle_close_at,
+        )
+        return self._recorded_bucket_overlay_cache
+
+    def _oracle_close_at(self, ts_ns: int) -> float | None:
+        """Reference (Binance) close at ``ts_ns`` for oracle leg resolution:
+        the last ReferenceEvent close at or before ``ts_ns`` over a 1h lookback.
+        Uses the source's configured reference feed so resolution matches the
+        same price series the backtest reads. None when the window has no data."""
+        win = 3600 * 1_000_000_000
+        if self._reference_source == "binance_bbo":
+            refs = self._load_binance_bbo_reference(ts_ns - win, ts_ns + 1)
+        elif self._reference_source == "klines_1s":
+            refs = self._load_klines_1s_reference(ts_ns - win, ts_ns + 1)
+        else:
+            kl = self._load_klines_window(ts_ns - win, ts_ns)
+            cands = [float(k["close"]) for k in sorted(kl, key=lambda k: int(k["ts_ns"])) if int(k["ts_ns"]) <= ts_ns]
+            return cands[-1] if cands else None
+        cands = [float(r.close) for r in refs if r.ts_ns <= ts_ns]
+        return cands[-1] if cands else None
 
     def _write_manifest(self, manifest: dict) -> None:
         self._cache_root.mkdir(parents=True, exist_ok=True)

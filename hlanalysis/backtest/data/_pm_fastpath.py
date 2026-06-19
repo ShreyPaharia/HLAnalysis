@@ -103,6 +103,83 @@ def read_pm_book_columns(book_glob: str, start_ns: int, end_ns: int) -> dict[str
     }
 
 
+def _pm_leg_best_bid_ask_maxima(book_glob: str, start_ns: int, end_ns: int) -> tuple[float, float] | None:
+    """Return ``(max_best_bid, max_best_ask)`` over the question window, or None
+    when the leg has no parquet / no in-window snapshots.
+
+    ``max_best_bid`` = the highest the best (top-of-book) bid ever reached;
+    ``max_best_ask`` = the highest the best (lowest) ask ever reached. These are
+    the only book quantities the favorite gate can depend on (see
+    ``_is_prunable_pm_bucket_leg``). A metadata-light aggregate scan (no
+    materialisation of the multi-level book) — far cheaper than the full
+    ``read_pm_book_columns`` + event-array build it lets us skip.
+
+    Level ordering matches ``read_pm_book_columns`` (bids px DESC, asks px ASC),
+    so ``list_max(bid_px)`` is the best bid and ``list_min(ask_px)`` the best ask
+    at each snapshot, exactly the values the runner reads top-of-book.
+    """
+    from glob import glob as _glob
+
+    import duckdb
+
+    if not _glob(book_glob, recursive=True):
+        return None
+
+    con = duckdb.connect()
+    try:
+        row = con.sql(
+            f"""
+            SELECT max(list_max(bid_px)) AS max_best_bid,
+                   max(list_min(ask_px)) AS max_best_ask
+            FROM read_parquet('{book_glob}', hive_partitioning=1)
+            WHERE exchange_ts >= {start_ns} AND exchange_ts < {end_ns}
+            """
+        ).fetchone()
+    finally:
+        con.close()
+
+    if row is None:
+        return None
+    mbid, mask = row
+    if mbid is None and mask is None:
+        return None
+    return (
+        float(mbid) if mbid is not None else float("-inf"),
+        float(mask) if mask is not None else float("-inf"),
+    )
+
+
+def _is_prunable_pm_bucket_leg(leg: str, idx: int, q, threshold: float, book_glob_for) -> bool:
+    """True iff this PM bucket leg can NEVER be entered/held/exited, so loading
+    its book is wasted work and emitting an empty (no-quote) leg is
+    decision-identical.
+
+    Two provably-safe cases (mirrors the HL HIP-4 prune; the strategy is shared):
+
+    1. **Odd index = NO leg.** ``theta_harvester._evaluate_entry`` restricts
+       bucket candidate legs to even (YES) indices
+       (``legs[i] for i in range(0, len, 2)``), so a NO leg is never a candidate
+       → never entered → never held → never exited. The bucket settlement winner
+       is derived per-leg in ``leg_payoff`` straight from the manifest
+       resolutions (independent of the event bundle), so dropping a NO leg's
+       events changes no payoff.
+
+    2. **YES leg whose best bid AND best ask both stay below ``threshold``.** The
+       favorite gate is ``_mid(book) >= favorite_threshold`` and in every branch
+       ``_mid <= max(best_bid, best_ask)``. So if, over the whole window, the best
+       bid and best ask never reach ``threshold``, the gate never fires → the leg
+       is never entered. A leg with no parquet / no in-window rows is likewise
+       untradeable.
+    """
+    if idx % 2 == 1:
+        return True
+    maxima = _pm_leg_best_bid_ask_maxima(book_glob_for(leg), q.start_ts_ns, q.end_ts_ns)
+    if maxima is None:
+        return True
+    max_best_bid, max_best_ask = maxima
+    return max_best_bid < threshold and max_best_ask < threshold
+
+
 def read_pm_trade_columns(
     trades: list,  # list[_RawTrade]
     token_id: str,
@@ -135,6 +212,7 @@ def build_pm_fast_path_bundle(
     trades: list,
     reference_events: list,
     settlement_events: list,
+    leg_prune_favorite_threshold: float | None = None,
 ) -> FastPathBundle:
     """Assemble a :class:`FastPathBundle` for a PM recorded-mode question.
 
@@ -152,9 +230,27 @@ def build_pm_fast_path_bundle(
         ``ReferenceEvent`` list (klines or BBO, already built by the caller).
     settlement_events:
         ``SettlementEvent`` list (one per leg, already built by the caller).
+    leg_prune_favorite_threshold:
+        ``priceBucket`` only. When set, bucket legs that can never be entered at
+        this favorite threshold are emitted as empty (no-quote) legs WITHOUT
+        reading/decoding their book parquet — a behavior-preserving speed-up for
+        many-leg PM bucket questions (most middle/tail buckets never become
+        favorites, yet decoding + replaying their books dominates the run). See
+        :func:`_is_prunable_pm_bucket_leg` for the safety argument. ``None``
+        (default) loads every leg, bit-identical to before.
     """
+    do_prune = leg_prune_favorite_threshold is not None and getattr(q, "klass", None) == "priceBucket"
     leg_arrays: dict[str, LegArrays] = {}
-    for leg in q.leg_symbols:
+    for leg_idx, leg in enumerate(q.leg_symbols):
+        if do_prune and _is_prunable_pm_bucket_leg(leg, leg_idx, q, leg_prune_favorite_threshold, book_glob_for):
+            # Untradeable leg → emit exactly what a no-book leg produces (empty
+            # event array, empty book_ts). Skips the DuckDB book read + trade
+            # filter + event assembly for this leg.
+            leg_arrays[leg] = LegArrays(
+                events=build_leg_event_array_from_columns(None, None),
+                book_ts=np.zeros(0, dtype=np.int64),
+            )
+            continue
         book_cols = read_pm_book_columns(book_glob_for(leg), q.start_ts_ns, q.end_ts_ns)
         trade_cols = read_pm_trade_columns(trades, leg)
         arr = build_leg_event_array_from_columns(book_cols, trade_cols)
@@ -223,4 +319,6 @@ __all__ = [
     "read_pm_trade_columns",
     "build_pm_fast_path_bundle",
     "build_pm_synthetic_fast_path_bundle",
+    "_pm_leg_best_bid_ask_maxima",
+    "_is_prunable_pm_bucket_leg",
 ]

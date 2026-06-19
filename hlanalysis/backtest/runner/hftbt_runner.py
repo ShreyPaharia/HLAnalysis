@@ -492,6 +492,28 @@ def run_one_question(
     # for a non-consumer. Range-based σ strategies (late_resolution/Parkinson)
     # leave consumes_hl_bars=True and get the full tuple. See Strategy.consumes_hl_bars.
     _consumes_hl_bars = getattr(strategy, "consumes_hl_bars", True)
+
+    # Bound the per-tick recent_returns/HL window to the seconds the strategy
+    # actually consumes, instead of the RunConfig default (86_400s ≈ a full day,
+    # which at dt=5 is a 17 280-element array converted to a tuple EVERY scan
+    # tick — the single biggest sim cost: ~32% of a 1s-cadence PM theta run).
+    # ``Strategy.decision_lookback_seconds`` reports that need (None → legacy:
+    # use the full RunConfig window, e.g. for Parkinson/late_resolution which we
+    # leave unbounded). We provision 2× the reported need: ``slice_window`` is a
+    # time-bounded window but the strategy re-slices it by COUNT (``[-n_keep:]``),
+    # and the window's ``lo_idx+1`` boundary offset (plus any NaN-return gaps)
+    # can leave the exact-need window one return short of n_keep — empirically
+    # the 1× window matched the full tail on only ~16% of ticks while the 2×
+    # window matched on 100% (95k ticks, v31_pm binary). Capped at the RunConfig
+    # default so this never *widens* the window vs legacy. Bit-identical: the
+    # most-recent returns are suffix-stable in lookback (a wider window only
+    # prepends OLDER returns, which the strategy's tail slice discards).
+    _need_lb = getattr(strategy, "decision_lookback_seconds", lambda: None)()
+    if _need_lb is not None:
+        _returns_lookback_s = min(cfg.vol_lookback_seconds, 2 * int(_need_lb))
+    else:
+        _returns_lookback_s = cfg.vol_lookback_seconds
+
     scan_interval_ns = cfg.scanner_interval_seconds * 1_000_000_000
 
     # Reference events are kept sorted and consumed incrementally.
@@ -512,6 +534,18 @@ def run_one_question(
     # needed by the scan loop. Defined BEFORE _RunState so the _RunState's
     # _book_idx field can alias the same dict.
     book_idx: dict[str, int] = {sym: 0 for sym in q.leg_symbols}
+
+    # Per-tick book build only needs legs that EVER carry a recorded book
+    # snapshot. A leg with no book_ts entries keeps an empty hftbacktest depth,
+    # so _book_state returns None every tick and it never enters `books` — so
+    # skipping its per-tick depth read (a numba jitclass boundary crossing) +
+    # apply_l2 is bit-identical. This removes the dominant per-tick cost on
+    # many-leg bucket questions, where most legs are untradeable (no/empty book)
+    # and, with leg-pruning on, are emitted with empty arrays on purpose. Binary
+    # legs (both quoted) are unaffected. The hedge leg is handled separately.
+    _active_leg_to_asset: dict[str, int] = {
+        sym: asset_no for sym, asset_no in leg_to_asset.items() if len(book_ts_per_leg.get(sym, ())) > 0
+    }
 
     # All mutable position/fill bookkeeping lives in one struct so the routing
     # helpers (_route_enter/_route_exit/_route_hedge/_route_stop_loss/_settle)
@@ -652,9 +686,11 @@ def run_one_question(
                 i += 1
             book_idx[sym] = i
 
-        # Build per-leg books.
+        # Build per-leg books. Iterate only legs that ever have a book snapshot
+        # (see _active_leg_to_asset): an empty leg's depth is always empty so
+        # _book_state would return None — skipping it is bit-identical.
         books: dict[str, BookState] = {}
-        for sym, asset_no in leg_to_asset.items():
+        for sym, asset_no in _active_leg_to_asset.items():
             ts_arr = book_ts_per_leg.get(sym)
             i = book_idx[sym]
             if ts_arr is not None and i > 0:
@@ -706,7 +742,7 @@ def run_one_question(
             qv = build_question_view(q, now_ns=now_ns, strike=strike, settled=False)
         else:
             qv = data_source.question_view(q, now_ns=now_ns, settled=False)
-        _rets_arr, _hl_arr = state.recent_returns_and_hl(now_ns=now_ns, lookback_seconds=cfg.vol_lookback_seconds)
+        _rets_arr, _hl_arr = state.recent_returns_and_hl(now_ns=now_ns, lookback_seconds=_returns_lookback_s)
         # Match the live engine's tuple contract (scanner.py:428-430): convert
         # numpy arrays to tuples so sim and live pass the identical container
         # type to strategy.evaluate.
