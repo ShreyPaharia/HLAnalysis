@@ -431,6 +431,25 @@ def _strike_for_data_source(name: str) -> Callable[[QuestionDescriptor], float]:
     return lambda _q: 0.0
 
 
+def _concat_jsonl(in_dir: Path, out_path: Path) -> None:
+    """Concatenate per-question ``*.jsonl`` decision-trace shards into one file.
+
+    Mirrors :func:`_concat_parquets`: each worker writes its question's trace to
+    ``<in_dir>/<question_id>.jsonl``; this stitches them (in sorted order) into
+    the final ``--decision-trace-out`` path. Always writes the output file (even
+    when empty) so the logged path exists.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as out:
+        if not in_dir.exists():
+            return
+        for p in sorted(in_dir.glob("*.jsonl")):
+            with open(p, encoding="utf-8") as fh:
+                for line in fh:
+                    if line.strip():
+                        out.write(line if line.endswith("\n") else line + "\n")
+
+
 def _concat_parquets(in_dir: Path, out_path: Path) -> None:
     if not in_dir.exists():
         return

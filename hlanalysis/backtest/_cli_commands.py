@@ -18,6 +18,7 @@ from ._cli_plumbing import (
     _ENV_PM_CACHE,
     _build_hedge_source,
     _build_strategy_for_cli,
+    _concat_jsonl,
     _concat_parquets,
     _extract_hedge_config,
     _hedge_data_path_for,
@@ -132,11 +133,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     # apart (closes the worker-factory config-drop bug class).
     strategy = _build_strategy_for_cli(args.strategy, params)
 
-    # --decision-trace-out: open a JSONL trace writer for the duration of the
-    # run.  Workers (n_workers>1) do NOT write trace rows (the subprocess path
-    # does not carry the writer across fork/spawn); only the in-process path
-    # (n_workers==1, the common debug/analysis case) produces trace output.
+    # --decision-trace-out: each question writes its own JSONL shard under
+    # ``out_dir/decision_trace/<question_id>.jsonl`` (mirrors diagnostics/fills),
+    # so the in-process AND subprocess-worker paths both produce trace output;
+    # the shards are concatenated into ``--decision-trace-out`` below.
     _decision_trace_out = getattr(args, "decision_trace_out", None)
+    _trace_dir = (out_dir / "decision_trace") if _decision_trace_out else None
     _trace_config_hash = ""
     _slot_cfg = getattr(args, "_slot_strategy_cfg", None)
     if _slot_cfg is not None:
@@ -144,35 +146,23 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         _trace_config_hash = _sig(_slot_cfg)
 
-    from .runner._decision_trace import DecisionTraceWriter as _DTW
-
-    _trace_writer: _DTW | None = None
-    if _decision_trace_out:
-        _trace_writer = _DTW(_decision_trace_out)
-        _trace_writer.open()
-        logger.info(f"Decision trace → {_decision_trace_out}")
-
-    try:
-        results = run_questions_parallel(
-            descriptors=descriptors,
-            strategy_id=args.strategy,
-            params=params,
-            run_cfg=run_cfg,
-            source_config=source_config,
-            diagnostics_dir=diag_dir,
-            fills_dir=fills_dir,
-            strike_for=strike_fn,
-            hedge_data_path=_hedge_data_path_for(args),
-            hedge_half_spread_bps=_hedge_half_spread_for(args),
-            n_workers=n_workers,
-            data_source=data_source,
-            strategy=strategy,
-            decision_trace_writer=_trace_writer,
-            decision_trace_config_hash=_trace_config_hash,
-        )
-    finally:
-        if _trace_writer is not None:
-            _trace_writer.close()
+    results = run_questions_parallel(
+        descriptors=descriptors,
+        strategy_id=args.strategy,
+        params=params,
+        run_cfg=run_cfg,
+        source_config=source_config,
+        diagnostics_dir=diag_dir,
+        fills_dir=fills_dir,
+        strike_for=strike_fn,
+        hedge_data_path=_hedge_data_path_for(args),
+        hedge_half_spread_bps=_hedge_half_spread_for(args),
+        n_workers=n_workers,
+        data_source=data_source,
+        strategy=strategy,
+        decision_trace_dir=_trace_dir,
+        decision_trace_config_hash=_trace_config_hash,
+    )
     per_q_pnl = [r.realized_pnl_usd for r in results]
     n_trades = sum(r.n_fills for r in results)
     outcomes = [r.outcome for r in results]
@@ -198,6 +188,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     # diagnostics.parquet / fills.parquet for downstream tooling.
     _concat_parquets(diag_dir, out_dir / "diagnostics.parquet")
     _concat_parquets(fills_dir, out_dir / "fills.parquet")
+    if _decision_trace_out and _trace_dir is not None:
+        _concat_jsonl(_trace_dir, Path(_decision_trace_out))
+        logger.info(f"Decision trace → {_decision_trace_out}")
     logger.info(f"Report → {out_dir}/report.md")
     return 0
 

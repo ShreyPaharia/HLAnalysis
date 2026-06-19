@@ -298,6 +298,7 @@ def run_one_question(
     extra_held_notional: float = 0.0,
     extra_n_held: int = 0,
     decision_trace_writer: DecisionTraceWriter | None = None,
+    decision_trace_dir: Path | None = None,
     decision_trace_strategy_id: str = "",
     decision_trace_config_hash: str = "",
 ) -> RunResult:
@@ -569,6 +570,17 @@ def run_one_question(
         extra_held_notional=extra_held_notional,
         extra_n_held=extra_n_held,
     )
+
+    # Per-question decision-trace shard (parallel-safe). When ``decision_trace_dir``
+    # is set and no explicit writer was passed, open a per-question JSONL file
+    # ``<dir>/<question_id>.jsonl`` (mirrors how diagnostics_dir / fills_dir write
+    # one parquet per question). The CLI concatenates these shards into the final
+    # ``--decision-trace-out`` path, so subprocess workers each write their own
+    # shard. Closed before return. Zero overhead when neither is provided.
+    _owned_trace_writer: DecisionTraceWriter | None = None
+    if decision_trace_writer is None and decision_trace_dir is not None:
+        _owned_trace_writer = DecisionTraceWriter(decision_trace_dir / f"{q.question_id}.jsonl").open()
+        decision_trace_writer = _owned_trace_writer
 
     # --- Scan loop ---------------------------------------------------------
     # Two modes (SHR-95):
@@ -857,6 +869,10 @@ def run_one_question(
         else:
             realized += notional - f.fee
     result.realized_pnl_usd = realized
+
+    # Flush + close the per-question trace shard we opened above (if any).
+    if _owned_trace_writer is not None:
+        _owned_trace_writer.close()
 
     if diagnostics_dir is not None:
         write_diagnostics(diag_rows, diagnostics_dir / f"{q.question_id}.parquet")

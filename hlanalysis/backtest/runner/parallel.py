@@ -155,6 +155,8 @@ def _run_question_worker(args: tuple) -> QResult:
         fills_dir,
         hedge_data_path,
         hedge_half_spread_bps,
+        decision_trace_dir,
+        decision_trace_config_hash,
     ) = args
 
     data_source = source_config.build()
@@ -189,6 +191,9 @@ def _run_question_worker(args: tuple) -> QResult:
         fills_dir=Path(fills_dir) if fills_dir else None,
         strike=strike,
         hedge_events=hedge_events,
+        decision_trace_dir=Path(decision_trace_dir) if decision_trace_dir else None,
+        decision_trace_strategy_id=strategy_id,
+        decision_trace_config_hash=decision_trace_config_hash,
     )
     return QResult(idx, res.realized_pnl_usd or 0.0, len(res.fills), data_source.resolved_outcome(q))
 
@@ -208,7 +213,7 @@ def run_questions_parallel(
     n_workers: int,
     data_source=None,
     strategy=None,
-    decision_trace_writer=None,
+    decision_trace_dir: Path | None = None,
     decision_trace_config_hash: str = "",
 ) -> list[QResult]:
     """Run each descriptor's backtest, returning QResult in INPUT order.
@@ -255,7 +260,7 @@ def run_questions_parallel(
                 hedge_events=hedge_events,
                 extra_held_notional=extra_notional,
                 extra_n_held=extra_n,
-                decision_trace_writer=decision_trace_writer,
+                decision_trace_dir=decision_trace_dir,
                 decision_trace_strategy_id=strategy_id,
                 decision_trace_config_hash=decision_trace_config_hash,
             )
@@ -285,6 +290,8 @@ def run_questions_parallel(
             str(fills_dir) if fills_dir else None,
             hedge_data_path,
             hedge_half_spread_bps,
+            str(decision_trace_dir) if decision_trace_dir else None,
+            decision_trace_config_hash,
         )
         for i, q in enumerate(descriptors)
     ]
