@@ -37,9 +37,7 @@ class TestResolveConfigAsof:
             assert len(commit_hash) == 40, f"Expected 40-hex commit hash, got: {commit_hash!r}"
             # c718f54a is the commit dated 2026-06-13 in the canonical repo.
             # Allow any valid hash that is a real git commit.
-            assert all(c in "0123456789abcdef" for c in commit_hash.lower()), (
-                f"Not a hex hash: {commit_hash!r}"
-            )
+            assert all(c in "0123456789abcdef" for c in commit_hash.lower()), f"Not a hex hash: {commit_hash!r}"
             assert out_path.exists(), f"Temp file missing: {out_path}"
             assert out_path.suffix == ".yaml"
             # Must be valid YAML.
@@ -74,9 +72,7 @@ class TestResolveConfigAsof:
 
         commit_hash, out_path = resolve_config_asof("2026-06-13", _REPO_ROOT)
         try:
-            assert commit_hash == expected_hash, (
-                f"Expected {expected_hash}, got {commit_hash}"
-            )
+            assert commit_hash == expected_hash, f"Expected {expected_hash}, got {commit_hash}"
         finally:
             out_path.unlink(missing_ok=True)
 
@@ -111,6 +107,4 @@ class TestResolveConfigAsof:
     def test_repo_root_from_file(self):
         """_repo_root_from_file should return a path containing config/strategy.yaml."""
         root = _repo_root_from_file(__file__)
-        assert (root / "config" / "strategy.yaml").exists(), (
-            f"config/strategy.yaml not found under {root}"
-        )
+        assert (root / "config" / "strategy.yaml").exists(), f"config/strategy.yaml not found under {root}"

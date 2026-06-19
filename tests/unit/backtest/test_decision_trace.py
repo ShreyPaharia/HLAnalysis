@@ -140,8 +140,7 @@ class TestBuildTraceRow:
             config_hash="abcdef012345",
         )
         assert set(row.keys()) == _CANONICAL_KEYS, (
-            f"Missing: {_CANONICAL_KEYS - set(row.keys())}  "
-            f"Extra: {set(row.keys()) - _CANONICAL_KEYS}"
+            f"Missing: {_CANONICAL_KEYS - set(row.keys())}  Extra: {set(row.keys()) - _CANONICAL_KEYS}"
         )
 
     def test_enter_decision_extracts_fields(self):
