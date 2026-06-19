@@ -67,24 +67,21 @@ def check_preconditions(
     PreconditionResult with per-check status and an overall verdict.
     """
     # -- Config hash check --
-    if live_config_hash is None and sim_config_hash is None:
-        # Also check within traces
-        live_hash_in_trace = (
-            live_trace["config_hash"].iloc[-1] if "config_hash" in live_trace.columns and not live_trace.empty else None
-        )
-        sim_hash_in_trace = (
-            sim_trace["config_hash"].iloc[-1] if "config_hash" in sim_trace.columns and not sim_trace.empty else None
-        )
-        if live_hash_in_trace is None and sim_hash_in_trace is None:
-            config_hash_match = "SKIP:no_live_hash"
-        elif live_hash_in_trace != sim_hash_in_trace:
-            config_hash_match = f"FAIL:live={live_hash_in_trace} sim={sim_hash_in_trace}"
-        else:
-            config_hash_match = "PASS"
-    elif live_config_hash is None or sim_config_hash is None:
+    # The live config hash MUST come from the per-question LIVE TRACE, never the
+    # engine's *current* hash (which may have changed since the question ran and
+    # would spuriously FAIL). When the live trace is empty for the question (no
+    # trace captured), there is nothing to compare against -> SKIP, not FAIL.
+    live_hash = _trace_config_hash(live_trace)
+    if live_hash is None and not live_trace.empty:
+        # Trace present but lacks a config_hash field: fall back to the caller's hint.
+        live_hash = live_config_hash
+
+    sim_hash = sim_config_hash if sim_config_hash is not None else _trace_config_hash(sim_trace)
+
+    if live_hash is None or sim_hash is None:
         config_hash_match = "SKIP:no_live_hash"
-    elif live_config_hash != sim_config_hash:
-        config_hash_match = f"FAIL:live={live_config_hash} sim={sim_config_hash}"
+    elif str(live_hash) != str(sim_hash):
+        config_hash_match = f"FAIL:live={live_hash} sim={sim_hash}"
     else:
         config_hash_match = "PASS"
 
@@ -377,6 +374,16 @@ def _is_nan(val: Any) -> bool:
         return False
 
 
+def _trace_config_hash(df: pd.DataFrame) -> str | None:
+    """Return the (last) config_hash from a per-question trace, or None if absent."""
+    if df.empty or "config_hash" not in df.columns:
+        return None
+    val = df["config_hash"].iloc[-1]
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return None
+    return str(val)
+
+
 # ── Layer 2: Fills ──────────────────────────────────────────────────────────
 
 
@@ -641,6 +648,57 @@ def reconcile_fills(
     )
 
 
+# ── Settlement-winner helpers ───────────────────────────────────────────────
+
+
+def _side_idx_from_symbol(symbol: str) -> int | None:
+    """Decode the side index from an HL outcome symbol (``#NNN`` -> NNN % 10).
+
+    Per the HL symbol convention ``#NNN`` -> ``side_idx = NNN % 10`` where
+    0 = Yes, 1 = No. Returns None if no ``#NNN`` suffix is present.
+    """
+    if "#" not in symbol:
+        return None
+    digits = "".join(ch for ch in symbol.rsplit("#", 1)[1] if ch.isdigit())
+    if not digits:
+        return None
+    return int(digits) % 10
+
+
+def _winner_from_settlement_fill(fills: pd.DataFrame) -> str | None:
+    """Derive the live winning side from the settlement-as-fill.
+
+    HL books settlement as a venue fill at price ~1.0 (the held leg won) / ~0.0
+    (it lost). The held leg's Yes/No identity comes from the symbol's side index.
+    Returns ``"yes"``/``"no"`` or None when no settlement-priced fill is present.
+    """
+    if fills is None or fills.empty:
+        return None
+    if "price" not in fills.columns or "symbol" not in fills.columns or "ts_ns" not in fills.columns:
+        return None
+    ordered = fills.sort_values("ts_ns")
+    settle = ordered[(ordered["price"] >= 0.99) | (ordered["price"] <= 0.01)]
+    if settle.empty:
+        return None
+    row = settle.iloc[-1]
+    side_idx = _side_idx_from_symbol(str(row["symbol"]))
+    if side_idx is None:
+        return None
+    leg_is_yes = side_idx == 0
+    won = float(row["price"]) >= 0.5
+    return ("yes" if leg_is_yes else "no") if won else ("no" if leg_is_yes else "yes")
+
+
+def _norm_winner(val: Any) -> str | None:
+    """Normalise a winner token for comparison; None / 'unknown' -> None."""
+    if val is None:
+        return None
+    s = str(val).strip().lower()
+    if s in ("", "unknown", "none", "nan"):
+        return None
+    return s
+
+
 # ── Layer 3: PnL ────────────────────────────────────────────────────────────
 
 
@@ -764,13 +822,23 @@ def reconcile_pnl(
         "residual": round(residual, 6),
     }
 
-    # Settlement winner check
+    # Settlement winner check. Prefer an explicit winner_side from settlement;
+    # otherwise derive the live winner from the settlement-as-fill (HL books
+    # settlement as a venue fill at px~1.0 => the filled leg won). Compare to the
+    # sim resolved outcome; SKIP if neither side is available.
     live_winner = live_settlement.get("winner_side") if live_settlement else None
+    if live_winner is None:
+        live_winner = _winner_from_settlement_fill(live_fills)
     sim_winner = sim_resolved.get("winner_side") if sim_resolved else None
+    if sim_winner is None and sim_resolved:
+        sim_winner = sim_resolved.get("resolved_outcome")
 
-    if live_winner is None and sim_winner is None or live_winner is None or sim_winner is None:
+    norm_live = _norm_winner(live_winner)
+    norm_sim = _norm_winner(sim_winner)
+
+    if norm_live is None or norm_sim is None:
         settlement_winner_match = "SKIP:no_settlement"
-    elif live_winner == sim_winner:
+    elif norm_live == norm_sim:
         settlement_winner_match = "PASS"
     else:
         settlement_winner_match = f"FAIL:live={live_winner} sim={sim_winner}"

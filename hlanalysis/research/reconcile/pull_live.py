@@ -1,4 +1,12 @@
-"""Pull live engine data from EC2 via AWS SSM send-command (no SSH)."""
+"""Pull live engine data from EC2 via AWS SSM send-command (no SSH).
+
+All queries target the **unified** engine state DB
+(``/opt/hl-recorder/data/engine/state.db``) — the per-slot
+``.../engine/<strategy_id>/state.db`` files are legacy. The unified DB mixes
+every slot, so every query MUST filter by ``strategy_id`` (``v1``, ``v31``,
+``v1_pm``, ``v31_pm``). HL recycles ``question_idx`` over time, so every query
+is also windowed to ``[expiry_ns - 24h, expiry_ns + 60s]``.
+"""
 
 from __future__ import annotations
 
@@ -13,11 +21,20 @@ from typing import Any
 import pandas as pd
 
 DEFAULT_INSTANCE_ID = "i-0dc4c0abec85a9eda"
+DEFAULT_STRATEGY_ID = "v31"
 _VENV_PYTHON = "/opt/hl-recorder/.venv/bin/python"
+
+# Unified engine state DB (read-only). The per-slot v31/state.db files are legacy.
+DB_PATH = "/opt/hl-recorder/data/engine/state.db"
 
 _NS_PER_S = 1_000_000_000
 _24H_NS = 24 * 3600 * _NS_PER_S
 _60S_NS = 60 * _NS_PER_S
+
+
+def _trace_path(strategy_id: str) -> str:
+    """Per-slot decision_trace path on EC2 for a given strategy_id."""
+    return f"/opt/hl-recorder/data/engine/{strategy_id}/decision_trace.jsonl"
 
 
 @dataclass
@@ -31,7 +48,8 @@ class LiveData:
     trace:
         Decision trace rows (canonical schema), one row per scan.
     settlement:
-        Settlement info dict with keys: question_idx, realized_pnl, ts_ns.
+        Settlement info dict with keys: question_idx, realized_pnl, ts_ns,
+        winner_side, source.
     halts_rejects:
         Engine halt/reject events, cols: ts_ns, kind, reason, payload_json.
     config_hash:
@@ -126,14 +144,16 @@ def _cache_path(
     cache_dir: Path,
     question_idx: int,
     kind: str,
+    strategy_id: str = DEFAULT_STRATEGY_ID,
 ) -> Path:
-    """Return a deterministic cache file path for a given pull."""
-    return cache_dir / f"q{question_idx}_{kind}.json"
+    """Return a deterministic, strategy-scoped cache file path for a given pull."""
+    return cache_dir / f"q{question_idx}_{strategy_id}_{kind}.json"
 
 
 def pull_live_fills(
     question_idx: int,
     expiry_ns: int,
+    strategy_id: str = DEFAULT_STRATEGY_ID,
     cache_dir: Path | None = None,
     instance_id: str = DEFAULT_INSTANCE_ID,
 ) -> pd.DataFrame:
@@ -145,6 +165,8 @@ def pull_live_fills(
         HL question/market index.
     expiry_ns:
         Market expiry timestamp in nanoseconds.
+    strategy_id:
+        Slot to filter the unified DB by (e.g. ``v31``, ``v1``).
     cache_dir:
         Directory to cache/read the pulled data. If provided and the cache
         file exists, it is read instead of pulling from EC2.
@@ -157,7 +179,7 @@ def pull_live_fills(
     Only source='venue' fills are returned. Empty DataFrame if none found.
     """
     if cache_dir is not None:
-        cache_file = _cache_path(cache_dir, question_idx, "fills")
+        cache_file = _cache_path(cache_dir, question_idx, "fills", strategy_id)
         if cache_file.exists():
             rows = json.loads(cache_file.read_text())
             return pd.DataFrame(rows) if rows else _empty_fills()
@@ -166,36 +188,32 @@ def pull_live_fills(
     window_end = expiry_ns + _60S_NS
 
     script = f"""
-import sqlite3, json, sys
+import sqlite3, json
 
-DB_PATH = "/opt/hl-recorder/data/engine/v31/state.db"
-try:
-    con = sqlite3.connect(DB_PATH)
-    rows = con.execute(
-        \"\"\"
-        SELECT ts_ns, symbol, side, price, size, fee, closed_pnl
-        FROM fills
-        WHERE question_idx = ? AND source = 'venue'
-          AND ts_ns >= ? AND ts_ns <= ?
-        ORDER BY ts_ns
-        \"\"\",
-        ({question_idx}, {window_start}, {window_end}),
-    ).fetchall()
-    con.close()
-    print(json.dumps([
-        dict(ts_ns=r[0], symbol=r[1], side=r[2], price=r[3],
-             size=r[4], fee=r[5], closed_pnl=r[6])
-        for r in rows
-    ]))
-except Exception as e:
-    print(json.dumps([]))
+con = sqlite3.connect("file:{DB_PATH}?mode=ro", uri=True)
+rows = con.execute(
+    \"\"\"
+    SELECT ts_ns, symbol, side, price, size, fee, closed_pnl
+    FROM fill
+    WHERE question_idx = ? AND strategy_id = ? AND source = 'venue'
+      AND ts_ns >= ? AND ts_ns <= ?
+    ORDER BY ts_ns
+    \"\"\",
+    ({question_idx}, {strategy_id!r}, {window_start}, {window_end}),
+).fetchall()
+con.close()
+print(json.dumps([
+    dict(ts_ns=r[0], symbol=r[1], side=r[2], price=r[3],
+         size=r[4], fee=r[5], closed_pnl=r[6])
+    for r in rows
+]))
 """
     raw = _ssm_python(script, instance_id=instance_id)
     rows = json.loads(raw.strip() or "[]")
 
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        _cache_path(cache_dir, question_idx, "fills").write_text(json.dumps(rows))
+        _cache_path(cache_dir, question_idx, "fills", strategy_id).write_text(json.dumps(rows))
 
     return pd.DataFrame(rows) if rows else _empty_fills()
 
@@ -207,7 +225,8 @@ def _empty_fills() -> pd.DataFrame:
 def pull_live_trace(
     question_idx: int,
     expiry_ns: int,
-    trace_path: str = "/opt/hl-recorder/data/engine/v31/decision_trace.jsonl",
+    strategy_id: str = DEFAULT_STRATEGY_ID,
+    trace_path: str | None = None,
     cache_dir: Path | None = None,
     instance_id: str = DEFAULT_INSTANCE_ID,
 ) -> pd.DataFrame:
@@ -219,8 +238,11 @@ def pull_live_trace(
         HL question/market index.
     expiry_ns:
         Market expiry timestamp in nanoseconds.
+    strategy_id:
+        Slot to pull the trace for; the JSONL path is built from this.
     trace_path:
-        Path to the decision_trace.jsonl on EC2.
+        Override path to the decision_trace.jsonl on EC2 (defaults to the
+        per-slot path derived from ``strategy_id``).
     cache_dir:
         Directory to cache/read the pulled data.
     instance_id:
@@ -231,18 +253,19 @@ def pull_live_trace(
     DataFrame with canonical schema columns. Empty if none found.
     """
     if cache_dir is not None:
-        cache_file = _cache_path(cache_dir, question_idx, "trace")
+        cache_file = _cache_path(cache_dir, question_idx, "trace", strategy_id)
         if cache_file.exists():
             rows = json.loads(cache_file.read_text())
             return pd.DataFrame(rows) if rows else pd.DataFrame()
 
     window_start = expiry_ns - _24H_NS
     window_end = expiry_ns + _60S_NS
+    path = trace_path if trace_path is not None else _trace_path(strategy_id)
 
     script = f"""
-import json, sys
+import json
 
-path = {repr(trace_path)}
+path = {path!r}
 question_idx = {question_idx}
 window_start = {window_start}
 window_end = {window_end}
@@ -272,7 +295,7 @@ print(json.dumps(rows))
 
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        _cache_path(cache_dir, question_idx, "trace").write_text(json.dumps(rows))
+        _cache_path(cache_dir, question_idx, "trace", strategy_id).write_text(json.dumps(rows))
 
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
@@ -280,17 +303,26 @@ print(json.dumps(rows))
 def pull_settlement(
     question_idx: int,
     expiry_ns: int,
+    strategy_id: str = DEFAULT_STRATEGY_ID,
     cache_dir: Path | None = None,
     instance_id: str = DEFAULT_INSTANCE_ID,
 ) -> dict[str, Any]:
-    """Pull settlement row for question_idx.
+    """Pull the settlement for question_idx from the unified DB.
+
+    Reads the ``settlement`` table (summed across symbols, windowed, scoped to
+    ``strategy_id``). If that table has no row for the question, falls back to
+    the **HL settlement-as-fill** convention: HL books settlement as a venue
+    fill at price ~1.0 (the held leg won) / ~0.0 (it lost). The realized PnL
+    and winning side are then derived from the final venue fill(s).
 
     Parameters
     ----------
     question_idx:
         HL question/market index.
     expiry_ns:
-        Market expiry timestamp in nanoseconds (used to bound the lookup window).
+        Market expiry timestamp in nanoseconds (bounds the lookup window).
+    strategy_id:
+        Slot to filter the unified DB by.
     cache_dir:
         Directory to cache/read the pulled data.
     instance_id:
@@ -298,10 +330,11 @@ def pull_settlement(
 
     Returns
     -------
-    Dict with keys: question_idx, realized_pnl, ts_ns. Empty dict if none found.
+    Dict with keys: question_idx, realized_pnl, ts_ns, winner_side, source.
+    Empty dict if neither the settlement table nor a settlement-as-fill is found.
     """
     if cache_dir is not None:
-        cache_file = _cache_path(cache_dir, question_idx, "settlement")
+        cache_file = _cache_path(cache_dir, question_idx, "settlement", strategy_id)
         if cache_file.exists():
             return json.loads(cache_file.read_text())
 
@@ -311,33 +344,67 @@ def pull_settlement(
     script = f"""
 import sqlite3, json
 
-DB_PATH = "/opt/hl-recorder/data/engine/v31/state.db"
-try:
-    con = sqlite3.connect(DB_PATH)
-    row = con.execute(
-        \"\"\"
-        SELECT question_idx, realized_pnl, ts_ns
-        FROM events
-        WHERE question_idx = ? AND kind = 'settlement'
-          AND ts_ns >= ? AND ts_ns <= ?
-        ORDER BY ts_ns DESC LIMIT 1
-        \"\"\",
-        ({question_idx}, {window_start}, {window_end}),
-    ).fetchone()
+con = sqlite3.connect("file:{DB_PATH}?mode=ro", uri=True)
+
+# 1) Authoritative: the settlement table (summed across symbols, windowed).
+srow = con.execute(
+    \"\"\"
+    SELECT SUM(realized_pnl), MAX(ts_ns)
+    FROM settlement
+    WHERE question_idx = ? AND strategy_id = ?
+      AND ts_ns >= ? AND ts_ns <= ?
+    \"\"\",
+    ({question_idx}, {strategy_id!r}, {window_start}, {window_end}),
+).fetchone()
+
+if srow is not None and srow[0] is not None:
     con.close()
-    if row:
-        print(json.dumps(dict(question_idx=row[0], realized_pnl=row[1], ts_ns=row[2])))
-    else:
+    print(json.dumps(dict(
+        question_idx={question_idx}, realized_pnl=srow[0], ts_ns=srow[1],
+        winner_side=None, source="settlement_table",
+    )))
+else:
+    # 2) Fallback: HL books settlement as a venue fill at px~1.0 (win) / ~0.0 (loss).
+    frows = con.execute(
+        \"\"\"
+        SELECT ts_ns, symbol, side, price, closed_pnl
+        FROM fill
+        WHERE question_idx = ? AND strategy_id = ? AND source = 'venue'
+          AND ts_ns >= ? AND ts_ns <= ?
+        ORDER BY ts_ns
+        \"\"\",
+        ({question_idx}, {strategy_id!r}, {window_start}, {window_end}),
+    ).fetchall()
+    con.close()
+    settle = [r for r in frows if r[3] is not None and (r[3] >= 0.99 or r[3] <= 0.01)]
+    if not settle:
         print(json.dumps({{}}))
-except Exception:
-    print(json.dumps({{}}))
+    else:
+        last = settle[-1]
+        symbol = last[1] or ""
+        price = last[3]
+        side_idx = None
+        if "#" in symbol:
+            digits = "".join(ch for ch in symbol.rsplit("#", 1)[1] if ch.isdigit())
+            if digits:
+                side_idx = int(digits) % 10
+        winner_side = None
+        if side_idx is not None:
+            leg_is_yes = side_idx == 0
+            won = price >= 0.5
+            winner_side = ("yes" if leg_is_yes else "no") if won else ("no" if leg_is_yes else "yes")
+        realized = sum(r[4] for r in settle if r[4] is not None)
+        print(json.dumps(dict(
+            question_idx={question_idx}, realized_pnl=realized, ts_ns=last[0],
+            winner_side=winner_side, settlement_price=price, source="settlement_as_fill",
+        )))
 """
     raw = _ssm_python(script, instance_id=instance_id)
     result: dict[str, Any] = json.loads(raw.strip() or "{}")
 
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        _cache_path(cache_dir, question_idx, "settlement").write_text(json.dumps(result))
+        _cache_path(cache_dir, question_idx, "settlement", strategy_id).write_text(json.dumps(result))
 
     return result
 
@@ -345,6 +412,7 @@ except Exception:
 def pull_halts_rejects(
     question_idx: int,
     expiry_ns: int,
+    strategy_id: str = DEFAULT_STRATEGY_ID,
     cache_dir: Path | None = None,
     instance_id: str = DEFAULT_INSTANCE_ID,
 ) -> pd.DataFrame:
@@ -356,6 +424,8 @@ def pull_halts_rejects(
         HL question/market index.
     expiry_ns:
         Market expiry timestamp in nanoseconds.
+    strategy_id:
+        Slot to filter the unified DB by.
     cache_dir:
         Directory to cache/read the pulled data.
     instance_id:
@@ -366,7 +436,7 @@ def pull_halts_rejects(
     DataFrame with cols: ts_ns, kind, reason, payload_json.
     """
     if cache_dir is not None:
-        cache_file = _cache_path(cache_dir, question_idx, "halts_rejects")
+        cache_file = _cache_path(cache_dir, question_idx, "halts_rejects", strategy_id)
         if cache_file.exists():
             rows = json.loads(cache_file.read_text())
             return pd.DataFrame(rows) if rows else _empty_halts()
@@ -377,35 +447,31 @@ def pull_halts_rejects(
     script = f"""
 import sqlite3, json
 
-DB_PATH = "/opt/hl-recorder/data/engine/v31/state.db"
 KINDS = ("order_rejected", "reconcile_drift", "halt")
-try:
-    con = sqlite3.connect(DB_PATH)
-    placeholders = ",".join("?" * len(KINDS))
-    rows = con.execute(
-        f\"\"\"
-        SELECT ts_ns, kind, reason, payload_json
-        FROM events
-        WHERE question_idx = ? AND kind IN ({{placeholders}})
-          AND ts_ns >= ? AND ts_ns <= ?
-        ORDER BY ts_ns
-        \"\"\",
-        ({question_idx}, *KINDS, {window_start}, {window_end}),
-    ).fetchall()
-    con.close()
-    print(json.dumps([
-        dict(ts_ns=r[0], kind=r[1], reason=r[2], payload_json=r[3])
-        for r in rows
-    ]))
-except Exception:
-    print(json.dumps([]))
+con = sqlite3.connect("file:{DB_PATH}?mode=ro", uri=True)
+placeholders = ",".join("?" * len(KINDS))
+rows = con.execute(
+    f\"\"\"
+    SELECT ts_ns, kind, reason, payload_json
+    FROM events
+    WHERE question_idx = ? AND strategy_id = ? AND kind IN ({{placeholders}})
+      AND ts_ns >= ? AND ts_ns <= ?
+    ORDER BY ts_ns
+    \"\"\",
+    ({question_idx}, {strategy_id!r}, *KINDS, {window_start}, {window_end}),
+).fetchall()
+con.close()
+print(json.dumps([
+    dict(ts_ns=r[0], kind=r[1], reason=r[2], payload_json=r[3])
+    for r in rows
+]))
 """
     raw = _ssm_python(script, instance_id=instance_id)
     rows = json.loads(raw.strip() or "[]")
 
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        _cache_path(cache_dir, question_idx, "halts_rejects").write_text(json.dumps(rows))
+        _cache_path(cache_dir, question_idx, "halts_rejects", strategy_id).write_text(json.dumps(rows))
 
     return pd.DataFrame(rows) if rows else _empty_halts()
 
@@ -415,12 +481,15 @@ def _empty_halts() -> pd.DataFrame:
 
 
 def pull_config_hash(
+    strategy_id: str = DEFAULT_STRATEGY_ID,
     instance_id: str = DEFAULT_INSTANCE_ID,
 ) -> str | None:
-    """Pull the config_hash from the most recent decision_trace row.
+    """Pull the config_hash from the most recent decision_trace row of a slot.
 
     Parameters
     ----------
+    strategy_id:
+        Slot whose decision_trace to read.
     instance_id:
         EC2 instance ID.
 
@@ -428,10 +497,10 @@ def pull_config_hash(
     -------
     Config hash string, or None if the trace is empty or the field is absent.
     """
-    script = """
+    script = f"""
 import json
 
-TRACE = "/opt/hl-recorder/data/engine/v31/decision_trace.jsonl"
+TRACE = {_trace_path(strategy_id)!r}
 last_obj = None
 try:
     with open(TRACE) as fh:
@@ -455,6 +524,7 @@ print(json.dumps(last_obj.get("config_hash") if last_obj else None))
 def pull_all(
     question_idx: int,
     expiry_ns: int,
+    strategy_id: str = DEFAULT_STRATEGY_ID,
     cache_dir: Path | None = None,
     instance_id: str = DEFAULT_INSTANCE_ID,
 ) -> LiveData:
@@ -466,6 +536,8 @@ def pull_all(
         HL question/market index.
     expiry_ns:
         Market expiry timestamp in nanoseconds.
+    strategy_id:
+        Slot to scope every pull to.
     cache_dir:
         Directory to cache/read pulled data.
     instance_id:
@@ -475,11 +547,13 @@ def pull_all(
     -------
     LiveData container with all pulled fields.
     """
-    fills = pull_live_fills(question_idx, expiry_ns, cache_dir=cache_dir, instance_id=instance_id)
-    trace = pull_live_trace(question_idx, expiry_ns, cache_dir=cache_dir, instance_id=instance_id)
-    settlement = pull_settlement(question_idx, expiry_ns, cache_dir=cache_dir, instance_id=instance_id)
-    halts_rejects = pull_halts_rejects(question_idx, expiry_ns, cache_dir=cache_dir, instance_id=instance_id)
-    config_hash = pull_config_hash(instance_id=instance_id)
+    fills = pull_live_fills(question_idx, expiry_ns, strategy_id, cache_dir=cache_dir, instance_id=instance_id)
+    trace = pull_live_trace(question_idx, expiry_ns, strategy_id, cache_dir=cache_dir, instance_id=instance_id)
+    settlement = pull_settlement(question_idx, expiry_ns, strategy_id, cache_dir=cache_dir, instance_id=instance_id)
+    halts_rejects = pull_halts_rejects(
+        question_idx, expiry_ns, strategy_id, cache_dir=cache_dir, instance_id=instance_id
+    )
+    config_hash = pull_config_hash(strategy_id, instance_id=instance_id)
     return LiveData(
         fills=fills,
         trace=trace,

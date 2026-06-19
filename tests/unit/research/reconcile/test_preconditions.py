@@ -87,17 +87,39 @@ class TestPreconditionConfigHash:
         # SKIP should not cause overall FAIL (unless other checks fail)
         assert result.overall == "PASS"
 
-    def test_precondition_skip_live_hash_none(self) -> None:
-        """Live hash None, sim hash present -> SKIP (not FAIL)."""
-        live = _make_trace()
+    def test_precondition_skip_empty_live_trace(self) -> None:
+        """Empty live trace (no per-question trace captured) -> SKIP (not FAIL).
+
+        The live config hash must come from the per-question LIVE TRACE, never the
+        engine's current hash. When no trace was captured for the question there is
+        nothing to compare against, so the check SKIPs rather than FAILs.
+        """
+        live = pd.DataFrame()  # no trace captured for this question
         sim = _make_trace(config_hash="def456")
         result = check_preconditions(
             live_trace=live,
             sim_trace=sim,
-            live_config_hash=None,
+            live_config_hash="current-engine-hash",  # must be ignored
             sim_config_hash="def456",
         )
         assert result.config_hash_match == "SKIP:no_live_hash"
+        # SKIP must not, by itself, fail the window check below it (empty live
+        # trace fails window, but the config check specifically must SKIP).
+        assert result.config_hash_match.startswith("SKIP")
+
+    def test_precondition_config_uses_trace_not_current_hash(self) -> None:
+        """Config hash compares the live TRACE hash, not the engine's current hash."""
+        live = _make_trace(config_hash="abc123")
+        sim = _make_trace(config_hash="abc123")
+        result = check_preconditions(
+            live_trace=live,
+            sim_trace=sim,
+            # Engine's *current* hash drifted; must be ignored in favour of the
+            # per-question trace hash (which matches sim).
+            live_config_hash="drifted-current-hash",
+            sim_config_hash="abc123",
+        )
+        assert result.config_hash_match == "PASS"
 
 
 class TestPreconditionWindowMatch:

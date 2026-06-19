@@ -84,6 +84,11 @@ Examples:
         help="EC2 instance ID for SSM pulls",
     )
     parser.add_argument(
+        "--strategy-id",
+        default="v31",
+        help="Engine slot to reconcile in the unified DB (e.g. v31, v1)",
+    )
+    parser.add_argument(
         "--pull",
         action="store_true",
         help="Pull fresh live data from EC2 (requires AWS CLI + credentials)",
@@ -104,6 +109,7 @@ Examples:
     cache_dir = Path(args.live_cache_dir)
     data_root = Path(args.data_root)
     instance_id: str = args.instance_id
+    strategy_id: str = args.strategy_id
 
     # -- Load sim data --
     sim_trace_path = Path(args.sim_trace)
@@ -152,16 +158,18 @@ Examples:
     )
 
     if args.pull:
-        print(f"Pulling live data for question #{question_idx} from {instance_id}...")
-        live_fills = pull_live_fills(question_idx, expiry_ns, cache_dir=cache_dir, instance_id=instance_id)
-        live_trace = pull_live_trace(question_idx, expiry_ns, cache_dir=cache_dir, instance_id=instance_id)
-        live_settlement = pull_settlement(question_idx, expiry_ns, cache_dir=cache_dir, instance_id=instance_id)
-        _halts = pull_halts_rejects(question_idx, expiry_ns, cache_dir=cache_dir, instance_id=instance_id)
-        live_config_hash = pull_config_hash(instance_id=instance_id)
+        print(f"Pulling live data for #{question_idx} ({strategy_id}) from {instance_id}...")
+        live_fills = pull_live_fills(question_idx, expiry_ns, strategy_id, cache_dir=cache_dir, instance_id=instance_id)
+        live_trace = pull_live_trace(question_idx, expiry_ns, strategy_id, cache_dir=cache_dir, instance_id=instance_id)
+        live_settlement = pull_settlement(
+            question_idx, expiry_ns, strategy_id, cache_dir=cache_dir, instance_id=instance_id
+        )
+        _halts = pull_halts_rejects(question_idx, expiry_ns, strategy_id, cache_dir=cache_dir, instance_id=instance_id)
+        live_config_hash = pull_config_hash(strategy_id, instance_id=instance_id)
     else:
         # Try to load from cache
         def _load_cache(kind: str) -> str | None:
-            p = cache_dir / f"q{question_idx}_{kind}.json"
+            p = cache_dir / f"q{question_idx}_{strategy_id}_{kind}.json"
             return p.read_text() if p.exists() else None
 
         fills_raw = _load_cache("fills")
