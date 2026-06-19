@@ -81,6 +81,11 @@ class Scanner:
         reference_symbol: str = "BTC",
         pnl_provider: Callable[[int], float] | None = None,
         gate_log_path: Path | None = None,
+        decision_trace_path: Path | None = None,
+        trace_question_idxs: frozenset[int] = frozenset(),
+        trace_filters: frozenset[tuple[str, str]] = frozenset(),
+        strategy_id: str | None = None,
+        config_hash: str | None = None,
     ) -> None:
         self.strategy = strategy
         self.cfg = cfg
@@ -104,6 +109,24 @@ class Scanner:
         # the bid-gate / cooldown / near-strike filters.
         self.gate_log_path = gate_log_path
         self._last_logged_state: dict[int, tuple[str, str]] = {}
+        # Per-scan decision trace. When ``trace_question_idxs`` is non-empty
+        # and ``decision_trace_path`` is set, the scanner writes ONE JSONL row
+        # PER SCAN for each question in the set. Unlike gate_log_path (which
+        # records transitions only), this writes every tick — purpose-built for
+        # reconciling live decisions against the backtester. Fully disabled
+        # (no allocation, no I/O) when ``trace_question_idxs`` is empty.
+        self.decision_trace_path = decision_trace_path
+        self.trace_question_idxs = trace_question_idxs
+        # Coin/class trace filters — each is an ``(underlying, klass)`` pair
+        # (e.g. ``("BTC", "priceBinary")``). A question matches if its
+        # ``(underlying, klass)`` is in this set. Lets us trace tomorrow's
+        # question without knowing its (irregularly-assigned) idx in advance.
+        self.trace_filters = trace_filters
+        # True iff any tracing is configured (idx set OR coin/class filter).
+        self._trace_enabled = bool(trace_question_idxs) or bool(trace_filters)
+        # Optional slot identity metadata for the trace rows.
+        self._strategy_id = strategy_id
+        self._config_hash = config_hash
         # PM up/down questions whose open-strike this slot has already resolved
         # and persisted — short-circuits the per-tick capture/persist work.
         self._pm_strike_seen: set[int] = set()
@@ -465,6 +488,14 @@ class Scanner:
                 now_ns=now_ns,
                 position=db_pos,
             )
+            self._maybe_write_decision_trace(
+                question=q,
+                decision=decision,
+                books=books,
+                now_ns=now_ns,
+                reference_price=ref,
+                position=db_pos,
+            )
             if decision.action is Action.HOLD:
                 continue
             for intent in decision.intents:
@@ -643,6 +674,184 @@ class Scanner:
         except OSError as e:
             # Best-effort logging — never block trading on a filesystem hiccup.
             logger.warning("gate log write failed path={} err={}", self.gate_log_path, e)
+
+    def _maybe_write_decision_trace(
+        self,
+        *,
+        question: QuestionView,
+        decision: Decision,
+        books: dict[str, BookState],
+        now_ns: int,
+        reference_price: float,
+        position: object | None = None,
+    ) -> None:
+        """Append ONE JSONL row per scan for each question_idx in
+        ``trace_question_idxs``.
+
+        Unlike ``_maybe_log_gate_transition`` (which fires only on state
+        transitions), this writes on EVERY scan tick for the traced questions —
+        purpose-built for reconciling live decisions against the backtester.
+
+        The hot path (``trace_question_idxs`` empty or question not in set) is
+        a single set-membership check with no allocation.
+        """
+        # Fast exit when tracing is disabled (single bool check, no allocation).
+        if not self._trace_enabled or self.decision_trace_path is None:
+            return
+        # Trace if the question is explicitly listed by idx OR matches a
+        # coin/class filter (so tomorrow's question is captured from open
+        # without knowing its idx ahead of time).
+        if question.question_idx not in self.trace_question_idxs and (
+            (question.underlying, question.klass) not in self.trace_filters
+        ):
+            return
+
+        # --- Resolve chosen leg (same priority logic as _maybe_log_gate_transition) ---
+        chosen_sym: str | None = None
+        chosen_side: str | None = None
+        for d in decision.diagnostics:
+            for k, v in d.fields:
+                if k == "chosen_leg":
+                    chosen_sym = v
+                    break
+            if chosen_sym is not None:
+                break
+        if chosen_sym is None and position is not None:
+            chosen_sym = getattr(position, "symbol", None)
+        if chosen_sym is None:
+            chosen_sym = _binary_favorite_sym(question, books)
+        # Derive side from chosen leg's position in question leg list.
+        if chosen_sym is not None and question.yes_symbol is not None:
+            if chosen_sym == question.yes_symbol:
+                chosen_side = "yes"
+            elif chosen_sym == getattr(question, "no_symbol", None):
+                chosen_side = "no"
+            else:
+                # priceBucket: use position in leg_symbols (even index = YES,
+                # odd index = NO for above_ladder layout).
+                leg_syms = question.leg_symbols or ()
+                try:
+                    idx = leg_syms.index(chosen_sym)
+                    chosen_side = "yes" if idx % 2 == 0 else "no"
+                except ValueError:
+                    chosen_side = None
+
+        # --- Book snapshot for chosen leg ---
+        sample_book: BookState | None = (books.get(chosen_sym) if chosen_sym else None) or next(
+            iter(books.values()), None
+        )
+
+        # --- Extract well-known scalar fields from all diagnostics (k,v) pairs ---
+        diag_kv: list[dict[str, str]] = []
+        for d in decision.diagnostics:
+            for k, v in d.fields:
+                diag_kv.append({"k": k, "v": v})
+
+        # Build a flat lookup for the well-known keys that appear across
+        # theta_harvester and late_resolution diagnostics.
+        _kv_map: dict[str, str] = {item["k"]: item["v"] for item in diag_kv}
+
+        def _float(key: str) -> float | None:
+            raw = _kv_map.get(key)
+            if raw is None:
+                return None
+            try:
+                return float(raw)
+            except (ValueError, TypeError):
+                return None
+
+        # theta_harvester emits "sigma"; late_resolution emits "sigma" too
+        sigma = _float("sigma")
+        # theta_harvester: "p_model"; late_resolution: "p_model" (edge diag)
+        p_model = _float("p_model")
+        # theta_harvester: "edge_yes" or "chosen_edge"; late_resolution: "edge_yes"
+        edge = _float("edge_yes") if "edge_yes" in _kv_map else _float("chosen_edge")
+        # safety_d entry: theta = "d" from "safety_d_below_min" diag;
+        # for the trace we expose whatever numeric "d" field is present as
+        # safety_d_entry (entry gate) — see also safety_d_exit below.
+        # We scan all diag messages to distinguish entry vs exit "d" values.
+        safety_d_entry: float | None = None
+        safety_d_exit: float | None = None
+        for d in decision.diagnostics:
+            if "below_min" in d.message or d.message == "safety_d_below_min":
+                for k, v in d.fields:
+                    if k == "d":
+                        try:
+                            safety_d_entry = float(v)
+                        except (ValueError, TypeError):
+                            pass
+                        break
+            elif "exit_safety_d" in d.message:
+                for k, v in d.fields:
+                    if k == "d":
+                        try:
+                            safety_d_exit = float(v)
+                        except (ValueError, TypeError):
+                            pass
+                        break
+        tte_s = _float("tte_s") or _float("tau_s")
+        # Favorite side from leadlag_veto / momentum_mr_tilt / direct field
+        favorite_side_raw = _kv_map.get("fav_side") or _kv_map.get("favorite_side")
+        # Normalize numeric sentinel (+1/-1) to string "yes"/"no"
+        favorite_side: str | None = None
+        if favorite_side_raw is not None:
+            if favorite_side_raw in ("1", "+1"):
+                favorite_side = "yes"
+            elif favorite_side_raw in ("-1",):
+                favorite_side = "no"
+            else:
+                favorite_side = favorite_side_raw  # pass through "yes"/"no" strings directly
+
+        # Intent (size / price) from first intent if present.
+        intended_size: float | None = None
+        intended_price: float | None = None
+        if decision.intents:
+            first_intent = decision.intents[0]
+            intended_size = first_intent.size
+            intended_price = first_intent.limit_price
+
+        # Position snapshot.
+        position_qty: float | None = None
+        position_avg_entry: float | None = None
+        if position is not None:
+            position_qty = getattr(position, "qty", None)
+            position_avg_entry = getattr(position, "avg_entry", None)
+
+        row = {
+            "ts_ns": now_ns,
+            "question_idx": question.question_idx,
+            "klass": question.klass,
+            "strategy_id": self._strategy_id,
+            "action": decision.action.value,
+            "reason": decision.diagnostics[0].message if decision.diagnostics else None,
+            "chosen_symbol": chosen_sym,
+            "chosen_side": chosen_side,
+            "reference_price": reference_price,
+            "sigma": sigma,
+            "p_model": p_model,
+            "edge": edge,
+            "safety_d_entry": safety_d_entry,
+            "safety_d_exit": safety_d_exit,
+            "tte_s": tte_s,
+            "favorite_side": favorite_side,
+            "intended_size": intended_size,
+            "intended_price": intended_price,
+            "bid_px": sample_book.bid_px if sample_book else None,
+            "bid_sz": sample_book.bid_sz if sample_book else None,
+            "ask_px": sample_book.ask_px if sample_book else None,
+            "ask_sz": sample_book.ask_sz if sample_book else None,
+            "position_qty": position_qty,
+            "position_avg_entry": position_avg_entry,
+            "config_hash": self._config_hash,
+            "diag_fields": diag_kv or None,
+        }
+        try:
+            self.decision_trace_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.decision_trace_path.open("a") as f:
+                f.write(json.dumps(row) + "\n")
+        except OSError as e:
+            # Best-effort — never block trading on a filesystem hiccup.
+            logger.warning("decision trace write failed path={} err={}", self.decision_trace_path, e)
 
     @staticmethod
     def _db_pos_to_strategy(p: object | None) -> Position | None:

@@ -146,6 +146,7 @@ class _OhlcBuffer:
         "_cap",
         "_bucket_ns",
         "_last_bucket",
+        "_slice_cache",
     )
 
     def __init__(self, bucket_ns: int, *, initial_capacity: int = 256) -> None:
@@ -158,6 +159,17 @@ class _OhlcBuffer:
         self._len = 0
         self._bucket_ns = int(bucket_ns)
         self._last_bucket: int | None = None
+        # Bit-identical slice memo (perf): consecutive scans (e.g. the 0.2s
+        # event-driven cadence over a dt=5 feed, or idle-backoff scans) often
+        # query a window whose content is byte-for-byte unchanged. The slice is
+        # fully determined by the window endpoints plus the ONLY mutable bar —
+        # the in-progress last bar (``ingest_tick`` only ever updates index
+        # ``_len-1``; all earlier bars are frozen once their bucket closes). So
+        # ``(lo_idx, hi_idx, last_high, last_low, last_close)`` is a complete
+        # validity signature; on an exact match we return the SAME array objects
+        # so callers can also memo their downstream tuple conversion by identity.
+        # ``None`` = cold. Holds ``(key, rets, hl)``.
+        self._slice_cache: tuple[tuple, np.ndarray, np.ndarray] | None = None
 
     def _grow(self) -> None:
         new_cap = self._cap * 2
@@ -236,6 +248,14 @@ class _OhlcBuffer:
         hi_idx = int(np.searchsorted(ts_view, now_ns, side="right"))
         if hi_idx <= lo_idx:
             return _EMPTY_F64, _EMPTY_HL
+        # Bit-identical memo: the window content is fully pinned by the endpoints
+        # and the sole mutable bar (last bar, index hi_idx-1). On an exact-key
+        # hit, return the SAME objects computed last time (see __init__ note).
+        last = hi_idx - 1
+        cache_key = (lo_idx, hi_idx, self._high[last], self._low[last], self._close[last])
+        cached = self._slice_cache
+        if cached is not None and cached[0] == cache_key:
+            return cached[1], cached[2]
         ret_slice = self._ret[lo_idx + 1 : hi_idx]
         if ret_slice.size:
             mask = ~np.isnan(ret_slice)
@@ -255,6 +275,7 @@ class _OhlcBuffer:
             hl = np.empty((kept_h.size, 2), dtype=np.float64)
             hl[:, 0] = kept_h
             hl[:, 1] = kept_l
+        self._slice_cache = (cache_key, rets, hl)
         return rets, hl
 
 

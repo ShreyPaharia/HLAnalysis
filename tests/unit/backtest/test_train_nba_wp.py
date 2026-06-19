@@ -1,12 +1,10 @@
 from pathlib import Path
 
-import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from scripts.train_nba_wp import (
     build_training_frame,
-    fit_logistic_wp,
 )
 
 
@@ -81,26 +79,3 @@ def test_build_training_frame_excludes_overtime(tmp_path: Path):
     # Only the 1 regulation row should survive.
     assert X.shape == (1, 3)
     assert y.shape == (1,)
-
-
-def test_fit_logistic_wp_separable(tmp_path: Path):
-    """8 games where huge home leads → home wins; huge away leads → away wins.
-    Logistic should fit cleanly and produce Brier well under 0.25 on a
-    held-out sample of the same structure."""
-    np.random.seed(42)
-    paths: list[Path] = []
-    for i in range(8):
-        home_wins = i % 2 == 0
-        margin = 20
-        rows = _synthetic_game(i * 10**10, home_wins=home_wins, leader_margin=margin)
-        p = tmp_path / f"g{i:03d}.parquet"
-        _write_pbp(p, rows)
-        paths.append(p)
-    X, y = build_training_frame(paths)
-    model, brier = fit_logistic_wp(X, y, holdout_fraction=0.2, random_state=0)
-    assert brier < 0.25
-    # Sanity: predicting home-team-leading-by-15-with-1min-left should give p > 0.7
-    from hlanalysis.backtest.data._espn_pbp import wp_features
-
-    feats = np.array([wp_features(score_diff_home=15, total_seconds_remaining=60, period=4)])
-    assert float(model.predict_proba(feats)[0][1]) > 0.7

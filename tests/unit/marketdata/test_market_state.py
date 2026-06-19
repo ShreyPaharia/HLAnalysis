@@ -532,3 +532,88 @@ def test_multi_cadence_independent_buffers() -> None:
     hl5 = ms.recent_hl_bars("BTC", now_ns=now, lookback_seconds=lookback, dt=5)
     hl60 = ms.recent_hl_bars("BTC", now_ns=now, lookback_seconds=lookback, dt=60)
     assert hl5.shape[0] > hl60.shape[0], f"Expected more dt=5 HL bars ({hl5.shape[0]}) than dt=60 ({hl60.shape[0]})"
+
+
+# --------------------------------------------------------------------------
+# _OhlcBuffer.slice_window bit-identical memo (perf)
+# --------------------------------------------------------------------------
+
+
+def _drive_ticks(buf, ticks):
+    """Feed (ts_ns, price) ticks via ingest_tick."""
+    for ts, px in ticks:
+        buf.ingest_tick(ts, px)
+
+
+def _make_tick_stream():
+    """A mix of multiple ticks per dt=5 bucket (mutating the last bar) and
+    new-bucket appends, spanning enough bars to exercise lo/hi advancement."""
+    from hlanalysis.marketdata.market_state import _OhlcBuffer  # noqa: PLC0415
+
+    dt_ns = 5 * S
+    ticks = []
+    price = 100.0
+    for bar in range(40):
+        base = bar * dt_ns
+        # 3 ticks inside the bucket; prices wiggle so H/L/close all move.
+        ticks.append((base + 0, price))
+        ticks.append((base + 1 * S, price + (0.5 if bar % 2 else -0.5)))
+        ticks.append((base + 3 * S, price + (0.2 if bar % 3 else -0.3)))
+        price += 0.4 if bar % 2 else -0.1
+    return _OhlcBuffer, dt_ns, ticks
+
+
+def test_slice_window_memo_returns_identical_object_on_repeat() -> None:
+    """Two consecutive slices with no intervening mutation hit the memo and
+    return the SAME array objects (enables the runner's identity-keyed tuple
+    memo)."""
+    OhlcBuffer, dt_ns, ticks = _make_tick_stream()
+    buf = OhlcBuffer(dt_ns)
+    _drive_ticks(buf, ticks)
+    now = ticks[-1][0]
+    r1, h1 = buf.slice_window(now_ns=now, lookback_seconds=3600)
+    r2, h2 = buf.slice_window(now_ns=now, lookback_seconds=3600)
+    assert r1 is r2
+    assert h1 is h2
+
+
+def test_slice_window_memo_is_bit_identical_across_scans() -> None:
+    """Slicing after EVERY tick (memo exercised across scans) yields, at the
+    final point, results byte-identical to a cold buffer that ingested the same
+    stream and sliced once. Proves the memo never serves a stale window."""
+    OhlcBuffer, dt_ns, ticks = _make_tick_stream()
+    lookback = 3600
+
+    # Hot path: a scan after every tick, at several lookbacks, across the stream.
+    hot = OhlcBuffer(dt_ns)
+    for ts, px in ticks:
+        hot.ingest_tick(ts, px)
+        for lb in (60, 300, lookback):
+            hot.slice_window(now_ns=ts, lookback_seconds=lb)
+    # Also re-scan at a now_ns strictly between the last two ticks (sub-bar).
+    r_hot, h_hot = hot.slice_window(now_ns=ticks[-1][0], lookback_seconds=lookback)
+
+    # Cold reference: same stream, single slice at the end.
+    cold = OhlcBuffer(dt_ns)
+    _drive_ticks(cold, ticks)
+    r_cold, h_cold = cold.slice_window(now_ns=ticks[-1][0], lookback_seconds=lookback)
+
+    np.testing.assert_array_equal(r_hot, r_cold)
+    np.testing.assert_array_equal(h_hot, h_cold)
+
+
+def test_slice_window_memo_recomputes_when_last_bar_mutates() -> None:
+    """A tick that changes the in-progress bar's close invalidates the memo
+    (different values, not the stale cached object)."""
+    OhlcBuffer, dt_ns, ticks = _make_tick_stream()
+    buf = OhlcBuffer(dt_ns)
+    _drive_ticks(buf, ticks)
+    now = ticks[-1][0]
+    _, h_before = buf.slice_window(now_ns=now, lookback_seconds=3600)
+    before = h_before.copy()
+    # Mutate the current bar with a new extreme high in the same bucket.
+    buf.ingest_tick(now + 1, 9999.0)
+    _, h_after = buf.slice_window(now_ns=now + 1, lookback_seconds=3600)
+    assert h_after[-1][0] == 9999.0
+    # The pre-mutation snapshot is untouched (cache stored a stable copy).
+    np.testing.assert_array_equal(h_before, before)

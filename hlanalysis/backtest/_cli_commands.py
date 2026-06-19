@@ -48,6 +48,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     from ..marketdata.decision_input import from_backtest_params
 
     params = _load_run_params(args)
+    # --slot-config-asof writes a temp file; clean it up after all params are
+    # resolved (it is no longer needed after _load_run_params returns).
+    _asof_tmp = getattr(args, "_slot_config_asof_tmp", None)
+    if _asof_tmp is not None:
+        try:
+            Path(_asof_tmp).unlink(missing_ok=True)
+        except Exception:
+            pass
 
     # Event-array cache is default-ON. --fresh/--no-cache disables it for this
     # invocation; --rebuild-cache forces a one-time rebuild (still repopulates).
@@ -97,6 +105,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             discover_kwargs["kind"] = kind
         elif args.data_source == "hl_hip4":
             discover_kwargs["kinds"] = ("priceBinary" if kind == "binary" else "priceBucket",)
+    if args.data_source == "hl_hip4":
+        discover_kwargs["underlying"] = getattr(args, "underlying", "BTC")
     descriptors = list(data_source.discover(start=start, end=end, **discover_kwargs))
     if args.max_markets is not None:
         descriptors = descriptors[args.skip_markets : args.skip_markets + args.max_markets]
@@ -121,21 +131,48 @@ def cmd_run(args: argparse.Namespace) -> int:
     # from the SAME ``source_config`` — no env side-channel can drift the two
     # apart (closes the worker-factory config-drop bug class).
     strategy = _build_strategy_for_cli(args.strategy, params)
-    results = run_questions_parallel(
-        descriptors=descriptors,
-        strategy_id=args.strategy,
-        params=params,
-        run_cfg=run_cfg,
-        source_config=source_config,
-        diagnostics_dir=diag_dir,
-        fills_dir=fills_dir,
-        strike_for=strike_fn,
-        hedge_data_path=_hedge_data_path_for(args),
-        hedge_half_spread_bps=_hedge_half_spread_for(args),
-        n_workers=n_workers,
-        data_source=data_source,
-        strategy=strategy,
-    )
+
+    # --decision-trace-out: open a JSONL trace writer for the duration of the
+    # run.  Workers (n_workers>1) do NOT write trace rows (the subprocess path
+    # does not carry the writer across fork/spawn); only the in-process path
+    # (n_workers==1, the common debug/analysis case) produces trace output.
+    _decision_trace_out = getattr(args, "decision_trace_out", None)
+    _trace_config_hash = ""
+    _slot_cfg = getattr(args, "_slot_strategy_cfg", None)
+    if _slot_cfg is not None:
+        from hlanalysis.engine.config import strategy_config_sig as _sig
+
+        _trace_config_hash = _sig(_slot_cfg)
+
+    from .runner._decision_trace import DecisionTraceWriter as _DTW
+
+    _trace_writer: _DTW | None = None
+    if _decision_trace_out:
+        _trace_writer = _DTW(_decision_trace_out)
+        _trace_writer.open()
+        logger.info(f"Decision trace → {_decision_trace_out}")
+
+    try:
+        results = run_questions_parallel(
+            descriptors=descriptors,
+            strategy_id=args.strategy,
+            params=params,
+            run_cfg=run_cfg,
+            source_config=source_config,
+            diagnostics_dir=diag_dir,
+            fills_dir=fills_dir,
+            strike_for=strike_fn,
+            hedge_data_path=_hedge_data_path_for(args),
+            hedge_half_spread_bps=_hedge_half_spread_for(args),
+            n_workers=n_workers,
+            data_source=data_source,
+            strategy=strategy,
+            decision_trace_writer=_trace_writer,
+            decision_trace_config_hash=_trace_config_hash,
+        )
+    finally:
+        if _trace_writer is not None:
+            _trace_writer.close()
     per_q_pnl = [r.realized_pnl_usd for r in results]
     n_trades = sum(r.n_fills for r in results)
     outcomes = [r.outcome for r in results]

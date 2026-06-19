@@ -87,6 +87,7 @@ from ._assets import (  # noqa: F401
     _latency_span,
     _sentinel_event_array,
 )
+from ._decision_trace import DecisionTraceWriter, build_trace_row  # noqa: F401
 from ._fees import _binary_fee  # noqa: F401
 from ._fills import (  # noqa: F401
     _classify_reject,
@@ -296,6 +297,9 @@ def run_one_question(
     sim_risk_caps: SimRiskCaps | None = None,
     extra_held_notional: float = 0.0,
     extra_n_held: int = 0,
+    decision_trace_writer: DecisionTraceWriter | None = None,
+    decision_trace_strategy_id: str = "",
+    decision_trace_config_hash: str = "",
 ) -> RunResult:
     """Run one question end-to-end through hftbacktest.
 
@@ -576,6 +580,14 @@ def run_one_question(
         _evt_idx = 0
         _last_scan_ns = q.start_ts_ns
 
+    # PERF: identity-keyed memo for the per-scan tuple conversion of the σ
+    # windows (see the build site below). Seeded with sentinels that can never
+    # equal a real array object, so the first scan always computes.
+    _prev_rets_arr: np.ndarray | None = None
+    _prev_recent_returns: tuple[float, ...] = ()
+    _prev_hl_arr: np.ndarray | None = None
+    _prev_recent_hl_bars: tuple[tuple[float, float], ...] = ()
+
     while True:
         if event_mode:
             # Determine how far to advance hbt to reach the next scan target.
@@ -698,14 +710,31 @@ def run_one_question(
         # Match the live engine's tuple contract (scanner.py:428-430): convert
         # numpy arrays to tuples so sim and live pass the identical container
         # type to strategy.evaluate.
-        recent_returns: tuple[float, ...] = tuple(_rets_arr.tolist())
+        #
+        # PERF: the tuple build is O(window) pure-Python and runs every scan —
+        # the dominant backtest cost for HL-bar consumers (e.g. v1 Parkinson over
+        # a 720-bar window). ``slice_window`` returns the SAME array object across
+        # consecutive scans whose window content is unchanged (its bit-identical
+        # memo), so an identity check lets us reuse the previously built tuples
+        # verbatim. Bit-identical: same object ⇒ same content ⇒ same tuple.
+        if _rets_arr is _prev_rets_arr:
+            recent_returns = _prev_recent_returns
+        else:
+            recent_returns = tuple(_rets_arr.tolist())
+            _prev_rets_arr = _rets_arr
+            _prev_recent_returns = recent_returns
         # FIX B: bulk C-level unbox via .tolist() then build inner tuples —
         # bit-identical to float(h)/float(lo) but avoids per-element numpy
         # scalar boxing in the Python loop (~68% of backtest runtime). Built
         # ONLY when the strategy consumes it (skip for theta — see above).
-        recent_hl_bars: tuple[tuple[float, float], ...] = (
-            tuple((h, lo) for h, lo in _hl_arr.tolist()) if _consumes_hl_bars else ()
-        )
+        if not _consumes_hl_bars:
+            recent_hl_bars = ()
+        elif _hl_arr is _prev_hl_arr:
+            recent_hl_bars = _prev_recent_hl_bars
+        else:
+            recent_hl_bars = tuple((h, lo) for h, lo in _hl_arr.tolist())
+            _prev_hl_arr = _hl_arr
+            _prev_recent_hl_bars = recent_hl_bars
         ref_close = state.latest_btc_close() or qv.strike
 
         decision = strategy.evaluate(
@@ -719,6 +748,21 @@ def run_one_question(
             recent_hl_bars=recent_hl_bars,
         )
         st.result.n_decisions += 1
+
+        # Per-scan decision trace (--decision-trace-out). Zero overhead when the
+        # writer is None (gate is a single None-check, no serialisation occurs).
+        if decision_trace_writer is not None:
+            _trace_row = build_trace_row(
+                ts_ns=now_ns,
+                question=qv,
+                strategy_id=decision_trace_strategy_id,
+                decision=decision,
+                reference_price=float(ref_close),
+                books=books,
+                position=st.pos,
+                config_hash=decision_trace_config_hash,
+            )
+            decision_trace_writer.write(_trace_row)
 
         current_diag: DiagnosticRow | None = None
         if need_diag:
@@ -811,6 +855,7 @@ def run_one_question(
 
 
 __all__ = [
+    "DecisionTraceWriter",
     "RunConfig",
     "run_one_question",
     "LatencyModel",

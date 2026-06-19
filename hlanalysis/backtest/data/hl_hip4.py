@@ -398,17 +398,22 @@ class HLHip4DataSource:
                 # raw fetchall tuples so the fast path can build the events list
                 # without going through the gen() generator.
                 evt = self.ref_event
-                ref_rows = self._reference_rows(con, evt, ref_start_ns, q.end_ts_ns, ref_date_list)
+                ref_rows = self._reference_rows(
+                    con, evt, ref_start_ns, q.end_ts_ns, ref_date_list, ref_symbol=q.underlying
+                )
                 if not ref_rows:
                     fallback = "mark" if evt == "bbo" else "bbo"
                     log.warning(
-                        "HL perp BTC %s yielded 0 rows in [%d, %d); falling back to %s",
+                        "HL perp %s %s yielded 0 rows in [%d, %d); falling back to %s",
+                        q.underlying,
                         evt,
                         ref_start_ns,
                         q.end_ts_ns,
                         fallback,
                     )
-                    ref_rows = self._reference_rows(con, fallback, ref_start_ns, q.end_ts_ns, ref_date_list)
+                    ref_rows = self._reference_rows(
+                        con, fallback, ref_start_ns, q.end_ts_ns, ref_date_list, ref_symbol=q.underlying
+                    )
                     evt = fallback
                 return build_fast_path_bundle(
                     con=con,
@@ -477,7 +482,7 @@ class HLHip4DataSource:
                 files.extend(_glob(g, recursive=True))
         # Reference feed (perp BBO primary, mark fallback).
         for evt in ("bbo", "mark"):
-            g = self._perp_partition_glob(evt, symbol="BTC")
+            g = self._perp_partition_glob(evt, symbol=q.underlying)
             files.extend(_glob(g, recursive=True))
         return [Path(f) for f in files]
 
@@ -503,7 +508,7 @@ class HLHip4DataSource:
             for leg in q.leg_symbols:
                 iters.append(self._book_iter(con, leg, q.start_ts_ns, q.end_ts_ns, date_list))
                 iters.append(self._trade_iter(con, leg, q.start_ts_ns, q.end_ts_ns, date_list))
-            iters.append(self._reference_iter(con, ref_start_ns, q.end_ts_ns, ref_date_list))
+            iters.append(self._reference_iter(con, ref_start_ns, q.end_ts_ns, ref_date_list, ref_symbol=q.underlying))
             iters.append(self._settlement_iter(con, q, q.start_ts_ns, q.end_ts_ns, date_list))
             for _ts, ev in heapq.merge(*iters, key=lambda x: x[0]):
                 yield ev
@@ -576,19 +581,22 @@ class HLHip4DataSource:
         start_ns: int,
         end_ns: int,
         date_list: list[str],
+        ref_symbol: str = "BTC",
     ) -> Iterator[tuple[int, ReferenceEvent]]:
+        sym = ref_symbol
         evt = self.ref_event
-        rows = self._reference_rows(con, evt, start_ns, end_ns, date_list)
+        rows = self._reference_rows(con, evt, start_ns, end_ns, date_list, ref_symbol=sym)
         if not rows:
             fallback = "mark" if evt == "bbo" else "bbo"
             log.warning(
-                "HL perp BTC %s yielded 0 rows in [%d, %d); falling back to %s",
+                "HL perp %s %s yielded 0 rows in [%d, %d); falling back to %s",
+                sym,
                 evt,
                 start_ns,
                 end_ns,
                 fallback,
             )
-            rows = self._reference_rows(con, fallback, start_ns, end_ns, date_list)
+            rows = self._reference_rows(con, fallback, start_ns, end_ns, date_list, ref_symbol=sym)
             evt = fallback
         if not rows:
             return iter(())
@@ -606,14 +614,14 @@ class HLHip4DataSource:
                 def gen_bbo_raw_ticks() -> Iterator[tuple[int, ReferenceEvent]]:
                     for ts, bid, ask in rows:
                         mid = (float(bid) + float(ask)) / 2.0
-                        yield int(ts), ReferenceEvent(int(ts), "BTC", mid, mid, mid)
+                        yield int(ts), ReferenceEvent(int(ts), sym, mid, mid, mid)
 
                 return gen_bbo_raw_ticks()
 
             def gen_mark_raw_ticks() -> Iterator[tuple[int, ReferenceEvent]]:
                 for ts, px in rows:
                     p = float(px)
-                    yield int(ts), ReferenceEvent(int(ts), "BTC", p, p, p)
+                    yield int(ts), ReferenceEvent(int(ts), sym, p, p, p)
 
             return gen_mark_raw_ticks()
 
@@ -634,14 +642,14 @@ class HLHip4DataSource:
             def gen_bbo_raw() -> Iterator[tuple[int, ReferenceEvent]]:
                 for ts, bid, ask in rows:
                     mid = (float(bid) + float(ask)) / 2.0
-                    yield int(ts), ReferenceEvent(int(ts), "BTC", mid, mid, mid)
+                    yield int(ts), ReferenceEvent(int(ts), sym, mid, mid, mid)
 
             return _resample_reference(gen_bbo_raw(), resample_ns=resample_ns)
 
         def gen_mark_raw() -> Iterator[tuple[int, ReferenceEvent]]:
             for ts, px in rows:
                 p = float(px)
-                yield int(ts), ReferenceEvent(int(ts), "BTC", p, p, p)
+                yield int(ts), ReferenceEvent(int(ts), sym, p, p, p)
 
         return _resample_reference(gen_mark_raw(), resample_ns=resample_ns)
 
@@ -652,8 +660,9 @@ class HLHip4DataSource:
         start_ns: int,
         end_ns: int,
         date_list: list[str],
+        ref_symbol: str = "BTC",
     ) -> list[tuple]:
-        glob = self._perp_partition_glob(evt, symbol="BTC")
+        glob = self._perp_partition_glob(evt, symbol=ref_symbol)
         if not self._partition_has_files(glob):
             return []
         # Narrow to in-range date partitions to dodge the 12k-file ``**`` glob
@@ -809,7 +818,7 @@ class HLHip4DataSource:
             # Reuse the same connection rather than opening a new one inside
             # ``_last_btc_ref_at_or_before``.
             if q.klass == "priceBinary":
-                last_btc = self._last_btc_ref_at_or_before(q.end_ts_ns, con=con)
+                last_btc = self._last_btc_ref_at_or_before(q.end_ts_ns, con=con, ref_symbol=q.underlying)
                 if last_btc is None:
                     return "unknown"
                 meta = self._load_meta(q)
@@ -951,13 +960,15 @@ class HLHip4DataSource:
         self._meta_cache[q.question_id] = meta
         return meta
 
-    def _last_btc_ref_at_or_before(self, ts_ns: int, con: duckdb.DuckDBPyConnection | None = None) -> float | None:
+    def _last_btc_ref_at_or_before(
+        self, ts_ns: int, con: duckdb.DuckDBPyConnection | None = None, ref_symbol: str = "BTC"
+    ) -> float | None:
         date_list = _date_partitions_in_range(ts_ns - int(2 * 86400 * 1e9), ts_ns)
         owned = con is None
         if owned:
             con = duckdb.connect()
         try:
-            return self._last_btc_ref_impl(con, ts_ns, date_list)
+            return self._last_btc_ref_impl(con, ts_ns, date_list, ref_symbol=ref_symbol)
         finally:
             if owned:
                 con.close()
@@ -967,9 +978,10 @@ class HLHip4DataSource:
         con: duckdb.DuckDBPyConnection,
         ts_ns: int,
         date_list: list[str],
+        ref_symbol: str = "BTC",
     ) -> float | None:
         for evt in ("bbo", "mark"):
-            glob = self._perp_partition_glob(evt, symbol="BTC")
+            glob = self._perp_partition_glob(evt, symbol=ref_symbol)
             if not self._partition_has_files(glob):
                 continue
             # Same narrowing as _reference_rows: avoid the fragile 12k-file ``**``

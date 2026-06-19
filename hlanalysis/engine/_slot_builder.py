@@ -17,6 +17,7 @@ Use ``TYPE_CHECKING`` for annotation-only imports.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -163,6 +164,44 @@ def build_slot(
     # through journal heartbeats. State-change-debounced, so file size
     # stays small (one line per question per transition).
     gate_log_path = slot_dir / "gate_decisions.jsonl"
+
+    # Per-scan decision trace — gated off by default. Set HLBT_TRACE_QUESTIONS
+    # (comma-separated) to enable. Each token is either a numeric question_idx
+    # (e.g. "1000433") OR a "COIN:KLASS" coin/class filter (e.g.
+    # "BTC:priceBinary") that traces any question with that underlying+class —
+    # use this to capture tomorrow's question from open without knowing its
+    # (irregularly-assigned) idx. HLBT_TRACE_PATH overrides the output path.
+    _trace_env = os.environ.get("HLBT_TRACE_QUESTIONS", "").strip()
+    _trace_idxs: frozenset[int] = frozenset()
+    _trace_filters: frozenset[tuple[str, str]] = frozenset()
+    if _trace_env:
+        _idxs: set[int] = set()
+        _filters: set[tuple[str, str]] = set()
+        for tok in _trace_env.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            if tok.isdigit():
+                _idxs.add(int(tok))
+            elif ":" in tok:
+                coin, _, klass = tok.partition(":")
+                _filters.add((coin.strip(), klass.strip()))
+        _trace_idxs = frozenset(_idxs)
+        _trace_filters = frozenset(_filters)
+    _trace_on = bool(_trace_idxs) or bool(_trace_filters)
+    _trace_path_env = os.environ.get("HLBT_TRACE_PATH", "").strip()
+    if _trace_on:
+        _decision_trace_path: Path | None = (
+            Path(_trace_path_env) if _trace_path_env else slot_dir / "decision_trace.jsonl"
+        )
+    else:
+        _decision_trace_path = None
+
+    # Compute config fingerprint once for the trace rows (stable 16-hex SHA-256).
+    from .config import strategy_config_sig
+
+    _config_hash: str | None = strategy_config_sig(s_cfg) if _trace_on else None
+
     scanner = Scanner(
         strategy=strategy,
         cfg=s_cfg,
@@ -182,6 +221,11 @@ def build_slot(
             outcome_only=True,
         ),
         gate_log_path=gate_log_path,
+        decision_trace_path=_decision_trace_path,
+        trace_question_idxs=_trace_idxs,
+        trace_filters=_trace_filters,
+        strategy_id=strategy_id,
+        config_hash=_config_hash,
     )
     return AccountSlot(
         cfg=s_cfg,

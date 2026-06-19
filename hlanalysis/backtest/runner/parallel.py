@@ -208,6 +208,8 @@ def run_questions_parallel(
     n_workers: int,
     data_source=None,
     strategy=None,
+    decision_trace_writer=None,
+    decision_trace_config_hash: str = "",
 ) -> list[QResult]:
     """Run each descriptor's backtest, returning QResult in INPUT order.
 
@@ -253,6 +255,9 @@ def run_questions_parallel(
                 hedge_events=hedge_events,
                 extra_held_notional=extra_notional,
                 extra_n_held=extra_n,
+                decision_trace_writer=decision_trace_writer,
+                decision_trace_strategy_id=strategy_id,
+                decision_trace_config_hash=decision_trace_config_hash,
             )
             # SHR-91: register this question's completed position windows so
             # subsequent questions can see them in the ledger.

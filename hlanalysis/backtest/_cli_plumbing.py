@@ -324,10 +324,56 @@ def _load_run_params(args: argparse.Namespace) -> dict:
     converter sets ``args.strategy`` to the matching registry id. ``--config``
     remains the explicit JSON path for ad-hoc params. The two are mutually
     exclusive.
+
+    ``--slot-config-asof <YYYY-MM-DD>`` sources the config from the last git
+    commit touching ``config/strategy.yaml`` on or before that date. Mutually
+    exclusive with a non-default ``--slot-config``.
     """
     if getattr(args, "slot", None):
         if getattr(args, "config", None):
             raise SystemExit("--slot and --config are mutually exclusive")
+
+        # --slot-config-asof: resolve config from git history.
+        asof = getattr(args, "slot_config_asof", None)
+        if asof is not None:
+            _default_slot_config = "config/strategy.yaml"
+            if args.slot_config != _default_slot_config:
+                raise SystemExit("--slot-config-asof and --slot-config are mutually exclusive")
+            from .config_asof import _repo_root_from_file, resolve_config_asof
+
+            repo_root = _repo_root_from_file(__file__)
+            try:
+                commit_hash, tmp_path = resolve_config_asof(asof, repo_root)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            from ..engine.config import load_strategies_config as _lsc
+            from ..engine.config import strategy_config_sig
+
+            _preview_cfgs = _lsc(tmp_path)
+            _preview_by_alias = {c.account_alias: c for c in _preview_cfgs.strategies}
+            if args.slot in _preview_by_alias:
+                _preview_sig = strategy_config_sig(_preview_by_alias[args.slot])
+            else:
+                _preview_sig = "(slot not found in asof config)"
+            import subprocess as _sp
+
+            _commit_date = _sp.run(
+                ["git", "log", "-1", "--format=%ci", commit_hash],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            print(
+                f"[slot-config-asof] resolved commit: {commit_hash[:12]}  "
+                f"date: {_commit_date}  config_sig({args.slot}): {_preview_sig}"
+            )
+            # Replace args.slot_config with the resolved temp-file path so the
+            # standard load_strategies_config call below reads the historical config.
+            args.slot_config = str(tmp_path)
+            # Record the temp path so cmd_run can delete it after use.
+            args._slot_config_asof_tmp = str(tmp_path)
+
         from ..engine.config import load_strategies_config
         from .slot_config import backtest_params_from_slot
 

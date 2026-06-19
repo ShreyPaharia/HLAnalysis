@@ -140,11 +140,26 @@ def _build_run_parser(sp) -> None:
         "(e.g. v31). Sources the EXACT live decision config via the engine "
         "config builders — no hand-written JSON to drift. Sets --strategy.",
     )
+    # --slot-config and --slot-config-asof are mutually exclusive: --slot-config
+    # is an explicit path; --slot-config-asof resolves the path from git history.
+    # Enforcement is in _load_run_params (after argparse, where asof populates
+    # args.slot_config with the resolved temp-file path).
     pr.add_argument(
         "--slot-config",
         default="config/strategy.yaml",
         dest="slot_config",
-        help="Path to the live strategy config for --slot (default config/strategy.yaml).",
+        help="Path to the live strategy config for --slot (default config/strategy.yaml). "
+        "Mutually exclusive with --slot-config-asof.",
+    )
+    pr.add_argument(
+        "--slot-config-asof",
+        default=None,
+        dest="slot_config_asof",
+        metavar="YYYY-MM-DD",
+        help="(--slot only) Source config/strategy.yaml as of the last git commit on or "
+        "before this date (YYYY-MM-DD). Resolves the exact config deployed at that "
+        "time from git history and uses it for the backtest run. Mutually exclusive "
+        "with a non-default --slot-config.",
     )
     pr.add_argument(
         "--slot-class",
@@ -184,6 +199,13 @@ def _build_run_parser(sp) -> None:
         help="Filter discovery to this question class. "
         "For hl_hip4: binary→priceBinary, bucket→priceBucket. "
         "For polymarket: pass-through.",
+    )
+    pr.add_argument(
+        "--underlying",
+        default="BTC",
+        help="(hl_hip4 only) Underlying to discover questions for "
+        "(e.g. BTC, ETH, SOL, HYPE). Reference feed reads the matching "
+        "HL perp. Default BTC.",
     )
     pr.add_argument(
         "--ref-source",
@@ -288,6 +310,19 @@ def _build_run_parser(sp) -> None:
         action="store_true",
         help="Ignore cached event arrays and rebuild them once (then repopulate the cache).",
     )
+    pr.add_argument(
+        "--decision-trace-out",
+        default=None,
+        dest="decision_trace_out",
+        metavar="PATH",
+        help="Write per-scan decision trace to PATH as JSONL (one row per strategy.evaluate "
+        "call). Schema: ts_ns, question_idx, klass, strategy_id, action, reason, "
+        "chosen_symbol, chosen_side, reference_price, sigma, p_model, edge, "
+        "safety_d_entry, safety_d_exit, tte_s, favorite_side, intended_size, "
+        "intended_price, bid_px, bid_sz, ask_px, ask_sz, position_qty, "
+        "position_avg_entry, config_hash, diag_fields. "
+        "Appends rows across questions. No overhead when omitted.",
+    )
     pr.set_defaults(func=cmd_run)
 
 
@@ -318,6 +353,14 @@ def _build_fetch_parser(sp) -> None:
 def _build_tune_parser(sp) -> None:
     pt = sp.add_parser("tune", help="Walk-forward parallel grid sweep")
     pt.add_argument("--strategy", required=True)
+    pt.add_argument(
+        "--slot-config-asof",
+        default=None,
+        dest="slot_config_asof",
+        metavar="YYYY-MM-DD",
+        help="(reserved, not yet wired for tune) Source config/strategy.yaml as of a "
+        "historical git commit date. See `run --slot-config-asof` for details.",
+    )
     pt.add_argument(
         "--data-source",
         required=True,

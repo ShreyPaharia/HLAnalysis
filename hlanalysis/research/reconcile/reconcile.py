@@ -1,0 +1,973 @@
+"""Core 4-layer sim-vs-live reconciliation."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from hlanalysis.research.reconcile.book import BookReader, book_parity_pct
+
+# ── Layer 0: Preconditions ──────────────────────────────────────────────────
+
+
+@dataclass
+class PreconditionResult:
+    """Result of pre-flight checks comparing live and sim traces.
+
+    Parameters
+    ----------
+    config_hash_match:
+        ``"PASS"`` | ``"FAIL:<detail>"`` | ``"SKIP:no_live_hash"``
+    question_identity_match:
+        ``"PASS"`` | ``"FAIL:<detail>"``
+    window_match:
+        ``"PASS"`` | ``"FAIL:<detail>"``
+    overall:
+        ``"PASS"`` | ``"FAIL"``
+    """
+
+    config_hash_match: str
+    question_identity_match: str
+    window_match: str
+    overall: str
+
+
+def check_preconditions(
+    live_trace: pd.DataFrame,
+    sim_trace: pd.DataFrame,
+    live_config_hash: str | None = None,
+    sim_config_hash: str | None = None,
+    live_expiry_ns: int | None = None,
+    sim_expiry_ns: int | None = None,
+) -> PreconditionResult:
+    """Layer 0: verify the two traces are for the same question with the same config.
+
+    Parameters
+    ----------
+    live_trace:
+        Decision trace from the live engine.
+    sim_trace:
+        Decision trace from the simulator.
+    live_config_hash:
+        Config hash from live (may be None if unavailable).
+    sim_config_hash:
+        Config hash from sim (may be None if unavailable).
+    live_expiry_ns:
+        Expiry timestamp for the live trace (ns); derived from trace if None.
+    sim_expiry_ns:
+        Expiry timestamp for the sim trace (ns); derived from trace if None.
+
+    Returns
+    -------
+    PreconditionResult with per-check status and an overall verdict.
+    """
+    # -- Config hash check --
+    if live_config_hash is None and sim_config_hash is None:
+        # Also check within traces
+        live_hash_in_trace = (
+            live_trace["config_hash"].iloc[-1] if "config_hash" in live_trace.columns and not live_trace.empty else None
+        )
+        sim_hash_in_trace = (
+            sim_trace["config_hash"].iloc[-1] if "config_hash" in sim_trace.columns and not sim_trace.empty else None
+        )
+        if live_hash_in_trace is None and sim_hash_in_trace is None:
+            config_hash_match = "SKIP:no_live_hash"
+        elif live_hash_in_trace != sim_hash_in_trace:
+            config_hash_match = f"FAIL:live={live_hash_in_trace} sim={sim_hash_in_trace}"
+        else:
+            config_hash_match = "PASS"
+    elif live_config_hash is None or sim_config_hash is None:
+        config_hash_match = "SKIP:no_live_hash"
+    elif live_config_hash != sim_config_hash:
+        config_hash_match = f"FAIL:live={live_config_hash} sim={sim_config_hash}"
+    else:
+        config_hash_match = "PASS"
+
+    # -- Question identity check --
+    def _get_field(df: pd.DataFrame, col: str) -> Any:
+        if col in df.columns and not df.empty:
+            return df[col].iloc[0]
+        return None
+
+    live_qidx = _get_field(live_trace, "question_idx")
+    sim_qidx = _get_field(sim_trace, "question_idx")
+    live_klass = _get_field(live_trace, "klass")
+    sim_klass = _get_field(sim_trace, "klass")
+
+    identity_fails = []
+    if live_qidx is not None and sim_qidx is not None and live_qidx != sim_qidx:
+        identity_fails.append(f"question_idx:live={live_qidx} sim={sim_qidx}")
+    if live_klass is not None and sim_klass is not None and live_klass != sim_klass:
+        identity_fails.append(f"klass:live={live_klass} sim={sim_klass}")
+
+    question_identity_match = "FAIL:" + "|".join(identity_fails) if identity_fails else "PASS"
+
+    # -- Window overlap check --
+    def _trace_window(df: pd.DataFrame, expiry_ns: int | None) -> tuple[int, int] | None:
+        if "ts_ns" not in df.columns or df.empty:
+            return None
+        ts = df["ts_ns"].dropna()
+        if ts.empty:
+            return None
+        return int(ts.min()), int(ts.max())
+
+    live_window = _trace_window(live_trace, live_expiry_ns)
+    sim_window = _trace_window(sim_trace, sim_expiry_ns)
+
+    if live_window is None or sim_window is None:
+        window_match = "FAIL:empty_trace"
+    else:
+        overlap_start = max(live_window[0], sim_window[0])
+        overlap_end = min(live_window[1], sim_window[1])
+        overlap = max(0, overlap_end - overlap_start)
+        live_span = max(1, live_window[1] - live_window[0])
+        sim_span = max(1, sim_window[1] - sim_window[0])
+        min_span = min(live_span, sim_span)
+        if min_span == 0 or overlap / min_span >= 0.5:
+            window_match = "PASS"
+        else:
+            window_match = f"FAIL:overlap_pct={overlap / min_span:.2f}"
+
+    # -- Overall --
+    fails = [s for s in [config_hash_match, question_identity_match, window_match] if s.startswith("FAIL")]
+    overall = "FAIL" if fails else "PASS"
+
+    return PreconditionResult(
+        config_hash_match=config_hash_match,
+        question_identity_match=question_identity_match,
+        window_match=window_match,
+        overall=overall,
+    )
+
+
+# ── Layer 1: Decisions ──────────────────────────────────────────────────────
+
+
+@dataclass
+class DecisionDivergence:
+    """A single field divergence between live and sim at a given time.
+
+    Parameters
+    ----------
+    ts_ns:
+        Bucket timestamp in nanoseconds.
+    field:
+        Name of the diverging field (e.g. ``"sigma"``).
+    live_val:
+        Live value.
+    sim_val:
+        Sim value.
+    rel_diff:
+        Relative difference for numeric fields; None for categorical.
+    """
+
+    ts_ns: int
+    field: str
+    live_val: Any
+    sim_val: Any
+    rel_diff: float | None
+
+
+@dataclass
+class DecisionResult:
+    """Alignment comparison of live vs sim decision traces.
+
+    Parameters
+    ----------
+    match_rate:
+        Fraction of aligned buckets where ``action`` agrees.
+    first_divergence:
+        First bucket with a numeric or action divergence, or None.
+    diff_table:
+        Per-bucket aligned diff DataFrame.
+    classification:
+        One of ``"match"``, ``"sigma_diff"``, ``"gate_diff"``, ``"cadence"``.
+    n_live_buckets:
+        Number of unique minute buckets in the live trace.
+    n_sim_buckets:
+        Number of unique minute buckets in the sim trace.
+    n_aligned:
+        Number of buckets present in both traces.
+    """
+
+    match_rate: float
+    first_divergence: DecisionDivergence | None
+    diff_table: pd.DataFrame
+    classification: str
+    n_live_buckets: int
+    n_sim_buckets: int
+    n_aligned: int
+
+
+def reconcile_decisions(
+    live_trace: pd.DataFrame,
+    sim_trace: pd.DataFrame,
+    bucket_seconds: int = 60,
+    align_tol_seconds: int = 2,
+    sigma_rel_tol: float = 0.05,
+    edge_abs_tol: float = 0.005,
+) -> DecisionResult:
+    """Layer 1: align traces on a coarse time grid and compare decision fields.
+
+    Parameters
+    ----------
+    live_trace:
+        Decision trace from the live engine (canonical schema).
+    sim_trace:
+        Decision trace from the simulator (canonical schema).
+    bucket_seconds:
+        Grid size in seconds for coarse alignment.
+    align_tol_seconds:
+        Tolerance for bucket alignment (unused internally but kept for API).
+    sigma_rel_tol:
+        Relative sigma difference threshold for "sigma_diff" classification.
+    edge_abs_tol:
+        Absolute edge difference threshold for reporting divergence.
+
+    Returns
+    -------
+    DecisionResult with match_rate, first_divergence, diff_table, and classification.
+    """
+    bucket_ns = bucket_seconds * 1_000_000_000
+
+    def _bucket_first(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty or "ts_ns" not in df.columns:
+            return df
+        df = df.copy()
+        df["_bucket"] = (df["ts_ns"] // bucket_ns) * bucket_ns
+        return df.groupby("_bucket", sort=True).first().reset_index()
+
+    live_b = _bucket_first(live_trace)
+    sim_b = _bucket_first(sim_trace)
+
+    n_live_buckets = len(live_b)
+    n_sim_buckets = len(sim_b)
+
+    if live_b.empty or sim_b.empty:
+        empty_diff = pd.DataFrame()
+        return DecisionResult(
+            match_rate=0.0,
+            first_divergence=None,
+            diff_table=empty_diff,
+            classification="cadence",
+            n_live_buckets=n_live_buckets,
+            n_sim_buckets=n_sim_buckets,
+            n_aligned=0,
+        )
+
+    live_b = live_b.set_index("_bucket")
+    sim_b = sim_b.set_index("_bucket")
+
+    common_buckets = live_b.index.intersection(sim_b.index)
+    n_aligned = len(common_buckets)
+
+    if n_aligned == 0:
+        return DecisionResult(
+            match_rate=0.0,
+            first_divergence=None,
+            diff_table=pd.DataFrame(),
+            classification="cadence",
+            n_live_buckets=n_live_buckets,
+            n_sim_buckets=n_sim_buckets,
+            n_aligned=0,
+        )
+
+    live_aligned = live_b.loc[common_buckets]
+    sim_aligned = sim_b.loc[common_buckets]
+
+    rows = []
+    action_matches = 0
+    first_div: DecisionDivergence | None = None
+    sigma_diffs: list[float] = []
+
+    numeric_fields = ["sigma", "p_model", "edge"]
+
+    for bucket in common_buckets:
+        l_row = live_aligned.loc[bucket]
+        s_row = sim_aligned.loc[bucket]
+        row: dict[str, Any] = {"bucket_ns": bucket}
+
+        for fld in numeric_fields:
+            l_val = float(l_row[fld]) if fld in live_aligned.columns and not _is_nan(l_row.get(fld)) else None
+            s_val = float(s_row[fld]) if fld in sim_aligned.columns and not _is_nan(s_row.get(fld)) else None
+            row[f"live_{fld}"] = l_val
+            row[f"sim_{fld}"] = s_val
+
+            if l_val is not None and s_val is not None:
+                denom = abs(l_val) if abs(l_val) > 1e-12 else 1e-12
+                rel_diff = abs(l_val - s_val) / denom
+                row[f"rel_diff_{fld}"] = rel_diff
+
+                if fld == "sigma":
+                    sigma_diffs.append(rel_diff)
+
+                if first_div is None:
+                    threshold = sigma_rel_tol if fld == "sigma" else edge_abs_tol
+                    if fld == "edge" and abs(l_val - s_val) > threshold or fld == "sigma" and rel_diff > threshold:
+                        first_div = DecisionDivergence(
+                            ts_ns=int(bucket),
+                            field=fld,
+                            live_val=l_val,
+                            sim_val=s_val,
+                            rel_diff=rel_diff,
+                        )
+            else:
+                row[f"rel_diff_{fld}"] = None
+
+        l_action = l_row["action"] if "action" in live_aligned.columns else None
+        s_action = s_row["action"] if "action" in sim_aligned.columns else None
+        row["live_action"] = l_action
+        row["sim_action"] = s_action
+        action_match = l_action == s_action
+        row["action_match"] = action_match
+        if action_match:
+            action_matches += 1
+        elif first_div is None:
+            first_div = DecisionDivergence(
+                ts_ns=int(bucket),
+                field="action",
+                live_val=l_action,
+                sim_val=s_action,
+                rel_diff=None,
+            )
+
+        rows.append(row)
+
+    match_rate = action_matches / n_aligned if n_aligned > 0 else 0.0
+    diff_table = pd.DataFrame(rows)
+
+    # Classification
+    max_possible_buckets = max(n_live_buckets, n_sim_buckets)
+    cadence_gap = (max_possible_buckets - n_aligned) / max(max_possible_buckets, 1)
+
+    mean_sigma_diff = float(np.mean(sigma_diffs)) if sigma_diffs else 0.0
+
+    if match_rate >= 0.95:
+        classification = "match"
+    elif cadence_gap > 0.10:
+        classification = "cadence"
+    elif mean_sigma_diff > sigma_rel_tol:
+        classification = "sigma_diff"
+    else:
+        classification = "gate_diff"
+
+    return DecisionResult(
+        match_rate=match_rate,
+        first_divergence=first_div,
+        diff_table=diff_table,
+        classification=classification,
+        n_live_buckets=n_live_buckets,
+        n_sim_buckets=n_sim_buckets,
+        n_aligned=n_aligned,
+    )
+
+
+def _is_nan(val: Any) -> bool:
+    """Return True if val is None or a float NaN."""
+    if val is None:
+        return True
+    try:
+        return math.isnan(float(val))
+    except (TypeError, ValueError):
+        return False
+
+
+# ── Layer 2: Fills ──────────────────────────────────────────────────────────
+
+
+@dataclass
+class FillEpisode:
+    """A contiguous cluster of same-direction fills forming one position leg.
+
+    Parameters
+    ----------
+    side:
+        ``"BUY"`` or ``"SELL"``.
+    start_ns:
+        Timestamp of the first fill in nanoseconds.
+    end_ns:
+        Timestamp of the last fill in nanoseconds.
+    total_size:
+        Sum of fill sizes.
+    vwap:
+        Volume-weighted average price.
+    n_fills:
+        Number of fills in this episode.
+    """
+
+    side: str
+    start_ns: int
+    end_ns: int
+    total_size: float
+    vwap: float
+    n_fills: int
+
+
+@dataclass
+class FillsResult:
+    """Comparison of live vs sim fill episodes.
+
+    Parameters
+    ----------
+    live_episodes:
+        Episodes detected in the live fills.
+    sim_episodes:
+        Episodes detected in the sim fills.
+    episode_table:
+        Matched episode pairs with size_diff and vwap_diff columns.
+    book_parity_pct:
+        Fraction of live fills whose price was present in the recorded book.
+    gap_classification:
+        One of ``"match"``, ``"latency"``, ``"depth_slippage"``,
+        ``"missed_episode"``, ``"extra_episode"``.
+    n_live_fills:
+        Total number of live fill rows.
+    n_sim_fills:
+        Total number of sim fill rows.
+    """
+
+    live_episodes: list[FillEpisode]
+    sim_episodes: list[FillEpisode]
+    episode_table: pd.DataFrame
+    book_parity_pct: float | None
+    gap_classification: str
+    n_live_fills: int
+    n_sim_fills: int
+
+
+def _group_episodes(fills: pd.DataFrame) -> list[FillEpisode]:
+    """Group fills into episodes (contiguous same-side clusters).
+
+    Parameters
+    ----------
+    fills:
+        DataFrame with cols: ts_ns, side, price, size.
+
+    Returns
+    -------
+    List of FillEpisode objects in chronological order.
+    """
+    if fills.empty:
+        return []
+
+    fills = fills.sort_values("ts_ns").reset_index(drop=True)
+    episodes: list[FillEpisode] = []
+    current_side: str | None = None
+    sizes: list[float] = []
+    prices: list[float] = []
+    start_ns = 0
+    end_ns = 0
+
+    for _, row in fills.iterrows():
+        side = str(row["side"])
+        price = float(row["price"])
+        size = float(row["size"])
+        ts = int(row["ts_ns"])
+
+        if current_side is None:
+            current_side = side
+            start_ns = ts
+            end_ns = ts
+            sizes = [size]
+            prices = [price]
+        elif side == current_side:
+            sizes.append(size)
+            prices.append(price)
+            end_ns = ts
+        else:
+            # Side flip: close current episode
+            total = sum(sizes)
+            vwap = sum(p * s for p, s in zip(prices, sizes)) / total if total > 0 else 0.0
+            episodes.append(
+                FillEpisode(
+                    side=current_side,
+                    start_ns=start_ns,
+                    end_ns=end_ns,
+                    total_size=total,
+                    vwap=vwap,
+                    n_fills=len(sizes),
+                )
+            )
+            current_side = side
+            start_ns = ts
+            end_ns = ts
+            sizes = [size]
+            prices = [price]
+
+    if current_side is not None and sizes:
+        total = sum(sizes)
+        vwap = sum(p * s for p, s in zip(prices, sizes)) / total if total > 0 else 0.0
+        episodes.append(
+            FillEpisode(
+                side=current_side,
+                start_ns=start_ns,
+                end_ns=end_ns,
+                total_size=total,
+                vwap=vwap,
+                n_fills=len(sizes),
+            )
+        )
+
+    return episodes
+
+
+def reconcile_fills(
+    live_fills: pd.DataFrame,
+    sim_fills: pd.DataFrame,
+    data_root: Path | None = None,
+    book_reader: BookReader | None = None,
+) -> FillsResult:
+    """Layer 2: group fills into episodes, compare VWAP/size, check book parity.
+
+    Parameters
+    ----------
+    live_fills:
+        Live venue fills with cols: ts_ns, side, price, size, symbol, [fee, closed_pnl].
+    sim_fills:
+        Sim fills with same schema (fee/closed_pnl optional).
+    data_root:
+        Root of the HL recorded data tree (for book parity check).
+    book_reader:
+        Injectable book reader for testing.
+
+    Returns
+    -------
+    FillsResult with episode lists, matched table, book_parity_pct, and classification.
+    """
+    live_eps = _group_episodes(live_fills) if not live_fills.empty else []
+    sim_eps = _group_episodes(sim_fills) if not sim_fills.empty else []
+
+    # Compute book parity on live fills
+    bk_pct: float | None = None
+    if not live_fills.empty and "symbol" in live_fills.columns:
+        if data_root is not None or book_reader is not None:
+            bk_pct = book_parity_pct(live_fills, data_root or Path("."), reader=book_reader)
+
+    # Match episodes: for each live episode, find closest sim episode within 300s
+    _300S_NS = 300 * 1_000_000_000
+    matched_rows: list[dict[str, Any]] = []
+    used_sim: set[int] = set()
+
+    for li, lep in enumerate(live_eps):
+        best_j: int | None = None
+        best_gap = float("inf")
+        for sj, sep in enumerate(sim_eps):
+            if sj in used_sim:
+                continue
+            if sep.side != lep.side:
+                continue
+            gap = abs(lep.start_ns - sep.start_ns)
+            if gap < best_gap and gap <= _300S_NS:
+                best_gap = gap
+                best_j = sj
+
+        if best_j is not None:
+            sep = sim_eps[best_j]
+            used_sim.add(best_j)
+            size_diff = sep.total_size - lep.total_size
+            vwap_diff = sep.vwap - lep.vwap
+            matched_rows.append(
+                {
+                    "live_side": lep.side,
+                    "live_start_ns": lep.start_ns,
+                    "live_size": lep.total_size,
+                    "sim_size": sep.total_size,
+                    "size_diff": size_diff,
+                    "live_vwap": lep.vwap,
+                    "sim_vwap": sep.vwap,
+                    "vwap_diff": vwap_diff,
+                    "latency_ns": lep.start_ns - sep.start_ns,
+                    "matched": True,
+                }
+            )
+        else:
+            matched_rows.append(
+                {
+                    "live_side": lep.side,
+                    "live_start_ns": lep.start_ns,
+                    "live_size": lep.total_size,
+                    "sim_size": None,
+                    "size_diff": None,
+                    "live_vwap": lep.vwap,
+                    "sim_vwap": None,
+                    "vwap_diff": None,
+                    "latency_ns": None,
+                    "matched": False,
+                }
+            )
+
+    episode_table = pd.DataFrame(matched_rows)
+
+    # Classification
+    n_live = len(live_eps)
+    n_sim = len(sim_eps)
+
+    if n_live == 0 and n_sim == 0:
+        classification = "match"
+    elif n_sim < n_live:
+        classification = "missed_episode"
+    elif n_sim > n_live:
+        classification = "extra_episode"
+    elif not episode_table.empty and episode_table["matched"].all():
+        # Check latency
+        latencies = episode_table["latency_ns"].dropna().abs()
+        max_latency_s = latencies.max() / 1e9 if not latencies.empty else 0.0
+        # Check VWAP diff
+        vwap_diffs = episode_table["vwap_diff"].dropna().abs()
+        max_vwap_diff = vwap_diffs.max() if not vwap_diffs.empty else 0.0
+
+        if max_vwap_diff > 0.005:
+            classification = "depth_slippage"
+        elif max_latency_s > 30:
+            classification = "latency"
+        else:
+            classification = "match"
+    else:
+        classification = "missed_episode"
+
+    return FillsResult(
+        live_episodes=live_eps,
+        sim_episodes=sim_eps,
+        episode_table=episode_table,
+        book_parity_pct=bk_pct,
+        gap_classification=classification,
+        n_live_fills=len(live_fills),
+        n_sim_fills=len(sim_fills),
+    )
+
+
+# ── Layer 3: PnL ────────────────────────────────────────────────────────────
+
+
+@dataclass
+class PnLResult:
+    """PnL comparison between live and sim.
+
+    Parameters
+    ----------
+    live_realized:
+        Sum of venue fill closed_pnl (venue-authoritative).
+    sim_realized:
+        Sim realized PnL computed from fill episodes.
+    pnl_diff:
+        live_realized - sim_realized.
+    settlement_winner_match:
+        ``"PASS"`` | ``"FAIL:<detail>"`` | ``"SKIP:no_settlement"``.
+    waterfall:
+        Attribution components: entry_vwap_diff, exit_vwap_diff, size_diff,
+        fee_diff, residual.
+    pnl_match:
+        ``"PASS"`` if |pnl_diff| <= threshold, else ``"FAIL:<amount>"``.
+    """
+
+    live_realized: float
+    sim_realized: float
+    pnl_diff: float
+    settlement_winner_match: str
+    waterfall: dict[str, float]
+    pnl_match: str
+
+
+def reconcile_pnl(
+    live_fills: pd.DataFrame,
+    sim_fills: pd.DataFrame,
+    live_settlement: dict[str, Any],
+    sim_resolved: dict[str, Any],
+    pnl_abs_threshold: float = 5.0,
+) -> PnLResult:
+    """Layer 3: compare live vs sim realized PnL with attribution waterfall.
+
+    Parameters
+    ----------
+    live_fills:
+        Live fills with cols: ts_ns, side, price, size, [fee], [closed_pnl].
+    sim_fills:
+        Sim fills with same schema.
+    live_settlement:
+        Dict with keys: question_idx, realized_pnl, ts_ns.  May be empty.
+    sim_resolved:
+        Dict with keys: winner_side (str), resolved_outcome (float).  May be empty.
+    pnl_abs_threshold:
+        Maximum acceptable |pnl_diff| for PASS verdict.
+
+    Returns
+    -------
+    PnLResult with realized PnL values, diff, and waterfall attribution.
+    """
+    # Live realized: sum of closed_pnl from venue fills
+    live_realized = 0.0
+    if not live_fills.empty and "closed_pnl" in live_fills.columns:
+        live_realized = float(live_fills["closed_pnl"].fillna(0).sum())
+    elif live_settlement:
+        live_realized = float(live_settlement.get("realized_pnl", 0.0) or 0.0)
+
+    # Sim realized: compute from fill episodes (entry + exit)
+    sim_eps = _group_episodes(sim_fills) if not sim_fills.empty else []
+    sim_fees_total = 0.0
+    if not sim_fills.empty and "fee" in sim_fills.columns:
+        sim_fees_total = float(sim_fills["fee"].fillna(0).sum())
+
+    live_fees_total = 0.0
+    if not live_fills.empty and "fee" in live_fills.columns:
+        live_fees_total = float(live_fills["fee"].fillna(0).sum())
+
+    # Compute sim PnL from episodes: pair BUY+SELL
+    buy_eps = [e for e in sim_eps if e.side == "BUY"]
+    sell_eps = [e for e in sim_eps if e.side == "SELL"]
+    sim_realized = 0.0
+    n_pairs = min(len(buy_eps), len(sell_eps))
+    for i in range(n_pairs):
+        be = buy_eps[i]
+        se = sell_eps[i]
+        pair_size = min(be.total_size, se.total_size)
+        sim_realized += (se.vwap - be.vwap) * pair_size
+    sim_realized -= sim_fees_total
+
+    # Waterfall attribution
+    # Use episodes from live fills as well
+    live_eps_all = _group_episodes(live_fills) if not live_fills.empty else []
+    live_buy_eps = [e for e in live_eps_all if e.side == "BUY"]
+    live_sell_eps = [e for e in live_eps_all if e.side == "SELL"]
+
+    entry_vwap_diff = 0.0
+    exit_vwap_diff = 0.0
+    size_diff_pnl = 0.0
+
+    n_pairs_wf = min(len(buy_eps), len(sell_eps), len(live_buy_eps), len(live_sell_eps))
+    for i in range(n_pairs_wf):
+        lbe = live_buy_eps[i]
+        lse = live_sell_eps[i]
+        sbe = buy_eps[i]
+        sse = sell_eps[i]
+        avg_entry = (lbe.vwap + sbe.vwap) / 2
+        pair_size = (lbe.total_size + sbe.total_size) / 2
+
+        entry_vwap_diff += (sbe.vwap - lbe.vwap) * pair_size
+        exit_vwap_diff += (sse.vwap - lse.vwap) * pair_size
+        size_diff_pnl += (sbe.total_size - lbe.total_size) * avg_entry
+
+    fee_diff = sim_fees_total - live_fees_total
+    pnl_diff = live_realized - sim_realized
+    accounted = entry_vwap_diff + exit_vwap_diff + size_diff_pnl + fee_diff
+    residual = pnl_diff - accounted
+
+    waterfall = {
+        "entry_vwap_diff": round(entry_vwap_diff, 6),
+        "exit_vwap_diff": round(exit_vwap_diff, 6),
+        "size_diff": round(size_diff_pnl, 6),
+        "fee_diff": round(fee_diff, 6),
+        "residual": round(residual, 6),
+    }
+
+    # Settlement winner check
+    live_winner = live_settlement.get("winner_side") if live_settlement else None
+    sim_winner = sim_resolved.get("winner_side") if sim_resolved else None
+
+    if live_winner is None and sim_winner is None or live_winner is None or sim_winner is None:
+        settlement_winner_match = "SKIP:no_settlement"
+    elif live_winner == sim_winner:
+        settlement_winner_match = "PASS"
+    else:
+        settlement_winner_match = f"FAIL:live={live_winner} sim={sim_winner}"
+
+    # PnL match verdict
+    if abs(pnl_diff) <= pnl_abs_threshold:
+        pnl_match = "PASS"
+    else:
+        pnl_match = f"FAIL:{pnl_diff:+.2f}"
+
+    return PnLResult(
+        live_realized=live_realized,
+        sim_realized=sim_realized,
+        pnl_diff=pnl_diff,
+        settlement_winner_match=settlement_winner_match,
+        waterfall=waterfall,
+        pnl_match=pnl_match,
+    )
+
+
+# ── Verdict ─────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ReconcileResult:
+    """Complete reconciliation result across all 4 layers.
+
+    Parameters
+    ----------
+    question_idx:
+        HL question/market index.
+    expiry_ns:
+        Market expiry timestamp in nanoseconds.
+    layer0:
+        Precondition check result.
+    layer1:
+        Decision alignment result.
+    layer2:
+        Fill episode comparison result.
+    layer3:
+        PnL comparison result.
+    verdict:
+        ``"PASS"`` or ``"FAIL"``.
+    fail_reasons:
+        List of human-readable failure reasons.
+    """
+
+    question_idx: int
+    expiry_ns: int
+    layer0: PreconditionResult
+    layer1: DecisionResult
+    layer2: FillsResult
+    layer3: PnLResult
+    verdict: str
+    fail_reasons: list[str] = field(default_factory=list)
+
+
+def verdict(
+    layer0: PreconditionResult,
+    layer1: DecisionResult,
+    layer2: FillsResult,
+    layer3: PnLResult,
+    pnl_abs_threshold: float = 5.0,
+    decision_match_min: float = 0.95,
+) -> tuple[str, list[str]]:
+    """Apply thresholds and return overall PASS/FAIL + list of failure reasons.
+
+    Parameters
+    ----------
+    layer0:
+        Precondition result.
+    layer1:
+        Decision result.
+    layer2:
+        Fill result (included in report but not a hard gate).
+    layer3:
+        PnL result.
+    pnl_abs_threshold:
+        Maximum acceptable |pnl_diff|.
+    decision_match_min:
+        Minimum acceptable decision match_rate.
+
+    Returns
+    -------
+    Tuple of (verdict_str, fail_reasons_list).  PASS requires all gates to clear.
+    """
+    reasons: list[str] = []
+
+    if layer0.overall == "FAIL":
+        if layer0.config_hash_match.startswith("FAIL"):
+            reasons.append(f"config_hash: {layer0.config_hash_match}")
+        if layer0.question_identity_match.startswith("FAIL"):
+            reasons.append(f"question_identity: {layer0.question_identity_match}")
+        if layer0.window_match.startswith("FAIL"):
+            reasons.append(f"window_overlap: {layer0.window_match}")
+
+    if layer1.match_rate < decision_match_min:
+        reasons.append(f"decision_match_rate={layer1.match_rate:.2%} < {decision_match_min:.0%}")
+
+    if layer3.pnl_match.startswith("FAIL"):
+        reasons.append(f"pnl_diff: {layer3.pnl_match}")
+
+    overall = "FAIL" if reasons else "PASS"
+    return overall, reasons
+
+
+def run_reconcile(
+    question_idx: int,
+    expiry_ns: int,
+    live_fills: pd.DataFrame,
+    live_trace: pd.DataFrame,
+    live_settlement: dict[str, Any],
+    live_config_hash: str | None,
+    sim_fills: pd.DataFrame,
+    sim_trace: pd.DataFrame,
+    sim_resolved: dict[str, Any],
+    data_root: Path | None = None,
+    book_reader: BookReader | None = None,
+    pnl_abs_threshold: float = 5.0,
+    decision_match_min: float = 0.95,
+) -> ReconcileResult:
+    """Run all 4 layers and return a ReconcileResult.
+
+    Parameters
+    ----------
+    question_idx:
+        HL question/market index.
+    expiry_ns:
+        Market expiry timestamp in nanoseconds.
+    live_fills:
+        Venue-confirmed live fills.
+    live_trace:
+        Live decision trace.
+    live_settlement:
+        Live settlement dict.
+    live_config_hash:
+        Config hash from the live engine.
+    sim_fills:
+        Sim fills.
+    sim_trace:
+        Sim decision trace.
+    sim_resolved:
+        Sim resolution dict with winner_side and resolved_outcome.
+    data_root:
+        Root of HL recorded data (for book parity checks).
+    book_reader:
+        Injectable book reader for testing.
+    pnl_abs_threshold:
+        Maximum acceptable |pnl_diff| for PASS.
+    decision_match_min:
+        Minimum acceptable decision match_rate for PASS.
+
+    Returns
+    -------
+    ReconcileResult with all 4 layers populated and a final verdict.
+    """
+    sim_config_hash: str | None = None
+    if "config_hash" in sim_trace.columns and not sim_trace.empty:
+        sim_config_hash = str(sim_trace["config_hash"].iloc[-1])
+
+    layer0 = check_preconditions(
+        live_trace=live_trace,
+        sim_trace=sim_trace,
+        live_config_hash=live_config_hash,
+        sim_config_hash=sim_config_hash,
+    )
+    layer1 = reconcile_decisions(live_trace=live_trace, sim_trace=sim_trace)
+    layer2 = reconcile_fills(
+        live_fills=live_fills,
+        sim_fills=sim_fills,
+        data_root=data_root,
+        book_reader=book_reader,
+    )
+    layer3 = reconcile_pnl(
+        live_fills=live_fills,
+        sim_fills=sim_fills,
+        live_settlement=live_settlement,
+        sim_resolved=sim_resolved,
+        pnl_abs_threshold=pnl_abs_threshold,
+    )
+
+    v, fail_reasons = verdict(
+        layer0=layer0,
+        layer1=layer1,
+        layer2=layer2,
+        layer3=layer3,
+        pnl_abs_threshold=pnl_abs_threshold,
+        decision_match_min=decision_match_min,
+    )
+
+    return ReconcileResult(
+        question_idx=question_idx,
+        expiry_ns=expiry_ns,
+        layer0=layer0,
+        layer1=layer1,
+        layer2=layer2,
+        layer3=layer3,
+        verdict=v,
+        fail_reasons=fail_reasons,
+    )
