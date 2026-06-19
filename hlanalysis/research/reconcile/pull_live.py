@@ -11,9 +11,13 @@ is also windowed to ``[expiry_ns - 24h, expiry_ns + 60s]``.
 from __future__ import annotations
 
 import base64
+import gzip
 import json
+import os
 import subprocess
+import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +30,15 @@ _VENV_PYTHON = "/opt/hl-recorder/.venv/bin/python"
 
 # Unified engine state DB (read-only). The per-slot v31/state.db files are legacy.
 DB_PATH = "/opt/hl-recorder/data/engine/state.db"
+
+# S3 transport for large results (e.g. the per-scan decision trace, which can be
+# 137k+ rows / ~11MB). AWS SSM ``GetCommandInvocation.StandardOutputContent`` is
+# hard-capped at 24,000 bytes, so anything bigger than ~35 trace rows truncates
+# mid-row on the inline path. Instead the box gzips the result and uploads it
+# here; we download + decompress locally. Override the bucket via env for other
+# accounts. The instance role already writes to the recorder archive bucket.
+S3_TRANSPORT_BUCKET = os.environ.get("HLBT_RECON_S3_BUCKET", "hl-recorder-archive-819175935435")
+_S3_TRANSPORT_PREFIX = "tmp/recon"
 
 _NS_PER_S = 1_000_000_000
 _24H_NS = 24 * 3600 * _NS_PER_S
@@ -138,6 +151,84 @@ def _ssm_python(
                 raise RuntimeError(f"SSM command {status}: {inv.get('StandardErrorContent', '')}")
             return inv.get("StandardOutputContent", "")
     raise TimeoutError(f"SSM command did not complete in {timeout_s}s")
+
+
+def _s3_download_bytes(bucket: str, key: str) -> bytes:
+    """Download ``s3://bucket/key`` into memory via the AWS CLI (no boto3 dep
+    on the client side; mirrors the rest of this module's CLI-only approach)."""
+    with tempfile.TemporaryDirectory() as td:
+        local = Path(td) / "obj"
+        subprocess.run(
+            ["aws", "s3", "cp", f"s3://{bucket}/{key}", str(local)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return local.read_bytes()
+
+
+def _s3_delete(bucket: str, key: str) -> None:
+    """Best-effort cleanup of a transport object (never raises)."""
+    subprocess.run(
+        ["aws", "s3", "rm", f"s3://{bucket}/{key}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _ssm_fetch_large_json(
+    compute_script: str,
+    result_var: str,
+    *,
+    instance_id: str = DEFAULT_INSTANCE_ID,
+    timeout_s: int = 300,
+    s3_bucket: str | None = None,
+    s3_key: str | None = None,
+) -> Any:
+    """Run remote python and retrieve an arbitrarily large JSON result via S3.
+
+    ``compute_script`` is remote python that assigns a JSON-serialisable object
+    to ``result_var``. The wrapper gzips ``json.dumps(result_var)`` and uploads
+    it to ``s3://s3_bucket/s3_key`` on the box (using boto3, available in the
+    recorder venv), then we download + decompress + parse locally. This bypasses
+    the 24,000-byte SSM inline-output cap and the inline 60s timeout, so a
+    full-day decision trace (137k+ rows) round-trips intact.
+
+    Parameters
+    ----------
+    compute_script:
+        Remote python that assigns ``result_var`` (e.g. builds ``rows``).
+    result_var:
+        Name of the variable holding the JSON-serialisable result.
+    instance_id:
+        EC2 instance ID.
+    timeout_s:
+        Max seconds for the remote filter+gzip+upload step (default 300 — a
+        157MB trace read is several seconds; give headroom).
+    s3_bucket / s3_key:
+        Transport object location; defaults to ``S3_TRANSPORT_BUCKET`` and a
+        unique ``tmp/recon/<uuid>.json.gz`` key.
+
+    Returns
+    -------
+    The parsed JSON object (e.g. ``list[dict]``).
+    """
+    bucket = s3_bucket or S3_TRANSPORT_BUCKET
+    key = s3_key or f"{_S3_TRANSPORT_PREFIX}/{uuid.uuid4().hex}.json.gz"
+    upload = (
+        compute_script
+        + "\nimport json as _j, gzip as _g, boto3 as _b\n"
+        + f"_b.client('s3').put_object(Bucket={bucket!r}, Key={key!r}, "
+        + f"Body=_g.compress(_j.dumps({result_var}).encode()))\n"
+        + "print('S3_UPLOAD_OK')\n"
+    )
+    _ssm_python(upload, instance_id=instance_id, timeout_s=timeout_s)
+    try:
+        raw = gzip.decompress(_s3_download_bytes(bucket, key))
+    finally:
+        _s3_delete(bucket, key)
+    return json.loads(raw or b"null")
 
 
 def _cache_path(
@@ -262,7 +353,9 @@ def pull_live_trace(
     window_end = expiry_ns + _60S_NS
     path = trace_path if trace_path is not None else _trace_path(strategy_id)
 
-    script = f"""
+    # The trace can be 137k+ rows / ~11MB — far past the 24KB SSM inline cap.
+    # Filter on the box, then ship the result out via S3 (see _ssm_fetch_large_json).
+    compute = f"""
 import json
 
 path = {path!r}
@@ -288,10 +381,8 @@ try:
             rows.append(obj)
 except FileNotFoundError:
     pass
-print(json.dumps(rows))
 """
-    raw = _ssm_python(script, instance_id=instance_id)
-    rows = json.loads(raw.strip() or "[]")
+    rows = _ssm_fetch_large_json(compute, "rows", instance_id=instance_id) or []
 
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -497,24 +588,27 @@ def pull_config_hash(
     -------
     Config hash string, or None if the trace is empty or the field is absent.
     """
+    # config_hash is identical on every row, so read only the file TAIL — a full
+    # readlines() of a ~157MB trace risks the 60s SSM timeout for no reason.
     script = f"""
-import json
+import json, subprocess
 
 TRACE = {_trace_path(strategy_id)!r}
-last_obj = None
+cfg = None
 try:
-    with open(TRACE) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                last_obj = json.loads(line)
-            except Exception:
-                continue
+    tail = subprocess.run(["tail", "-n", "5", TRACE], capture_output=True, text=True).stdout
+    for line in reversed(tail.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            cfg = json.loads(line).get("config_hash")
+            break
+        except Exception:
+            continue
 except FileNotFoundError:
     pass
-print(json.dumps(last_obj.get("config_hash") if last_obj else None))
+print(json.dumps(cfg))
 """
     raw = _ssm_python(script, instance_id=instance_id)
     value = json.loads(raw.strip() or "null")

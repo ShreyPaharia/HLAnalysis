@@ -6,6 +6,7 @@ generated remote script and return canned JSON.
 
 from __future__ import annotations
 
+import gzip
 import json
 import re
 
@@ -150,10 +151,27 @@ class TestPullSettlementSQL:
 # ── trace / config / halts paths ────────────────────────────────────────────
 
 
+def _mock_s3_trace(monkeypatch: pytest.MonkeyPatch, rows: list[dict]) -> _Recorder:
+    """Wire up the SSM + S3 transport so pull_live_trace returns ``rows`` offline.
+
+    ``_ssm_python`` captures the remote (upload) script; ``_s3_download_bytes``
+    returns the gzipped JSON the box would have written; ``_s3_delete`` is a
+    no-op. This exercises the S3-routed path WITHOUT the 24KB inline cap.
+    """
+    rec = _Recorder("S3_UPLOAD_OK")
+    monkeypatch.setattr(pull_live, "_ssm_python", rec)
+    monkeypatch.setattr(
+        pull_live,
+        "_s3_download_bytes",
+        lambda bucket, key: gzip.compress(json.dumps(rows).encode()),
+    )
+    monkeypatch.setattr(pull_live, "_s3_delete", lambda bucket, key: None)
+    return rec
+
+
 class TestSlotScopedPaths:
     def test_trace_path_built_from_strategy_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        rec = _Recorder(json.dumps([]))
-        monkeypatch.setattr(pull_live, "_ssm_python", rec)
+        rec = _mock_s3_trace(monkeypatch, [])
         pull_live.pull_live_trace(4010, _EXPIRY_NS, strategy_id="v1")
         assert "/opt/hl-recorder/data/engine/v1/decision_trace.jsonl" in rec.scripts[0]
 
@@ -162,6 +180,47 @@ class TestSlotScopedPaths:
         monkeypatch.setattr(pull_live, "_ssm_python", rec)
         pull_live.pull_config_hash(strategy_id="v1")
         assert "/opt/hl-recorder/data/engine/v1/decision_trace.jsonl" in rec.scripts[0]
+
+    def test_config_hash_uses_tail_not_full_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """config_hash must read only the file tail (a 157MB full read times out)."""
+        rec = _Recorder(json.dumps("deadbeef"))
+        monkeypatch.setattr(pull_live, "_ssm_python", rec)
+        assert pull_live.pull_config_hash(strategy_id="v31") == "deadbeef"
+        assert "tail" in rec.scripts[0]
+
+
+class TestPullLiveTraceS3Transport:
+    """The live trace can be huge (137k+ rows / ~11MB). The SSM inline-output
+    channel is hard-capped at 24,000 bytes, so the trace MUST be routed through
+    S3: filter+gzip on the box, upload, download+decompress locally."""
+
+    def test_trace_routed_through_s3_upload(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        rec = _mock_s3_trace(monkeypatch, [{"question_idx": 4010, "ts_ns": 1, "action": "hold"}])
+        df = pull_live.pull_live_trace(4010, _EXPIRY_NS, strategy_id="v31")
+        # The remote script gzips + uploads to S3 (no inline return of rows).
+        assert "put_object" in rec.scripts[0]
+        assert "gzip" in rec.scripts[0]
+        assert len(df) == 1
+        assert df.iloc[0]["action"] == "hold"
+
+    def test_trace_large_payload_roundtrips(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A payload far larger than the 24KB inline cap must come back intact."""
+        rows = [{"question_idx": 4010, "ts_ns": i, "action": "hold"} for i in range(5000)]
+        _mock_s3_trace(monkeypatch, rows)
+        df = pull_live.pull_live_trace(4010, _EXPIRY_NS, strategy_id="v31")
+        assert len(df) == 5000  # > 24KB of JSON; would truncate on the inline path
+
+    def test_trace_cache_read_skips_remote(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        cache_file = tmp_path / "q4010_v31_trace.json"
+        cache_file.write_text(json.dumps([{"question_idx": 4010, "ts_ns": 9, "action": "hold"}]))
+
+        def _boom(*a, **k):
+            raise AssertionError("must not hit SSM/S3 when cache exists")
+
+        monkeypatch.setattr(pull_live, "_ssm_python", _boom)
+        monkeypatch.setattr(pull_live, "_s3_download_bytes", _boom)
+        df = pull_live.pull_live_trace(4010, _EXPIRY_NS, strategy_id="v31", cache_dir=tmp_path)
+        assert len(df) == 1 and df.iloc[0]["ts_ns"] == 9
 
     def test_halts_filters_strategy_id_unified_db(self, monkeypatch: pytest.MonkeyPatch) -> None:
         rec = _Recorder(json.dumps([]))
