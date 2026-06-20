@@ -165,8 +165,9 @@ class TestWaterfallMatchedStructure:
         # Residual is small (no giant cancelling components).
         assert abs(wf["residual"]) < 2.0, wf
         # The matched-leg vwap components are modest (single-leg scale, not ~$24).
-        assert abs(wf["matched_entry_vwap"]) < 10.0
-        assert abs(wf["matched_exit_vwap"]) < 10.0
+        # With no reference reader the split puts the whole gap into impact.
+        assert abs(wf["matched_entry_delay"] + wf["matched_entry_impact"]) < 10.0
+        assert abs(wf["matched_exit_delay"] + wf["matched_exit_impact"]) < 10.0
 
 
 class TestRealizedAvgCost:

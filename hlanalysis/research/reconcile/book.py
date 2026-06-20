@@ -62,6 +62,88 @@ def _default_book_reader(
         return None
 
 
+# RefPriceReader is a callable that can be injected for testing.
+# Signature: (ref_symbol: str, ts_ns: int, data_root: Path | None) -> float | None
+# Returns the reference (perp mark) price at or before ts_ns (LOCF), or None.
+RefPriceReader = Callable[[str, int, "Path | None"], "float | None"]
+
+
+def _default_ref_price_reader(
+    ref_symbol: str,
+    ts_ns: int,
+    data_root: Path | None,
+) -> float | None:
+    """Read the recorded HL perp ``mark`` price for ``ref_symbol`` at/before ts_ns.
+
+    Parameters
+    ----------
+    ref_symbol:
+        Reference perp symbol, e.g. ``"BTC"``.
+    ts_ns:
+        Query timestamp in nanoseconds; returns the last mark at or before this.
+    data_root:
+        Root of the HL recorded data tree; None yields None (no data).
+
+    Returns
+    -------
+    The ``mark_px`` of the closest row at or before ts_ns, or None if not found.
+    """
+    if data_root is None:
+        return None
+    try:
+        import duckdb  # noqa: PLC0415
+    except ImportError:
+        return None
+
+    pattern = str(
+        data_root / f"venue=hyperliquid/product_type=perp/mechanism=clob/event=mark/symbol={ref_symbol}/**/*.parquet"
+    )
+    try:
+        con = duckdb.connect()
+        df: pd.DataFrame = con.execute(
+            f"""
+            SELECT mark_px
+            FROM read_parquet('{pattern}', hive_partitioning=true)
+            WHERE exchange_ts <= {ts_ns}
+            ORDER BY exchange_ts DESC
+            LIMIT 1
+            """
+        ).df()
+        con.close()
+        if df.empty:
+            return None
+        return float(df["mark_px"].iloc[0])
+    except Exception:
+        return None
+
+
+def recorded_ref_price_at(
+    ref_symbol: str,
+    ts_ns: int,
+    data_root: Path | None,
+    reader: RefPriceReader | None = None,
+) -> float | None:
+    """Return the recorded perp ``mark`` price closest to (at or before) ts_ns.
+
+    Parameters
+    ----------
+    ref_symbol:
+        Reference perp symbol, e.g. ``"BTC"``.
+    ts_ns:
+        Query timestamp in nanoseconds.
+    data_root:
+        Root of the HL recorded data tree; may be None when ``reader`` is given.
+    reader:
+        Injectable reference reader for testing; defaults to the duckdb reader.
+
+    Returns
+    -------
+    The reference price at that time, or None if unavailable.
+    """
+    fn = reader or _default_ref_price_reader
+    return fn(ref_symbol, ts_ns, data_root)
+
+
 def recorded_book_at(
     leg_symbol: str,
     ts_ns: int,

@@ -11,7 +11,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from hlanalysis.research.reconcile.book import BookReader, book_parity_pct
+from hlanalysis.research.reconcile.book import (
+    BookReader,
+    RefPriceReader,
+    book_parity_pct,
+    recorded_ref_price_at,
+)
 
 # ── Layer 0: Preconditions ──────────────────────────────────────────────────
 
@@ -1019,6 +1024,9 @@ def reconcile_pnl(
     pnl_abs_threshold: float = 5.0,
     max_match_gap_seconds: float = 1800.0,
     expiry_ns: int | None = None,
+    ref_symbol: str = "BTC",
+    data_root: Path | None = None,
+    ref_price_reader: RefPriceReader | None = None,
 ) -> PnLResult:
     """Layer 3: compare live vs sim realized PnL with attribution waterfall.
 
@@ -1034,6 +1042,15 @@ def reconcile_pnl(
         Dict with keys: winner_side (str), resolved_outcome (float).  May be empty.
     pnl_abs_threshold:
         Maximum acceptable |pnl_diff| for PASS verdict.
+    ref_symbol:
+        Reference perp symbol for the delay/impact split (e.g. ``"BTC"``).
+    data_root:
+        Root of the HL recorded data tree; used by the default reference reader
+        to sample the perp ``mark`` price at both episode timestamps.
+    ref_price_reader:
+        Injectable reference-price reader (for tests). When neither this nor
+        ``data_root`` is available the matched VWAP gap cannot be split and is
+        attributed entirely to impact (delay = 0).
 
     Returns
     -------
@@ -1075,16 +1092,50 @@ def reconcile_pnl(
     matched_buys = [(le, se) for le, se in match.matched if le.side == "BUY"]
     matched_sells = [(le, se) for le, se in match.matched if le.side == "SELL"]
 
-    entry_vwap_diff = 0.0  # $ from sim entering matched legs at a different price
-    exit_vwap_diff = 0.0  # $ from sim exiting matched legs at a different price
+    # Split the matched VWAP gap (Perold implementation shortfall, SHR-146) into:
+    #   delay  — sim entered/exited at a DIFFERENT TIME into a moving market;
+    #   impact — sim filled a DIFFERENT-QUALITY price at the SAME instant.
+    # The common arrival benchmark is the reference (perp mark) price sampled at
+    # BOTH the live and sim episode timestamps. delay = ref-move × size; the
+    # remainder of the VWAP gap is impact. delay + impact == the old matched_*_vwap.
+    def _ref_at(ts_ns: int) -> float | None:
+        if ref_price_reader is None and data_root is None:
+            return None
+        return recorded_ref_price_at(ref_symbol, ts_ns, data_root, reader=ref_price_reader)
+
+    entry_delay = 0.0  # $ from sim entering matched legs at a different TIME
+    entry_impact = 0.0  # $ from sim entering matched legs at a different-quality price
+    exit_delay = 0.0  # $ from sim exiting matched legs at a different TIME
+    exit_impact = 0.0  # $ from sim exiting matched legs at a different-quality price
     size_diff_pnl = 0.0  # $ from sim trading a different size on matched legs
     # Pair the i-th matched buy with the i-th matched sell into a round-trip.
     for (lbe, sbe), (lse, sse) in zip(matched_buys, matched_sells):
         live_size = (lbe.total_size + lse.total_size) / 2
         sim_size = (sbe.total_size + sse.total_size) / 2
-        # Contributions to (live_realized − sim_realized), holding size at live's:
-        entry_vwap_diff += (sbe.vwap - lbe.vwap) * live_size  # sim paid more → +live
-        exit_vwap_diff += (lse.vwap - sse.vwap) * live_size  # live sold higher → +live
+
+        # Entry: contribution to (live_realized − sim_realized) is "sim − live".
+        entry_gap = (sbe.vwap - lbe.vwap) * live_size  # sim paid more → +live
+        r_live_entry = _ref_at(lbe.start_ns)
+        r_sim_entry = _ref_at(sbe.start_ns)
+        if r_live_entry is not None and r_sim_entry is not None:
+            e_delay = (r_sim_entry - r_live_entry) * live_size
+        else:
+            e_delay = 0.0
+        entry_delay += e_delay
+        entry_impact += entry_gap - e_delay
+
+        # Exit: contribution is "live − sim" (live sold higher → +live), so the
+        # delay term carries the same orientation: ref-move from sim to live time.
+        exit_gap = (lse.vwap - sse.vwap) * live_size
+        r_live_exit = _ref_at(lse.start_ns)
+        r_sim_exit = _ref_at(sse.start_ns)
+        if r_live_exit is not None and r_sim_exit is not None:
+            x_delay = (r_live_exit - r_sim_exit) * live_size
+        else:
+            x_delay = 0.0
+        exit_delay += x_delay
+        exit_impact += exit_gap - x_delay
+
         size_diff_pnl += (sse.vwap - sbe.vwap) * (live_size - sim_size)
 
     # Round-trips one side made and the other did not, valued on their own fills.
@@ -1093,12 +1144,16 @@ def reconcile_pnl(
 
     fee_diff = sim_fees_total - live_fees_total
     pnl_diff = live_realized - sim_realized
-    accounted = entry_vwap_diff + exit_vwap_diff + size_diff_pnl + live_only_pnl - sim_only_pnl + fee_diff
+    accounted = (
+        entry_delay + entry_impact + exit_delay + exit_impact + size_diff_pnl + live_only_pnl - sim_only_pnl + fee_diff
+    )
     residual = pnl_diff - accounted
 
     waterfall = {
-        "matched_entry_vwap": round(entry_vwap_diff, 6),
-        "matched_exit_vwap": round(exit_vwap_diff, 6),
+        "matched_entry_delay": round(entry_delay, 6),
+        "matched_entry_impact": round(entry_impact, 6),
+        "matched_exit_delay": round(exit_delay, 6),
+        "matched_exit_impact": round(exit_impact, 6),
         "matched_size": round(size_diff_pnl, 6),
         "live_only_roundtrips": round(live_only_pnl, 6),
         "sim_only_roundtrips": round(-sim_only_pnl, 6),
@@ -1264,6 +1319,7 @@ def run_reconcile(
     decision_match_min: float = 0.95,
     ref_symbol: str = "BTC",
     reference_ts_reader: ReferenceTsReader | None = None,
+    ref_price_reader: RefPriceReader | None = None,
 ) -> ReconcileResult:
     """Run all 4 layers and return a ReconcileResult.
 
@@ -1324,6 +1380,9 @@ def run_reconcile(
         sim_resolved=sim_resolved,
         pnl_abs_threshold=pnl_abs_threshold,
         expiry_ns=expiry_ns,
+        ref_symbol=ref_symbol,
+        data_root=data_root,
+        ref_price_reader=ref_price_reader,
     )
 
     v, fail_reasons = verdict(

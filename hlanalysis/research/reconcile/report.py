@@ -189,12 +189,20 @@ def render_markdown(result: ReconcileResult) -> str:
     lines.append(f"| Settlement winner | {l3.settlement_winner_match} | — | — |")
     lines.append(f"| PnL match | {l3.pnl_match} | — | — |")
     lines.append("")
-    lines.append("**Waterfall attribution:**")
+    lines.append("**Waterfall attribution** (Perold implementation shortfall):")
     lines.append("")
     lines.append("| Component | $Amount |")
     lines.append("|-----------|---------|")
     for component, amount in l3.waterfall.items():
         lines.append(f"| {component} | ${amount:+.4f} |")
+    lines.append("")
+    lines.append(
+        "_matched_entry/exit are split into **delay** (sim entered/exited at a "
+        "different time into a moving market — the reference-feed-gap signature) and "
+        "**impact** (sim filled a different-quality price at the same instant). "
+        "opportunity_cost values the unmatched (un-replicated) legs marked at the "
+        "resolved settlement price._"
+    )
     lines.append("")
 
     return "\n".join(lines)

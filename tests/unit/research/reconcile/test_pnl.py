@@ -129,8 +129,10 @@ class TestWaterfall:
             live_settlement={},
             sim_resolved={},
         )
-        assert "matched_entry_vwap" in result.waterfall
-        assert "matched_exit_vwap" in result.waterfall
+        assert "matched_entry_delay" in result.waterfall
+        assert "matched_entry_impact" in result.waterfall
+        assert "matched_exit_delay" in result.waterfall
+        assert "matched_exit_impact" in result.waterfall
         assert "matched_size" in result.waterfall
         assert "live_only_roundtrips" in result.waterfall
         assert "sim_only_roundtrips" in result.waterfall
