@@ -974,6 +974,62 @@ def _winner_from_settlement_fill(fills: pd.DataFrame, expiry_ns: int | None = No
     return ("yes" if leg_is_yes else "no") if won else ("no" if leg_is_yes else "yes")
 
 
+def _leg_symbol(*fills: pd.DataFrame) -> str | None:
+    """Return the traded leg symbol from the first non-empty fills frame."""
+    for df in fills:
+        if df is not None and not df.empty and "symbol" in df.columns:
+            vals = df["symbol"].dropna()
+            if not vals.empty:
+                return str(vals.iloc[0])
+    return None
+
+
+def _leg_settlement_price(symbol: str, winner: Any) -> float | None:
+    """Resolved settlement price of the traded leg given the winning side.
+
+    The HL outcome token settles to ``1.0`` if its own side won, ``0.0`` if it
+    lost. The leg's Yes/No identity comes from the symbol's side index
+    (``#NNN`` -> ``side_idx = NNN % 10``; 0 = Yes). Returns None when the winner
+    or the side index is unknown.
+    """
+    side_idx = _side_idx_from_symbol(str(symbol))
+    w = _norm_winner(winner)
+    if side_idx is None or w is None:
+        return None
+    leg_is_yes = side_idx == 0
+    leg_won = (w == "yes" and leg_is_yes) or (w == "no" and not leg_is_yes)
+    return 1.0 if leg_won else 0.0
+
+
+def _open_position_at_settlement(eps: list[FillEpisode], settlement_price: float) -> float:
+    """Settlement-marked value of the net OPEN position left by ``eps``.
+
+    Used for Perold opportunity cost (SHR-147): a leg one venue traded and the
+    other did not, HELD to settlement, has value its own fills never realized.
+    Episodes are accounted by running average-cost in start order; the closed
+    (round-trip) portion is valued separately by :func:`_round_trip_pnl`, so this
+    returns only ``(settlement_price − avg_cost) × open_shares`` for the leftover
+    net-long position (0 when fully closed or net flat/short).
+    """
+    pos = 0.0
+    avg_cost = 0.0
+    for e in sorted(eps, key=lambda x: x.start_ns):
+        if e.side == "BUY":
+            new_pos = pos + e.total_size
+            if new_pos > 0:
+                avg_cost = (avg_cost * pos + e.vwap * e.total_size) / new_pos
+            pos = new_pos
+        else:  # SELL
+            pos -= e.total_size
+            if pos <= 0:
+                pos = max(pos, 0.0)
+                if pos == 0:
+                    avg_cost = 0.0
+    if pos > 1e-12:
+        return (settlement_price - avg_cost) * pos
+    return 0.0
+
+
 def _norm_winner(val: Any) -> str | None:
     """Normalise a winner token for comparison; None / 'unknown' -> None."""
     if val is None:
@@ -1142,10 +1198,45 @@ def reconcile_pnl(
     live_only_pnl = _round_trip_pnl(match.unmatched_live)  # PnL live booked, sim lacked
     sim_only_pnl = _round_trip_pnl(match.unmatched_sim)  # PnL sim booked, live lacked
 
+    # Settlement winner. Prefer an explicit winner_side from settlement; otherwise
+    # derive the live winner from the settlement-as-fill (HL books settlement as a
+    # venue fill at px~1.0 => the filled leg won). Needed both for the winner check
+    # and to mark unmatched OPEN legs at the resolved price (opportunity cost).
+    live_winner = live_settlement.get("winner_side") if live_settlement else None
+    if live_winner is None:
+        live_winner = _winner_from_settlement_fill(live_fills, expiry_ns=expiry_ns)
+    sim_winner = sim_resolved.get("winner_side") if sim_resolved else None
+    if sim_winner is None and sim_resolved:
+        sim_winner = sim_resolved.get("resolved_outcome")
+
+    norm_live = _norm_winner(live_winner)
+    norm_sim = _norm_winner(sim_winner)
+
+    # Opportunity cost (Perold, SHR-147): an unmatched leg HELD to settlement has
+    # value its own fills never realized. Mark the net OPEN position of the
+    # unmatched round-trips at the resolved settlement price (1.0/0.0 for the
+    # leg). 0 when the winner is unknown or nothing is left open.
+    leg_symbol = _leg_symbol(live_fills, sim_fills)
+    settle_winner = norm_sim if norm_sim is not None else norm_live
+    settlement_price = _leg_settlement_price(leg_symbol, settle_winner) if leg_symbol is not None else None
+    opportunity_cost = 0.0
+    if settlement_price is not None:
+        opportunity_cost = _open_position_at_settlement(
+            match.unmatched_live, settlement_price
+        ) - _open_position_at_settlement(match.unmatched_sim, settlement_price)
+
     fee_diff = sim_fees_total - live_fees_total
     pnl_diff = live_realized - sim_realized
     accounted = (
-        entry_delay + entry_impact + exit_delay + exit_impact + size_diff_pnl + live_only_pnl - sim_only_pnl + fee_diff
+        entry_delay
+        + entry_impact
+        + exit_delay
+        + exit_impact
+        + size_diff_pnl
+        + live_only_pnl
+        - sim_only_pnl
+        + opportunity_cost
+        + fee_diff
     )
     residual = pnl_diff - accounted
 
@@ -1157,23 +1248,10 @@ def reconcile_pnl(
         "matched_size": round(size_diff_pnl, 6),
         "live_only_roundtrips": round(live_only_pnl, 6),
         "sim_only_roundtrips": round(-sim_only_pnl, 6),
+        "opportunity_cost": round(opportunity_cost, 6),
         "fee_diff": round(fee_diff, 6),
         "residual": round(residual, 6),
     }
-
-    # Settlement winner check. Prefer an explicit winner_side from settlement;
-    # otherwise derive the live winner from the settlement-as-fill (HL books
-    # settlement as a venue fill at px~1.0 => the filled leg won). Compare to the
-    # sim resolved outcome; SKIP if neither side is available.
-    live_winner = live_settlement.get("winner_side") if live_settlement else None
-    if live_winner is None:
-        live_winner = _winner_from_settlement_fill(live_fills, expiry_ns=expiry_ns)
-    sim_winner = sim_resolved.get("winner_side") if sim_resolved else None
-    if sim_winner is None and sim_resolved:
-        sim_winner = sim_resolved.get("resolved_outcome")
-
-    norm_live = _norm_winner(live_winner)
-    norm_sim = _norm_winner(sim_winner)
 
     if norm_live is None or norm_sim is None:
         settlement_winner_match = "SKIP:no_settlement"
