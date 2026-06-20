@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -124,11 +125,14 @@ def check_preconditions(
         overlap = max(0, overlap_end - overlap_start)
         live_span = max(1, live_window[1] - live_window[0])
         sim_span = max(1, sim_window[1] - sim_window[0])
-        min_span = min(live_span, sim_span)
-        if min_span == 0 or overlap / min_span >= 0.5:
+        # Divide by the LARGER span: a tiny sim window fully inside a long live
+        # window would score 1.0 against min_span and pass, hiding that sim only
+        # covers a sliver of the question (audit M3). Both must broadly overlap.
+        max_span = max(live_span, sim_span)
+        if overlap / max_span >= 0.5:
             window_match = "PASS"
         else:
-            window_match = f"FAIL:overlap_pct={overlap / min_span:.2f}"
+            window_match = f"FAIL:overlap_pct={overlap / max_span:.2f}"
 
     # -- Overall --
     fails = [s for s in [config_hash_match, question_identity_match, window_match] if s.startswith("FAIL")]
@@ -199,6 +203,8 @@ class DecisionResult:
     n_live_buckets: int
     n_sim_buckets: int
     n_aligned: int
+    n_live_events: int = 0
+    n_sim_events: int = 0
 
 
 def reconcile_decisions(
@@ -232,15 +238,44 @@ def reconcile_decisions(
     """
     bucket_ns = bucket_seconds * 1_000_000_000
 
-    def _bucket_first(df: pd.DataFrame) -> pd.DataFrame:
+    numeric_fields = ["sigma", "p_model", "edge"]
+
+    def _bucket_select(df: pd.DataFrame) -> pd.DataFrame:
+        # Pick the most SIGNIFICANT row per bucket, not merely the first. A trace
+        # is ~99.97% ``hold``; taking the first row would let a single ``hold``
+        # mask the lone ``enter``/``exit`` in that minute and report a spurious
+        # 100% match (the 2026-06-20 #1000465 blind spot). Prefer the first
+        # non-hold action when the bucket contains one.
+        #
+        # BUT the action-bearing row (enter/exit) usually carries NULL
+        # sigma/p_model/edge — the engine populates those on the gate-evaluation
+        # (hold/scan) rows. So overlay the numeric fields with the bucket's
+        # mean of non-null values; otherwise selecting the enter row would null
+        # out the very fields the numeric comparison needs (audit H1).
         if df.empty or "ts_ns" not in df.columns:
             return df
         df = df.copy()
         df["_bucket"] = (df["ts_ns"] // bucket_ns) * bucket_ns
-        return df.groupby("_bucket", sort=True).first().reset_index()
+        if "action" in df.columns:
+            df["_is_hold"] = (df["action"].astype(str) == "hold").astype(int)
+            df = df.sort_values(["_bucket", "_is_hold", "ts_ns"])
+        out = df.groupby("_bucket", sort=True).first().reset_index()
+        for fld in numeric_fields:
+            if fld in df.columns:
+                per_bucket = df.assign(_v=pd.to_numeric(df[fld], errors="coerce")).groupby("_bucket")["_v"].mean()
+                out[fld] = out["_bucket"].map(per_bucket)
+        return out.drop(columns=["_is_hold"], errors="ignore")
 
-    live_b = _bucket_first(live_trace)
-    sim_b = _bucket_first(sim_trace)
+    def _n_events(df: pd.DataFrame) -> int:
+        if df.empty or "action" not in df.columns:
+            return 0
+        return int((df["action"].astype(str) != "hold").sum())
+
+    n_live_events = _n_events(live_trace)
+    n_sim_events = _n_events(sim_trace)
+
+    live_b = _bucket_select(live_trace)
+    sim_b = _bucket_select(sim_trace)
 
     n_live_buckets = len(live_b)
     n_sim_buckets = len(sim_b)
@@ -255,6 +290,8 @@ def reconcile_decisions(
             n_live_buckets=n_live_buckets,
             n_sim_buckets=n_sim_buckets,
             n_aligned=0,
+            n_live_events=n_live_events,
+            n_sim_events=n_sim_events,
         )
 
     live_b = live_b.set_index("_bucket")
@@ -272,6 +309,8 @@ def reconcile_decisions(
             n_live_buckets=n_live_buckets,
             n_sim_buckets=n_sim_buckets,
             n_aligned=0,
+            n_live_events=n_live_events,
+            n_sim_events=n_sim_events,
         )
 
     live_aligned = live_b.loc[common_buckets]
@@ -281,8 +320,6 @@ def reconcile_decisions(
     action_matches = 0
     first_div: DecisionDivergence | None = None
     sigma_diffs: list[float] = []
-
-    numeric_fields = ["sigma", "p_model", "edge"]
 
     for bucket in common_buckets:
         l_row = live_aligned.loc[bucket]
@@ -304,8 +341,14 @@ def reconcile_decisions(
                     sigma_diffs.append(rel_diff)
 
                 if first_div is None:
-                    threshold = sigma_rel_tol if fld == "sigma" else edge_abs_tol
-                    if fld == "edge" and abs(l_val - s_val) > threshold or fld == "sigma" and rel_diff > threshold:
+                    # sigma uses a RELATIVE tolerance; edge and p_model use an
+                    # ABSOLUTE one. p_model was previously never tested here
+                    # (audit H2) and the old `and/or` chain was precedence-fragile.
+                    if fld == "sigma":
+                        diverged = rel_diff > sigma_rel_tol
+                    else:  # edge, p_model
+                        diverged = abs(l_val - s_val) > edge_abs_tol
+                    if diverged:
                         first_div = DecisionDivergence(
                             ts_ns=int(bucket),
                             field=fld,
@@ -361,6 +404,8 @@ def reconcile_decisions(
         n_live_buckets=n_live_buckets,
         n_sim_buckets=n_sim_buckets,
         n_aligned=n_aligned,
+        n_live_events=n_live_events,
+        n_sim_events=n_sim_events,
     )
 
 
@@ -471,7 +516,11 @@ def _group_episodes(fills: pd.DataFrame) -> list[FillEpisode]:
     end_ns = 0
 
     for _, row in fills.iterrows():
-        side = str(row["side"])
+        # Canonicalise side case. Real venue/sim fills use lowercase
+        # ``buy``/``sell``; downstream PnL pairing compares against ``BUY``/
+        # ``SELL``. Normalising here keeps both consistent (the 2026-06-20
+        # #1000465 false FAIL was sim_realized=$0 from this case mismatch).
+        side = str(row["side"]).strip().upper()
         price = float(row["price"])
         size = float(row["size"])
         ts = int(row["ts_ns"])
@@ -523,11 +572,174 @@ def _group_episodes(fills: pd.DataFrame) -> list[FillEpisode]:
     return episodes
 
 
+@dataclass
+class EpisodeMatch:
+    """Result of pairing live and sim fill episodes by side.
+
+    Parameters
+    ----------
+    matched:
+        ``(live_episode, sim_episode)`` pairs that correspond (same side, closest
+        start within the cap).
+    unmatched_live:
+        Live episodes with no sim counterpart — a leg live traded and sim did not.
+    unmatched_sim:
+        Sim episodes with no live counterpart — a leg sim traded and live did not.
+    """
+
+    matched: list[tuple[FillEpisode, FillEpisode]]
+    unmatched_live: list[FillEpisode]
+    unmatched_sim: list[FillEpisode]
+
+
+def _match_episodes(
+    live_eps: list[FillEpisode],
+    sim_eps: list[FillEpisode],
+    max_match_gap_ns: int,
+) -> EpisodeMatch:
+    """Pair live/sim episodes by SIDE, greedily by closest start time.
+
+    Repeatedly take the globally-closest unmatched same-side ``(live, sim)`` pair
+    whose start-time gap is within ``max_match_gap_ns``. Episodes left over on
+    either side are real structural divergence (a round-trip one venue made and
+    the other did not) and are returned separately rather than force-paired across
+    an arbitrary clock distance. The shared spine for Layer 2 (the episode table)
+    and Layer 3 (the matched-leg PnL waterfall).
+    """
+    used_live: set[int] = set()
+    used_sim: set[int] = set()
+    matched: list[tuple[FillEpisode, FillEpisode]] = []
+
+    for side in ("BUY", "SELL"):
+        li_idx = [i for i, e in enumerate(live_eps) if e.side == side]
+        sj_idx = [j for j, e in enumerate(sim_eps) if e.side == side]
+        # Greedy: rank all candidate pairs by start-time gap, take closest first.
+        candidates = sorted(
+            ((abs(live_eps[i].start_ns - sim_eps[j].start_ns), i, j) for i in li_idx for j in sj_idx),
+            key=lambda t: t[0],
+        )
+        for gap, i, j in candidates:
+            if i in used_live or j in used_sim or gap > max_match_gap_ns:
+                continue
+            used_live.add(i)
+            used_sim.add(j)
+            matched.append((live_eps[i], sim_eps[j]))
+
+    # Keep matched pairs chronological by live start time for stable reporting.
+    matched.sort(key=lambda pair: pair[0].start_ns)
+    unmatched_live = [e for i, e in enumerate(live_eps) if i not in used_live]
+    unmatched_sim = [e for j, e in enumerate(sim_eps) if j not in used_sim]
+    return EpisodeMatch(matched=matched, unmatched_live=unmatched_live, unmatched_sim=unmatched_sim)
+
+
+def _episode_match_rows(match: EpisodeMatch) -> list[dict[str, Any]]:
+    """Flatten an :class:`EpisodeMatch` into chronological report rows."""
+    rows: list[dict[str, Any]] = []
+    for lep, sep in match.matched:
+        rows.append(
+            {
+                "match_status": "matched",
+                "live_side": lep.side,
+                "live_start_ns": lep.start_ns,
+                "sim_start_ns": sep.start_ns,
+                "live_size": lep.total_size,
+                "sim_size": sep.total_size,
+                "size_diff": sep.total_size - lep.total_size,
+                "live_vwap": lep.vwap,
+                "sim_vwap": sep.vwap,
+                "vwap_diff": sep.vwap - lep.vwap,
+                "latency_ns": lep.start_ns - sep.start_ns,
+            }
+        )
+    for lep in match.unmatched_live:
+        rows.append(
+            {
+                "match_status": "live_only",
+                "live_side": lep.side,
+                "live_start_ns": lep.start_ns,
+                "sim_start_ns": None,
+                "live_size": lep.total_size,
+                "sim_size": None,
+                "size_diff": None,
+                "live_vwap": lep.vwap,
+                "sim_vwap": None,
+                "vwap_diff": None,
+                "latency_ns": None,
+            }
+        )
+    for sep in match.unmatched_sim:
+        rows.append(
+            {
+                "match_status": "sim_only",
+                "live_side": sep.side,
+                "live_start_ns": None,
+                "sim_start_ns": sep.start_ns,
+                "live_size": None,
+                "sim_size": sep.total_size,
+                "size_diff": None,
+                "live_vwap": None,
+                "sim_vwap": sep.vwap,
+                "vwap_diff": None,
+                "latency_ns": None,
+            }
+        )
+
+    def _sort_key(r: dict[str, Any]) -> int:
+        return int(r.get("live_start_ns") or r.get("sim_start_ns") or 0)
+
+    rows.sort(key=_sort_key)
+    return rows
+
+
+def _round_trip_pnl(eps: list[FillEpisode]) -> float:
+    """Realized PnL of a set of episodes, pairing buys with sells in order.
+
+    Used to value the *unmatched* round-trips (legs one venue traded and the other
+    did not) so they enter the PnL waterfall as their own attributable buckets.
+    """
+    buys = [e for e in eps if e.side == "BUY"]
+    sells = [e for e in eps if e.side == "SELL"]
+    return sum((se.vwap - be.vwap) * min(be.total_size, se.total_size) for be, se in zip(buys, sells))
+
+
+def _realized_from_fills(fills: pd.DataFrame) -> float:
+    """Realized PnL from a fill stream via running average-cost accounting.
+
+    A sell realizes ``(price − avg_cost) × size`` against the running long basis;
+    a buy updates the basis. Correct for scale-ins, scale-outs and partial closes
+    (a plain buy/sell episode pairing drops the remainder of any unbalanced leg).
+    Open inventory at the end is left unrealized (settlement is handled elsewhere).
+    """
+    if fills.empty or not {"side", "price", "size", "ts_ns"}.issubset(fills.columns):
+        return 0.0
+    ordered = fills.sort_values("ts_ns")
+    pos = 0.0
+    avg_cost = 0.0
+    realized = 0.0
+    for _, row in ordered.iterrows():
+        side = str(row["side"]).strip().upper()
+        price = float(row["price"])
+        size = float(row["size"])
+        if side == "BUY":
+            if pos + size > 0:
+                avg_cost = (avg_cost * pos + price * size) / (pos + size)
+            pos += size
+        else:  # SELL
+            closed = min(size, pos) if pos > 0 else 0.0
+            realized += (price - avg_cost) * closed
+            pos -= size
+            if pos <= 0:
+                pos = max(pos, 0.0)
+                avg_cost = 0.0 if pos == 0 else avg_cost
+    return realized
+
+
 def reconcile_fills(
     live_fills: pd.DataFrame,
     sim_fills: pd.DataFrame,
     data_root: Path | None = None,
     book_reader: BookReader | None = None,
+    max_match_gap_seconds: float = 1800.0,
 ) -> FillsResult:
     """Layer 2: group fills into episodes, compare VWAP/size, check book parity.
 
@@ -541,6 +753,11 @@ def reconcile_fills(
         Root of the HL recorded data tree (for book parity check).
     book_reader:
         Injectable book reader for testing.
+    max_match_gap_seconds:
+        Maximum live↔sim episode start-time gap to still call a match. Sim and live
+        execute the same legs at timestamps that legitimately drift (sim fills a
+        modeled book; live the real venue), so this is generous (default 30 min).
+        The old 300 s cap dropped genuinely-corresponding legs.
 
     Returns
     -------
@@ -555,60 +772,11 @@ def reconcile_fills(
         if data_root is not None or book_reader is not None:
             bk_pct = book_parity_pct(live_fills, data_root or Path("."), reader=book_reader)
 
-    # Match episodes: for each live episode, find closest sim episode within 300s
-    _300S_NS = 300 * 1_000_000_000
-    matched_rows: list[dict[str, Any]] = []
-    used_sim: set[int] = set()
-
-    for li, lep in enumerate(live_eps):
-        best_j: int | None = None
-        best_gap = float("inf")
-        for sj, sep in enumerate(sim_eps):
-            if sj in used_sim:
-                continue
-            if sep.side != lep.side:
-                continue
-            gap = abs(lep.start_ns - sep.start_ns)
-            if gap < best_gap and gap <= _300S_NS:
-                best_gap = gap
-                best_j = sj
-
-        if best_j is not None:
-            sep = sim_eps[best_j]
-            used_sim.add(best_j)
-            size_diff = sep.total_size - lep.total_size
-            vwap_diff = sep.vwap - lep.vwap
-            matched_rows.append(
-                {
-                    "live_side": lep.side,
-                    "live_start_ns": lep.start_ns,
-                    "live_size": lep.total_size,
-                    "sim_size": sep.total_size,
-                    "size_diff": size_diff,
-                    "live_vwap": lep.vwap,
-                    "sim_vwap": sep.vwap,
-                    "vwap_diff": vwap_diff,
-                    "latency_ns": lep.start_ns - sep.start_ns,
-                    "matched": True,
-                }
-            )
-        else:
-            matched_rows.append(
-                {
-                    "live_side": lep.side,
-                    "live_start_ns": lep.start_ns,
-                    "live_size": lep.total_size,
-                    "sim_size": None,
-                    "size_diff": None,
-                    "live_vwap": lep.vwap,
-                    "sim_vwap": None,
-                    "vwap_diff": None,
-                    "latency_ns": None,
-                    "matched": False,
-                }
-            )
-
-    episode_table = pd.DataFrame(matched_rows)
+    max_match_gap_ns = int(max_match_gap_seconds * 1_000_000_000)
+    match = _match_episodes(live_eps, sim_eps, max_match_gap_ns)
+    n_unmatched_live = len(match.unmatched_live)
+    n_unmatched_sim = len(match.unmatched_sim)
+    episode_table = pd.DataFrame(_episode_match_rows(match))
 
     # Classification
     n_live = len(live_eps)
@@ -616,15 +784,19 @@ def reconcile_fills(
 
     if n_live == 0 and n_sim == 0:
         classification = "match"
-    elif n_sim < n_live:
-        classification = "missed_episode"
-    elif n_sim > n_live:
-        classification = "extra_episode"
-    elif not episode_table.empty and episode_table["matched"].all():
-        # Check latency
+    elif n_unmatched_live and n_unmatched_sim:
+        # Both venues have legs the other lacks → genuine structural divergence
+        # (e.g. each made a round-trip the other did not). Most often a reference-
+        # feed gap desynced the entry gate — see check_reference_coverage.
+        classification = "structure_diff"
+    elif n_unmatched_live:
+        classification = "missed_episode"  # sim is missing legs live had
+    elif n_unmatched_sim:
+        classification = "extra_episode"  # sim invented legs live did not have
+    else:
+        # Fully matched: grade on latency / VWAP.
         latencies = episode_table["latency_ns"].dropna().abs()
         max_latency_s = latencies.max() / 1e9 if not latencies.empty else 0.0
-        # Check VWAP diff
         vwap_diffs = episode_table["vwap_diff"].dropna().abs()
         max_vwap_diff = vwap_diffs.max() if not vwap_diffs.empty else 0.0
 
@@ -634,8 +806,6 @@ def reconcile_fills(
             classification = "latency"
         else:
             classification = "match"
-    else:
-        classification = "missed_episode"
 
     return FillsResult(
         live_episodes=live_eps,
@@ -646,6 +816,107 @@ def reconcile_fills(
         n_live_fills=len(live_fills),
         n_sim_fills=len(sim_fills),
     )
+
+
+# ── Reference-feed coverage (Layer 2.5) ─────────────────────────────────────
+
+
+@dataclass
+class ReferenceGap:
+    """A hole in the recorded reference (perp mark) feed.
+
+    During a gap the SIM holds the last reference value while the live engine
+    (on its own uninterrupted feed) tracked the true price — desyncing the entry
+    gate and producing genuine sim≠live fill divergence that is NOT a harness bug.
+
+    Parameters
+    ----------
+    start_ns:
+        Timestamp of the last tick before the gap.
+    end_ns:
+        Timestamp of the first tick after the gap.
+    gap_seconds:
+        Width of the hole in seconds.
+    """
+
+    start_ns: int
+    end_ns: int
+    gap_seconds: float
+
+
+# A reader returns the sorted reference tick timestamps (ns) in [start_ns, end_ns].
+# Signature: (ref_symbol, start_ns, end_ns, data_root) -> list[int]
+ReferenceTsReader = Callable[[str, int, int, "Path | None"], "list[int]"]
+
+
+def _default_reference_ts_reader(
+    ref_symbol: str,
+    start_ns: int,
+    end_ns: int,
+    data_root: Path | None,
+) -> list[int]:
+    """Read recorded HL perp ``mark`` exchange timestamps for ``ref_symbol``."""
+    if data_root is None:
+        return []
+    try:
+        import duckdb  # noqa: PLC0415
+    except ImportError:
+        return []
+    pattern = str(
+        data_root / f"venue=hyperliquid/product_type=perp/mechanism=clob/event=mark/symbol={ref_symbol}/**/*.parquet"
+    )
+    try:
+        con = duckdb.connect()
+        df = con.execute(
+            f"""
+            SELECT exchange_ts FROM read_parquet('{pattern}', hive_partitioning=true)
+            WHERE exchange_ts BETWEEN {start_ns} AND {end_ns}
+            ORDER BY exchange_ts
+            """
+        ).df()
+        con.close()
+        return [int(x) for x in df["exchange_ts"].tolist()]
+    except Exception:
+        return []
+
+
+def check_reference_coverage(
+    start_ns: int,
+    end_ns: int,
+    ref_symbol: str = "BTC",
+    data_root: Path | None = None,
+    gap_threshold_seconds: float = 60.0,
+    ts_reader: ReferenceTsReader | None = None,
+) -> list[ReferenceGap]:
+    """Detect gaps in the recorded reference feed over ``[start_ns, end_ns]``.
+
+    Parameters
+    ----------
+    start_ns, end_ns:
+        Window to inspect (the question's trading window).
+    ref_symbol:
+        Reference perp symbol (e.g. ``"BTC"``).
+    data_root:
+        Root of the HL recorded data tree; may be None when ``ts_reader`` is given.
+    gap_threshold_seconds:
+        Report inter-tick gaps wider than this. The recorder normally ticks every
+        ~1-3 s, so 60 s comfortably separates a real outage from jitter.
+    ts_reader:
+        Injectable timestamp reader for testing.
+
+    Returns
+    -------
+    Chronological list of ReferenceGap. Empty if coverage is dense (or unreadable).
+    """
+    reader = ts_reader or _default_reference_ts_reader
+    ts = sorted(reader(ref_symbol, start_ns, end_ns, data_root))
+    threshold_ns = gap_threshold_seconds * 1_000_000_000
+    gaps: list[ReferenceGap] = []
+    for prev, cur in zip(ts, ts[1:]):
+        delta = cur - prev
+        if delta > threshold_ns:
+            gaps.append(ReferenceGap(start_ns=prev, end_ns=cur, gap_seconds=delta / 1e9))
+    return gaps
 
 
 # ── Settlement-winner helpers ───────────────────────────────────────────────
@@ -665,18 +936,27 @@ def _side_idx_from_symbol(symbol: str) -> int | None:
     return int(digits) % 10
 
 
-def _winner_from_settlement_fill(fills: pd.DataFrame) -> str | None:
+def _winner_from_settlement_fill(fills: pd.DataFrame, expiry_ns: int | None = None) -> str | None:
     """Derive the live winning side from the settlement-as-fill.
 
     HL books settlement as a venue fill at price ~1.0 (the held leg won) / ~0.0
     (it lost). The held leg's Yes/No identity comes from the symbol's side index.
     Returns ``"yes"``/``"no"`` or None when no settlement-priced fill is present.
+
+    ``expiry_ns`` guards against misreading a *legitimate deep-ITM trading fill*
+    (e.g. buying a 0.99 favorite mid-session) as the settlement leg: when given,
+    only fills at/after expiry are considered (audit M2). Settlement fills land at
+    expiry; trading fills do not.
     """
     if fills is None or fills.empty:
         return None
     if "price" not in fills.columns or "symbol" not in fills.columns or "ts_ns" not in fills.columns:
         return None
     ordered = fills.sort_values("ts_ns")
+    if expiry_ns is not None:
+        ordered = ordered[ordered["ts_ns"] >= expiry_ns]
+        if ordered.empty:
+            return None
     settle = ordered[(ordered["price"] >= 0.99) | (ordered["price"] <= 0.01)]
     if settle.empty:
         return None
@@ -737,6 +1017,8 @@ def reconcile_pnl(
     live_settlement: dict[str, Any],
     sim_resolved: dict[str, Any],
     pnl_abs_threshold: float = 5.0,
+    max_match_gap_seconds: float = 1800.0,
+    expiry_ns: int | None = None,
 ) -> PnLResult:
     """Layer 3: compare live vs sim realized PnL with attribution waterfall.
 
@@ -774,50 +1056,52 @@ def reconcile_pnl(
     if not live_fills.empty and "fee" in live_fills.columns:
         live_fees_total = float(live_fills["fee"].fillna(0).sum())
 
-    # Compute sim PnL from episodes: pair BUY+SELL
-    buy_eps = [e for e in sim_eps if e.side == "BUY"]
-    sell_eps = [e for e in sim_eps if e.side == "SELL"]
-    sim_realized = 0.0
-    n_pairs = min(len(buy_eps), len(sell_eps))
-    for i in range(n_pairs):
-        be = buy_eps[i]
-        se = sell_eps[i]
-        pair_size = min(be.total_size, se.total_size)
-        sim_realized += (se.vwap - be.vwap) * pair_size
-    sim_realized -= sim_fees_total
+    # Sim realized: running average-cost over fills. Robust to scale-ins,
+    # scale-outs and partial closes (the old index-paired ``min(size)`` dropped
+    # the remainder of any unbalanced leg).
+    sim_realized = _realized_from_fills(sim_fills) - sim_fees_total
 
-    # Waterfall attribution
-    # Use episodes from live fills as well
+    # ── Waterfall attribution (matched-structure) ──────────────────────────
+    # Decompose pnl_diff (= live_realized − sim_realized) over the legs the two
+    # actually share, plus the round-trips unique to each side. The old code
+    # paired episodes positionally, comparing live's leg-1 to sim's leg-1 even
+    # when those were different trades — yielding huge components that only
+    # cancelled by luck. We now attribute only across *matched* legs and bucket
+    # the unmatched round-trips explicitly (the 2026-06-20 #1000465 fix).
     live_eps_all = _group_episodes(live_fills) if not live_fills.empty else []
-    live_buy_eps = [e for e in live_eps_all if e.side == "BUY"]
-    live_sell_eps = [e for e in live_eps_all if e.side == "SELL"]
+    max_match_gap_ns = int(max_match_gap_seconds * 1_000_000_000)
+    match = _match_episodes(live_eps_all, sim_eps, max_match_gap_ns)
 
-    entry_vwap_diff = 0.0
-    exit_vwap_diff = 0.0
-    size_diff_pnl = 0.0
+    matched_buys = [(le, se) for le, se in match.matched if le.side == "BUY"]
+    matched_sells = [(le, se) for le, se in match.matched if le.side == "SELL"]
 
-    n_pairs_wf = min(len(buy_eps), len(sell_eps), len(live_buy_eps), len(live_sell_eps))
-    for i in range(n_pairs_wf):
-        lbe = live_buy_eps[i]
-        lse = live_sell_eps[i]
-        sbe = buy_eps[i]
-        sse = sell_eps[i]
-        avg_entry = (lbe.vwap + sbe.vwap) / 2
-        pair_size = (lbe.total_size + sbe.total_size) / 2
+    entry_vwap_diff = 0.0  # $ from sim entering matched legs at a different price
+    exit_vwap_diff = 0.0  # $ from sim exiting matched legs at a different price
+    size_diff_pnl = 0.0  # $ from sim trading a different size on matched legs
+    # Pair the i-th matched buy with the i-th matched sell into a round-trip.
+    for (lbe, sbe), (lse, sse) in zip(matched_buys, matched_sells):
+        live_size = (lbe.total_size + lse.total_size) / 2
+        sim_size = (sbe.total_size + sse.total_size) / 2
+        # Contributions to (live_realized − sim_realized), holding size at live's:
+        entry_vwap_diff += (sbe.vwap - lbe.vwap) * live_size  # sim paid more → +live
+        exit_vwap_diff += (lse.vwap - sse.vwap) * live_size  # live sold higher → +live
+        size_diff_pnl += (sse.vwap - sbe.vwap) * (live_size - sim_size)
 
-        entry_vwap_diff += (sbe.vwap - lbe.vwap) * pair_size
-        exit_vwap_diff += (sse.vwap - lse.vwap) * pair_size
-        size_diff_pnl += (sbe.total_size - lbe.total_size) * avg_entry
+    # Round-trips one side made and the other did not, valued on their own fills.
+    live_only_pnl = _round_trip_pnl(match.unmatched_live)  # PnL live booked, sim lacked
+    sim_only_pnl = _round_trip_pnl(match.unmatched_sim)  # PnL sim booked, live lacked
 
     fee_diff = sim_fees_total - live_fees_total
     pnl_diff = live_realized - sim_realized
-    accounted = entry_vwap_diff + exit_vwap_diff + size_diff_pnl + fee_diff
+    accounted = entry_vwap_diff + exit_vwap_diff + size_diff_pnl + live_only_pnl - sim_only_pnl + fee_diff
     residual = pnl_diff - accounted
 
     waterfall = {
-        "entry_vwap_diff": round(entry_vwap_diff, 6),
-        "exit_vwap_diff": round(exit_vwap_diff, 6),
-        "size_diff": round(size_diff_pnl, 6),
+        "matched_entry_vwap": round(entry_vwap_diff, 6),
+        "matched_exit_vwap": round(exit_vwap_diff, 6),
+        "matched_size": round(size_diff_pnl, 6),
+        "live_only_roundtrips": round(live_only_pnl, 6),
+        "sim_only_roundtrips": round(-sim_only_pnl, 6),
         "fee_diff": round(fee_diff, 6),
         "residual": round(residual, 6),
     }
@@ -828,7 +1112,7 @@ def reconcile_pnl(
     # sim resolved outcome; SKIP if neither side is available.
     live_winner = live_settlement.get("winner_side") if live_settlement else None
     if live_winner is None:
-        live_winner = _winner_from_settlement_fill(live_fills)
+        live_winner = _winner_from_settlement_fill(live_fills, expiry_ns=expiry_ns)
     sim_winner = sim_resolved.get("winner_side") if sim_resolved else None
     if sim_winner is None and sim_resolved:
         sim_winner = sim_resolved.get("resolved_outcome")
@@ -884,6 +1168,10 @@ class ReconcileResult:
         ``"PASS"`` or ``"FAIL"``.
     fail_reasons:
         List of human-readable failure reasons.
+    reference_gaps:
+        Holes in the recorded reference feed over the window. When non-empty, any
+        fill/decision divergence is likely data-caused (sim held a stale reference
+        while live tracked the true price), not a strategy or harness fault.
     """
 
     question_idx: int
@@ -894,6 +1182,7 @@ class ReconcileResult:
     layer3: PnLResult
     verdict: str
     fail_reasons: list[str] = field(default_factory=list)
+    reference_gaps: list[ReferenceGap] = field(default_factory=list)
 
 
 def verdict(
@@ -903,6 +1192,7 @@ def verdict(
     layer3: PnLResult,
     pnl_abs_threshold: float = 5.0,
     decision_match_min: float = 0.95,
+    decision_coverage_min: float = 0.5,
 ) -> tuple[str, list[str]]:
     """Apply thresholds and return overall PASS/FAIL + list of failure reasons.
 
@@ -920,6 +1210,12 @@ def verdict(
         Maximum acceptable |pnl_diff|.
     decision_match_min:
         Minimum acceptable decision match_rate.
+    decision_coverage_min:
+        Minimum fraction of buckets that must be ALIGNED across both traces. The
+        match rate is computed only over aligned buckets, so a sim trace that is
+        truncated/misaligned can match 100% of its few overlapping buckets and
+        sail through (audit H3). Require the aligned set to cover a real share of
+        the larger trace before trusting the match rate.
 
     Returns
     -------
@@ -934,6 +1230,13 @@ def verdict(
             reasons.append(f"question_identity: {layer0.question_identity_match}")
         if layer0.window_match.startswith("FAIL"):
             reasons.append(f"window_overlap: {layer0.window_match}")
+
+    coverage = layer1.n_aligned / max(layer1.n_live_buckets, layer1.n_sim_buckets, 1)
+    if coverage < decision_coverage_min:
+        reasons.append(
+            f"decision_coverage={coverage:.2%} < {decision_coverage_min:.0%} "
+            "(sim trace truncated or misaligned — match rate is over too few buckets)"
+        )
 
     if layer1.match_rate < decision_match_min:
         reasons.append(f"decision_match_rate={layer1.match_rate:.2%} < {decision_match_min:.0%}")
@@ -959,6 +1262,8 @@ def run_reconcile(
     book_reader: BookReader | None = None,
     pnl_abs_threshold: float = 5.0,
     decision_match_min: float = 0.95,
+    ref_symbol: str = "BTC",
+    reference_ts_reader: ReferenceTsReader | None = None,
 ) -> ReconcileResult:
     """Run all 4 layers and return a ReconcileResult.
 
@@ -1018,6 +1323,7 @@ def run_reconcile(
         live_settlement=live_settlement,
         sim_resolved=sim_resolved,
         pnl_abs_threshold=pnl_abs_threshold,
+        expiry_ns=expiry_ns,
     )
 
     v, fail_reasons = verdict(
@@ -1029,6 +1335,27 @@ def run_reconcile(
         decision_match_min=decision_match_min,
     )
 
+    # Layer 2.5: reference-feed coverage over the live trace window. A gap here
+    # means the sim replayed a stale (hold-last) reference while live tracked the
+    # true price — the usual cause of fill/decision divergence that is data-driven,
+    # not a strategy or harness fault. Surface it so a divergent verdict can be
+    # attributed rather than mistaken for a regression.
+    reference_gaps: list[ReferenceGap] = []
+    if (
+        (data_root is not None or reference_ts_reader is not None)
+        and not live_trace.empty
+        and "ts_ns" in live_trace.columns
+    ):
+        win_lo = int(live_trace["ts_ns"].min())
+        win_hi = int(live_trace["ts_ns"].max())
+        reference_gaps = check_reference_coverage(
+            start_ns=win_lo,
+            end_ns=win_hi,
+            ref_symbol=ref_symbol,
+            data_root=data_root,
+            ts_reader=reference_ts_reader,
+        )
+
     return ReconcileResult(
         question_idx=question_idx,
         expiry_ns=expiry_ns,
@@ -1038,4 +1365,5 @@ def run_reconcile(
         layer3=layer3,
         verdict=v,
         fail_reasons=fail_reasons,
+        reference_gaps=reference_gaps,
     )

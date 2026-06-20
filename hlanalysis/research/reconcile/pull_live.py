@@ -223,8 +223,12 @@ def _ssm_fetch_large_json(
         + f"Body=_g.compress(_j.dumps({result_var}).encode()))\n"
         + "print('S3_UPLOAD_OK')\n"
     )
-    _ssm_python(upload, instance_id=instance_id, timeout_s=timeout_s)
+    # Key is generated up-front and deleted in `finally` regardless of where we
+    # fail. If the remote step uploads then errors on a later line (or SSM reports
+    # Failed post-upload), the object would otherwise orphan in S3 (audit M5).
+    # S3 delete is idempotent, so cleaning up a never-created key is harmless.
     try:
+        _ssm_python(upload, instance_id=instance_id, timeout_s=timeout_s)
         raw = gzip.decompress(_s3_download_bytes(bucket, key))
     finally:
         _s3_delete(bucket, key)

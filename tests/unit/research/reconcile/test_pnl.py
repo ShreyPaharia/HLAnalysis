@@ -129,14 +129,16 @@ class TestWaterfall:
             live_settlement={},
             sim_resolved={},
         )
-        assert "entry_vwap_diff" in result.waterfall
-        assert "exit_vwap_diff" in result.waterfall
-        assert "size_diff" in result.waterfall
+        assert "matched_entry_vwap" in result.waterfall
+        assert "matched_exit_vwap" in result.waterfall
+        assert "matched_size" in result.waterfall
+        assert "live_only_roundtrips" in result.waterfall
+        assert "sim_only_roundtrips" in result.waterfall
         assert "fee_diff" in result.waterfall
         assert "residual" in result.waterfall
 
     def test_waterfall_sums_to_pnl_diff(self) -> None:
-        """entry_vwap_diff + exit_vwap_diff + size_diff + fee_diff + residual ≈ pnl_diff."""
+        """All waterfall components sum to pnl_diff."""
         live = _round_trip_fills(entry_price=0.80, exit_price=0.85, size=10)
         sim = _round_trip_fills(entry_price=0.81, exit_price=0.84, size=10)
         result = reconcile_pnl(
@@ -145,8 +147,7 @@ class TestWaterfall:
             live_settlement={},
             sim_resolved={},
         )
-        wf = result.waterfall
-        total = wf["entry_vwap_diff"] + wf["exit_vwap_diff"] + wf["size_diff"] + wf["fee_diff"] + wf["residual"]
+        total = sum(result.waterfall.values())
         assert abs(total - result.pnl_diff) < 1e-4  # floating point tolerance
 
     def test_waterfall_fee_diff_zero_when_fees_equal(self) -> None:

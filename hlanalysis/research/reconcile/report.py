@@ -74,6 +74,12 @@ def render_markdown(result: ReconcileResult) -> str:
         f"Aligned buckets: {l1.n_aligned} / live={l1.n_live_buckets} sim={l1.n_sim_buckets}"
     )
     lines.append("")
+    lines.append(
+        f"Decision events (non-hold): live={l1.n_live_events} sim={l1.n_sim_events} "
+        "— the enter/exit decisions the match rate must verify (holds dominate the "
+        "trace and no longer mask a divergent event within a bucket)."
+    )
+    lines.append("")
 
     if l1.first_divergence is not None:
         fd = l1.first_divergence
@@ -114,19 +120,63 @@ def render_markdown(result: ReconcileResult) -> str:
     lines.append("")
 
     if not l2.episode_table.empty:
-        lines.append("| Episode | Side | Live size | Sim size | Size diff | Live VWAP | Sim VWAP | VWAP diff |")
-        lines.append("|---------|------|-----------|----------|-----------|-----------|----------|-----------|")
-        for i, row in l2.episode_table.iterrows():
+        lines.append(
+            "| Episode | Status | Side | Live size | Sim size | Size diff | "
+            "Live VWAP | Sim VWAP | VWAP diff | Latency (s) |"
+        )
+        lines.append(
+            "|---------|--------|------|-----------|----------|-----------|-----------|----------|-----------|-------------|"
+        )
+        for i, row in enumerate(l2.episode_table.to_dict("records")):
+            lat = row.get("latency_ns")
+            lat_str = _fmt_float(lat / 1e9, 1) if isinstance(lat, (int, float)) and lat == lat else "N/A"
             lines.append(
                 f"| {i + 1} "
+                f"| {row.get('match_status', 'N/A')} "
                 f"| {row.get('live_side', 'N/A')} "
                 f"| {_fmt_float(row.get('live_size'), 4)} "
                 f"| {_fmt_float(row.get('sim_size'), 4)} "
                 f"| {_fmt_float(row.get('size_diff'), 4)} "
                 f"| {_fmt_float(row.get('live_vwap'), 4)} "
                 f"| {_fmt_float(row.get('sim_vwap'), 4)} "
-                f"| {_fmt_float(row.get('vwap_diff'), 4)} |"
+                f"| {_fmt_float(row.get('vwap_diff'), 4)} "
+                f"| {lat_str} |"
             )
+        lines.append("")
+
+    # Layer 2.5: reference-feed coverage
+    if result.reference_gaps:
+        gaps = result.reference_gaps
+        total_s = sum(g.gap_seconds for g in gaps)
+        # The gap that actually matters is the one straddling the first decision
+        # divergence — that is where a stale reference desynced the entry gate.
+        div_ns = result.layer1.first_divergence.ts_ns if result.layer1.first_divergence else None
+        culprit = next((g for g in gaps if div_ns is not None and g.start_ns <= div_ns <= g.end_ns), None)
+
+        lines.append("## Reference-feed coverage")
+        lines.append("")
+        lines.append(
+            f"⚠️ {len(gaps)} gap(s) (Σ {total_s / 60:.0f} min) in the recorded reference feed over "
+            "the window. During a gap the sim holds a stale reference; where the price also moves, "
+            "the entry gate desyncs from live — so divergence is **likely data-caused, not a "
+            "strategy/harness fault**."
+        )
+        if culprit is not None and div_ns is not None:
+            lines.append("")
+            lines.append(
+                f"➡️ The first decision divergence ({_fmt_ns(div_ns)}) falls inside the "
+                f"{culprit.gap_seconds:.0f}s gap {_fmt_ns(culprit.start_ns)} → {_fmt_ns(culprit.end_ns)} "
+                "— the likely root cause of the fill divergence on this market."
+            )
+        lines.append("")
+        widest = sorted(gaps, key=lambda g: g.gap_seconds, reverse=True)[:10]
+        lines.append(f"Widest gaps (top {len(widest)} of {len(gaps)}):")
+        lines.append("")
+        lines.append("| Gap start | Gap end | Width (s) |")
+        lines.append("|-----------|---------|-----------|")
+        for g in widest:
+            mark = " ⬅️" if g is culprit else ""
+            lines.append(f"| {_fmt_ns(g.start_ns)} | {_fmt_ns(g.end_ns)} | {g.gap_seconds:.0f}{mark} |")
         lines.append("")
 
     # Layer 3
