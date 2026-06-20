@@ -16,22 +16,6 @@ from hlanalysis.research.reconcile.book import (
     book_parity_pct,
     recorded_book_at,
 )
-from hlanalysis.research.reconcile.reconcile import (
-    DecisionResult,
-    FillsResult,
-    PnLResult,
-    PreconditionResult,
-    ReconcileResult,
-    ReferenceGap,
-    attributable_gaps,
-    check_preconditions,
-    check_reference_coverage,
-    reconcile_decisions,
-    reconcile_fills,
-    reconcile_pnl,
-    run_reconcile,
-    verdict,
-)
 from hlanalysis.research.reconcile.fidelity import (
     Distribution,
     FidelityGroup,
@@ -39,6 +23,25 @@ from hlanalysis.research.reconcile.fidelity import (
     QuestionLabel,
     aggregate_fidelity,
     render_fidelity_html,
+)
+from hlanalysis.research.reconcile.reconcile import (
+    DecisionResult,
+    FillsResult,
+    InvariantResult,
+    InvariantTolerances,
+    PnLResult,
+    PreconditionResult,
+    ReconcileResult,
+    ReferenceGap,
+    attributable_gaps,
+    check_invariants,
+    check_preconditions,
+    check_reference_coverage,
+    reconcile_decisions,
+    reconcile_fills,
+    reconcile_pnl,
+    run_reconcile,
+    verdict,
 )
 from hlanalysis.research.reconcile.report import render_markdown
 
@@ -58,6 +61,9 @@ __all__ = [
     "reconcile_pnl",
     "verdict",
     "run_reconcile",
+    "check_invariants",
+    "InvariantTolerances",
+    "InvariantResult",
     # fidelity
     "aggregate_fidelity",
     "render_fidelity_html",

@@ -1191,6 +1191,10 @@ class PnLResult:
         fee_diff, residual.
     pnl_match:
         ``"PASS"`` if |pnl_diff| <= threshold, else ``"FAIL:<amount>"``.
+    live_fees, sim_fees:
+        Total fees paid live / sim (for the per-component fee invariant, SHR-151).
+    live_size, sim_size:
+        Total traded size (turnover) live / sim (for the turnover invariant).
     """
 
     live_realized: float
@@ -1199,6 +1203,10 @@ class PnLResult:
     settlement_winner_match: str
     waterfall: dict[str, float]
     pnl_match: str
+    live_fees: float = 0.0
+    sim_fees: float = 0.0
+    live_size: float = 0.0
+    sim_size: float = 0.0
 
 
 def reconcile_pnl(
@@ -1395,6 +1403,13 @@ def reconcile_pnl(
     else:
         pnl_match = f"FAIL:{pnl_diff:+.2f}"
 
+    live_size_total = 0.0
+    if not live_fills.empty and "size" in live_fills.columns:
+        live_size_total = float(live_fills["size"].fillna(0).abs().sum())
+    sim_size_total = 0.0
+    if not sim_fills.empty and "size" in sim_fills.columns:
+        sim_size_total = float(sim_fills["size"].fillna(0).abs().sum())
+
     return PnLResult(
         live_realized=live_realized,
         sim_realized=sim_realized,
@@ -1402,7 +1417,155 @@ def reconcile_pnl(
         settlement_winner_match=settlement_winner_match,
         waterfall=waterfall,
         pnl_match=pnl_match,
+        live_fees=live_fees_total,
+        sim_fees=sim_fees_total,
+        live_size=live_size_total,
+        sim_size=sim_size_total,
     )
+
+
+# ── Per-component invariants (SHR-151) ───────────────────────────────────────
+
+
+@dataclass
+class InvariantTolerances:
+    """Per-component tolerances ε for the PnL-layer accounting invariants.
+
+    Each accounting component must reconcile within its own tolerance; the verdict
+    names whichever invariant broke instead of reporting a single opaque total.
+
+    Parameters
+    ----------
+    realized_pnl_abs:
+        Maximum acceptable ``|pnl_diff|`` ($). The original single PnL gate — kept
+        unchanged so overall strictness is not loosened.
+    fee_rel:
+        Maximum acceptable fee divergence as a fraction of the larger fee total
+        (default 1%).
+    turnover_units:
+        Maximum acceptable ``|live_size − sim_size|`` in contract units.
+    slippage_abs:
+        Maximum acceptable matched price-quality slippage ($), i.e.
+        ``|matched_entry_impact + matched_exit_impact|`` from the waterfall.
+    """
+
+    realized_pnl_abs: float = 5.0
+    fee_rel: float = 0.01
+    turnover_units: float = 1.0
+    slippage_abs: float = 5.0
+
+
+@dataclass
+class InvariantResult:
+    """Outcome of checking one named accounting invariant.
+
+    Parameters
+    ----------
+    name:
+        Invariant identifier (e.g. ``"fees"``, ``"settlement_winner"``).
+    passed:
+        Whether the component reconciled within its tolerance.
+    observed:
+        The measured divergence magnitude (units depend on the invariant).
+    tolerance:
+        The tolerance ε it was checked against.
+    detail:
+        Human-readable description for the verdict reason list.
+    """
+
+    name: str
+    passed: bool
+    observed: float
+    tolerance: float
+    detail: str
+
+
+def check_invariants(layer3: PnLResult, tol: InvariantTolerances | None = None) -> list[InvariantResult]:
+    """Check each PnL accounting component against its own tolerance (SHR-151).
+
+    Parameters
+    ----------
+    layer3:
+        The Layer-3 PnL result (carries the waterfall, fee and size totals).
+    tol:
+        Per-component tolerances; defaults to :class:`InvariantTolerances`.
+
+    Returns
+    -------
+    One :class:`InvariantResult` per named invariant, in a stable order.
+    """
+    tol = tol or InvariantTolerances()
+    wf = layer3.waterfall or {}
+    results: list[InvariantResult] = []
+
+    # 1. Settlement winner — exact (PASS/SKIP clear; explicit FAIL breaks).
+    settle_ok = not str(layer3.settlement_winner_match).startswith("FAIL")
+    results.append(
+        InvariantResult(
+            name="settlement_winner",
+            passed=settle_ok,
+            observed=0.0 if settle_ok else 1.0,
+            tolerance=0.0,
+            detail=("settlement winner exact" if settle_ok else f"winner mismatch ({layer3.settlement_winner_match})"),
+        )
+    )
+
+    # 2. Fees match within fee_rel of the larger fee total.
+    fee_diff = abs(layer3.sim_fees - layer3.live_fees)
+    fee_ref = max(abs(layer3.live_fees), abs(layer3.sim_fees))
+    fee_budget = tol.fee_rel * fee_ref
+    fees_ok = fee_diff <= fee_budget + 1e-12
+    rel = (fee_diff / fee_ref) if fee_ref > 0 else 0.0
+    results.append(
+        InvariantResult(
+            name="fees",
+            passed=fees_ok,
+            observed=fee_diff,
+            tolerance=fee_budget,
+            detail=f"fee divergence {rel:.2%} (Δ${fee_diff:.4f}) vs {tol.fee_rel:.0%} of ${fee_ref:.4f}",
+        )
+    )
+
+    # 3. Turnover (total size) within N units.
+    turnover_diff = abs(layer3.live_size - layer3.sim_size)
+    turn_ok = turnover_diff <= tol.turnover_units + 1e-9
+    results.append(
+        InvariantResult(
+            name="turnover",
+            passed=turn_ok,
+            observed=turnover_diff,
+            tolerance=tol.turnover_units,
+            detail=f"size divergence {turnover_diff:.4f} units vs {tol.turnover_units:.4f}",
+        )
+    )
+
+    # 4. Slippage (matched price-quality impact) within a band.
+    slip = abs(float(wf.get("matched_entry_impact", 0.0)) + float(wf.get("matched_exit_impact", 0.0)))
+    slip_ok = slip <= tol.slippage_abs + 1e-9
+    results.append(
+        InvariantResult(
+            name="slippage",
+            passed=slip_ok,
+            observed=slip,
+            tolerance=tol.slippage_abs,
+            detail=f"matched impact slippage ${slip:.4f} vs band ${tol.slippage_abs:.4f}",
+        )
+    )
+
+    # 5. Realized PnL ≤ $X (the original gate, unchanged).
+    pnl_abs = abs(layer3.pnl_diff)
+    pnl_ok = pnl_abs <= tol.realized_pnl_abs + 1e-9
+    results.append(
+        InvariantResult(
+            name="realized_pnl",
+            passed=pnl_ok,
+            observed=pnl_abs,
+            tolerance=tol.realized_pnl_abs,
+            detail=f"realized PnL diff ${layer3.pnl_diff:+.2f} vs ±${tol.realized_pnl_abs:.2f}",
+        )
+    )
+
+    return results
 
 
 # ── Verdict ─────────────────────────────────────────────────────────────────
@@ -1455,6 +1618,7 @@ def verdict(
     pnl_abs_threshold: float = 5.0,
     decision_match_min: float = 0.95,
     decision_coverage_min: float = 0.5,
+    invariant_tolerances: InvariantTolerances | None = None,
 ) -> tuple[str, list[str]]:
     """Apply thresholds and return overall PASS/FAIL + list of failure reasons.
 
@@ -1469,7 +1633,8 @@ def verdict(
     layer3:
         PnL result.
     pnl_abs_threshold:
-        Maximum acceptable |pnl_diff|.
+        Maximum acceptable |pnl_diff|. Used as the realized-PnL invariant tolerance
+        when ``invariant_tolerances`` is not supplied.
     decision_match_min:
         Minimum acceptable decision match_rate.
     decision_coverage_min:
@@ -1478,6 +1643,11 @@ def verdict(
         truncated/misaligned can match 100% of its few overlapping buckets and
         sail through (audit H3). Require the aligned set to cover a real share of
         the larger trace before trusting the match rate.
+    invariant_tolerances:
+        Per-component PnL invariant tolerances (SHR-151). When None, defaults are
+        used with ``realized_pnl_abs`` taken from ``pnl_abs_threshold`` so the PnL
+        gate is unchanged; the named fee/turnover/slippage/settlement invariants
+        are additional gates (strictly stricter, never looser).
 
     Returns
     -------
@@ -1503,8 +1673,12 @@ def verdict(
     if layer1.match_rate < decision_match_min:
         reasons.append(f"decision_match_rate={layer1.match_rate:.2%} < {decision_match_min:.0%}")
 
-    if layer3.pnl_match.startswith("FAIL"):
-        reasons.append(f"pnl_diff: {layer3.pnl_match}")
+    # Per-component invariants: name whichever accounting component broke rather
+    # than reporting an opaque PnL total (SHR-151).
+    tol = invariant_tolerances or InvariantTolerances(realized_pnl_abs=pnl_abs_threshold)
+    for inv in check_invariants(layer3, tol):
+        if not inv.passed:
+            reasons.append(f"invariant[{inv.name}]: {inv.detail}")
 
     overall = "FAIL" if reasons else "PASS"
     return overall, reasons
@@ -1530,6 +1704,7 @@ def run_reconcile(
     reference_gap_method: str = "poisson",
     reference_gap_poisson_p: float = 1e-6,
     cross_feed_reader: CrossFeedIngestReader | None = None,
+    invariant_tolerances: InvariantTolerances | None = None,
 ) -> ReconcileResult:
     """Run all 4 layers and return a ReconcileResult.
 
@@ -1602,6 +1777,7 @@ def run_reconcile(
         layer3=layer3,
         pnl_abs_threshold=pnl_abs_threshold,
         decision_match_min=decision_match_min,
+        invariant_tolerances=invariant_tolerances,
     )
 
     # Layer 2.5: reference-feed coverage over the live trace window. A gap here
