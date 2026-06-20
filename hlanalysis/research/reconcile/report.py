@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from hlanalysis.research.reconcile.reconcile import ReconcileResult
+from hlanalysis.research.reconcile.reconcile import ReconcileResult, attributable_gaps
 
 
 def _fmt_ns(ts_ns: int) -> str:
@@ -147,36 +147,52 @@ def render_markdown(result: ReconcileResult) -> str:
     # Layer 2.5: reference-feed coverage
     if result.reference_gaps:
         gaps = result.reference_gaps
-        total_s = sum(g.gap_seconds for g in gaps)
+        # SHR-149: only gaps coinciding with GLOBAL ingest silence are real outages
+        # attributable to data. A gap with other feeds ticking is a calm/illiquid
+        # market on one symbol, not a recording outage.
+        attributable = attributable_gaps(gaps)
+        benign = [g for g in gaps if not g.global_silence]
+        attr_total_s = sum(g.gap_seconds for g in attributable)
         # The gap that actually matters is the one straddling the first decision
         # divergence — that is where a stale reference desynced the entry gate.
         div_ns = result.layer1.first_divergence.ts_ns if result.layer1.first_divergence else None
-        culprit = next((g for g in gaps if div_ns is not None and g.start_ns <= div_ns <= g.end_ns), None)
+        culprit = next((g for g in attributable if div_ns is not None and g.start_ns <= div_ns <= g.end_ns), None)
 
         lines.append("## Reference-feed coverage")
         lines.append("")
-        lines.append(
-            f"⚠️ {len(gaps)} gap(s) (Σ {total_s / 60:.0f} min) in the recorded reference feed over "
-            "the window. During a gap the sim holds a stale reference; where the price also moves, "
-            "the entry gate desyncs from live — so divergence is **likely data-caused, not a "
-            "strategy/harness fault**."
-        )
+        if attributable:
+            lines.append(
+                f"⚠️ {len(attributable)} outage gap(s) (Σ {attr_total_s / 60:.0f} min) coinciding with "
+                "**global ingest silence** in the recorded reference feed. During such a gap the sim "
+                "holds a stale reference; where the price also moves, the entry gate desyncs from live "
+                "— so divergence is **likely data-caused, not a strategy/harness fault**."
+            )
+        else:
+            lines.append(
+                "✅ No outage gaps: every reference gap over the window had other feeds still ticking "
+                "(global ingest alive) — a calm/illiquid market on this symbol, **not** a recording "
+                "outage, so divergence is **not** attributable to data here."
+            )
+        if benign:
+            lines.append("")
+            lines.append(f"_({len(benign)} benign gap(s) where other feeds kept ticking — not attributed.)_")
         if culprit is not None and div_ns is not None:
             lines.append("")
             lines.append(
                 f"➡️ The first decision divergence ({_fmt_ns(div_ns)}) falls inside the "
-                f"{culprit.gap_seconds:.0f}s gap {_fmt_ns(culprit.start_ns)} → {_fmt_ns(culprit.end_ns)} "
+                f"{culprit.gap_seconds:.0f}s outage {_fmt_ns(culprit.start_ns)} → {_fmt_ns(culprit.end_ns)} "
                 "— the likely root cause of the fill divergence on this market."
             )
         lines.append("")
         widest = sorted(gaps, key=lambda g: g.gap_seconds, reverse=True)[:10]
         lines.append(f"Widest gaps (top {len(widest)} of {len(gaps)}):")
         lines.append("")
-        lines.append("| Gap start | Gap end | Width (s) |")
-        lines.append("|-----------|---------|-----------|")
+        lines.append("| Gap start | Gap end | Width (s) | Attribution |")
+        lines.append("|-----------|---------|-----------|-------------|")
         for g in widest:
             mark = " ⬅️" if g is culprit else ""
-            lines.append(f"| {_fmt_ns(g.start_ns)} | {_fmt_ns(g.end_ns)} | {g.gap_seconds:.0f}{mark} |")
+            attr = "outage" if g.global_silence else "benign (feeds ticking)"
+            lines.append(f"| {_fmt_ns(g.start_ns)} | {_fmt_ns(g.end_ns)} | {g.gap_seconds:.0f}{mark} | {attr} |")
         lines.append("")
 
     # Layer 3

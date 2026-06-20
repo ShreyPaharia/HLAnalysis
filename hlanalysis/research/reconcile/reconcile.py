@@ -846,17 +846,30 @@ class ReferenceGap:
         For the ``"poisson"`` method, P(wait > gap) = e^(−λ·gap) under the fitted
         per-window rate — the improbability that earned the flag. ``None`` for the
         flat-threshold method.
+    global_silence:
+        Whether *every* feed was silent during the gap (SHR-149, porting engine
+        9bea25f). ``True`` ⇒ a real recording outage; divergence may be attributed
+        to data. ``False`` ⇒ other feeds kept ticking, so this is a calm/illiquid
+        market on this one symbol, NOT an outage — do not attribute. Defaults to
+        ``True`` when no cross-feed reader is supplied (back-compatible).
     """
 
     start_ns: int
     end_ns: int
     gap_seconds: float
     p_value: float | None = None
+    global_silence: bool = True
 
 
 # A reader returns the sorted reference tick timestamps (ns) in [start_ns, end_ns].
 # Signature: (ref_symbol, start_ns, end_ns, data_root) -> list[int]
 ReferenceTsReader = Callable[[str, int, int, "Path | None"], "list[int]"]
+
+# A cross-feed reader returns the sorted ingest timestamps (ns) across feeds OTHER
+# than the reference symbol over [start_ns, end_ns] — the parquet analogue of the
+# engine's global ``_last_ingest_ns`` (SHR-149). Injectable like ReferenceTsReader.
+# Signature: (start_ns, end_ns, data_root) -> list[int]
+CrossFeedIngestReader = Callable[[int, int, "Path | None"], "list[int]"]
 
 
 def _default_reference_ts_reader(
@@ -908,6 +921,48 @@ def _poisson_threshold_ns(deltas_ns: list[int], poisson_p: float) -> float | Non
     return mean_delta * (-math.log(poisson_p))
 
 
+def _default_cross_feed_ingest_reader(
+    start_ns: int,
+    end_ns: int,
+    data_root: Path | None,
+) -> list[int]:
+    """Read recorded HL perp ``mark`` exchange timestamps across *all* symbols.
+
+    The parquet analogue of the engine's global ``_last_ingest_ns`` (SHR-149): a
+    tick from any coin's mark feed proves the recorder was alive. Used to decide
+    whether a per-symbol reference gap coincided with global ingest silence.
+    """
+    if data_root is None:
+        return []
+    try:
+        import duckdb  # noqa: PLC0415
+    except ImportError:
+        return []
+    pattern = str(data_root / "venue=hyperliquid/product_type=perp/mechanism=clob/event=mark/symbol=*/**/*.parquet")
+    try:
+        con = duckdb.connect()
+        df = con.execute(
+            f"""
+            SELECT exchange_ts FROM read_parquet('{pattern}', hive_partitioning=true)
+            WHERE exchange_ts BETWEEN {start_ns} AND {end_ns}
+            ORDER BY exchange_ts
+            """
+        ).df()
+        con.close()
+        return [int(x) for x in df["exchange_ts"].tolist()]
+    except Exception:
+        return []
+
+
+def attributable_gaps(gaps: list[ReferenceGap]) -> list[ReferenceGap]:
+    """Return only the gaps that coincided with global ingest silence (SHR-149).
+
+    A gap where other feeds kept ticking is a calm/illiquid market on one symbol,
+    not a recording outage — so it is NOT attributable to data and is filtered out.
+    """
+    return [g for g in gaps if g.global_silence]
+
+
 def check_reference_coverage(
     start_ns: int,
     end_ns: int,
@@ -917,6 +972,7 @@ def check_reference_coverage(
     ts_reader: ReferenceTsReader | None = None,
     method: str = "flat",
     poisson_p: float = 1e-6,
+    cross_feed_reader: CrossFeedIngestReader | None = None,
 ) -> list[ReferenceGap]:
     """Detect gaps in the recorded reference feed over ``[start_ns, end_ns]``.
 
@@ -942,6 +998,11 @@ def check_reference_coverage(
         falls back to the flat threshold when too few ticks exist to fit λ.
     poisson_p:
         Poisson method only: the implausibility cutoff (default ``1e-6``).
+    cross_feed_reader:
+        Injectable reader of ingest timestamps across *other* feeds (SHR-149). When
+        supplied, each gap's ``global_silence`` is set by whether any cross-feed
+        tick landed inside the gap: ticking other feeds ⇒ benign (not attributable).
+        When ``None`` every gap keeps ``global_silence=True`` (back-compatible).
 
     Returns
     -------
@@ -979,6 +1040,16 @@ def check_reference_coverage(
             delta = cur - prev
             if delta > threshold_ns:
                 gaps.append(ReferenceGap(start_ns=prev, end_ns=cur, gap_seconds=delta / 1e9))
+
+    # SHR-149: gate each gap on global ingest silence. A gap with other feeds
+    # ticking is a calm market on one symbol, not a recording outage.
+    if cross_feed_reader is not None and gaps:
+        cross_ts = sorted(cross_feed_reader(start_ns, end_ns, data_root))
+        for g in gaps:
+            # Strictly-inside ticks (the gap endpoints are this symbol's own ticks).
+            others_ticked = any(g.start_ns < t < g.end_ns for t in cross_ts)
+            g.global_silence = not others_ticked
+
     return gaps
 
 
@@ -1458,6 +1529,7 @@ def run_reconcile(
     ref_price_reader: RefPriceReader | None = None,
     reference_gap_method: str = "poisson",
     reference_gap_poisson_p: float = 1e-6,
+    cross_feed_reader: CrossFeedIngestReader | None = None,
 ) -> ReconcileResult:
     """Run all 4 layers and return a ReconcileResult.
 
@@ -1545,6 +1617,11 @@ def run_reconcile(
     ):
         win_lo = int(live_trace["ts_ns"].min())
         win_hi = int(live_trace["ts_ns"].max())
+        # Use the default cross-feed ingest reader live (when data_root is set) so a
+        # one-symbol gap with other feeds ticking is not mis-attributed (SHR-149).
+        cross_reader = cross_feed_reader
+        if cross_reader is None and data_root is not None:
+            cross_reader = _default_cross_feed_ingest_reader
         reference_gaps = check_reference_coverage(
             start_ns=win_lo,
             end_ns=win_hi,
@@ -1553,6 +1630,7 @@ def run_reconcile(
             ts_reader=reference_ts_reader,
             method=reference_gap_method,
             poisson_p=reference_gap_poisson_p,
+            cross_feed_reader=cross_reader,
         )
 
     return ReconcileResult(
