@@ -85,6 +85,29 @@ class TestCheckInvariants:
         p = _pnl(waterfall=wf)
         assert not _named(check_invariants(p, InvariantTolerances(slippage_abs=5.0)), "slippage").passed
 
+    def test_slippage_robust_to_binary_delay_impact_artifact(self) -> None:
+        """The delay/impact split blows up for binary markets (ref ~$63k × size).
+
+        On #1000465 the entry split was delay=-35972 / impact=+35967 — each huge,
+        cancelling to a true entry VWAP gap of ~-$4.68. The slippage invariant must
+        measure the NET matched VWAP gap per leg, not the corrupted impact-only
+        component, so it reports real slippage (~$8) rather than ~$35,970.
+        """
+        wf = {
+            "matched_entry_delay": -35972.0,
+            "matched_entry_impact": 35967.32,  # net entry gap ≈ -4.68
+            "matched_exit_delay": 0.0,
+            "matched_exit_impact": 3.49,  # net exit gap ≈ +3.49
+        }
+        p = _pnl(waterfall=wf)
+        inv = _named(check_invariants(p, InvariantTolerances(slippage_abs=5.0)), "slippage")
+        # Observed ≈ |−4.68| + |3.49| ≈ 8.17, NOT ~35,970.
+        assert inv.observed < 100.0, inv.observed
+        assert abs(inv.observed - 8.17) < 0.5, inv.observed
+        assert not inv.passed  # 8.17 > 5 band → real (data-caused) slippage
+        # A wider band clears it.
+        assert _named(check_invariants(p, InvariantTolerances(slippage_abs=10.0)), "slippage").passed
+
     def test_realized_pnl_gate_unchanged(self) -> None:
         p = _pnl(pnl_diff=10.0)
         assert not _named(check_invariants(p, InvariantTolerances(realized_pnl_abs=5.0)), "realized_pnl").passed

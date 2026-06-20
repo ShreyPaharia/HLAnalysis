@@ -1539,8 +1539,14 @@ def check_invariants(layer3: PnLResult, tol: InvariantTolerances | None = None) 
         )
     )
 
-    # 4. Slippage (matched price-quality impact) within a band.
-    slip = abs(float(wf.get("matched_entry_impact", 0.0)) + float(wf.get("matched_exit_impact", 0.0)))
+    # 4. Slippage within a band: the NET matched VWAP gap per leg (entry + exit),
+    #    summed in magnitude. We deliberately use delay+impact (the true VWAP×size
+    #    gap) rather than the impact component alone: for binary markets the SHR-146
+    #    delay term is ref-move ($63k space) × option size, so delay and impact are
+    #    each enormous and cancel — their sum is the real, dimensionally-sound gap.
+    entry_gap = float(wf.get("matched_entry_delay", 0.0)) + float(wf.get("matched_entry_impact", 0.0))
+    exit_gap = float(wf.get("matched_exit_delay", 0.0)) + float(wf.get("matched_exit_impact", 0.0))
+    slip = abs(entry_gap) + abs(exit_gap)
     slip_ok = slip <= tol.slippage_abs + 1e-9
     results.append(
         InvariantResult(
@@ -1548,7 +1554,7 @@ def check_invariants(layer3: PnLResult, tol: InvariantTolerances | None = None) 
             passed=slip_ok,
             observed=slip,
             tolerance=tol.slippage_abs,
-            detail=f"matched impact slippage ${slip:.4f} vs band ${tol.slippage_abs:.4f}",
+            detail=f"matched VWAP slippage ${slip:.4f} (entry ${entry_gap:+.4f} + exit ${exit_gap:+.4f}) vs band ${tol.slippage_abs:.4f}",
         )
     )
 
