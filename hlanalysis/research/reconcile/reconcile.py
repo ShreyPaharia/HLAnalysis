@@ -842,11 +842,16 @@ class ReferenceGap:
         Timestamp of the first tick after the gap.
     gap_seconds:
         Width of the hole in seconds.
+    p_value:
+        For the ``"poisson"`` method, P(wait > gap) = e^(−λ·gap) under the fitted
+        per-window rate — the improbability that earned the flag. ``None`` for the
+        flat-threshold method.
     """
 
     start_ns: int
     end_ns: int
     gap_seconds: float
+    p_value: float | None = None
 
 
 # A reader returns the sorted reference tick timestamps (ns) in [start_ns, end_ns].
@@ -885,6 +890,24 @@ def _default_reference_ts_reader(
         return []
 
 
+def _poisson_threshold_ns(deltas_ns: list[int], poisson_p: float) -> float | None:
+    """Fit a Poisson rate λ to inter-tick deltas; return the gap-flag threshold.
+
+    Model inter-update gaps as a Poisson process with rate λ (= 1 / mean inter-tick
+    delta over the window). The probability a single inter-arrival exceeds T is
+    P(wait > T) = e^(−λT); flag a gap once that probability drops below ``poisson_p``,
+    i.e. T* = −ln(p) / λ = mean_delta · −ln(p). Returns the threshold in ns, or
+    None when there are too few intervals (≥2 needed) to fit a rate.
+    """
+    if len(deltas_ns) < 2:
+        return None
+    mean_delta = sum(deltas_ns) / len(deltas_ns)
+    if mean_delta <= 0:
+        return None
+    # T* = mean_delta · −ln(p); λ = 1 / mean_delta.
+    return mean_delta * (-math.log(poisson_p))
+
+
 def check_reference_coverage(
     start_ns: int,
     end_ns: int,
@@ -892,6 +915,8 @@ def check_reference_coverage(
     data_root: Path | None = None,
     gap_threshold_seconds: float = 60.0,
     ts_reader: ReferenceTsReader | None = None,
+    method: str = "flat",
+    poisson_p: float = 1e-6,
 ) -> list[ReferenceGap]:
     """Detect gaps in the recorded reference feed over ``[start_ns, end_ns]``.
 
@@ -904,10 +929,19 @@ def check_reference_coverage(
     data_root:
         Root of the HL recorded data tree; may be None when ``ts_reader`` is given.
     gap_threshold_seconds:
-        Report inter-tick gaps wider than this. The recorder normally ticks every
-        ~1-3 s, so 60 s comfortably separates a real outage from jitter.
+        Flat method only: report inter-tick gaps wider than this. The recorder
+        normally ticks every ~1-3 s, so 60 s comfortably separates a real outage
+        from jitter — but it over-flags on slower/bursty feeds (SHR-148).
     ts_reader:
         Injectable timestamp reader for testing.
+    method:
+        ``"flat"`` (default, back-compatible) flags every inter-tick wider than
+        ``gap_threshold_seconds``. ``"poisson"`` fits a per-window rate λ to the
+        inter-tick deltas and flags a gap only when P(wait > Δ) = e^(−λΔ) drops
+        below ``poisson_p`` — auto-adapting to the feed cadence. The poisson method
+        falls back to the flat threshold when too few ticks exist to fit λ.
+    poisson_p:
+        Poisson method only: the implausibility cutoff (default ``1e-6``).
 
     Returns
     -------
@@ -915,12 +949,36 @@ def check_reference_coverage(
     """
     reader = ts_reader or _default_reference_ts_reader
     ts = sorted(reader(ref_symbol, start_ns, end_ns, data_root))
-    threshold_ns = gap_threshold_seconds * 1_000_000_000
+    deltas = [cur - prev for prev, cur in zip(ts, ts[1:])]
+
+    threshold_ns: float = gap_threshold_seconds * 1_000_000_000
+    use_poisson = False
+    if method == "poisson":
+        poisson_threshold = _poisson_threshold_ns(deltas, poisson_p)
+        if poisson_threshold is not None:
+            threshold_ns = poisson_threshold
+            use_poisson = True
+
     gaps: list[ReferenceGap] = []
-    for prev, cur in zip(ts, ts[1:]):
-        delta = cur - prev
-        if delta > threshold_ns:
-            gaps.append(ReferenceGap(start_ns=prev, end_ns=cur, gap_seconds=delta / 1e9))
+    if use_poisson:
+        mean_delta = sum(deltas) / len(deltas)
+        lam = 1.0 / mean_delta
+        for prev, cur in zip(ts, ts[1:]):
+            delta = cur - prev
+            if delta > threshold_ns:
+                gaps.append(
+                    ReferenceGap(
+                        start_ns=prev,
+                        end_ns=cur,
+                        gap_seconds=delta / 1e9,
+                        p_value=math.exp(-lam * delta),
+                    )
+                )
+    else:
+        for prev, cur in zip(ts, ts[1:]):
+            delta = cur - prev
+            if delta > threshold_ns:
+                gaps.append(ReferenceGap(start_ns=prev, end_ns=cur, gap_seconds=delta / 1e9))
     return gaps
 
 
@@ -1398,6 +1456,8 @@ def run_reconcile(
     ref_symbol: str = "BTC",
     reference_ts_reader: ReferenceTsReader | None = None,
     ref_price_reader: RefPriceReader | None = None,
+    reference_gap_method: str = "poisson",
+    reference_gap_poisson_p: float = 1e-6,
 ) -> ReconcileResult:
     """Run all 4 layers and return a ReconcileResult.
 
@@ -1491,6 +1551,8 @@ def run_reconcile(
             ref_symbol=ref_symbol,
             data_root=data_root,
             ts_reader=reference_ts_reader,
+            method=reference_gap_method,
+            poisson_p=reference_gap_poisson_p,
         )
 
     return ReconcileResult(
