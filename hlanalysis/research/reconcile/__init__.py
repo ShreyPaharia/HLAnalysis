@@ -32,6 +32,14 @@ from hlanalysis.research.reconcile.reconcile import (
     run_reconcile,
     verdict,
 )
+from hlanalysis.research.reconcile.fidelity import (
+    Distribution,
+    FidelityGroup,
+    FidelityReport,
+    QuestionLabel,
+    aggregate_fidelity,
+    render_fidelity_html,
+)
 from hlanalysis.research.reconcile.report import render_markdown
 
 __all__ = [
@@ -50,6 +58,13 @@ __all__ = [
     "reconcile_pnl",
     "verdict",
     "run_reconcile",
+    # fidelity
+    "aggregate_fidelity",
+    "render_fidelity_html",
+    "FidelityReport",
+    "FidelityGroup",
+    "Distribution",
+    "QuestionLabel",
     # book
     "recorded_book_at",
     "book_has_price",
