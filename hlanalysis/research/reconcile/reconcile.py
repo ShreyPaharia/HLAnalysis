@@ -1442,15 +1442,22 @@ class InvariantTolerances:
     fee_rel:
         Maximum acceptable fee divergence as a fraction of the larger fee total
         (default 1%).
+    turnover_rel:
+        Maximum acceptable ``|live_size − sim_size|`` as a fraction of the larger
+        turnover (default 5%). Real turnover is hundreds–thousands of contracts, so
+        a relative band is the meaningful gate; ``turnover_units`` is a floor below
+        which small-market noise is ignored.
     turnover_units:
-        Maximum acceptable ``|live_size − sim_size|`` in contract units.
+        Absolute floor for the turnover band in contract units (used when it
+        exceeds ``turnover_rel × turnover``). Guards tiny markets from false fails.
     slippage_abs:
-        Maximum acceptable matched price-quality slippage ($), i.e.
-        ``|matched_entry_impact + matched_exit_impact|`` from the waterfall.
+        Maximum acceptable matched VWAP slippage ($) across the round trip, i.e.
+        ``|entry_gap| + |exit_gap|`` where each leg gap is delay+impact.
     """
 
     realized_pnl_abs: float = 5.0
     fee_rel: float = 0.01
+    turnover_rel: float = 0.05
     turnover_units: float = 1.0
     slippage_abs: float = 5.0
 
@@ -1526,16 +1533,23 @@ def check_invariants(layer3: PnLResult, tol: InvariantTolerances | None = None) 
         )
     )
 
-    # 3. Turnover (total size) within N units.
+    # 3. Turnover (total size): relative band with an absolute floor for small mkts.
     turnover_diff = abs(layer3.live_size - layer3.sim_size)
-    turn_ok = turnover_diff <= tol.turnover_units + 1e-9
+    turnover_ref = max(abs(layer3.live_size), abs(layer3.sim_size))
+    turnover_budget = max(tol.turnover_units, tol.turnover_rel * turnover_ref)
+    turn_ok = turnover_diff <= turnover_budget + 1e-9
+    turn_pct = (turnover_diff / turnover_ref) if turnover_ref > 0 else 0.0
     results.append(
         InvariantResult(
             name="turnover",
             passed=turn_ok,
             observed=turnover_diff,
-            tolerance=tol.turnover_units,
-            detail=f"size divergence {turnover_diff:.4f} units vs {tol.turnover_units:.4f}",
+            tolerance=turnover_budget,
+            detail=(
+                f"size divergence {turnover_diff:.4f} units ({turn_pct:.2%}) vs "
+                f"budget {turnover_budget:.4f} (max of {tol.turnover_units:.4f} floor, "
+                f"{tol.turnover_rel:.0%} of {turnover_ref:.1f})"
+            ),
         )
     )
 

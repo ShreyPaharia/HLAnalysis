@@ -68,10 +68,26 @@ class TestCheckInvariants:
         p = _pnl(live_fees=1.00, sim_fees=1.005)
         assert _named(check_invariants(p, InvariantTolerances(fee_rel=0.01)), "fees").passed
 
-    def test_turnover_invariant_breaks(self) -> None:
+    def test_turnover_invariant_breaks_absolute(self) -> None:
+        # Pure absolute mode (turnover_rel=0): 20-unit diff > 5-unit floor.
         p = _pnl(live_size=500.0, sim_size=520.0)
-        invs = check_invariants(p, InvariantTolerances(turnover_units=5.0))
+        invs = check_invariants(p, InvariantTolerances(turnover_units=5.0, turnover_rel=0.0))
         assert not _named(invs, "turnover").passed
+
+    def test_turnover_relative_tolerance_passes_small_pct(self) -> None:
+        # 45.7-unit diff on ~2100-unit turnover (~2%) clears the default 5% band.
+        p = _pnl(live_size=2144.0, sim_size=2098.3)
+        assert _named(check_invariants(p, InvariantTolerances()), "turnover").passed
+
+    def test_turnover_relative_still_fails_real_divergence(self) -> None:
+        # Sim traded 603 units, live traded nothing — must still FAIL.
+        p = _pnl(live_size=0.0, sim_size=603.0)
+        assert not _named(check_invariants(p, InvariantTolerances()), "turnover").passed
+
+    def test_turnover_floor_for_tiny_markets(self) -> None:
+        # 0.5-unit diff on a tiny 5-unit market is within the absolute floor.
+        p = _pnl(live_size=5.0, sim_size=5.5)
+        assert _named(check_invariants(p, InvariantTolerances()), "turnover").passed
 
     def test_settlement_winner_exact(self) -> None:
         p = _pnl(settlement="FAIL:live=yes sim=no")
