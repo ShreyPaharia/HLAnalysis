@@ -15,6 +15,7 @@ from hlanalysis.research.reconcile.book import (
     BookReader,
     RefPriceReader,
     book_parity_pct,
+    recorded_book_at,
     recorded_ref_price_at,
 )
 
@@ -1220,6 +1221,7 @@ def reconcile_pnl(
     ref_symbol: str = "BTC",
     data_root: Path | None = None,
     ref_price_reader: RefPriceReader | None = None,
+    book_reader: BookReader | None = None,
 ) -> PnLResult:
     """Layer 3: compare live vs sim realized PnL with attribution waterfall.
 
@@ -1236,14 +1238,25 @@ def reconcile_pnl(
     pnl_abs_threshold:
         Maximum acceptable |pnl_diff| for PASS verdict.
     ref_symbol:
-        Reference perp symbol for the delay/impact split (e.g. ``"BTC"``).
+        Reference perp symbol (passed through to ``ref_price_reader`` when one is
+        injected as the arrival benchmark).
     data_root:
-        Root of the HL recorded data tree; used by the default reference reader
-        to sample the perp ``mark`` price at both episode timestamps.
+        Root of the HL recorded data tree; used by the default benchmark to sample
+        the traded leg's recorded book mid at both episode timestamps.
     ref_price_reader:
-        Injectable reference-price reader (for tests). When neither this nor
-        ``data_root`` is available the matched VWAP gap cannot be split and is
-        attributed entirely to impact (delay = 0).
+        Optional benchmark-price reader override (for tests, or to supply a custom
+        delta-scaled benchmark). When given it is used verbatim as the arrival
+        benchmark for the delay/impact split.
+    book_reader:
+        Injectable recorded-book reader. The DEFAULT delay/impact benchmark is the
+        traded leg's own book **mid** (its fair value) — which moves by
+        ``delta × Δreference`` and is therefore the dimensionally-correct,
+        delta-scaled arrival price for a 0–1 option. (The raw perp ``mark`` is NOT
+        used: ``mark`` lives in the underlying's ~$60k space, so ``Δmark × option
+        size`` would be a unit mismatch that blows up the split — the #1000465
+        $35,970 artifact.) When neither a benchmark reader nor recorded book is
+        available the gap cannot be split and is attributed entirely to impact
+        (delay = 0).
 
     Returns
     -------
@@ -1288,13 +1301,36 @@ def reconcile_pnl(
     # Split the matched VWAP gap (Perold implementation shortfall, SHR-146) into:
     #   delay  — sim entered/exited at a DIFFERENT TIME into a moving market;
     #   impact — sim filled a DIFFERENT-QUALITY price at the SAME instant.
-    # The common arrival benchmark is the reference (perp mark) price sampled at
-    # BOTH the live and sim episode timestamps. delay = ref-move × size; the
-    # remainder of the VWAP gap is impact. delay + impact == the old matched_*_vwap.
-    def _ref_at(ts_ns: int) -> float | None:
-        if ref_price_reader is None and data_root is None:
+    # The arrival benchmark is sampled at BOTH the live and sim episode timestamps;
+    # delay = benchmark-move × size, impact = the remainder. delay + impact ==
+    # the old matched_*_vwap, so the split is exact regardless of benchmark choice.
+    #
+    # The benchmark MUST live in the traded instrument's price space. For an HL
+    # outcome token (price 0–1) that is the leg's own recorded book MID (its fair
+    # value), which moves by ``delta × Δreference`` — i.e. the option's realized,
+    # delta-scaled response to the underlying. Using the raw perp ``mark`` (~$60k)
+    # instead multiplies an underlying move by option size: a unit mismatch that
+    # blew the split up to ±$35,970 on #1000465 while the net gap was ~$5. A caller
+    # may still inject ``ref_price_reader`` to supply an explicit benchmark (e.g. a
+    # pre-delta-scaled series, or in tests).
+    leg_symbol = _leg_symbol(live_fills, sim_fills)
+
+    def _benchmark_at(ts_ns: int) -> float | None:
+        # Explicit override: use the injected benchmark series verbatim.
+        if ref_price_reader is not None:
+            return recorded_ref_price_at(ref_symbol, ts_ns, data_root, reader=ref_price_reader)
+        # Default: the traded leg's own recorded book mid (delta-scaled fair value).
+        if leg_symbol is None or (book_reader is None and data_root is None):
             return None
-        return recorded_ref_price_at(ref_symbol, ts_ns, data_root, reader=ref_price_reader)
+        df = recorded_book_at(leg_symbol, ts_ns, data_root or Path("."), reader=book_reader)
+        if df is None or df.empty:
+            return None
+        row = df.iloc[0]
+        bid = float(row.get("bid_px", math.nan))
+        ask = float(row.get("ask_px", math.nan))
+        if math.isnan(bid) or math.isnan(ask):
+            return None
+        return (bid + ask) / 2.0
 
     entry_delay = 0.0  # $ from sim entering matched legs at a different TIME
     entry_impact = 0.0  # $ from sim entering matched legs at a different-quality price
@@ -1308,22 +1344,22 @@ def reconcile_pnl(
 
         # Entry: contribution to (live_realized − sim_realized) is "sim − live".
         entry_gap = (sbe.vwap - lbe.vwap) * live_size  # sim paid more → +live
-        r_live_entry = _ref_at(lbe.start_ns)
-        r_sim_entry = _ref_at(sbe.start_ns)
-        if r_live_entry is not None and r_sim_entry is not None:
-            e_delay = (r_sim_entry - r_live_entry) * live_size
+        b_live_entry = _benchmark_at(lbe.start_ns)
+        b_sim_entry = _benchmark_at(sbe.start_ns)
+        if b_live_entry is not None and b_sim_entry is not None:
+            e_delay = (b_sim_entry - b_live_entry) * live_size
         else:
             e_delay = 0.0
         entry_delay += e_delay
         entry_impact += entry_gap - e_delay
 
         # Exit: contribution is "live − sim" (live sold higher → +live), so the
-        # delay term carries the same orientation: ref-move from sim to live time.
+        # delay term carries the same orientation: benchmark-move from sim to live.
         exit_gap = (lse.vwap - sse.vwap) * live_size
-        r_live_exit = _ref_at(lse.start_ns)
-        r_sim_exit = _ref_at(sse.start_ns)
-        if r_live_exit is not None and r_sim_exit is not None:
-            x_delay = (r_live_exit - r_sim_exit) * live_size
+        b_live_exit = _benchmark_at(lse.start_ns)
+        b_sim_exit = _benchmark_at(sse.start_ns)
+        if b_live_exit is not None and b_sim_exit is not None:
+            x_delay = (b_live_exit - b_sim_exit) * live_size
         else:
             x_delay = 0.0
         exit_delay += x_delay
@@ -1352,8 +1388,8 @@ def reconcile_pnl(
     # Opportunity cost (Perold, SHR-147): an unmatched leg HELD to settlement has
     # value its own fills never realized. Mark the net OPEN position of the
     # unmatched round-trips at the resolved settlement price (1.0/0.0 for the
-    # leg). 0 when the winner is unknown or nothing is left open.
-    leg_symbol = _leg_symbol(live_fills, sim_fills)
+    # leg). 0 when the winner is unknown or nothing is left open. (``leg_symbol``
+    # was resolved above for the delay/impact benchmark.)
     settle_winner = norm_sim if norm_sim is not None else norm_live
     settlement_price = _leg_settlement_price(leg_symbol, settle_winner) if leg_symbol is not None else None
     opportunity_cost = 0.0
@@ -1788,6 +1824,7 @@ def run_reconcile(
         ref_symbol=ref_symbol,
         data_root=data_root,
         ref_price_reader=ref_price_reader,
+        book_reader=book_reader,
     )
 
     v, fail_reasons = verdict(

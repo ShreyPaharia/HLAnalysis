@@ -2,10 +2,12 @@
 
 The matched-leg VWAP gap conflates two causes: sim entered/exited at a DIFFERENT
 TIME into a moving market (delay) vs sim filled a DIFFERENT-QUALITY price at the
-SAME instant (impact). We separate them with a common arrival benchmark: the
-reference price (HL perp ``mark``) sampled at BOTH the live and sim episode times.
+SAME instant (impact). We separate them with a common arrival benchmark sampled at
+BOTH the live and sim episode times. The DEFAULT benchmark is the traded leg's own
+recorded book mid (its delta-scaled fair value, in option price space); a caller
+may inject ``ref_price_reader`` to override it with an explicit benchmark series.
 
-    delay  = (ref@sim_time − ref@live_time) × size
+    delay  = (benchmark@sim_time − benchmark@live_time) × size
     impact = (vwap gap) − delay
 """
 
@@ -137,6 +139,54 @@ class TestSameTimePriceQuality:
         assert abs(wf["matched_exit_delay"]) < 1e-6, wf
         assert abs(wf["matched_entry_impact"]) > 1e-6
         assert abs(wf["matched_exit_impact"]) > 1e-6
+
+
+def _book_reader(mids: dict[int, float], spread: float = 0.002) -> object:
+    """A recorded-book reader returning a bid/ask bracketing the mid at each ts.
+
+    ``mids`` maps ts_offset_s → option mid; the reader LOCFs to the closest prior key.
+    """
+
+    def reader(leg_symbol: str, ts_ns: int, data_root) -> pd.DataFrame:
+        off = (ts_ns - _T0) / _1S_NS
+        key = max((k for k in mids if k <= off), default=min(mids))
+        mid = mids[key]
+        return pd.DataFrame([{"exchange_ts": ts_ns, "bid_px": mid - spread / 2, "ask_px": mid + spread / 2}])
+
+    return reader
+
+
+class TestDeltaScaledOptionMidBenchmark:
+    """SHR-146 fix: the default benchmark is the leg's own book mid (delta-scaled).
+
+    The raw perp ``mark`` (~$60k) × option size blew the split to ±$35,970 on
+    #1000465. Sampling the option's own mid keeps delay/impact in option-price
+    space, so the components are option-scale and still sum to the true gap.
+    """
+
+    def test_default_benchmark_is_option_mid_not_blown_up(self) -> None:
+        # Held leg like #1000465: live enters later/higher than sim; mid drifts up.
+        live = pd.DataFrame([_fill(1000, "buy", 0.9435, 529), _fill(5000, "sell", 0.9806, 529)])
+        sim = pd.DataFrame([_fill(0, "buy", 0.9346, 529), _fill(5000, "sell", 0.9740, 529)])
+        # Option mid drifts from 0.93 (sim entry) to 0.94 (live entry), ~flat at exit.
+        mids = {0: 0.9300, 1000: 0.9400, 5000: 0.9800}
+        res = reconcile_pnl(
+            live_fills=live,
+            sim_fills=sim,
+            live_settlement={},
+            sim_resolved={},
+            book_reader=_book_reader(mids),
+        )
+        wf = res.waterfall
+        # Entry delay = (mid@sim_entry − mid@live_entry) × size = (0.93 − 0.94)×529.
+        assert abs(wf["matched_entry_delay"] - (0.9300 - 0.9400) * 529) < 1e-6, wf
+        # Everything stays option-scale (single digits), NOT ~$35,970.
+        for k in ("matched_entry_delay", "matched_entry_impact", "matched_exit_delay", "matched_exit_impact"):
+            assert abs(wf[k]) < 50.0, (k, wf[k])
+        # Split is still exact: delay+impact == the true matched VWAP gaps.
+        assert abs((wf["matched_entry_delay"] + wf["matched_entry_impact"]) - (0.9346 - 0.9435) * 529) < 1e-6
+        assert abs((wf["matched_exit_delay"] + wf["matched_exit_impact"]) - (0.9806 - 0.9740) * 529) < 1e-6
+        assert abs(sum(wf.values()) - res.pnl_diff) < 1e-4
 
 
 class TestNoReaderBackwardCompatible:

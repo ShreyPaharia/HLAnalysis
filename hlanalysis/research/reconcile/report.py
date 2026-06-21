@@ -214,10 +214,10 @@ def render_markdown(result: ReconcileResult) -> str:
     lines.append("")
     lines.append(
         "_matched_entry/exit are split into **delay** (sim entered/exited at a "
-        "different time into a moving market — the reference-feed-gap signature) and "
-        "**impact** (sim filled a different-quality price at the same instant). "
-        "opportunity_cost values the unmatched (un-replicated) legs marked at the "
-        "resolved settlement price._"
+        "different time into a moving market — benchmarked on the leg's own book "
+        "mid, i.e. its delta-scaled fair value) and **impact** (sim filled a "
+        "different-quality price at the same instant). opportunity_cost values the "
+        "unmatched (un-replicated) legs marked at the resolved settlement price._"
     )
     lines.append("")
 
