@@ -220,6 +220,11 @@ def build_run_argv(args, cfg: Config, q_global: int, out_dir: Path) -> list[str]
         argv += ["--strategy", args.strategy]
         if slot_config:
             argv += ["--config", slot_config]
+    # Underlying (hl_hip4 only). BTC is hl-bt's default, so emit the flag ONLY for
+    # non-BTC underlyings — keeps the BTC argv byte-identical to the legacy driver.
+    underlying = getattr(args, "underlying", None)
+    if data_source == "hl_hip4" and underlying and underlying != "BTC":
+        argv += ["--underlying", underlying]
     # Cadence: `--inner-scan-mode fixed` forces the inner run onto a fixed grid
     # (--scanner-interval-seconds), overriding the slot's event-mode default —
     # used for churn-fidelity bucket sweeps. Otherwise fall through to event mode
@@ -343,7 +348,8 @@ def discover_count(args) -> int:
     data_root = os.environ.get("HLBT_HL_DATA_ROOT", "data")
     ds = hl_mod.HLHip4DataSource(data_root)
     klass = "priceBucket" if args.kind == "bucket" else "priceBinary"
-    return len(ds.discover(start=args.start, end=args.end, kinds=(klass,)))
+    underlying = getattr(args, "underlying", None) or "BTC"
+    return len(ds.discover(start=args.start, end=args.end, kinds=(klass,), underlying=underlying))
 
 
 # --- supervisor -----------------------------------------------------------
@@ -471,6 +477,8 @@ class Driver:
             cmd += ["--slot-class", self.args.slot_class]
         if self.args.strategy:
             cmd += ["--strategy", self.args.strategy]
+        if getattr(self.args, "underlying", None):
+            cmd += ["--underlying", self.args.underlying]
         if self.args.scan_min is not None:
             cmd += ["--scan-min", str(self.args.scan_min)]
         if self.args.scan_max is not None:
@@ -645,6 +653,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--slot-config", default=None)
     ap.add_argument("--slot-class", default=None)
     ap.add_argument("--strategy", default=None)
+    ap.add_argument(
+        "--underlying",
+        default="BTC",
+        help="(hl_hip4 only) Underlying to discover questions for (BTC/ETH/SOL/HYPE). "
+        "Reference feed reads the matching HL perp. Default BTC.",
+    )
     # PM source flags (polymarket only) — mirror `hl-bt run`. Per-config
     # overridable via configs.json (same mechanism as scan_min/scan_max).
     ap.add_argument(

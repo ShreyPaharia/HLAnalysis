@@ -386,6 +386,61 @@ class TestPMSupport:
         argv = rr.build_run_argv(a, rr.Config(id="base"), q_global=0, out_dir=tmp_path / "o")
         assert "--cache-root" not in argv
 
+    def test_hl_argv_includes_underlying_when_non_btc(self, tmp_path):
+        a = _args(tmp_path, underlying="HYPE")
+        argv = rr.build_run_argv(a, rr.Config(id="base"), q_global=0, out_dir=tmp_path / "o")
+        assert argv[argv.index("--underlying") + 1] == "HYPE"
+
+    def test_hl_argv_omits_underlying_for_btc_default(self, tmp_path):
+        # BTC is the hl-bt default, so omitting it keeps argv byte-identical.
+        a = _args(tmp_path, underlying="BTC")
+        argv = rr.build_run_argv(a, rr.Config(id="base"), q_global=0, out_dir=tmp_path / "o")
+        assert "--underlying" not in argv
+        # also when the attr is entirely absent (legacy callers)
+        argv2 = rr.build_run_argv(_args(tmp_path), rr.Config(id="base"), q_global=0, out_dir=tmp_path / "o")
+        assert "--underlying" not in argv2
+
+    def test_cli_underlying_parses_and_defaults_btc(self):
+        ap = rr._build_arg_parser()
+        ns = ap.parse_args(["--kind", "binary", "--start", "x", "--end", "y", "--out-base", "/o", "--slot", "v31"])
+        assert ns.underlying == "BTC"
+        ns2 = ap.parse_args(
+            [
+                "--kind",
+                "binary",
+                "--start",
+                "x",
+                "--end",
+                "y",
+                "--out-base",
+                "/o",
+                "--slot",
+                "v31",
+                "--underlying",
+                "HYPE",
+            ]
+        )
+        assert ns2.underlying == "HYPE"
+
+    def test_discover_count_forwards_underlying(self, tmp_path, monkeypatch):
+        import hlanalysis.backtest.data.hl_hip4 as hl_mod
+
+        seen = {}
+
+        class _DS:
+            def __init__(self, *a, **k):
+                pass
+
+            def discover(self, *, start, end, kinds, underlying="BTC"):
+                seen["underlying"] = underlying
+                seen["kinds"] = kinds
+                return [object(), object()]
+
+        monkeypatch.setattr(hl_mod, "HLHip4DataSource", _DS)
+        n = rr.discover_count(_args(tmp_path, underlying="HYPE"))
+        assert n == 2
+        assert seen == {"underlying": "HYPE", "kinds": ("priceBinary",)}
+
     def test_cli_data_source_default_is_hl(self):
         ap = rr._build_arg_parser()
         ns = ap.parse_args(["--kind", "binary", "--start", "x", "--end", "y", "--out-base", "/o", "--slot", "v31"])
@@ -492,8 +547,9 @@ class TestPMSupport:
             def __init__(self, data_root):
                 captured["data_root"] = data_root
 
-            def discover(self, *, start, end, kinds):
+            def discover(self, *, start, end, kinds, underlying="BTC"):
                 captured["kinds"] = kinds
+                captured["underlying"] = underlying
                 return ["a", "b"]
 
         import hlanalysis.backtest.data.hl_hip4 as hl_mod
