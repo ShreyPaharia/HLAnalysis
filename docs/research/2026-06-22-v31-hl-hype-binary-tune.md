@@ -1,10 +1,22 @@
 # v31/theta HL **HYPE** binary — first walk-forward characterisation
 
 **Date:** 2026-06-22 · **Scope:** HL HIP-4 `priceBinary`, underlying **HYPE**,
-v3_theta_harvester ("v31"/theta). **Decision: DO NOT open a live HYPE binary slot.
-Insufficient data + no demonstrated edge.** Analysis only — no config change, no
-deploy. This is the FIRST look at HYPE binaries (recorder-only since 2026-06-15);
-there is no existing live HYPE slot.
+v3_theta_harvester ("v31"/theta). **Decision: still DO NOT open a live HYPE binary
+slot yet (n=6), but a tail-safe profitable candidate DOES exist** — the full
+cartesian grid (added below) found one the OAT sweep missed. Analysis only — no
+config change, no deploy. First look at HYPE binaries (recorder-only since
+2026-06-15); no existing live HYPE slot.
+
+> **Update (full grid).** This doc has two passes. **Pass 1 (OAT)** perturbed one
+> axis at a time around the BTC anchor (frozen at the live `vol_lookback=900`) and
+> concluded "no edge / whipsaw". **Pass 2 (full 4608-config cartesian)** — added at
+> the user's request because HYPE is a new token whose joint optimum need not sit
+> near BTC — **overturns that**: `vol_lookback` is the decisive lever the OAT held
+> fixed. With `vol_lookback=3600` (1h, not the live 900) the soft-exit whipsaw
+> disappears and a **tail-safe** cell emerges:
+> `vl3600/dt5/tte43200/msd2.5/esd1.0` → EV **+$104** / 5th-pct **+$35** / P(loss)
+> **1.7%**, positive in both walk-forward halves. See **"Full cartesian grid"** below;
+> it supersedes Pass 1's verdict. Everything is still n=6 — promising, not promotable.
 
 ## Headline (read this first)
 
@@ -21,10 +33,11 @@ there is no existing live HYPE slot.
   from HL's own perp (`--ref-source hl_perp`, the default). σ computes **non-zero**
   (annualised **0.62–0.73**, plausibly higher than BTC's ~0.5) — results are not a
   frozen/absent-reference artifact.
-- **The only "profitable" cells trade almost nothing.** Raising the entry floor to
-  `min_safety_d=3.0` flips full PnL to +$36 — but only by entering 2 ultra-deep
-  favorites and skipping the whipsaw-prone ones. That is overfitting to which of 6
-  questions got skipped, not an edge.
+- **But the full grid finds a tail-safe profitable cell** the OAT missed: with
+  `vol_lookback=3600` (not the live 900), `vl3600/dt5/tte43200/msd2.5/esd1.0` returns
+  +$123 (both halves positive, Sharpe 23.8) and survives the tail stress (EV +$104 /
+  5th-pct +$35 / P(loss) 1.7%). The lever is the σ-lookback, not the entry floor.
+  Still n=6 — promising, not promotable.
 
 ## Data existence + span (acceptance #1)
 
@@ -91,7 +104,11 @@ toward the adverse boundary — and it then recovered to settle YES. The exit so
 winner at a loss. HYPE's higher realised σ pushes the soft exit into whipsaw far more
 than on BTC.
 
-## Ranked sweep (acceptance #3) — n=6, EXPLORATORY ONLY
+## Pass 1 — OAT ranked sweep (acceptance #3) — n=6, EXPLORATORY ONLY
+
+*One-axis-at-a-time around the BTC anchor, with `vol_lookback` frozen at the live
+900s. Superseded by the full grid below, which frees `vol_lookback` — read Pass 2
+for the actual recommendation.*
 
 Sorted by worst-half PnL (full / Sharpe / maxDD / early / late / worst-half / trades / hit):
 
@@ -143,27 +160,97 @@ Loss-injection, N=20000, full corpus (n=6):
 
 **Validation passes:** the buy-and-hold cell collapses to a 5th-pct of **−$522** from
 full-stake flips, reproducing the 2026-06-18 model behaviour — so the relative tail
-numbers are trustworthy. The anchor is a certain loser (P(loss)=100%); only the
-trade-almost-nothing `msd3.0` cells survive the tail, on 1–2 winning entries.
+numbers are trustworthy. The anchor is a certain loser (P(loss)=100%); within the
+vl900-anchored OAT slice only the trade-almost-nothing `msd3.0` cells survive the tail.
+
+## Pass 2 — FULL cartesian grid (the complete sweep)
+
+Because HYPE is a new token, the OAT pass (which froze `vol_lookback=900`) can't see
+joint optima. Pass 2 sweeps the **full 7-axis cartesian product = 4608 configs**:
+
+| axis | levels |
+|---|---|
+| favorite_threshold | 0.75, 0.80, 0.85, 0.90 |
+| edge_buffer | 0.0, 0.01, 0.02, 0.03 |
+| vol_lookback_seconds | 900, 1800, 3600 |
+| vol_sampling_dt_seconds | 5, 60 |
+| tte_max_seconds | 21600, 43200, 86400 |
+| min_safety_d | 1.5, 2.0, 2.5, 3.0 |
+| exit_safety_d | 0.0, 1.0, 1.5, 2.0 |
+
+Run via the shared-decode warm-chunk driver `scripts/perf/resumable_run.py`
+(`--underlying HYPE`, added for this study): one pass over the full window, each
+question decoded once and replayed against all 4608 configs (≈50 min wall, 27,648
+cells); early/late halves split offline (q0–2 / q3–5). Runner:
+`experiments/scripts/run_v31_hl_hype_binary_fullgrid.py`.
+
+**Decisive lever = `vol_lookback`** (best achievable worst-half by level): **900 →
+$19, 1800 → $47, 3600 → $112**. The live config inherited BTC's short `vl900`; that
+short σ window is what made `safety_d` jumpy and drove the Pass-1 whipsaw. With
+`vl3600` (1h) σ stabilises and the soft exit stops dumping winners. Other axis
+marginals: `dt 5 ($112) ≫ 60 ($23)`; `tte 43200 ($112)` interior-best; `favorite_threshold`
+and `edge_buffer` remain **inert** (the `vl3600/dt5/tte43200/msd2.5/esd1.0` cell is
+$118–$123 across *all* fav/eb — keep them at the live 0.85/0.02).
+
+Top of the full grid (worst-half), with the tail verdict from the stress below:
+
+| config | full | early | late | worst½ | Sharpe | maxDD | trd | wins | tail |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `vl3600 dt5 tte43200 msd1.5 esd0.0` (fav/eb any) | 224.78 | 112.60 | 112.18 | 112.18 | 20.7 | 0.00 | 21 | 4/6 | **REJECT — buy&hold, 5th −$788** |
+| `vl3600 dt5 tte86400 msd1.5 esd0.0` | 213.50 | 102.59 | 110.91 | 102.59 | 15.7 | 0.00 | 51 | 4/6 | reject (esd=0) |
+| **`vl3600 dt5 tte43200 msd2.5 esd1.0`** | **123.15** | 69.96 | 53.19 | **53.19** | 23.8 | 0.00 | 9 | 4/6 | **SURVIVES — EV +$104 / 5th +$35 / P(loss) 1.7%** |
+| `vl3600 dt5 tte43200 msd2.5 esd1.5` | 66.7 | — | — | ~31 | — | 0.00 | — | 3/6 | survives — EV +$55 / 5th −$1 / P(loss) 8.3% |
+| anchor `vl900 … msd2.5 esd1.5` | −48.26 | −0.49 | −47.77 | −47.77 | −6.8 | 66.04 | 44 | 1/6 | reject — EV −$50 / P(loss) 100% (**rank 2418/4608**) |
+
+`min_safety_d` and `exit_safety_d` only *look* monotone-toward-zero in the raw
+worst-half marginals because the unconstrained max is the (tail-blind) buy-and-hold
+corner; among **tail-safe** (`esd>0`) configs the optimum is interior:
+`msd2.5/esd1.0`. 713 of the 3456 `esd>0` configs have positive worst-half, but **999
+of them post realized maxDD=$0** — the corpus simply never sampled a losing held
+favorite, which is exactly why the loss-injection tail stress (not realized maxDD) is
+the deciding metric.
+
+### Full-grid tail stress (acceptance #4, Pass 2)
+
+Loss-injection, N=20000, n=6 (`experiments/scripts/run_v31_hl_hype_binary_fullgrid_tail_stress.py`):
+
+| config | esd | realized | wins | EV | 5th-pct | P(loss) |
+|---|---:|---:|---:|---:|---:|---:|
+| `vl3600 … msd1.5 esd0.0` (grid winner, buy&hold) | 0.0 | +$225 | 4 | +$5 | **−$788** | 35.4% |
+| **`vl3600 … msd2.5 esd1.0`** (best tail-safe) | 1.0 | +$123 | 4 | **+$104** | **+$35** | **1.7%** |
+| `vl3600 … msd2.5 esd1.5` | 1.5 | +$67 | 3 | +$55 | −$1 | 8.3% |
+| `vl3600 … msd2.0 esd1.0` | 1.0 | −$47 | 3 | −$104 | −$285 | 100.0% |
+| anchor `vl900 … msd2.5 esd1.5` | 1.5 | −$48 | 1 | −$50 | −$48 | 100.0% |
+
+The literal grid winner (buy-and-hold) is the tail-blind trap — EV collapses to +$5
+with a 5th-pct of −$788 and a 35% loss probability (validation: behaves like the
+2026-06-18 BAH collapse). The standout is the **tail-safe** cell
+`vol_lookback=3600 / dt=5 / tte=43200 / min_safety_d=2.5 / exit_safety_d=1.0`
+(fav/eb at the live 0.85/0.02): positive in both halves, Sharpe 23.8, and the only
+candidate with a **positive 5th-pct** (+$35) and ~zero loss probability under stress.
 
 ## Verdict (acceptance #5)
 
-**No tradeable edge has been demonstrated, and the data is too thin to claim one
-either way. Do not open a live HYPE `priceBinary` slot now.**
+**A tail-safe, profitable HYPE-binary candidate exists, but n=6 is still far below
+the power floor — characterise + paper-soak, do NOT open a live slot yet.**
 
-1. n=6 over 6 days is ~3× below the n≥15 power floor; a walk-forward split is noise.
-2. The BTC-tuned config is an outright loser on HYPE (−$48, P(loss)=100% stressed),
-   driven by a concrete, repeatable mechanism (soft-exit whipsaw under HYPE's higher
-   σ), not just sample luck — so "lift-and-shift the BTC block to HYPE" is rejected.
-3. The least-bad config (`min_safety_d=3.0`, i.e. enter only ≥3σ√τ favorites) is the
-   *direction* a real HYPE tune would likely take — HYPE's higher vol wants a higher
-   entry floor than BTC — but +$36 from 2 entries is anecdotal, not promotable.
+1. **Recommended HYPE-binary cell (when one is opened):** the live BTC theta block
+   with **two changes** — `vol_lookback_seconds 900 → 3600` and `exit_safety_d
+   1.5 → 1.0`; keep `dt=5, tte_max=43200, min_safety_d=2.5, favorite_threshold=0.85,
+   edge_buffer=0.02` (the last two are inert on this corpus). This cell:
+   full +$123 / both halves positive / Sharpe 23.8 / stressed EV +$104 / 5th-pct
+   +$35 / P(loss) 1.7%, robust across all favorite/edge levels.
+2. **Why it differs from BTC:** HYPE's higher realised σ (0.62–0.73) needs a **longer
+   σ-lookback (1h)** to keep `safety_d` stable; the live `vl900` made the soft exit
+   whipsaw winners (the −$48 anchor / Pass-1 "no edge"). Params do not transfer.
+3. **Reject the literal grid winner** (`esd=0` buy-and-hold, +$225): tail-blind
+   (5th-pct −$788), the same trap rejected for BTC on 2026-06-18.
+4. **Do not deploy on n=6.** Every "winner" posts realized maxDD=$0 because the corpus
+   has no losing held favorite; the positive-tail verdict rests on the injection model.
 
-**Recommended next step:** re-run this exact harness **on/after ~2026-06-29** (≈2 more
-weeks of settled HYPE questions → n≈20), and only then consider a *paper* HYPE slot.
-When tuning for real, start the entry floor **higher than BTC** (`min_safety_d ≥ 3.0`)
-and treat the soft exit cautiously — on HYPE it whipsawed winners. Do not pre-commit
-any HYPE params from this run.
+**Recommended next step:** re-run the full grid **on/after ~2026-06-29** (≈n≈20), and
+if `vl3600/dt5/tte43200/msd2.5/esd1.0` (or its neighbourhood) holds, stand up a
+**paper** HYPE slot before any live capital. Do not pre-commit live params from n=6.
 
 ## Caveats (acceptance #6)
 
@@ -184,11 +271,17 @@ any HYPE params from this run.
 
 ## Artifacts
 
-- Sweep runner: `experiments/scripts/run_v31_hl_hype_binary_sweep.py`
-- Tail stress: `experiments/scripts/run_v31_hl_hype_binary_tail_stress.py`
-- Raw runs: `data/sim/runs/v31-hl-hype-binary-2026-06-22/` (per-cell `report.md` +
-  `fills.parquet`, `results.json`)
-- Worker discovery fix: `hlanalysis/backtest/core/source_config.py`
-  (`discover_underlying` + `discover_kwargs()`), wired in `runner/parallel.py`,
-  `tuning.py`, `_cli_plumbing.py`; tested in
-  `tests/unit/backtest/test_source_config.py`.
+- **Pass 1 (OAT):** runner `experiments/scripts/run_v31_hl_hype_binary_sweep.py`,
+  tail stress `…_tail_stress.py`; raw runs
+  `data/sim/runs/v31-hl-hype-binary-2026-06-22/` (`results.json`).
+- **Pass 2 (full grid):** runner
+  `experiments/scripts/run_v31_hl_hype_binary_fullgrid.py` (drives
+  `scripts/perf/resumable_run.py`), tail stress `…_fullgrid_tail_stress.py`; raw runs
+  `data/sim/runs/v31-hl-hype-binary-fullgrid-2026-06-22/` (`aggregate.json` =
+  4608-config ranked table; per-cell `<id>/qNNNN/report.md`).
+- **Worker discovery fix** (enables any non-BTC `--underlying`):
+  `hlanalysis/backtest/core/source_config.py` (`discover_underlying` +
+  `discover_kwargs()`), wired in `runner/parallel.py`, `tuning.py`,
+  `_cli_plumbing.py`; tested in `tests/unit/backtest/test_source_config.py`.
+- **`resumable_run.py --underlying`** added (discover + argv + worker forwarding);
+  tested in `tests/perf/test_resumable_run.py`.
