@@ -129,12 +129,13 @@ def test_no_overrides_yields_empty_by_class_map() -> None:
 def test_live_strategy_yaml_bucket_override_matches_tune() -> None:
     """Guard the shipped HL v31 per-class config (C3, 2026-06-06 overfit
     rollback): priceBucket keeps only the mechanical σ/timing tilt
-    (vol_lookback 2700 / dt 2; tte 8h on the allowlist) and RESTORES the three
-    risk gates to the binary baseline (fav 0.85 / eb 0.02 / esd 1.0). The
-    2026-06-05 "best sim" (fav0.80/eb0.005/esd0) was overfit to a zero-loss
-    sample — a loss-injection stress collapsed it to ~$0 expected / 50% chance of
-    a net loss; C3 is strictly better risk-adjusted. priceBinary keeps the shared
-    theta defaults EXCEPT vol_lookback_seconds=900 (binary @dt5). The PM (v31_pm)
+    (vol_lookback 2700 / dt 2; tte 8h on the allowlist) and pins its own C3
+    protective floor (fav 0.85 / eb 0.02 / esd 1.0). The 2026-06-05 "best sim"
+    (fav0.80/eb0.005/esd0) was overfit to a zero-loss sample — a loss-injection
+    stress collapsed it to ~$0 expected / 50% chance of a net loss; C3 is strictly
+    better risk-adjusted. priceBinary carries the 2026-06-22 axes tune
+    (fav 0.80 / eb 0.01 / vlb 1800 @dt5); the bucket C3 floor (0.85/0.02) now sits
+    ABOVE the binary base on fav/eb and is pinned independently. The PM (v31_pm)
     slot carries NO per-class override.
 
     If someone edits config/strategy.yaml's theta config, this pins the
@@ -161,9 +162,12 @@ def test_live_strategy_yaml_bucket_override_matches_tune() -> None:
     # exit_edge_threshold 1.0→0.0), KEPT the entry gate (min_safety_d 2.0). A
     # loss-injection stress showed buy-and-hold's maxDD $0 was tail-blind (EV ≈ $0,
     # P(loss) 48%); the σ-based soft exits cap a flipping favorite at ~$50-150.
-    # vol_lookback stays 900 @dt5.
-    assert base.favorite_threshold == 0.85
-    assert base.vol_lookback_seconds == 900
+    # 2026-06-22: full theta-axes walk-forward tune (on the raised band,
+    # docs/research/2026-06-22-v31-hl-binary-tune.md, n=42) moved the binary
+    # optimum: vol_lookback 900→1800 (load-bearing; lowers maxDD $199→$177),
+    # favorite_threshold 0.85→0.80, edge_buffer 0.02→0.01. tte=43200 / dt=5 kept.
+    assert base.favorite_threshold == 0.80
+    assert base.vol_lookback_seconds == 1800
     assert base.vol_sampling_dt_seconds == 5
     # 2026-06-22: binary band raised to msd2.5/esd1.5 (independent sweep + tail
     # stress + fee stress, docs/research/2026-06-22-v31-hl-safetyd-band.md). Buckets
@@ -173,7 +177,7 @@ def test_live_strategy_yaml_bucket_override_matches_tune() -> None:
     assert base.exit_safety_d == 1.5
     assert base.exit_edge_threshold == 0.0
     assert base.min_safety_d == 2.5
-    assert base.edge_buffer == 0.02
+    assert base.edge_buffer == 0.01
     # only priceBucket diverges; binary falls through to the default
     assert set(build_theta_harvester_configs_by_class(v31)) == {"priceBucket"}
 

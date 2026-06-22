@@ -254,19 +254,22 @@ strategies:
       daily_window_start_hour_utc: 6
 
     theta:
-      # 2026-06-05: 3600 → 900 (binary only; buckets override to 2700 below).
-      # Independent HL binary walk-forward tune
-      # (v31_binary_independent_tune_2026_06_05 /
-      # docs/research/2026-06-05-v31-hl-binary-tune.md, n=25, engine bit-identical
-      # to prod baseline $830.24). At dt=5, vol_lookback=900 is the worst-half
-      # optimum AND lowers maxDD: full $863.51 (+$33), worst-half $385.52 (+$21),
-      # maxDD $111.51 (−$13), Sharpe 12.94 vs prod $830.24 / $364.10 / $124.57.
-      # 900 is interior (600 worse, 1800+ lower). ⚠️ Validated ONLY at dt=5 —
-      # binary stays dt=5 (vol_sampling_dt below); do NOT pair with edge_buffer=0.0
-      # (eb=0 + vlb=900 do not stack — combo craters the early half to $207/DD$166,
-      # so edge_buffer stays 0.02). dt=2 was rejected for binary (worst-half
-      # $364→$250, the OPPOSITE of buckets).
-      vol_lookback_seconds: 900
+      # 2026-06-22: 900 → 1800. Full theta-axes walk-forward tune on the RAISED band
+      # (v31_hl_binary_axes_tune_2026_06_22 /
+      # docs/research/2026-06-22-v31-hl-binary-tune.md, n=42 corpus 2026-05-10..06-21,
+      # ranked by worst-half PnL + loss-injection tail stress). vol_lookback=1800 is
+      # the load-bearing lever: every vlb1800 grid cell tops the table and it lowers
+      # maxDD ($199→$177) regardless of the other knobs — a 30-min σ window is
+      # steadier than 15-min, raising entry selectivity (329→212 trades, hit 71→79%).
+      # SUPERSEDES the 2026-06-05 reasoning below: that tune ranked full PnL on the
+      # OLD msd2.0/esd1.0 band (n=25) and found "900 interior / 1800+ lower"; under
+      # the 2026-06-22 msd2.5/esd1.5 band the worst-half optimum moved to 1800.
+      # Shipped jointly with favorite_threshold 0.85→0.80 + edge_buffer 0.02→0.01
+      # (those recover the full PnL the longer lookback gives up). ⚠️ Validated ONLY
+      # at dt=5 (binary stays dt=5); same n=42 tail-deficient corpus as the band
+      # retune → re-confirm on fresh data ~2026-06-29. (Earlier 2026-06-05 note:
+      # 3600→900, dt=5 worst-half optimum on the old band — kept for history.)
+      vol_lookback_seconds: 1800
       # 2026-05-30: 60 → 5 (v3.7 T13). v31 + v1 share the BTC reference feed and
       # MUST move in lockstep — the engine conflict-guards a same-symbol cadence
       # mismatch. ⚠️ GATE: ≥1-week paper validation before live cutover (see
@@ -278,7 +281,11 @@ strategies:
       # PnL/Sharpe/maxDD/trades vs prod. See docs/research/2026-05-23-v31-final-state.md.
       vol_clip_min: 0.0
       vol_clip_max: 5.0
-      edge_buffer: 0.02
+      # 2026-06-22: 0.02 → 0.01. Same axes tune as vol_lookback above — paired with
+      # vlb=1800, edge_buffer ≤0.01 lifts worst-half (the old "eb stays 0.02 / eb=0
+      # craters the early half" warning was measured against vlb=900; with vlb=1800
+      # the early half no longer collapses). eb=0.03 is strictly worse.
+      edge_buffer: 0.01
       # 2026-05-22: entry fee zeroed alongside take-profit-mode flip. Per the
       # exit_take_profit_mode block below, all fee accounting now lives on
       # the exit side via `exit_fee`. PM + HL A/B (v3.1-exitflip-2026-05-22)
@@ -287,7 +294,11 @@ strategies:
       half_spread_assumption: 0.005
       drift_lookback_seconds: 3600
       drift_blend: 0.0
-      favorite_threshold: 0.85
+      # 2026-06-22: 0.85 → 0.80 (axes tune, see vol_lookback above). 0.80 beats 0.85
+      # on worst-half; 0.90 is much worse (worst-half $104, maxDD $256). Secondary
+      # lever — admits slightly less-extreme favorites, recovering PnL the longer
+      # vol_lookback trades away.
+      favorite_threshold: 0.80
       # 2026-05-24: 0.20 → null (kill). Upper-edge filter never binds on PM
       # (entries are gated well below 20% edge by edge_buffer + favorite_threshold)
       # and never binds on HL. Both PM walk-forward and HL kill-only ablation
