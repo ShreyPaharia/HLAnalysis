@@ -347,12 +347,29 @@ strategies:
       # ~$50-150 instead of the full ~$500 stake. The loss-injection stress
       # (see exit_edge_threshold note) makes msd2 (this on + entry gate) the
       # risk-adjusted winner; buy-and-hold's higher realized PnL was a tail-blind
-      # sample. 1.0 is the production ceiling (d=1.5 → re-entry cascade).
-      exit_safety_d: 1.0
-      # Entry-side safety_d floor, kept from the buy-and-hold change: only enter
-      # when the favorite is ≥2 σ√τ from its adverse boundary (avoids near-strike
-      # fake favorites). Forms a hysteresis band [exit_safety_d, min_safety_d].
-      min_safety_d: 2.0
+      # 2026-06-22: 1.0 → 1.5. Independent band sweep + loss-injection tail stress
+      # + round-trip fee stress (docs/research/2026-06-22-v31-hl-safetyd-band.md,
+      # n=42 corpus 05-10→06-21) found the old (msd2.0/esd1.0) band poorly placed:
+      # worst-half −$27, the HIGHEST maxDD in the grid ($343). Raising to msd2.5/esd1.5
+      # dominates on walk-forward worst-half (+$178), maxDD ($199), Sharpe (7.2), AND
+      # the tail stress (EV $503 / P(loss) 0.6% vs $415 / 1.5%), retaining ~99% PnL
+      # under a 3.5× round-trip-fee bump (not a churn artifact). The OLD "1.0 is the
+      # production ceiling / d=1.5 → re-entry cascade" note no longer holds — that
+      # cascade was under the low entry floor; at msd=2.5 the higher floor suppresses
+      # re-entry (esd1.5 = 329 trades, FEWER than the old 431). ⚠️ n=42 single corpus,
+      # tail-deficient (relative ranking robust, absolute $ inflated) — watch first
+      # live exits.
+      # ⏭ esd=2.0 tested STRICTLY BETTER on this corpus (full $827 / worst-half $247 /
+      # maxDD $42 / Sharpe 13.5 / stressed EV $711 / P(loss) 0%) but earns it via more
+      # aggressive exit/re-entry (468 trades) → most fill-model-sensitive. RE-VALIDATE
+      # ~2026-06-29 (≥1 week of live data + a fresh backtest); if esd=2.0 still wins,
+      # promote binary to 2.0 (and re-check the bucket floor decoupling below).
+      exit_safety_d: 1.5
+      # Entry-side safety_d floor. 2026-06-22: 2.0 → 2.5 (see exit_safety_d note).
+      # Enter only when the favorite is ≥2.5 σ√τ from its adverse boundary; with the
+      # raised exit this forms a tighter, higher hysteresis band [1.5, 2.5] that
+      # prevents the re-entry churn aggressive exits would otherwise cause.
+      min_safety_d: 2.5
 
     # Per-question.klass theta overrides. Each class maps to a PARTIAL theta
     # block: only the listed fields override the shared `theta:` defaults above

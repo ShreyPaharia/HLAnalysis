@@ -84,8 +84,9 @@ def test_live_strategy_yaml_forwards_exit_safety_d() -> None:
             "slot v31_pm: exit_safety_d must stay 1.0 (SHR-65 regression guard)"
         )
     if "v31" in by_alias:
-        assert build_theta_harvester_config(by_alias["v31"]).exit_safety_d == 1.0, (
-            "slot v31: exit_safety_d must be 1.0 (msd2 — mid-hold exit re-enabled; buy-and-hold reverted as tail-blind)"
+        assert build_theta_harvester_config(by_alias["v31"]).exit_safety_d == 1.5, (
+            "slot v31: exit_safety_d must be 1.5 (2026-06-22 band retune to msd2.5/esd1.5; "
+            ">0 keeps the tail-blind buy-and-hold guard — a silent flip to 0.0 must still fail)"
         )
 
 
