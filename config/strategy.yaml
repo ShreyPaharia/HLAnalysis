@@ -432,6 +432,108 @@ strategies:
                                        # (kills doom-loop churn). 35-day backtest: +$330, 0 regressions,
                                        # inert on 30/35 days. See docs/research/2026-06-12-hl-bucket-retune-exit-spread-hold.md
 
+  # --- v3.1 theta_harvester — HL HYPE binary (2026-06-23) ---
+  # First non-BTC HL slot. Recorder ingested HYPE perps + above/below binaries
+  # since 2026-06-16; this takes HYPE priceBinary LIVE on the SAME v31 wallet via
+  # a distinct alias (deploy.accounts.v31_hype reuses the v31 key — see deploy.yaml).
+  #
+  # WHY A SEPARATE SLOT (not a HYPE entry on the v31 slot above):
+  #   - reference_symbol is a per-slot scalar; the v31 slot is BTC. HYPE needs its
+  #     own slot so σ/p_model read the HL HYPE perp (reference_symbol: HYPE), not BTC.
+  #   - theta params are shared per-class; HYPE needs its own vol_lookback (3600)
+  #     which can only live in its own theta block.
+  #
+  # PARAMS = the tail-safe full-grid winner (INDEPENDENTLY tuned; the BTC-binary
+  # block loses on HYPE). Absolute values: vol_lookback=3600, vol_sampling_dt=5,
+  # tte_max=43200, min_safety_d=2.5, exit_safety_d=1.0, favorite_threshold=0.85,
+  # edge_buffer=0.02. The decisive lever is the 1h σ-window: HYPE's higher realised
+  # σ (~0.62–0.73 vs BTC ~0.5) needs it to keep safety_d stable (a short window made
+  # the soft exit whipsaw winners). favorite_threshold/edge_buffer are inert across
+  # the grid. NB: the BTC v31 binary was concurrently retuned (bba75d4: vlb1800/
+  # fav0.80/eb0.01) — do NOT read these as a diff from BTC; they are HYPE-native.
+  # Full grid: full +$123 / both walk-forward halves positive / Sharpe 23.8 /
+  # stressed EV +$104 / 5th-pct +$35 / P(loss) 1.7%.
+  #
+  # ⚠️ EVIDENCE IS n=6 (corpus 2026-06-16→06-21). Promising, NOT statistically
+  # settled — every backtest "winner" posts realized maxDD=$0 only because the
+  # 6-question corpus never sampled a losing held favorite; the positive tail rests
+  # on the loss-injection model. Watch the first live entries; re-validate the full
+  # grid ~2026-06-29 at n≥15. max_position_usd is held at $100 (vs BTC $500) for
+  # exactly this reason. See docs/research/2026-06-22-v31-hl-hype-binary-tune.md.
+  - name: theta_harvester
+    account_alias: v31_hype
+    strategy_type: theta_harvester
+    paper_mode: false                   # LIVE: real HL orders on the v31 wallet
+    reference_symbol: HYPE              # HL HYPE perp (HYPE is NOT on Binance — HL is the only reference)
+    reference_sigma_source: mark       # HL perp mark (live-faithful default)
+
+    allowlist:
+      - match:
+          class: priceBinary
+          underlying: HYPE
+          venue: hyperliquid
+        max_position_usd: 100             # burn-in cap (n=6) — well below BTC's $500
+        stop_loss_pct: null              # theta drives exits off edge, not stop-loss
+        tte_min_seconds: 0
+        tte_max_seconds: 43200           # 12h — full-grid interior optimum (matches BTC binary)
+        price_extreme_threshold: 0.0
+        price_extreme_max: 1.0
+        distance_from_strike_usd_min: 0
+        vol_max: 100
+        entry_cooldown_seconds: 60
+
+    blocklist_question_idxs: []
+
+    defaults:
+      match: {}
+      max_position_usd: 100
+      stop_loss_pct: null
+      tte_min_seconds: 0
+      tte_max_seconds: 43200             # mirror allowlist — engine reads tte_max from defaults
+      price_extreme_threshold: 0.0
+      price_extreme_max: 1.0
+      distance_from_strike_usd_min: 0
+      vol_max: 100
+      entry_cooldown_seconds: 60
+
+    global:
+      max_total_inventory_usd: 1200      # per operator request 2026-06-23 (this slot only; no combined pool)
+      max_concurrent_positions: 5
+      daily_loss_cap_usd: 150            # per operator request 2026-06-23
+      max_strike_distance_pct: 50
+      min_recent_volume_usd: 100
+      stale_data_halt_seconds: 30
+      reconcile_interval_seconds: 15
+      scan_min_interval_seconds: 0.2     # own reference_symbol (HYPE) → no lockstep with the BTC-feed slots
+      scan_max_interval_seconds: 2.0
+      daily_window_start_hour_utc: 6     # HL HIP-4 settles 06:00 UTC
+
+    theta:
+      # HYPE-native full-grid tail-safe winner (docs/research/2026-06-22-v31-hl-hype-binary-tune.md).
+      # Independently tuned — NOT a diff from the (concurrently retuned) BTC binary block.
+      vol_lookback_seconds: 3600         # 1h σ-window — the decisive lever for HYPE's higher σ
+      vol_sampling_dt_seconds: 5
+      vol_clip_min: 0.0
+      vol_clip_max: 5.0
+      edge_buffer: 0.02                  # inert across the grid
+      fee_taker: 0.0
+      half_spread_assumption: 0.005
+      drift_lookback_seconds: 3600
+      drift_blend: 0.0
+      favorite_threshold: 0.85           # inert across the grid
+      edge_max: null
+      exit_edge_threshold: 0.0
+      time_stop_seconds: 0
+      exit_take_profit_mode: true
+      exit_fee: 0.0007
+      min_distance_pct: null
+      min_bid_notional_usd: 0.0
+      topup_enabled: true
+      topup_threshold_pct: 0.2
+      topup_min_notional_usd: 11.0
+      exit_safety_d: 1.0                 # grid tail-safe optimum (stable 1h σ stops the whipsaw)
+      min_safety_d: 2.5
+
   # --- v3.1 Polymarket ---
   # PM ablation knobs: post-2026-05-23 walk-forward (see Appendix C of
   # docs/v31-polymarket-live-plan.md and [[v31-final-state-2026-05-23]]) picked

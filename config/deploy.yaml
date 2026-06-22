@@ -16,6 +16,19 @@ deploy:
       account_address: ${HL_ACCOUNT_ADDRESS_V31}
       api_secret_key: ${HL_API_SECRET_KEY_V31}
       base_url: https://api.hyperliquid.xyz
+    # HYPE binary slot (2026-06-23). Distinct alias required by the strategies
+    # loader's account_alias-uniqueness check, but it REUSES the v31 wallet/key
+    # (same ${HL_ACCOUNT_ADDRESS_V31} / ${HL_API_SECRET_KEY_V31}) — one on-chain
+    # account, two engine slots (BTC via `v31`, HYPE via `v31_hype`). The slots
+    # have INDEPENDENT risk envelopes (the engine has no combined-pool cap) and
+    # each runs its own reconcile against the shared wallet; BTC vs HYPE are
+    # different coins so positions never collide. See docs/research/
+    # 2026-06-22-v31-hl-hype-binary-tune.md (n=6 — first-week watch).
+    v31_hype:
+      venue: hyperliquid
+      account_address: ${HL_ACCOUNT_ADDRESS_V31}
+      api_secret_key: ${HL_API_SECRET_KEY_V31}
+      base_url: https://api.hyperliquid.xyz
     # Polymarket CLOB slot for v3.1 strategy. Paper-only until Phase 8 of the
     # v3.1-PM plan wires py-clob-client-v2; live mode requires all four
     # `clob_api_*` creds plus the Polygon `private_key` for L1 signing.
