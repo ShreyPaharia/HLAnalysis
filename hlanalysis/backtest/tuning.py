@@ -237,7 +237,7 @@ def _run_one_cell(args: tuple) -> dict:
     # cached questions, not an empty set. The parent process already applied
     # the user's --start/--end during the initial discover; workers just
     # need to re-map question_id → descriptor across all cached entries.
-    all_descs = list(data_source.discover(start="1970-01-01", end="2999-12-31"))
+    all_descs = list(data_source.discover(start="1970-01-01", end="2999-12-31", **source_config.discover_kwargs()))
     for q_id, strike in te_ids_with_strikes:
         match = next(
             (d for d in all_descs if d.question_id == q_id),

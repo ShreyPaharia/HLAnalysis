@@ -112,6 +112,24 @@ class SourceConfig:
     # SourceConfig directly — it does NOT affect CLI invocations where the resolver
     # derives "raw" as the default.
     hl_ref_ticks: str = "bars"
+    # HL HIP-4 discovery underlying (BTC/ETH/SOL/HYPE). Carried here so spawn AND
+    # serial workers re-discover question_id → descriptor with the SAME underlying
+    # filter the parent used. discover() defaults to BTC, so without this a worker
+    # re-mapping a non-BTC question raises "worker could not re-map question_id"
+    # (the worker-factory config-drop bug class, for the discovery filter).
+    discover_underlying: str = "BTC"
+
+    def discover_kwargs(self) -> dict[str, str]:
+        """Discovery filters a worker must replay to re-map question_id → descriptor.
+
+        Only ``hl_hip4`` discover() takes an ``underlying`` filter; PM / synthetic /
+        pm_nba discover() do not, so they get no kwargs. Filtering by underlying alone
+        (not ``kinds``) is sufficient and minimal: the worker only needs the target
+        question present in the re-discovered set to map it by id.
+        """
+        if self.kind == "hl_hip4":
+            return {"underlying": self.discover_underlying}
+        return {}
 
     def with_reference_resample(self, seconds: int) -> SourceConfig:
         """Return a copy with ``reference_resample_seconds`` replaced (per-cell)."""

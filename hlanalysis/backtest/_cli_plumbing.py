@@ -86,6 +86,7 @@ def _source_config_from_args(
             hl_ref_ticks=_cli_ref_ticks or _default_ref_ticks,
             reference_resample_seconds=reference_resample_seconds,
             reference_warmup_seconds=reference_warmup_seconds,
+            discover_underlying=getattr(args, "underlying", None) or "BTC",
         )
     if name == "pm_nba":
         return SourceConfig(

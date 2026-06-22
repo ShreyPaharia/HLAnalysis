@@ -80,6 +80,32 @@ def test_with_reference_resample_returns_replaced_copy():
     assert out.kind == "hl_hip4"
 
 
+def test_hl_discover_kwargs_carries_underlying_to_workers():
+    """A spawn/serial worker re-discovers question_id → descriptor across the full
+    corpus. For non-BTC underlyings (HYPE/ETH/SOL) the worker MUST filter by the
+    same underlying the parent used, or discover (which defaults to BTC) never
+    surfaces the question and the worker raises "could not re-map question_id".
+    """
+    cfg = SourceConfig(kind="hl_hip4", discover_underlying="HYPE")
+    assert cfg.discover_kwargs() == {"underlying": "HYPE"}
+
+
+def test_hl_discover_kwargs_defaults_to_btc():
+    assert SourceConfig(kind="hl_hip4").discover_kwargs() == {"underlying": "BTC"}
+
+
+def test_non_hl_discover_kwargs_is_empty():
+    # PM / synthetic / pm_nba discover() take no underlying filter.
+    assert SourceConfig(kind="polymarket").discover_kwargs() == {}
+    assert SourceConfig(kind="synthetic").discover_kwargs() == {}
+
+
+def test_discover_underlying_survives_pickle_round_trip():
+    cfg = SourceConfig(kind="hl_hip4", discover_underlying="HYPE")
+    assert pickle.loads(pickle.dumps(cfg)) == cfg
+    assert pickle.loads(pickle.dumps(cfg)).discover_kwargs() == {"underlying": "HYPE"}
+
+
 def test_unknown_pm_flavor_raises(tmp_path):
     import pytest
 
@@ -103,7 +129,7 @@ def test_tune_cell_overrides_reference_resample_from_cell_params(monkeypatch):
     captured: dict = {}
 
     class _FakeSource:
-        def discover(self, *, start, end):
+        def discover(self, *, start, end, **kwargs):
             return []
 
     def fake_build(self):

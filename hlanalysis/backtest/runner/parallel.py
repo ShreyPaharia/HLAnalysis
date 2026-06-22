@@ -172,7 +172,7 @@ def _run_question_worker(args: tuple) -> QResult:
 
     # Wide window: cache-driven sources (PM) filter by end_ts ∈ [start,end);
     # re-discover everything, then map id → descriptor (mirrors tuning worker).
-    all_descs = list(data_source.discover(start="1970-01-01", end="2999-12-31"))
+    all_descs = list(data_source.discover(start="1970-01-01", end="2999-12-31", **source_config.discover_kwargs()))
     q = next((d for d in all_descs if d.question_id == q_id), None)
     if q is None:
         raise RuntimeError(f"worker could not re-map question_id {q_id!r}")
