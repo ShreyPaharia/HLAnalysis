@@ -721,7 +721,6 @@ class EngineRuntime:
             if self.stop_event.is_set():
                 return
             try:
-                btc_mark = self.market_state.last_mark("BTC")
                 n_questions = len(self.market_state.all_questions())
                 d_events = self.events_ingested - prev_events
                 prev_events = self.events_ingested
@@ -730,9 +729,15 @@ class EngineRuntime:
                     n_live = len(slot.dal.live_orders())
                     d_scans = slot.scans_completed - prev_scans[slot.alias]
                     prev_scans[slot.alias] = slot.scans_completed
+                    # Show THIS slot's own reference (HYPE, ETHUSDT_SPOT, …), not a
+                    # hardcoded BTC mark — the engine is multi-coin and the BTC mark
+                    # is meaningless for non-BTC slots (it falsely read as if a HYPE
+                    # slot referenced BTC). Strategy already uses scanner.ref_symbol.
+                    ref_sym = slot.scanner.ref_symbol
+                    ref_mark = self.market_state.last_mark(ref_sym)
                     logger.info(
                         "heartbeat alias={} events={} (+{}) scans={} (+{}) "
-                        "decisions={} | btc={} questions={} positions={} live_orders={}"
+                        "decisions={} | {}={} questions={} positions={} live_orders={}"
                         "{}",
                         slot.alias,
                         self.events_ingested,
@@ -740,7 +745,8 @@ class EngineRuntime:
                         slot.scans_completed,
                         d_scans,
                         slot.decisions_emitted,
-                        f"${btc_mark:.2f}" if btc_mark else "none",
+                        ref_sym,
+                        f"${ref_mark:.2f}" if ref_mark else "none",
                         n_questions,
                         n_positions,
                         n_live,
