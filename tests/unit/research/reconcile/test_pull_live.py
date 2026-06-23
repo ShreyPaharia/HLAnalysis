@@ -166,6 +166,8 @@ def _mock_s3_trace(monkeypatch: pytest.MonkeyPatch, rows: list[dict]) -> _Record
         lambda bucket, key: gzip.compress(json.dumps(rows).encode()),
     )
     monkeypatch.setattr(pull_live, "_s3_delete", lambda bucket, key: None)
+    # No sealed segments by default — keeps these tests hermetic (no real `aws`).
+    monkeypatch.setattr(pull_live, "_s3_list_keys", lambda bucket, prefix: [])
     return rec
 
 
@@ -178,6 +180,8 @@ class TestSlotScopedPaths:
     def test_config_hash_path_built_from_strategy_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         rec = _Recorder(json.dumps(None))
         monkeypatch.setattr(pull_live, "_ssm_python", rec)
+        # Empty tail triggers the S3 fallback; keep it hermetic (no real `aws`).
+        monkeypatch.setattr(pull_live, "_s3_list_keys", lambda bucket, prefix: [])
         pull_live.pull_config_hash(strategy_id="v1")
         assert "/opt/hl-recorder/data/engine/v1/decision_trace.jsonl" in rec.scripts[0]
 
@@ -222,6 +226,101 @@ class TestPullLiveTraceS3Transport:
         df = pull_live.pull_live_trace(4010, _EXPIRY_NS, strategy_id="v31", cache_dir=tmp_path)
         assert len(df) == 1 and df.iloc[0]["ts_ns"] == 9
 
+
+class TestPullLiveTraceS3SealedSegments:
+    """After the box rotates+archives the trace, old rows live ONLY in S3 sealed
+    segments (``engine/date=<d>/<alias>/traces/*.jsonl.gz``). pull_live_trace must
+    union those with the live on-box file, filtered to the question + window."""
+
+    def _wire(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        live_rows: list[dict],
+        seg_rows: list[dict],
+    ) -> list[str]:
+        """live file -> live_rows (via SSM/S3 transport); one sealed segment ->
+        seg_rows. Returns the list of prefixes passed to _s3_list_keys."""
+        prefixes: list[str] = []
+        monkeypatch.setattr(pull_live, "_ssm_python", _Recorder("S3_UPLOAD_OK"))
+        monkeypatch.setattr(pull_live, "_s3_delete", lambda bucket, key: None)
+
+        def _list(bucket: str, prefix: str) -> list[str]:
+            prefixes.append(prefix)
+            if "traces" in prefix:
+                return [f"{prefix}decision_trace.20240610T064500.jsonl.gz"]
+            return []
+
+        def _dl(bucket: str, key: str) -> bytes:
+            if "traces" in key:
+                # Sealed segments are JSONL (one object per line), gzipped.
+                return gzip.compress(("\n".join(json.dumps(r) for r in seg_rows) + "\n").encode())
+            # The live-file transport blob is a JSON array (json.dumps(rows)).
+            return gzip.compress(json.dumps(live_rows).encode())
+
+        monkeypatch.setattr(pull_live, "_s3_list_keys", _list)
+        monkeypatch.setattr(pull_live, "_s3_download_bytes", _dl)
+        return prefixes
+
+    def test_unions_live_file_and_sealed_segment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        live = [{"question_idx": 4010, "ts_ns": _EXPIRY_NS - 10, "action": "enter"}]
+        seg = [{"question_idx": 4010, "ts_ns": _EXPIRY_NS - 100_000, "action": "hold"}]
+        self._wire(monkeypatch, live_rows=live, seg_rows=seg)
+        df = pull_live.pull_live_trace(4010, _EXPIRY_NS, strategy_id="v31")
+        assert len(df) == 2
+        assert set(df["action"]) == {"enter", "hold"}
+        # Output is time-ordered for downstream alignment.
+        assert list(df["ts_ns"]) == sorted(df["ts_ns"])
+
+    def test_dedupes_overlap_between_live_and_segment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        dup = {"question_idx": 4010, "ts_ns": _EXPIRY_NS - 50, "action": "hold"}
+        self._wire(monkeypatch, live_rows=[dup], seg_rows=[dict(dup)])
+        df = pull_live.pull_live_trace(4010, _EXPIRY_NS, strategy_id="v31")
+        assert len(df) == 1
+
+    def test_segment_rows_filtered_by_window_and_question(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        before = {"question_idx": 4010, "ts_ns": _EXPIRY_NS - 48 * 3600 * 1_000_000_000, "action": "hold"}
+        other_q = {"question_idx": 999, "ts_ns": _EXPIRY_NS - 60, "action": "hold"}
+        keep = {"question_idx": 4010, "ts_ns": _EXPIRY_NS - 60, "action": "enter"}
+        self._wire(monkeypatch, live_rows=[], seg_rows=[before, other_q, keep])
+        df = pull_live.pull_live_trace(4010, _EXPIRY_NS, strategy_id="v31")
+        assert len(df) == 1
+        assert df.iloc[0]["action"] == "enter"
+
+    def test_lists_engine_date_traces_prefix_for_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        prefixes = self._wire(monkeypatch, live_rows=[], seg_rows=[])
+        pull_live.pull_live_trace(4010, _EXPIRY_NS, strategy_id="v31")
+        trace_prefixes = [p for p in prefixes if "traces" in p]
+        assert trace_prefixes, "expected at least one traces/ prefix listed"
+        for p in trace_prefixes:
+            assert p.startswith("engine/date=")
+            assert p.endswith("/v31/traces/")
+        # Window spans up to 24h before expiry → must cover ≥2 date partitions.
+        assert len({p.split("date=")[1].split("/")[0] for p in trace_prefixes}) >= 2
+
+
+class TestPullConfigHashS3Fallback:
+    def test_falls_back_to_sealed_segment_when_live_tail_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Post-rotation the live file is often freshly rotated/empty, so the tail
+        yields no config_hash; fall back to the newest sealed S3 segment."""
+        # Live-file tail returns null (no rows).
+        monkeypatch.setattr(pull_live, "_ssm_python", _Recorder(json.dumps(None)))
+        monkeypatch.setattr(
+            pull_live,
+            "_s3_list_keys",
+            lambda bucket, prefix: [f"{prefix}decision_trace.20240610T064500.jsonl.gz"] if "traces" in prefix else [],
+        )
+        monkeypatch.setattr(
+            pull_live,
+            "_s3_download_bytes",
+            lambda bucket, key: gzip.compress(
+                (json.dumps({"question_idx": 4010, "ts_ns": 1, "config_hash": "cafef00d12345678"}) + "\n").encode()
+            ),
+        )
+        assert pull_live.pull_config_hash(strategy_id="v31") == "cafef00d12345678"
+
+
+class TestPullLiveTraceMisc:
     def test_halts_filters_strategy_id_unified_db(self, monkeypatch: pytest.MonkeyPatch) -> None:
         rec = _Recorder(json.dumps([]))
         monkeypatch.setattr(pull_live, "_ssm_python", rec)

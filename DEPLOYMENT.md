@@ -686,6 +686,19 @@ Per slot alias under `/opt/hl-recorder/data/engine/<alias>/`, it uploads to
   live-writing engine can be torn/corrupt-on-read). Stale `state.db.bak-*` and
   the live `-wal`/`-shm` are excluded by naming the file exactly.
 - `gate_decisions.jsonl.gz` — the live decision log.
+- `<alias>/traces/decision_trace.<SEAL>.jsonl.gz` — the **per-scan decision
+  trace** used by `research/reconcile` (sim↔live). The engine appends to a plain
+  `decision_trace.jsonl` (best-effort, never blocks trading); this sync **seals**
+  it via an atomic rename (the engine re-opens the path each write, so it just
+  recreates a fresh live file), gzips the sealed segment (~10× on the repetitive
+  JSONL), and uploads it under the `date=` partition matching the segment's own
+  **seal date** (so a reconcile can locate it by time window). Sealed segments
+  older than `TRACE_LOCAL_RETENTION_DAYS` (default **2**) are then **pruned from
+  the box once their S3 copy is confirmed** — bounding local disk while keeping
+  recent reconciles fast (read straight off the box). `pull_live.py` reads these
+  S3 segments and unions them with the live file, so reconciles work after the
+  local copy is gone. (`SEAL_STAMP`/`TRACE_LOCAL_RETENTION_DAYS` are overridable
+  env; see the script header.)
 - `engine/log-filtered.gz` — journald `hl-engine` lines matching the signal
   regex (WARN/ERROR/halt/reject/FEED STALE/drift/…). KB/day, **not** the ~97
   MB/day raw 1 Hz PnL-poll + 429 + reject noise (piped `journalctl|grep|gzip`,

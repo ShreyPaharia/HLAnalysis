@@ -49,6 +49,11 @@ BUCKET="${ARCHIVE_BUCKET:?ARCHIVE_BUCKET must be set}"
 ENGINE_ROOT="${ENGINE_DATA_ROOT:-/opt/hl-recorder/data/engine}"
 DATE_BIN=$(command -v gdate || command -v date)
 DATE="${SYNC_DATE:-$("$DATE_BIN" -u +%Y-%m-%d)}"
+# Seal stamp for the decision-trace segment rotated out this run (UTC, sortable).
+SEAL_STAMP="${SEAL_STAMP:-$("$DATE_BIN" -u +%Y%m%dT%H%M%S)}"
+# Keep this many days of sealed trace segments LOCALLY (for fast SSM reads of
+# recent reconciles); older sealed segments live only in S3 once confirmed there.
+TRACE_LOCAL_RETENTION_DAYS="${TRACE_LOCAL_RETENTION_DAYS:-2}"
 LOG_SINCE="${LOG_SINCE:-yesterday}"
 LOG_UNIT="${LOG_UNIT:-hl-engine}"
 S3_ENGINE_PREFIX="${S3_ENGINE_PREFIX:-engine}"
@@ -104,12 +109,81 @@ trap 'rm -rf "$TMP"' EXIT
 # Upload (or, in tests, local-copy) one file to its dated key. Switching on the
 # s3:// scheme keeps the script runnable end-to-end in a sandbox without AWS.
 put() {  # put <local_file> <relative_key>
-  local src="$1" key="$2"
-  local dest="$S3_BASE/date=$DATE/$key"
+  put_dated "$1" "$DATE" "$2"
+}
+
+# Like put() but to an explicit date= partition. Decision-trace segments are
+# archived under the partition matching their OWN seal date (not the run date),
+# so a reconcile can locate a segment by the time window it covers.
+put_dated() {  # put_dated <local_file> <date> <relative_key>
+  local src="$1" d="$2" key="$3"
+  local dest="$S3_BASE/date=$d/$key"
   case "$dest" in
     s3://*) aws s3 cp --no-progress "$src" "$dest" ;;
     *) mkdir -p "$(dirname "$dest")"; cp "$src" "$dest" ;;
   esac
+}
+
+# True if the dated key already exists at the destination (real S3 or, in tests,
+# a local dir). Safety belt: never prune a local sealed segment until its
+# archived copy is confirmed present.
+s3_exists_dated() {  # s3_exists_dated <date> <relative_key>
+  local dest="$S3_BASE/date=$1/$2"
+  case "$dest" in
+    s3://*) aws s3 ls "$dest" >/dev/null 2>&1 ;;
+    *) [ -f "$dest" ] ;;
+  esac
+}
+
+# YYYY-MM-DD from a seal stamp "YYYYMMDDThhmmss" (its first 8 chars).
+_seal_date() {  # _seal_date <stamp>
+  local s="$1"
+  printf '%s-%s-%s' "${s:0:4}" "${s:4:2}" "${s:6:2}"
+}
+
+# Rotate, archive, and prune the per-scan decision trace for one slot dir.
+# The live engine appends to decision_trace.jsonl and re-opens it by path on
+# every write, so renaming it out is safe: the engine recreates a fresh live
+# file on its next scan. We then gzip + upload every local sealed segment
+# (idempotent — re-uploads are cheap and guarantee upload-before-prune), and
+# delete sealed segments older than the local-retention window once their S3
+# copy is confirmed.
+rotate_traces() {  # rotate_traces <slot_dir> <alias>
+  local dir="$1" alias="$2"
+  local live="$dir/decision_trace.jsonl"
+
+  # 1) Seal the live file (if any rows) into a stamped segment.
+  if [ -s "$live" ]; then
+    local sealed_plain="$dir/decision_trace.$SEAL_STAMP.jsonl"
+    mv "$live" "$sealed_plain"
+    gzip -f "$sealed_plain"   # -> $sealed_plain.gz
+  fi
+
+  # 2) Upload every local sealed segment to its own seal-date partition.
+  shopt -s nullglob
+  local gz seg stamp seal_date key
+  for gz in "$dir"/decision_trace.*.jsonl.gz; do
+    seg="$(basename "$gz")"                 # decision_trace.<stamp>.jsonl.gz
+    stamp="${seg#decision_trace.}"; stamp="${stamp%.jsonl.gz}"
+    seal_date="$(_seal_date "$stamp")"
+    key="$alias/traces/$seg"
+    put_dated "$gz" "$seal_date" "$key"
+  done
+
+  # 3) Prune sealed segments older than retention, once confirmed in S3.
+  for gz in $(find "$dir" -maxdepth 1 -name 'decision_trace.*.jsonl.gz' \
+                -mtime +"$TRACE_LOCAL_RETENTION_DAYS" 2>/dev/null); do
+    seg="$(basename "$gz")"
+    stamp="${seg#decision_trace.}"; stamp="${stamp%.jsonl.gz}"
+    seal_date="$(_seal_date "$stamp")"
+    key="$alias/traces/$seg"
+    if s3_exists_dated "$seal_date" "$key"; then
+      rm -f "$gz"
+    else
+      echo "WARN: not pruning $gz — S3 copy not confirmed (date=$seal_date)" >&2
+    fi
+  done
+  shopt -u nullglob
 }
 
 # --- per-slot Tier 1: state.db snapshot + gate_decisions.jsonl --------------
@@ -224,6 +298,15 @@ else
     SLOTS=$((SLOTS + 1))
   done
 fi
+
+# --- Tier 1b: per-scan decision trace (rotate + archive + prune) ------------
+# Independent of the unified/legacy split above — the trace lives in the
+# per-strategy sibling dir regardless of DB layout. The alias is the dir name.
+shopt -s nullglob
+for dir in "$ENGINE_ROOT"/*/; do
+  rotate_traces "${dir%/}" "$(basename "$dir")"
+done
+shopt -u nullglob
 
 # --- Tier 2: filtered engine log (engine-wide, not per-slot) ----------------
 # Pipe journalctl|grep|gzip so the 97 MB/day raw log never lands on disk or in

@@ -221,3 +221,85 @@ if [ "$fail2" -eq 0 ]; then
 else
   exit 1
 fi
+
+# ===========================================================================
+# DECISION-TRACE ROTATION CASE: per-slot decision_trace.jsonl is sealed,
+# gzipped, uploaded under date=<DATE>/<alias>/traces/, then local sealed
+# segments older than TRACE_LOCAL_RETENTION_DAYS are pruned (only once their
+# S3 object is confirmed present).
+# ===========================================================================
+
+SANDBOX3=$(mktemp -d)
+trap 'rm -rf "$SANDBOX" "$SANDBOX2" "$SANDBOX3"' EXIT
+
+ENGINE_ROOT3="$SANDBOX3/engine-data"
+S3_LOCAL3="$SANDBOX3/s3"
+mkdir -p "$ENGINE_ROOT3" "$S3_LOCAL3"
+DATE3="2026-06-20"
+SEAL3="20260620T064500"
+
+# A unified DB so the script takes the unified path (irrelevant to traces, but
+# realistic — traces live in the per-strategy sibling dirs either way).
+sqlite3 "$ENGINE_ROOT3/state.db" <<SQL
+CREATE TABLE events (id INTEGER PRIMARY KEY, strategy_id TEXT);
+INSERT INTO events VALUES (1,'v31');
+SQL
+
+# Slot v31: a LIVE decision_trace.jsonl (must be sealed+uploaded+removed) and an
+# OLD already-sealed segment (must be uploaded then pruned locally).
+mkdir -p "$ENGINE_ROOT3/v31"
+printf '{"ts_ns":1,"question_idx":4010,"action":"hold"}\n{"ts_ns":2,"question_idx":4010,"action":"enter"}\n' \
+  > "$ENGINE_ROOT3/v31/decision_trace.jsonl"
+# An old sealed segment from days ago — beyond the 2-day local retention.
+printf '{"ts_ns":0,"question_idx":4009,"action":"hold"}\n' | gzip -c \
+  > "$ENGINE_ROOT3/v31/decision_trace.20260615T064500.jsonl.gz"
+touch -t 202606150645 "$ENGINE_ROOT3/v31/decision_trace.20260615T064500.jsonl.gz"
+
+# Slot v1: no trace file at all (must not error, must produce no traces/ keys).
+mkdir -p "$ENGINE_ROOT3/v1"
+
+PATH="$SHIM:$PATH" \
+ARCHIVE_BUCKET="test-bucket" \
+ENGINE_DATA_ROOT="$ENGINE_ROOT3" \
+ENGINE_SYNC_S3_BASE="$S3_LOCAL3" \
+SYNC_DATE="$DATE3" \
+SEAL_STAMP="$SEAL3" \
+TRACE_LOCAL_RETENTION_DAYS=2 \
+LOG_UNIT="hl-engine" \
+  bash "$REPO/scripts/sync-engine-to-s3.sh"
+
+fail3=0
+# Each sealed segment is archived under the date= partition matching its OWN
+# seal date (so pull can locate it by time window), NOT the run date.
+BASE3="$S3_LOCAL3/date=$DATE3"            # 2026-06-20 — the freshly-sealed live file
+BASE3_OLD="$S3_LOCAL3/date=2026-06-15"    # the old pre-sealed segment's own date
+exists3()     { [ -f "$1" ] || { echo "FAIL(trace): expected object missing: $1"; fail3=1; }; }
+not_exists3() { [ -e "$1" ] && { echo "FAIL(trace): unexpected object present: $1"; fail3=1; } || true; }
+
+# Freshly-sealed live trace is uploaded under traces/ with the seal stamp.
+exists3 "$BASE3/v31/traces/decision_trace.$SEAL3.jsonl.gz"
+# The old pre-sealed segment is uploaded too (upload-before-prune), under ITS date.
+exists3 "$BASE3_OLD/v31/traces/decision_trace.20260615T064500.jsonl.gz"
+
+# The live file was renamed away (engine would recreate it; not running here).
+not_exists3 "$ENGINE_ROOT3/v31/decision_trace.jsonl"
+# The freshly-sealed segment is RECENT → kept locally (within retention).
+exists3 "$ENGINE_ROOT3/v31/decision_trace.$SEAL3.jsonl.gz"
+# The OLD segment is beyond retention AND confirmed in S3 → pruned locally.
+not_exists3 "$ENGINE_ROOT3/v31/decision_trace.20260615T064500.jsonl.gz"
+
+# Slot with no trace produced no traces/ prefix.
+not_exists3 "$BASE3/v1/traces"
+
+# Uploaded sealed segment round-trips to the original rows.
+TR="$SANDBOX3/trace.jsonl"
+gunzip -c "$BASE3/v31/traces/decision_trace.$SEAL3.jsonl.gz" > "$TR"
+n_trace=$(wc -l < "$TR" | tr -d ' ')
+[ "$n_trace" = "2" ] || { echo "FAIL(trace): expected 2 sealed rows, got $n_trace"; fail3=1; }
+grep -q '"action":"enter"' "$TR" || { echo "FAIL(trace): sealed segment lost a row"; fail3=1; }
+
+if [ "$fail3" -eq 0 ]; then
+  echo "PASS: sync-engine-to-s3.sh integration test (decision-trace rotation)"
+else
+  exit 1
+fi

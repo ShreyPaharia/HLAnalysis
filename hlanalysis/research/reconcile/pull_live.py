@@ -19,6 +19,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,12 @@ DB_PATH = "/opt/hl-recorder/data/engine/state.db"
 # accounts. The instance role already writes to the recorder archive bucket.
 S3_TRANSPORT_BUCKET = os.environ.get("HLBT_RECON_S3_BUCKET", "hl-recorder-archive-819175935435")
 _S3_TRANSPORT_PREFIX = "tmp/recon"
+
+# Sealed decision-trace segments are archived by scripts/sync-engine-to-s3.sh under
+# ``<engine-prefix>/date=YYYY-MM-DD/<strategy_id>/traces/*.jsonl.gz`` and then pruned
+# from the box. Old reconciles must read them from S3. This mirrors the sync
+# script's S3_ENGINE_PREFIX (default "engine").
+_TRACE_ARCHIVE_PREFIX = os.environ.get("HLBT_ENGINE_S3_PREFIX", "engine")
 
 _NS_PER_S = 1_000_000_000
 _24H_NS = 24 * 3600 * _NS_PER_S
@@ -175,6 +182,122 @@ def _s3_delete(bucket: str, key: str) -> None:
         text=True,
         check=False,
     )
+
+
+def _s3_list_keys(bucket: str, prefix: str) -> list[str]:
+    """List object keys under ``s3://bucket/prefix`` (best-effort).
+
+    Returns ``[]`` on any failure (missing AWS CLI, no objects, no credentials)
+    so a transient listing problem degrades to "no sealed segments" rather than
+    raising — the live on-box file path still applies for recent reconciles.
+    """
+    try:
+        out = subprocess.run(
+            [
+                "aws",
+                "s3api",
+                "list-objects-v2",
+                "--bucket",
+                bucket,
+                "--prefix",
+                prefix,
+                "--query",
+                "Contents[].Key",
+                "--output",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+    keys = json.loads(out or "null")
+    return keys if isinstance(keys, list) else []
+
+
+def _window_dates(expiry_ns: int) -> list[str]:
+    """date= partitions that can hold rows in ``[expiry-24h, expiry+60s]``.
+
+    Segments are sealed daily (~06:45 UTC) and a single segment can straddle the
+    seal boundary, so a row near the window edge may live in the partition for the
+    day before or after the expiry date. Cover expiry_date ± 1 day to be safe.
+    """
+    exp = datetime.fromtimestamp(expiry_ns / 1e9, tz=UTC).date()
+    return [(exp + timedelta(days=d)).strftime("%Y-%m-%d") for d in (-1, 0, 1)]
+
+
+def _trace_segments_from_s3(
+    question_idx: int,
+    window_start: int,
+    window_end: int,
+    strategy_id: str,
+    expiry_ns: int,
+) -> list[dict[str, Any]]:
+    """Read sealed trace segments from S3 for the window, filtered to the question."""
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for d in _window_dates(expiry_ns):
+        prefix = f"{_TRACE_ARCHIVE_PREFIX}/date={d}/{strategy_id}/traces/"
+        for key in _s3_list_keys(S3_TRANSPORT_BUCKET, prefix):
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                raw = gzip.decompress(_s3_download_bytes(S3_TRANSPORT_BUCKET, key))
+            except Exception:
+                continue
+            for line in raw.decode().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if obj.get("question_idx") != question_idx:
+                    continue
+                ts = obj.get("ts_ns", 0)
+                if ts < window_start or ts > window_end:
+                    continue
+                rows.append(obj)
+    return rows
+
+
+def _dedup_trace_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Dedup by (ts_ns, question_idx) — one scan per question per slot — keeping
+    the first occurrence (live-file rows take precedence over S3), time-ordered."""
+    by_key: dict[tuple[Any, Any], dict[str, Any]] = {}
+    for r in rows:
+        by_key.setdefault((r.get("ts_ns"), r.get("question_idx")), r)
+    return sorted(by_key.values(), key=lambda r: r.get("ts_ns") or 0)
+
+
+def _config_hash_from_s3_segments(strategy_id: str, *, days: int = 7) -> str | None:
+    """Newest sealed segment's config_hash, searching recent date partitions.
+
+    Used when the live on-box trace has just been rotated away (empty tail)."""
+    today = datetime.now(UTC).date()
+    for back in range(days):
+        d = (today - timedelta(days=back)).strftime("%Y-%m-%d")
+        prefix = f"{_TRACE_ARCHIVE_PREFIX}/date={d}/{strategy_id}/traces/"
+        keys = _s3_list_keys(S3_TRANSPORT_BUCKET, prefix)
+        for key in sorted(keys, reverse=True):  # newest seal stamp first
+            try:
+                raw = gzip.decompress(_s3_download_bytes(S3_TRANSPORT_BUCKET, key))
+            except Exception:
+                continue
+            for line in reversed(raw.decode().splitlines()):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ch = json.loads(line).get("config_hash")
+                except Exception:
+                    continue
+                if ch:
+                    return str(ch)
+    return None
 
 
 def _ssm_fetch_large_json(
@@ -386,7 +509,12 @@ try:
 except FileNotFoundError:
     pass
 """
-    rows = _ssm_fetch_large_json(compute, "rows", instance_id=instance_id) or []
+    live_rows = _ssm_fetch_large_json(compute, "rows", instance_id=instance_id) or []
+    # Old rows live ONLY in sealed S3 segments once the box prunes them — union
+    # those with the live file and dedup so a reconcile run after rotation still
+    # sees the full pre-settlement decision history.
+    seg_rows = _trace_segments_from_s3(question_idx, window_start, window_end, strategy_id, expiry_ns)
+    rows = _dedup_trace_rows(live_rows + seg_rows)
 
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -616,7 +744,11 @@ print(json.dumps(cfg))
 """
     raw = _ssm_python(script, instance_id=instance_id)
     value = json.loads(raw.strip() or "null")
-    return str(value) if value is not None else None
+    if value is not None:
+        return str(value)
+    # The live file is often freshly rotated away (empty tail) by the time a
+    # reconcile runs; fall back to the newest sealed segment archived in S3.
+    return _config_hash_from_s3_segments(strategy_id)
 
 
 def pull_all(
