@@ -53,7 +53,9 @@ DATE="${SYNC_DATE:-$("$DATE_BIN" -u +%Y-%m-%d)}"
 SEAL_STAMP="${SEAL_STAMP:-$("$DATE_BIN" -u +%Y%m%dT%H%M%S)}"
 # Keep this many days of sealed trace segments LOCALLY (for fast SSM reads of
 # recent reconciles); older sealed segments live only in S3 once confirmed there.
-TRACE_LOCAL_RETENTION_DAYS="${TRACE_LOCAL_RETENTION_DAYS:-2}"
+# Default 0 = keep nothing on the box — delete each sealed segment as soon as its
+# S3 copy is confirmed (the box is disk-constrained; pull_live reads from S3).
+TRACE_LOCAL_RETENTION_DAYS="${TRACE_LOCAL_RETENTION_DAYS:-0}"
 LOG_SINCE="${LOG_SINCE:-yesterday}"
 LOG_UNIT="${LOG_UNIT:-hl-engine}"
 S3_ENGINE_PREFIX="${S3_ENGINE_PREFIX:-engine}"
@@ -170,9 +172,17 @@ rotate_traces() {  # rotate_traces <slot_dir> <alias>
     put_dated "$gz" "$seal_date" "$key"
   done
 
-  # 3) Prune sealed segments older than retention, once confirmed in S3.
-  for gz in $(find "$dir" -maxdepth 1 -name 'decision_trace.*.jsonl.gz' \
-                -mtime +"$TRACE_LOCAL_RETENTION_DAYS" 2>/dev/null); do
+  # 3) Prune sealed segments once their S3 copy is confirmed. Retention 0 means
+  #    "keep nothing locally" — delete every segment this run (note `-mtime +0`
+  #    matches only files >24h old, so 0 must skip the age filter, not use it).
+  local prune_candidates
+  if [ "$TRACE_LOCAL_RETENTION_DAYS" -eq 0 ]; then
+    prune_candidates=$(find "$dir" -maxdepth 1 -name 'decision_trace.*.jsonl.gz' 2>/dev/null)
+  else
+    prune_candidates=$(find "$dir" -maxdepth 1 -name 'decision_trace.*.jsonl.gz' \
+                         -mtime +"$TRACE_LOCAL_RETENTION_DAYS" 2>/dev/null)
+  fi
+  for gz in $prune_candidates; do
     seg="$(basename "$gz")"
     stamp="${seg#decision_trace.}"; stamp="${stamp%.jsonl.gz}"
     seal_date="$(_seal_date "$stamp")"

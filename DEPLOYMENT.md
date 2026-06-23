@@ -691,14 +691,16 @@ Per slot alias under `/opt/hl-recorder/data/engine/<alias>/`, it uploads to
   `decision_trace.jsonl` (best-effort, never blocks trading); this sync **seals**
   it via an atomic rename (the engine re-opens the path each write, so it just
   recreates a fresh live file), gzips the sealed segment (~10× on the repetitive
-  JSONL), and uploads it under the `date=` partition matching the segment's own
-  **seal date** (so a reconcile can locate it by time window). Sealed segments
-  older than `TRACE_LOCAL_RETENTION_DAYS` (default **2**) are then **pruned from
-  the box once their S3 copy is confirmed** — bounding local disk while keeping
-  recent reconciles fast (read straight off the box). `pull_live.py` reads these
-  S3 segments and unions them with the live file, so reconciles work after the
-  local copy is gone. (`SEAL_STAMP`/`TRACE_LOCAL_RETENTION_DAYS` are overridable
-  env; see the script header.)
+  JSONL — ~55× in practice), and uploads it under the `date=` partition matching
+  the segment's own **seal date** (so a reconcile can locate it by time window).
+  Sealed segments are then **pruned from the box once their S3 copy is
+  confirmed**: `TRACE_LOCAL_RETENTION_DAYS` (default **0**) keeps *nothing*
+  locally — each segment is deleted the same run it is archived (the box is
+  disk-constrained). Set it >0 to keep that many days of sealed segments locally
+  for faster recent reconciles. Either way `pull_live.py` reads sealed segments
+  from S3 and unions them with the live file, so reconciles work after the local
+  copy is gone. (`SEAL_STAMP`/`TRACE_LOCAL_RETENTION_DAYS` are overridable env;
+  see the script header.)
 - `engine/log-filtered.gz` — journald `hl-engine` lines matching the signal
   regex (WARN/ERROR/halt/reject/FEED STALE/drift/…). KB/day, **not** the ~97
   MB/day raw 1 Hz PnL-poll + 429 + reject noise (piped `journalctl|grep|gzip`,

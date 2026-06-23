@@ -303,3 +303,54 @@ if [ "$fail3" -eq 0 ]; then
 else
   exit 1
 fi
+
+# ===========================================================================
+# RETENTION=0 CASE: a freshly-sealed segment must be uploaded AND deleted from
+# the box in the SAME run (keep nothing locally), once its S3 copy is confirmed.
+# `find -mtime +0` would NOT match a <24h-old file, so 0 must be special-cased.
+# ===========================================================================
+
+SANDBOX4=$(mktemp -d)
+trap 'rm -rf "$SANDBOX" "$SANDBOX2" "$SANDBOX3" "$SANDBOX4"' EXIT
+
+ENGINE_ROOT4="$SANDBOX4/engine-data"
+S3_LOCAL4="$SANDBOX4/s3"
+mkdir -p "$ENGINE_ROOT4" "$S3_LOCAL4"
+DATE4="2026-06-22"
+SEAL4="20260622T064500"
+
+sqlite3 "$ENGINE_ROOT4/state.db" <<SQL
+CREATE TABLE events (id INTEGER PRIMARY KEY, strategy_id TEXT);
+INSERT INTO events VALUES (1,'v31');
+SQL
+
+mkdir -p "$ENGINE_ROOT4/v31"
+printf '{"ts_ns":1,"question_idx":4010,"action":"enter"}\n' > "$ENGINE_ROOT4/v31/decision_trace.jsonl"
+
+PATH="$SHIM:$PATH" \
+ARCHIVE_BUCKET="test-bucket" \
+ENGINE_DATA_ROOT="$ENGINE_ROOT4" \
+ENGINE_SYNC_S3_BASE="$S3_LOCAL4" \
+SYNC_DATE="$DATE4" \
+SEAL_STAMP="$SEAL4" \
+TRACE_LOCAL_RETENTION_DAYS=0 \
+LOG_UNIT="hl-engine" \
+  bash "$REPO/scripts/sync-engine-to-s3.sh"
+
+fail4=0
+BASE4="$S3_LOCAL4/date=2026-06-22"
+# Sealed segment is archived to S3 (under its own seal date).
+[ -f "$BASE4/v31/traces/decision_trace.$SEAL4.jsonl.gz" ] \
+  || { echo "FAIL(ret0): segment not uploaded to S3"; fail4=1; }
+# ...and deleted from the box in the SAME run (retention 0 -> keep nothing).
+[ -e "$ENGINE_ROOT4/v31/decision_trace.$SEAL4.jsonl.gz" ] \
+  && { echo "FAIL(ret0): sealed segment still on box (retention=0 must delete)"; fail4=1; } || true
+# Live file was renamed away (engine recreates it).
+[ -e "$ENGINE_ROOT4/v31/decision_trace.jsonl" ] \
+  && { echo "FAIL(ret0): live file not rotated"; fail4=1; } || true
+
+if [ "$fail4" -eq 0 ]; then
+  echo "PASS: sync-engine-to-s3.sh integration test (retention=0 immediate prune)"
+else
+  exit 1
+fi
