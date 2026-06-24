@@ -22,6 +22,17 @@ from .market_state import MarketState
 from .risk import RiskInputs
 from .state import StateDAL
 
+# Heartbeat interval for the per-question decision trace (nanoseconds). The
+# scanner writes a trace row when the decision (action + chosen leg/side)
+# changes, OR when at least this much wall-clock has elapsed since the last
+# WRITTEN row for that question — whichever comes first. Consecutive unchanged
+# `hold` ticks inside this window are suppressed, which is the overwhelming
+# majority of rows. 5s keeps each reconcile 60s-bucket mean (sigma/edge/p_model)
+# well-sampled while cutting raw decision_trace.jsonl growth by ~an order of
+# magnitude. Tighten (e.g. 2–3s) before weakening reconcile tolerances if a
+# bucket mean ever drifts out of tolerance.
+DECISION_TRACE_HEARTBEAT_NS = 5_000_000_000
+
 
 def _binary_favorite_sym(
     question: QuestionView,
@@ -116,6 +127,13 @@ class Scanner:
         # reconciling live decisions against the backtester. Fully disabled
         # (no allocation, no I/O) when ``trace_question_idxs`` is empty.
         self.decision_trace_path = decision_trace_path
+        # Per-question throttle state for the decision trace:
+        #   question_idx -> (last_written_key, last_written_ns)
+        # where last_written_key = (action, chosen_symbol, chosen_side). A row is
+        # written only when the key changes OR the heartbeat has elapsed since
+        # the last WRITTEN row — collapsing the long runs of identical `hold`
+        # ticks that dominate the raw trace. See DECISION_TRACE_HEARTBEAT_NS.
+        self._last_trace_state: dict[int, tuple[tuple[str, str | None, str | None], int]] = {}
         self.trace_question_idxs = trace_question_idxs
         # Coin/class trace filters — each is an ``(underlying, klass)`` pair
         # (e.g. ``("BTC", "priceBinary")``). A question matches if its
@@ -584,6 +602,7 @@ class Scanner:
             self._tradeable_cache.pop(idx, None)
             self._pm_strike_seen.discard(idx)
             self._last_logged_state.pop(idx, None)
+            self._last_trace_state.pop(idx, None)
 
     def _maybe_log_gate_transition(
         self,
@@ -735,6 +754,21 @@ class Scanner:
                     chosen_side = "yes" if idx % 2 == 0 else "no"
                 except ValueError:
                     chosen_side = None
+
+        # --- Throttle: write on-change OR on heartbeat, never every tick ---
+        # Collapse the long runs of identical `hold` ticks that dominate the raw
+        # trace. A row is written iff the decision changed (action OR chosen
+        # leg/side) since the last written row, or the heartbeat has elapsed
+        # since that write. Measuring elapsed time from the last WRITTEN row (not
+        # the last scan) keeps the cadence at ~1 row / heartbeat regardless of
+        # scan frequency, while preserving reconcile's 60s bucket-mean fidelity.
+        trace_key = (decision.action.value, chosen_sym, chosen_side)
+        prev = self._last_trace_state.get(question.question_idx)
+        if prev is not None:
+            prev_key, prev_ns = prev
+            if prev_key == trace_key and (now_ns - prev_ns) < DECISION_TRACE_HEARTBEAT_NS:
+                return
+        self._last_trace_state[question.question_idx] = (trace_key, now_ns)
 
         # --- Book snapshot for chosen leg ---
         sample_book: BookState | None = (books.get(chosen_sym) if chosen_sym else None) or next(

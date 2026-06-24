@@ -23,7 +23,7 @@ from hlanalysis.engine.config import (
     StrategyConfig,
 )
 from hlanalysis.engine.market_state import MarketState
-from hlanalysis.engine.scanner import Scanner
+from hlanalysis.engine.scanner import DECISION_TRACE_HEARTBEAT_NS, Scanner
 from hlanalysis.engine.state import StateDAL
 from hlanalysis.events import (
     BboEvent,
@@ -111,6 +111,44 @@ class _FixedHoldStrategy(Strategy):
             ),
         )
         return Decision(action=Action.HOLD, diagnostics=(diag,))
+
+
+class _ControlStrategy(Strategy):
+    """Strategy whose action and chosen leg can be mutated between scans, to
+    exercise the on-change decision-trace throttle (action change / chosen-leg
+    change force a row even inside the heartbeat window)."""
+
+    name = "control"
+    consumes_hl_bars = False
+
+    def __init__(self) -> None:
+        self.action: Action = Action.HOLD
+        self.chosen_leg: str | None = None
+
+    def evaluate(
+        self,
+        *,
+        question: QuestionView,
+        books: Mapping[str, BookState],
+        reference_price: float,
+        recent_returns: tuple[float, ...],
+        recent_volume_usd: float,
+        position: Position | None,
+        now_ns: int,
+        recent_hl_bars: tuple[tuple[float, float], ...] = (),
+    ) -> Decision:
+        leg = self.chosen_leg if self.chosen_leg is not None else (question.yes_symbol or "")
+        diag = Diagnostic(
+            "info",
+            "edge",
+            (
+                ("sigma", "0.2500"),
+                ("p_model", "0.9200"),
+                ("edge_yes", "0.0300"),
+                ("chosen_leg", leg),
+            ),
+        )
+        return Decision(action=self.action, diagnostics=(diag,))
 
 
 # ── Shared market / config helpers ────────────────────────────────────────────
@@ -218,12 +256,13 @@ def _make_scanner(
     decision_trace_path: Path | None = None,
     strategy_id: str | None = "test_slot",
     config_hash: str | None = "abc123",
+    strategy: Strategy | None = None,
 ) -> Scanner:
     dal = StateDAL(tmp_path / "state.db")
     dal.run_migrations()
     cfg = _strategy_cfg()
     return Scanner(
-        strategy=_FixedHoldStrategy(sigma=0.25),
+        strategy=strategy if strategy is not None else _FixedHoldStrategy(sigma=0.25),
         cfg=cfg,
         market_state=ms,
         dal=dal,
@@ -239,7 +278,8 @@ def _make_scanner(
 
 def test_trace_coin_class_filter_matches(tmp_path: Path) -> None:
     """A coin/class filter traces a question even when its idx is NOT listed —
-    so tomorrow's (unknown-idx) BTC binary is captured from open."""
+    so tomorrow's (unknown-idx) BTC binary is captured from open. Scans are
+    spaced beyond the heartbeat so the throttle writes both rows."""
     ms = _seed_market(_NOW, question_idx=999)  # idx NOT in any idx set
     trace_path = tmp_path / "decision_trace.jsonl"
     scanner = _make_scanner(
@@ -250,7 +290,7 @@ def test_trace_coin_class_filter_matches(tmp_path: Path) -> None:
         decision_trace_path=trace_path,
     )
     scanner.scan(now_ns=_NOW)
-    scanner.scan(now_ns=_NOW + 1_000_000_000)
+    scanner.scan(now_ns=_NOW + DECISION_TRACE_HEARTBEAT_NS)
     assert trace_path.exists()
     rows = [json.loads(line) for line in trace_path.read_text().strip().splitlines()]
     assert len(rows) == 2
@@ -289,8 +329,10 @@ def test_trace_disabled_no_file_created(tmp_path: Path) -> None:
     assert not trace_path.exists(), "trace file must not be created when tracing is disabled"
 
 
-def test_trace_enabled_row_per_scan(tmp_path: Path) -> None:
-    """With tracing enabled, exactly one row is written per scan for the traced question."""
+def test_trace_enabled_heartbeat_row_per_scan(tmp_path: Path) -> None:
+    """With tracing enabled and scans spaced at/over the heartbeat, one row is
+    written per scan for the traced question (heartbeat forces a row even when
+    the decision is unchanged)."""
     ms = _seed_market(_NOW, question_idx=42)
     trace_path = tmp_path / "decision_trace.jsonl"
     scanner = _make_scanner(
@@ -301,12 +343,108 @@ def test_trace_enabled_row_per_scan(tmp_path: Path) -> None:
     )
 
     scanner.scan(now_ns=_NOW)
-    scanner.scan(now_ns=_NOW + 1_000_000_000)
-    scanner.scan(now_ns=_NOW + 2_000_000_000)
+    scanner.scan(now_ns=_NOW + DECISION_TRACE_HEARTBEAT_NS)
+    scanner.scan(now_ns=_NOW + 2 * DECISION_TRACE_HEARTBEAT_NS)
 
     assert trace_path.exists()
     rows = [json.loads(line) for line in trace_path.read_text().strip().splitlines()]
-    assert len(rows) == 3, f"expected 3 rows (one per scan), got {len(rows)}"
+    assert len(rows) == 3, f"expected 3 rows (one per heartbeat-spaced scan), got {len(rows)}"
+
+
+def test_trace_throttle_skips_unchanged_holds_within_heartbeat(tmp_path: Path) -> None:
+    """Consecutive unchanged HOLD decisions within the heartbeat window are NOT
+    written — only the first row appears."""
+    ms = _seed_market(_NOW, question_idx=42)
+    trace_path = tmp_path / "decision_trace.jsonl"
+    scanner = _make_scanner(
+        tmp_path,
+        ms=ms,
+        trace_question_idxs=frozenset({42}),
+        decision_trace_path=trace_path,
+    )
+
+    # Three scans at 1s spacing — all within the 5s heartbeat, same decision.
+    scanner.scan(now_ns=_NOW)
+    scanner.scan(now_ns=_NOW + 1_000_000_000)
+    scanner.scan(now_ns=_NOW + 2_000_000_000)
+
+    rows = [json.loads(line) for line in trace_path.read_text().strip().splitlines()]
+    assert len(rows) == 1, f"unchanged holds within heartbeat must collapse to 1 row, got {len(rows)}"
+    assert rows[0]["ts_ns"] == _NOW
+
+
+def test_trace_throttle_writes_when_heartbeat_elapsed(tmp_path: Path) -> None:
+    """An unchanged HOLD is written again once the heartbeat has elapsed."""
+    ms = _seed_market(_NOW, question_idx=42)
+    trace_path = tmp_path / "decision_trace.jsonl"
+    scanner = _make_scanner(
+        tmp_path,
+        ms=ms,
+        trace_question_idxs=frozenset({42}),
+        decision_trace_path=trace_path,
+    )
+
+    scanner.scan(now_ns=_NOW)
+    # Just under the heartbeat → suppressed.
+    scanner.scan(now_ns=_NOW + DECISION_TRACE_HEARTBEAT_NS - 1)
+    # At/over the heartbeat (measured from the last WRITTEN row) → written.
+    scanner.scan(now_ns=_NOW + DECISION_TRACE_HEARTBEAT_NS)
+
+    rows = [json.loads(line) for line in trace_path.read_text().strip().splitlines()]
+    assert len(rows) == 2, f"expected 2 rows (first + heartbeat), got {len(rows)}"
+    assert rows[0]["ts_ns"] == _NOW
+    assert rows[1]["ts_ns"] == _NOW + DECISION_TRACE_HEARTBEAT_NS
+
+
+def test_trace_throttle_writes_on_action_change(tmp_path: Path) -> None:
+    """A change in the decision's action forces a row even inside the heartbeat."""
+    ms = _seed_market(_NOW, question_idx=42)
+    trace_path = tmp_path / "decision_trace.jsonl"
+    strat = _ControlStrategy()
+    scanner = _make_scanner(
+        tmp_path,
+        ms=ms,
+        trace_question_idxs=frozenset({42}),
+        decision_trace_path=trace_path,
+        strategy=strat,
+    )
+
+    strat.action = Action.HOLD
+    scanner.scan(now_ns=_NOW)
+    # Within heartbeat, but the action flips → must write.
+    strat.action = Action.EXIT
+    scanner.scan(now_ns=_NOW + 1_000_000_000)
+
+    rows = [json.loads(line) for line in trace_path.read_text().strip().splitlines()]
+    assert len(rows) == 2, f"action change must force a row, got {len(rows)}"
+    assert rows[0]["action"] == "hold"
+    assert rows[1]["action"] == "exit"
+
+
+def test_trace_throttle_writes_on_chosen_leg_change(tmp_path: Path) -> None:
+    """A change in the chosen leg/side forces a row even inside the heartbeat,
+    while the same action stays HOLD."""
+    ms = _seed_market(_NOW, question_idx=42, outcome_idx=3)  # YES=#30, NO=#31
+    trace_path = tmp_path / "decision_trace.jsonl"
+    strat = _ControlStrategy()
+    scanner = _make_scanner(
+        tmp_path,
+        ms=ms,
+        trace_question_idxs=frozenset({42}),
+        decision_trace_path=trace_path,
+        strategy=strat,
+    )
+
+    strat.chosen_leg = "#30"  # YES
+    scanner.scan(now_ns=_NOW)
+    # Within heartbeat, same action, but chosen leg flips to NO → must write.
+    strat.chosen_leg = "#31"  # NO
+    scanner.scan(now_ns=_NOW + 1_000_000_000)
+
+    rows = [json.loads(line) for line in trace_path.read_text().strip().splitlines()]
+    assert len(rows) == 2, f"chosen-leg change must force a row, got {len(rows)}"
+    assert rows[0]["chosen_side"] == "yes"
+    assert rows[1]["chosen_side"] == "no"
 
 
 def test_trace_row_has_all_schema_keys(tmp_path: Path) -> None:
