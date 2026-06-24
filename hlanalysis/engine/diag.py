@@ -226,16 +226,22 @@ def _build_slot_snapshot(
     # ---- flag files ----
     halt_info = _flag_info(halt_flag_path)
     blocked_info = _flag_info(restart_blocked_path)
+    # Venue-PnL fail-safe halt (auto-clearing, written by _venue_io). Distinct
+    # from the persistent operator/daily-loss `halt` flag — surfaced here so a
+    # slot stuck on the venue-fail latch is visible, not reported as "running"
+    # (incident 2026-06-24).
+    venue_pnl_halt_info = _flag_info(halt_flag_path.parent / "venue_pnl_halt")
     flags: dict[str, Any] = {
         "restart_blocked": blocked_info,
         "halt": halt_info,
+        "venue_pnl_halt": venue_pnl_halt_info,
     }
 
     # ---- status ----
     # Priority: blocked > halted > paper > running
     if blocked_info["present"]:
         status = "blocked"
-    elif halt_info["present"]:
+    elif halt_info["present"] or venue_pnl_halt_info["present"]:
         status = "halted"
     elif strategy_cfg.paper_mode:
         status = "paper"

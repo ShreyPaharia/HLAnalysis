@@ -47,6 +47,46 @@ from .scanner import Scanner
 # detection for the slot).
 _VENUE_READ_TIMEOUT_S = 30.0
 
+# Visibility flag for the venue-PnL-unreadable fail-safe halt. Unlike the
+# operator/daily-loss kill-switch flag (which is persistent and operator-cleared),
+# this one is written when the fail-safe latches and REMOVED when the venue read
+# recovers, so `engine-diag` / `engine-status` reflect the live state. Sits next
+# to the slot's kill-switch flag.
+VENUE_PNL_HALT_FLAG = "venue_pnl_halt"
+
+
+def _venue_pnl_halt_flag_path(slot: object):
+    return slot.kill_switch_path.parent / VENUE_PNL_HALT_FLAG  # type: ignore[attr-defined]
+
+
+def _set_venue_pnl_halt_flag(slot: object, *, present: bool) -> None:
+    """Write (present=True) or remove (present=False) the venue-PnL-halt flag
+    file. Best-effort: a filesystem hiccup must not crash the PnL read."""
+    path = _venue_pnl_halt_flag_path(slot)
+    try:
+        if present:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(exist_ok=True)
+        else:
+            path.unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("venue_pnl_halt flag {} update failed: {}", path, e)
+
+
+def _recover_venue_pnl_halt(slot: object) -> None:
+    """A successful venue read auto-clears a prior venue-fail halt. Scoped to the
+    venue-fail path ONLY (``venue_pnl_halted``): an operator/daily-loss kill-switch
+    (flag file present) stays latched for the operator. The transient-outage halt
+    must not survive once the venue is readable again (incident 2026-06-24)."""
+    if not getattr(slot, "venue_pnl_halted", False):
+        return
+    slot.venue_pnl_halted = False  # type: ignore[attr-defined]
+    _set_venue_pnl_halt_flag(slot, present=False)
+    # Never override a persistent operator/daily-loss kill (its own flag file).
+    if not slot.kill_switch_path.exists():  # type: ignore[attr-defined]
+        slot.halted = False  # type: ignore[attr-defined]
+        logger.info("venue PnL readable again; cleared venue-fail halt on slot {}", slot.alias)  # type: ignore[attr-defined]
+
 
 async def venue_snapshot(
     slot: object,
@@ -131,6 +171,7 @@ async def realized_pnl_today(
             outcome_only=True,
         )
         venue_pnl_failures[alias] = 0
+        _recover_venue_pnl_halt(slot)
         if slot.is_pm:  # type: ignore[attr-defined]
             settlement_pnl = await asyncio.to_thread(
                 slot.dal.settlement_pnl_since,
@@ -154,6 +195,8 @@ async def realized_pnl_today(
                 alias,
             )
             slot.halted = True  # type: ignore[attr-defined]
+            slot.venue_pnl_halted = True  # type: ignore[attr-defined]
+            _set_venue_pnl_halt_flag(slot, present=True)
         # DAL realized_pnl_since already includes settlement PnL (SHR-53).
         return await asyncio.to_thread(
             slot.dal.realized_pnl_since,

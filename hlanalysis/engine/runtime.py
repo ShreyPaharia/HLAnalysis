@@ -210,6 +210,11 @@ class AccountSlot:
     scans_completed: int = 0
     decisions_emitted: int = 0
     halted: bool = False  # daily-loss / kill-switch latched
+    # Marks a halt set BY the venue-PnL-unreadable fail-safe (_venue_io). Only
+    # these auto-clear when the venue read recovers — a transient HL outage must
+    # not permanently down the slot (incident 2026-06-24). An operator/daily-loss
+    # kill-switch (flag file) leaves this False and stays latched for the operator.
+    venue_pnl_halted: bool = False
     # PM-only mutable state. Non-None iff this is a Polymarket slot (set at build
     # time); HL slots leave it None. Populated/mutated by the PM watchdogs and
     # `_continuous_checks_loop`.
@@ -1179,6 +1184,17 @@ class EngineRuntime:
         pm_bus_sub: asyncio.Queue | None = self.bus.subscribe() if is_pm else None
         while not self.stop_event.is_set():
             try:
+                if slot.halted:
+                    # Auto-recovery probe for the venue-PnL fail-safe halt: the
+                    # scan loop and cap check that normally drive the venue read
+                    # are suspended while halted, so without this probe a
+                    # transient-outage halt would NEVER clear (incident
+                    # 2026-06-24: all 3 HL slots stuck 5h+ after a 47s blip). A
+                    # successful read inside _realized_pnl_today clears the latch.
+                    # Operator/daily-loss kill-switch halts (no venue_pnl_halted)
+                    # are intentionally NOT probed — they require an explicit clear.
+                    if slot.venue_pnl_halted:
+                        await self._realized_pnl_today(slot, now_ns=self._now_ns())
                 if slot.halted:
                     # W1.9: even a halted slot must protect open positions.
                     # The dedicated stop-loss loop also runs enforcement (when

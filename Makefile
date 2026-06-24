@@ -195,7 +195,7 @@ engine-status:
 	aws ssm send-command \
 		--instance-ids "$$INSTANCE_ID" \
 		--document-name "AWS-RunShellScript" \
-		--parameters 'commands=["systemctl status hl-engine.service --no-pager", "echo", "echo === restart_blocked flags (per-slot) ===", "find /opt/hl-recorder/data/engine -name restart_blocked 2>/dev/null | grep . || echo none", "echo", "echo === halt flags (per-slot) ===", "find /opt/hl-recorder/data/engine -name halt 2>/dev/null | grep . || echo none", "echo", "echo === recent journal ===", "journalctl -u hl-engine.service -n 30 --no-pager"]' \
+		--parameters 'commands=["systemctl status hl-engine.service --no-pager", "echo", "echo === restart_blocked flags (per-slot) ===", "find /opt/hl-recorder/data/engine -name restart_blocked 2>/dev/null | grep . || echo none", "echo", "echo === halt flags (per-slot) ===", "find /opt/hl-recorder/data/engine -name halt 2>/dev/null | grep . || echo none", "echo", "echo === venue_pnl_halt flags (auto-clearing fail-safe) ===", "find /opt/hl-recorder/data/engine -name venue_pnl_halt 2>/dev/null | grep . || echo none", "echo", "echo === recent journal ===", "journalctl -u hl-engine.service -n 30 --no-pager"]' \
 		--query "Command.CommandId" \
 		--output text | xargs -I {} sh -c \
 		'sleep 3 && aws ssm get-command-invocation --command-id {} --instance-id '"$$INSTANCE_ID"' --query "StandardOutputContent" --output text'
