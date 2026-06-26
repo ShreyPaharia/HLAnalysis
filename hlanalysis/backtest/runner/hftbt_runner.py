@@ -493,6 +493,15 @@ def run_one_question(
     # for a non-consumer. Range-based σ strategies (late_resolution/Parkinson)
     # leave consumes_hl_bars=True and get the full tuple. See Strategy.consumes_hl_bars.
     _consumes_hl_bars = getattr(strategy, "consumes_hl_bars", True)
+    # PERF (opt-in): HLBT_HL_BARS_NDARRAY=1 passes the HL-bar σ window to the
+    # strategy as the (N,2) ndarray instead of rebuilding a tuple-of-(h,lo) every
+    # scan — ~85x faster for v1 at fine cadence (the tuple build dominates when
+    # the scan interval ≈ the bar interval). DEFAULT OFF so the backtest passes
+    # the SAME tuple container the live scanner builds (sim≡live parity, guarded
+    # by test_runner_tuple_types_match_engine_contract); v1's _sigma_parkinson
+    # computes the bit-identical σ from either container. Used by the fine-cadence
+    # tuning harnesses (experiments/scripts/run_v1_*).
+    _hl_bars_ndarray = os.environ.get("HLBT_HL_BARS_NDARRAY") == "1"
 
     # Bound the per-tick recent_returns/HL window to the seconds the strategy
     # actually consumes, instead of the RunConfig default (86_400s ≈ a full day,
@@ -626,13 +635,14 @@ def run_one_question(
         _evt_idx = 0
         _last_scan_ns = q.start_ts_ns
 
-    # PERF: identity-keyed memo for the per-scan tuple conversion of the returns
-    # σ window (see the build site below). Seeded with a sentinel that can never
-    # equal a real array object, so the first scan always computes. The HL-bar
-    # window is now passed through as an ndarray (no tuple build), so it needs no
-    # memo.
+    # PERF: identity-keyed memo for the per-scan tuple conversion of the σ
+    # windows (see the build site below). Seeded with sentinels that can never
+    # equal a real array object, so the first scan always computes. (The HL-bar
+    # memo is unused when HLBT_HL_BARS_NDARRAY=1, which passes the array directly.)
     _prev_rets_arr: np.ndarray | None = None
     _prev_recent_returns: tuple[float, ...] = ()
+    _prev_hl_arr: np.ndarray | None = None
+    _prev_recent_hl_bars: tuple[tuple[float, float], ...] = ()
 
     while True:
         if event_mode:
@@ -771,19 +781,27 @@ def run_one_question(
             recent_returns = tuple(_rets_arr.tolist())
             _prev_rets_arr = _rets_arr
             _prev_recent_returns = recent_returns
-        # PERF: pass the (N,2) HL-bar window as the ndarray directly, skipping the
-        # per-scan O(window) tuple-of-(h,lo) build. That build was the dominant
-        # cost at fine cadence: when the scan interval ≈ the bar interval (e.g.
-        # dt=5 with a 5s scan) a new bar lands every scan, so the `_hl_arr is
-        # _prev_hl_arr` identity memo misses every tick and the 720-row tuple is
-        # rebuilt ~17k times/question — ~80% of v1 runtime (the (h,lo) genexpr ran
-        # 161M times for a single dt=5 question). The only consumer,
-        # LateResolutionStrategy._sigma_parkinson, accepts an ndarray and computes
-        # the BIT-IDENTICAL Parkinson σ from it (same JIT kernel, float64 columns);
-        # negative-index slicing / len() used by the entry+exit gates work on the
-        # array unchanged. theta sets _consumes_hl_bars=False so it is unaffected.
-        # Verified bit-identical PnL vs the tuple path (test_hl_bars_ndarray_parity).
-        recent_hl_bars = _hl_arr if _consumes_hl_bars else ()
+        # HL-bar σ window. DEFAULT: build the tuple-of-(h,lo) the live scanner
+        # also builds, so sim and live pass the IDENTICAL container type to
+        # strategy.evaluate (sim≡live parity; guarded by
+        # test_runner_tuple_types_match_engine_contract). The identity memo reuses
+        # the prior tuple when the window object is unchanged. Opt-in fast path
+        # (HLBT_HL_BARS_NDARRAY=1): pass the ndarray and skip the per-scan O(window)
+        # build — at fine cadence (scan ≈ bar interval) the memo misses every tick
+        # and the ~720-row tuple is rebuilt ~17k×/question (~80% of v1 runtime).
+        # v1's _sigma_parkinson computes the BIT-IDENTICAL σ from the ndarray
+        # (same JIT kernel; gate slicing/len() work unchanged); theta sets
+        # _consumes_hl_bars=False so it is unaffected.
+        if not _consumes_hl_bars:
+            recent_hl_bars = ()
+        elif _hl_bars_ndarray:
+            recent_hl_bars = _hl_arr
+        elif _hl_arr is _prev_hl_arr:
+            recent_hl_bars = _prev_recent_hl_bars
+        else:
+            recent_hl_bars = tuple((h, lo) for h, lo in _hl_arr.tolist())
+            _prev_hl_arr = _hl_arr
+            _prev_recent_hl_bars = recent_hl_bars
         ref_close = state.latest_btc_close() or qv.strike
 
         decision = strategy.evaluate(
