@@ -19,65 +19,13 @@ strategies:
     # Pattern-based allowlist; matches QuestionMetaEvent fields.
     # Auto-applies across rollovers; blocklist for per-instance escape hatch.
     allowlist:
-      # 24h regime: enter inside the last 2h, winning leg ∈ [0.85, 0.999]. Lower
-      # bound calibrated on PM BTC daily Up/Down (May 2025 – May 2026): walk-forward
-      # 5-OOS-split total $577, full-year $687, Sharpe 3.70, hit 74.9%. Upper bound
-      # widened from PM-optimal 0.97 because HL HIP-4 favorites trade tighter
-      # (0.98–0.9999); the 0.97 cap blocked every HL trade in live. HL-specific
-      # tuning is a follow-up once enough live fills accumulate.
-      - match:
-          class: priceBinary
-          underlying: BTC
-          venue: hyperliquid              # scope to HL; PM BTC binaries share class+underlying
-        max_position_usd: 300             # bumped 200→300 2026-05-24
-        stop_loss_pct: null              # disabled — 1y PM tuning showed any stop hurts net PnL
-        tte_min_seconds: 0
-        tte_max_seconds: 7200
-        price_extreme_threshold: 0.85
-        # 2026-05-19 edge-and-tuning memo P2: tighten upper bound from 0.999 → 0.99.
-        # The 0.001 band contributes zero PnL after the [0,1] fill clamp but is
-        # exactly where stale-high asks live. HL backtest unchanged (no entries
-        # in [0.99, 0.999] in 13-day corpus); strictly defensive.
-        price_extreme_max: 0.99
-        min_safety_d: 3.0
-        vol_lookback_seconds: 3600
-        exit_safety_d: 1.0
-        vol_ewma_lambda: 0.97
-        # 2026-05-30 v1 cadence validation. Parkinson (range/HL) σ is the robust
-        # +$48 lever; paired with dt=5 sub-minute sampling + the gate retune
-        # (min_safety_d 1.0→3.0, λ 0.85→0.97) the dt=5 winner is $269.52 / Sharpe
-        # 9.73 / DD $33 vs the dt=60 baseline $212. v1 + v31 share the BTC feed
-        # and MUST move to dt=5 IN LOCKSTEP (engine conflict-guards a mismatch).
-        # ⚠️ GATE: requires ≥1-week paper validation before live cutover.
-        # See docs/research/v1_cadence_validation_2026_05_30.md.
-        vol_estimator: parkinson
-        vol_sampling_dt_seconds: 5
-        distance_from_strike_usd_min: 0
-        vol_max: 100
-        # Targeted near-strike low-ask size cap — zero size on the 4 catastrophic
-        # leg-flip trades the 1y PM analysis surfaced (BTC within 1.5% of strike,
-        # ask ∈ [0.85, 0.88]). Walk-forward 5-OOS-split total $585 → $679
-        # (+$94, +16%), max drawdown $122 → $90 (−26%), Sharpe 3.88 → 6.22
-        # at fixed trade count (−12 trades, all losers). See
-        # data/sim/tuning/v1-size-cap-pm/.
-        size_cap_near_strike_pct: 1.0
-        size_cap_max_dist_pct: 1.5
-        size_cap_min_ask: 0.88
-        # 2026-05-19 churn fixes — see fixes commit. HL HIP-4 books have
-        # stale top-of-book asks that drove v1 to enter at 0.999 ask and
-        # fill at 0.55-0.60. The bid is structurally a more reliable signal
-        # because stale-high-bids get arbed in ms while stale-high-asks
-        # persist. Sizing and IOC limit still use ask; only the gate moves.
-        use_bid_for_entry_gate: true
-        # 2026-05-19 edge-and-tuning memo P1: raise from 10 → 25.
-        # HL microstructure profile (3.83M ticks, §3 of memo): only 1.4% of v1
-        # entry-gate ticks have bid notional <$10; $25 catches ~18% of thin-book
-        # ticks. PM bid notionals are routinely $thousands → no PM impact.
-        min_bid_notional_usd: 25.0
-        # 60s cooldown after exit on the same question_idx — would have
-        # prevented every churn cycle observed today regardless of which
-        # other gate was misfiring.
-        entry_cooldown_seconds: 60
+      # ── v1 priceBinary TAKEN DOWN 2026-06-26 ──────────────────────────────
+      # Removed the HL BTC priceBinary entry. At live event cadence (0.2/2.0)
+      # v31 dominates binary ($1058/wh$492 vs tuned-v1 $336/$133), and running
+      # both on the same binary markets just double-stacks one near-resolution
+      # signal. v1 now trades **buckets only**; HL BTC binary is v31's book.
+      # (Match logic is allowlist-only — with no priceBinary entry, binary
+      # questions return None from match_question and v1 never trades them.)
       # priceBucket — same per-leg consensus rule across all bucket legs.
       # NOTE: Polymarket bucket data uses an "above-X binary stack" layout that
       # is incompatible with the strategy's HL mutually-exclusive bucket
@@ -90,17 +38,21 @@ strategies:
           class: priceBucket
           underlying: BTC
           venue: hyperliquid              # scope to HL
-        max_position_usd: 300             # bumped 200→300 2026-05-24
+        max_position_usd: 500             # 300→500 2026-06-26 (capital scale-up; v1 is now bucket-only)
         stop_loss_pct: null              # disabled — 1y PM tuning showed any stop hurts net PnL
         tte_min_seconds: 0
-        # 2026-05-22: capped at 6h for live forward-test. Backtest swept
-        # tte∈{2,4,12,24}h post-σ-fix; 24h optimum was selected by total PnL
-        # but live operations want a tighter exposure window than backtest
-        # suggested while we confirm the per-class plumbing change actually
-        # fires. 6h sits between the 4h and 12h backtest points (+$49.49
-        # and +$122.84 / DD $0 respectively); revisit once we have ≥1 week
-        # of live priceBucket fills.
-        tte_max_seconds: 21600
+        # 2026-06-26: 6h → 8h. Event-cadence retune winner (tune at the live
+        # 0.2/2.0 floor; validated at 0.2/2.0): tte8h is a clean Pareto gain —
+        # worst-half $236→$348, full $698→$906, Sharpe 19.6→26.2, maxDD stays $0,
+        # hit 91→94%. λ kept at 0.97 (0.85 was TOXIC at event cadence, −$93);
+        # exit_safety_d kept 0 (any mid-hold/stop exit doom-loops across wide
+        # bucket spreads — only v31's exit_spread_hold avoids it). See
+        # docs/research/2026-06-24-v1-hl-tiered-tune.md + the event-cadence retune.
+        # ⚠️ TAIL: no exit gate ⇒ buy-and-hold; maxDD $0 is tail-blind. Loss-
+        # injection at $500/pos: EV≈$0, P(net loss) ~51%, 5th-pct deeply negative
+        # on an adverse-settlement cluster. The daily_loss_cap below is the
+        # circuit breaker; size accordingly.
+        tte_max_seconds: 28800
         price_extreme_threshold: 0.85
         price_extreme_max: 0.999          # HL HIP-4 favorites trade 0.98-0.9999; 0.97 cap blocked every trade live
         min_safety_d: 3.0                 # dt=5 retune; see priceBinary slot
@@ -121,10 +73,10 @@ strategies:
 
     defaults:
       match: {}
-      max_position_usd: 300               # mirrors allowlist; build_late_resolution_config reads from here
+      max_position_usd: 500               # 300→500 2026-06-26; mirrors bucket allowlist; build_late_resolution_config reads from here
       stop_loss_pct: null
       tte_min_seconds: 0
-      tte_max_seconds: 7200
+      tte_max_seconds: 28800              # bucket-only now; mirror the 8h allowlist value
       price_extreme_threshold: 0.85
       price_extreme_max: 0.999
       min_safety_d: 3.0                    # dt=5 retune; see priceBinary slot
@@ -151,9 +103,14 @@ strategies:
       topup_min_notional_usd: 11.0        # HL per-order min is $10; buffer to 11
 
     global:
-      max_total_inventory_usd: 1000
+      max_total_inventory_usd: 1500       # 1000→1500 2026-06-26: ≈3 concurrent $500 bucket positions (was 3.3× $300)
       max_concurrent_positions: 5
-      daily_loss_cap_usd: 100             # tightened from 200 in lockstep with per-position cap
+      # 100→150 2026-06-26, scaled with the $500 per-position cap. ⚠️ With v1
+      # buckets running NO exit gate (buy-and-hold), this daily realized-loss cap
+      # is the PRIMARY tail protection: one adverse bucket settlement (~−$500)
+      # trips it and halts the slot for the UTC day (operator clears). Tighten for
+      # more protection / loosen for fewer halts — this is the key risk knob.
+      daily_loss_cap_usd: 150
       max_strike_distance_pct: 50       # 50% — BTC moves 5-10% per day, allow room
       min_recent_volume_usd: 100        # HL HIP-4 binaries are inherently thin; 1000 vetoed every trade
       stale_data_halt_seconds: 30       # HIP-4 books update on bursts not steady streams; 5s vetoed every trade
@@ -182,7 +139,7 @@ strategies:
           class: priceBinary
           underlying: BTC
           venue: hyperliquid              # scope to HL; PM BTC binaries share class+underlying
-        max_position_usd: 500             # bumped 300→500 2026-05-24
+        max_position_usd: 750             # 500→750 2026-06-26 (capital scale-up)
         stop_loss_pct: null              # theta_harvester drives exits off edge, not stop-loss
         tte_min_seconds: 0
         # 2026-05-21: 14400 → 43200 (4h → 12h). The original 4h cap was
@@ -207,7 +164,7 @@ strategies:
           class: priceBucket
           underlying: BTC
           venue: hyperliquid              # scope to HL
-        max_position_usd: 500             # bumped 300→500 2026-05-24
+        max_position_usd: 750             # 500→750 2026-06-26 (capital scale-up)
         stop_loss_pct: null
         tte_min_seconds: 0
         # 2026-06-05: 43200 → 28800 (12h → 8h). The short hold avoids the
@@ -226,7 +183,7 @@ strategies:
 
     defaults:
       match: {}
-      max_position_usd: 500
+      max_position_usd: 750               # 500→750 2026-06-26 (capital scale-up)
       stop_loss_pct: null
       tte_min_seconds: 0
       tte_max_seconds: 43200              # mirror priceBinary/Bucket allowlist — engine reads ThetaHarvesterConfig.tte_max from defaults
@@ -237,13 +194,12 @@ strategies:
       entry_cooldown_seconds: 60          # router reads from defaults
 
     global:
-      # 2026-06-02: 1000→1100. v31 saturated at 2 filled positions ($1001.90)
-      # which is $1.90 over the old $1000 cap → every 3rd-leg/top-up entry was
-      # vetoed with max_total_inventory every tick. With per-position cap $500,
-      # 1100 leaves headroom for a 3rd position's first partial fill.
-      max_total_inventory_usd: 1100
+      # 2026-06-02: 1000→1100 (headroom for a 3rd position's partial fill at
+      # $500/pos). 2026-06-26: 1100→1650 with the $750 per-position cap — same
+      # logic: 2 filled positions = $1500, +$150 headroom for a 3rd partial.
+      max_total_inventory_usd: 1650
       max_concurrent_positions: 5
-      daily_loss_cap_usd: 100             # tightened in lockstep with per-position cap
+      daily_loss_cap_usd: 150             # 100→150 2026-06-26, scaled with the $750 per-position cap (v31 exits are tail-protected: esd band + exit_spread_hold)
       max_strike_distance_pct: 50
       min_recent_volume_usd: 100
       stale_data_halt_seconds: 30
