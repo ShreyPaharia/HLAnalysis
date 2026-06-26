@@ -626,13 +626,13 @@ def run_one_question(
         _evt_idx = 0
         _last_scan_ns = q.start_ts_ns
 
-    # PERF: identity-keyed memo for the per-scan tuple conversion of the σ
-    # windows (see the build site below). Seeded with sentinels that can never
-    # equal a real array object, so the first scan always computes.
+    # PERF: identity-keyed memo for the per-scan tuple conversion of the returns
+    # σ window (see the build site below). Seeded with a sentinel that can never
+    # equal a real array object, so the first scan always computes. The HL-bar
+    # window is now passed through as an ndarray (no tuple build), so it needs no
+    # memo.
     _prev_rets_arr: np.ndarray | None = None
     _prev_recent_returns: tuple[float, ...] = ()
-    _prev_hl_arr: np.ndarray | None = None
-    _prev_recent_hl_bars: tuple[tuple[float, float], ...] = ()
 
     while True:
         if event_mode:
@@ -771,18 +771,19 @@ def run_one_question(
             recent_returns = tuple(_rets_arr.tolist())
             _prev_rets_arr = _rets_arr
             _prev_recent_returns = recent_returns
-        # FIX B: bulk C-level unbox via .tolist() then build inner tuples —
-        # bit-identical to float(h)/float(lo) but avoids per-element numpy
-        # scalar boxing in the Python loop (~68% of backtest runtime). Built
-        # ONLY when the strategy consumes it (skip for theta — see above).
-        if not _consumes_hl_bars:
-            recent_hl_bars = ()
-        elif _hl_arr is _prev_hl_arr:
-            recent_hl_bars = _prev_recent_hl_bars
-        else:
-            recent_hl_bars = tuple((h, lo) for h, lo in _hl_arr.tolist())
-            _prev_hl_arr = _hl_arr
-            _prev_recent_hl_bars = recent_hl_bars
+        # PERF: pass the (N,2) HL-bar window as the ndarray directly, skipping the
+        # per-scan O(window) tuple-of-(h,lo) build. That build was the dominant
+        # cost at fine cadence: when the scan interval ≈ the bar interval (e.g.
+        # dt=5 with a 5s scan) a new bar lands every scan, so the `_hl_arr is
+        # _prev_hl_arr` identity memo misses every tick and the 720-row tuple is
+        # rebuilt ~17k times/question — ~80% of v1 runtime (the (h,lo) genexpr ran
+        # 161M times for a single dt=5 question). The only consumer,
+        # LateResolutionStrategy._sigma_parkinson, accepts an ndarray and computes
+        # the BIT-IDENTICAL Parkinson σ from it (same JIT kernel, float64 columns);
+        # negative-index slicing / len() used by the entry+exit gates work on the
+        # array unchanged. theta sets _consumes_hl_bars=False so it is unaffected.
+        # Verified bit-identical PnL vs the tuple path (test_hl_bars_ndarray_parity).
+        recent_hl_bars = _hl_arr if _consumes_hl_bars else ()
         ref_close = state.latest_btc_close() or qv.strike
 
         decision = strategy.evaluate(

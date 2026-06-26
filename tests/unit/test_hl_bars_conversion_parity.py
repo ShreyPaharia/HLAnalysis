@@ -90,3 +90,57 @@ def test_result_elements_are_plain_floats():
     for h, lo in result:
         assert type(h) is float, f"Expected float, got {type(h)}"
         assert type(lo) is float, f"Expected float, got {type(lo)}"
+
+
+# ---------------------------------------------------------------------------
+# ndarray-passthrough parity (hftbt_runner now hands v1 the (N,2) ndarray window
+# directly instead of a tuple-of-(h,lo); see hftbt_runner.py build site). The
+# only consumer, LateResolutionStrategy._sigma_parkinson, must compute the
+# bit-identical Parkinson σ from either container.
+# ---------------------------------------------------------------------------
+
+
+def _v1_strategy():
+    from hlanalysis.strategy.late_resolution import build_v1_late_resolution
+
+    return build_v1_late_resolution(
+        {
+            "tte_min_seconds": 0,
+            "tte_max_seconds": 86400,
+            "price_extreme_threshold": 0.85,
+            "distance_from_strike_usd_min": 0,
+            "vol_max": 100.0,
+            "max_position_usd": 100.0,
+            "stop_loss_pct": None,
+            "max_strike_distance_pct": 50.0,
+            "min_recent_volume_usd": 0.0,
+            "stale_data_halt_seconds": 86400,
+            "vol_estimator": "parkinson",
+            "vol_ewma_lambda": 0.97,
+        }
+    )
+
+
+@pytest.mark.parametrize("seed,n", [(1, 1), (2, 5), (3, 50), (4, 200), (5, 720), (6, 1000)])
+def test_sigma_parkinson_ndarray_equals_tuple(seed: int, n: int):
+    """σ from the (N,2) ndarray window == σ from the tuple-of-(h,lo) window."""
+    strat = _v1_strategy()
+    arr = _make_array(seed, n)
+    # ensure high >= low so the bars are well-formed (Parkinson uses ln(H/L))
+    arr = np.column_stack([arr.max(axis=1), arr.min(axis=1)])
+    returns = tuple(np.diff(np.log(arr[:, 0])).tolist()) if n > 1 else ()
+    tuple_window = tuple((float(h), float(lo)) for h, lo in arr)
+    sig_arr = strat._sigma(returns, arr)
+    sig_tup = strat._sigma(returns, tuple_window)
+    assert sig_arr == sig_tup, f"seed={seed} n={n}: ndarray σ={sig_arr!r} != tuple σ={sig_tup!r}"
+
+
+def test_sigma_parkinson_ndarray_slice_equals_tuple_slice():
+    """The gates slice recent_hl_bars[-n_keep:]; ndarray and tuple slices agree."""
+    strat = _v1_strategy()
+    arr = _make_array(7, 300)
+    arr = np.column_stack([arr.max(axis=1), arr.min(axis=1)])
+    n_keep = 144
+    tuple_window = tuple((float(h), float(lo)) for h, lo in arr)
+    returns = tuple(np.diff(np.log(arr[:, 0])).tolist())
+    assert strat._sigma(returns[-n_keep:], arr[-n_keep:]) == strat._sigma(returns[-n_keep:], tuple_window[-n_keep:])
