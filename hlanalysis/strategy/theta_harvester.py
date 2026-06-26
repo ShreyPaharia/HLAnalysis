@@ -61,6 +61,12 @@ class ThetaHarvesterStrategy(Strategy):
         self.cfg = cfg
         self._default_cfg = cfg
         self._cfg_by_class: dict[str, ThetaHarvesterConfig] = dict(cfg_by_class) if cfg_by_class else {}
+        # Per-leg consecutive-breach counter for the exit_safety_d dwell filter.
+        # Keyed (question_idx, symbol). Pruned when a question goes flat/settles
+        # (see _evaluate). Instance-scoped so it accrues across scans in BOTH the
+        # live Scanner and the backtest runner (one strategy instance per slot,
+        # evaluate() called once per scan) — shared-spine-safe and deterministic.
+        self._safety_d_breach_count: dict[tuple[int, str], int] = {}
 
     def _cfg_for(self, question: QuestionView) -> ThetaHarvesterConfig:
         return self._cfg_by_class.get(question.klass, self._default_cfg)
@@ -144,6 +150,16 @@ class ThetaHarvesterStrategy(Strategy):
         now_ns: int,
         recent_hl_bars: tuple[tuple[float, float], ...] = (),
     ) -> Decision:
+        # Prune dwell counters for this question whenever it is flat or settled —
+        # the breach streak is only meaningful while a leg is actively held. This
+        # runs before any early return so settled/evicted questions don't leak
+        # per-leg counters. (No-op when the dict has no entry for this question.)
+        if position is None or question.settled:
+            qidx = question.question_idx
+            stale = [k for k in self._safety_d_breach_count if k[0] == qidx]
+            for k in stale:
+                del self._safety_d_breach_count[k]
+
         # Phase A: settlement
         if question.settled:
             if position is not None:
@@ -779,6 +795,9 @@ class ThetaHarvesterStrategy(Strategy):
         # (drift-aware). Skipped when σ·√τ is non-positive or the leg has no
         # contiguous winning region (middle-bucket NO).
         # Skipped when _spread_hold_active (SHR-102 hold-to-settle).
+        # Dwell-pending diagnostic, surfaced on the eventual HOLD when a safety_d
+        # breach has not yet persisted for exit_safety_d_dwell_scans (dwell>1 only).
+        _dwell_pending_diag: Diagnostic | None = None
         if self.cfg.exit_safety_d > 0.0 and not _spread_hold_active:
             safety_d = _safety_d_for_region(
                 reference_price=reference_price,
@@ -788,28 +807,52 @@ class ThetaHarvesterStrategy(Strategy):
                 mu_eff=mu_eff,
                 tau_yr=tau_yr,
             )
-            if safety_d is not None and safety_d < self.cfg.exit_safety_d:
-                intent = make_exit_intent(
-                    question,
-                    position,
-                    limit_price=held.bid_px,
-                    exit_reason="exit_safety_d",
-                )
-                return Decision(
-                    action=Action.EXIT,
-                    intents=(intent,),
-                    diagnostics=(
-                        Diagnostic(
-                            "info",
-                            "exit_safety_d",
-                            (
-                                ("exit_reason", "safety_d_below_threshold"),
-                                ("exit_safety_d", f"{safety_d:.4f}"),
-                                ("exit_threshold", f"{self.cfg.exit_safety_d:.4f}"),
+            if safety_d is not None:
+                _key = (question.question_idx, position.symbol)
+                if safety_d < self.cfg.exit_safety_d:
+                    # Consecutive-breach streak. Exit only once it reaches the
+                    # configured dwell count — a transient excursion that reverts
+                    # next scan never reaches the threshold. dwell=1 → fire on the
+                    # first breach (bit-identical to the legacy single-scan exit).
+                    _count = self._safety_d_breach_count.get(_key, 0) + 1
+                    self._safety_d_breach_count[_key] = _count
+                    if _count >= self.cfg.exit_safety_d_dwell_scans:
+                        intent = make_exit_intent(
+                            question,
+                            position,
+                            limit_price=held.bid_px,
+                            exit_reason="exit_safety_d",
+                        )
+                        return Decision(
+                            action=Action.EXIT,
+                            intents=(intent,),
+                            diagnostics=(
+                                Diagnostic(
+                                    "info",
+                                    "exit_safety_d",
+                                    (
+                                        ("exit_reason", "safety_d_below_threshold"),
+                                        ("exit_safety_d", f"{safety_d:.4f}"),
+                                        ("exit_threshold", f"{self.cfg.exit_safety_d:.4f}"),
+                                    ),
+                                ),
                             ),
+                        )
+                    # Breach not yet persistent — suppress the soft exit but keep
+                    # evaluating the remaining exit rules (exit_edge can still fire
+                    # if the bid has genuinely collapsed). Surface the streak.
+                    _dwell_pending_diag = Diagnostic(
+                        "info",
+                        "exit_safety_d_dwell_pending",
+                        (
+                            ("safety_d", f"{safety_d:.4f}"),
+                            ("count", str(_count)),
+                            ("dwell", str(self.cfg.exit_safety_d_dwell_scans)),
                         ),
-                    ),
-                )
+                    )
+                else:
+                    # Recovered above threshold → reset the streak.
+                    self._safety_d_breach_count.pop(_key, None)
 
         pp = _p_leg_win_prob_and_phi(
             reference_price=reference_price,
@@ -893,6 +936,8 @@ class ThetaHarvesterStrategy(Strategy):
                     ),
                 ),
             ) + hold_diags
+        if _dwell_pending_diag is not None:
+            hold_diags = (_dwell_pending_diag,) + hold_diags
         return Decision(action=Action.HOLD, diagnostics=hold_diags)
 
     def _evaluate_topup(
