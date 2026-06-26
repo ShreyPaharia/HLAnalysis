@@ -24,6 +24,9 @@ from loguru import logger
 
 from ..engine.event_bus import EventBus
 from ..engine.risk_events import (
+    BENIGN_VETO_REASONS as _BENIGN_VETO_REASONS,
+)
+from ..engine.risk_events import (
     BusEvent,
     DailyLossHalt,
     Entry,
@@ -50,41 +53,12 @@ class _TelegramLike(Protocol):
     async def send(self, text: str, *, markdown: bool = True) -> bool: ...
 
 
-# RiskVeto reasons that reflect ordinary *market conditions* — the gate is
-# correctly declining to trade an illiquid/quiet/mispriced market — rather than
-# an engine or risk-state problem. They re-fire on every scan when a slot is
-# pointed at a thin market (the v31_pm_eth_ms ETH-multistrike incident
-# 2026-06-12 emitted ≈240/h), require no operator action, and self-heal when the
-# market moves. They are still logged (`logger.info` in the router) and journaled
-# (SHR-83), so diagnostics keep full visibility — only the Telegram page is
-# suppressed. Mirrors the OrderRejected FAK no-match suppression below.
-#
-# Reasons NOT in this set page by default (fail-safe): engine/risk-state vetoes
-# (daily_loss_cap, kill_switch_active, max_*_usd / max_concurrent_positions,
-# stale_reconcile, stale_reference, opposite_leg_held, size_invalid) and any
-# newly-added reason stay visible until explicitly classified as benign.
-_BENIGN_VETO_REASONS = frozenset(
-    {
-        "low_volume",  # market notional below floor (thin book)
-        "stale_data",  # the trading leg's book has gone quiet (PM favorites do)
-        "strike_distance",  # favorite too far from the reference price
-        "tte_out_of_window",  # outside the slot's time-to-expiry window
-        "depth_walk_no_fill",  # no level marketable at our limit (book ticked away)
-        "depth_walk_slip",  # at-limit fill would exceed the slippage cap
-        "order_below_min_notional",  # effective size clamped below the min-notional floor
-        "post_exit_cooldown",  # churn guard — re-entry too soon after an exit
-        # Slot at its concurrent-position cap while the strategy keeps proposing
-        # entries every scan — the cap is the gate working as designed and
-        # re-fires every tick with no operator action possible (incident
-        # 2026-06-16 v31_pm_eth_ms q=2026151396). An untracked position eating a
-        # slot still surfaces via the venue_orphan/qty_mismatch drift alerts, so
-        # suppressing this page loses no visibility.
-        "max_concurrent_positions",
-        "settled",  # market already cash-settled
-        "allowlist_no_match",  # question not in this slot's allowlist
-        "blocklist",  # question explicitly blocked
-    }
-)
+# `_BENIGN_VETO_REASONS` is imported from engine.risk_events (single source of
+# truth). It re-fires on every scan when a slot is pointed at a thin/multi-strike
+# market, requires no operator action, and self-heals — so AlertRules suppresses
+# it from Telegram entirely (the router additionally throttles its persistence/
+# logging to on-change + heartbeat). Mirrors the OrderRejected FAK no-match
+# suppression below.
 
 
 # PM reconcile drift resolutions that are informational and PERSISTENT: the

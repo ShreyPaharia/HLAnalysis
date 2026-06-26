@@ -18,7 +18,7 @@ from .event_bus import EventBus
 from .exec_client import ExecutionClient
 from .exec_types import PlaceRequest
 from .risk import RiskGate, RiskInputs
-from .risk_events import Entry, Exit, OrderRejected, ReconcileDrift, RiskVeto
+from .risk_events import BENIGN_VETO_REASONS, Entry, Exit, OrderRejected, ReconcileDrift, RiskVeto
 from .state import Fill, OpenOrder, Position, StateDAL
 from .trade_journal import HaltSnapshot, TradeJournal
 
@@ -46,6 +46,20 @@ _PM_BALANCE_SHORTFALL_RE = re.compile(
 # so 5 min is generous; the 6h RedemptionTimeout watchdog backstops a stuck
 # PM redemption independently. (Incident 2026-06-12: HL legs settling at $0.)
 _SETTLEMENT_DEFER_TIMEOUT_NS = 300 * 1_000_000_000
+
+# How often a *benign* market-condition veto (BENIGN_VETO_REASONS) is allowed to
+# persist/log per reason, per slot. These re-fire on EVERY scan tick for every
+# thin/quiet/at-cap candidate leg — a multi-strike slot pointed at ~600 legs
+# emitted 613k risk_veto/day (v31_pm_eth_ms), saturating the 1M-row events table
+# (~30h retained), the 100k-row trade_journal (~7.7h, 94% max_concurrent_positions)
+# and journald (763 MB, ~20h) — so real audit history was evicted within a day.
+# We emit the FIRST occurrence (on-change) then at most one heartbeat per window,
+# carrying the count suppressed since the last emit. Trading is unaffected: the
+# order is still vetoed every tick (the gate verdict is unchanged); only the
+# journaling/logging of the veto is throttled. Non-benign (engine/risk-state)
+# vetoes are NEVER throttled — they always emit, fail-safe. Mirrors the
+# decision-trace on-change+heartbeat throttle (commit 3b80608).
+_BENIGN_VETO_THROTTLE_NS = 300 * 1_000_000_000
 
 
 def _pm_settlement_winner_known(qv: QuestionView | None) -> bool:
@@ -161,6 +175,81 @@ class Router:
         # Wall-clock (ns) of the most recent reject per (qidx, side), driving the
         # auto-reset window above.
         self._last_reject_ts: dict[tuple[int, str], int] = {}
+        # Benign-veto throttle state (per slot, keyed by veto reason). See
+        # _BENIGN_VETO_THROTTLE_NS / _throttle_benign_veto. Bounded: keys are the
+        # finite BENIGN_VETO_REASONS set, so no prune is needed.
+        self._benign_veto_last_emit_ns: dict[str, int] = {}
+        self._benign_veto_suppressed: dict[str, int] = {}
+
+    def _throttle_benign_veto(self, reason: str, now_ns: int) -> tuple[bool, int]:
+        """Decide whether to emit (persist+log) this veto, throttling benign
+        market-condition reasons to on-change + a periodic heartbeat.
+
+        Returns ``(emit, suppressed_since_last)``:
+          * Non-benign reason → ``(True, 0)`` always (fail-safe; never throttled).
+          * Benign + first sight or window elapsed → ``(True, n)`` where ``n`` is
+            how many were suppressed since the last emit (carried into the alert
+            detail so the heartbeat reports the true rate).
+          * Benign + within window → ``(False, 0)``; the suppressed counter for
+            this reason is incremented.
+        """
+        if reason not in BENIGN_VETO_REASONS:
+            return True, 0
+        last = self._benign_veto_last_emit_ns.get(reason)
+        if last is None or (now_ns - last) >= _BENIGN_VETO_THROTTLE_NS:
+            suppressed = self._benign_veto_suppressed.pop(reason, 0)
+            self._benign_veto_last_emit_ns[reason] = now_ns
+            return True, suppressed
+        self._benign_veto_suppressed[reason] = self._benign_veto_suppressed.get(reason, 0) + 1
+        return False, 0
+
+    async def _emit_veto(
+        self,
+        *,
+        reason: str,
+        detail: dict[str, str],
+        decision: Decision,
+        intent: OrderIntent,
+        inputs: RiskInputs,
+        now_ns: int,
+        recent_returns: tuple[float, ...],
+        halt: HaltSnapshot | None,
+    ) -> None:
+        """Persist + log a veto, throttling benign market-condition reasons.
+
+        Single emission point for both veto sites (post-exit cooldown + risk
+        gate) so the throttle covers all three sinks consistently: the events
+        table (via the bus → events_persist_loop), the trade_journal (via
+        record_decision/record_reject) and journald (via the bus publish-log +
+        the line below). When throttled, NONE of them are written — that is the
+        flood fix. Trading is already decided by the caller (the order is not
+        placed regardless); this only governs visibility.
+        """
+        emit, suppressed = self._throttle_benign_veto(reason, now_ns)
+        if not emit:
+            return
+        # SHR-83: journal the decision (+ its reject) only when we actually emit.
+        # Throttled benign vetoes would otherwise insert+delete a journal row on
+        # every scan tick — the flood we are removing.
+        self._journal_decision(decision, intent, inputs, now_ns, recent_returns, halt)
+        self._journal_reject(intent.cloid, reason)
+        if suppressed:
+            detail = {**detail, "suppressed_since_last": str(suppressed)}
+        await self.bus.publish(
+            RiskVeto(
+                ts_ns=now_ns,
+                account_alias=self.account_alias,
+                reason=reason,
+                question_idx=intent.question_idx,
+                detail=detail,
+            )
+        )
+        logger.info(
+            "risk veto cloid={} reason={} detail={}",
+            intent.cloid,
+            reason,
+            detail,
+        )
 
     def _cooldown_path(self) -> Path:
         return Path(self.dal.db_path).parent / "exit_cooldowns.json"
@@ -228,10 +317,6 @@ class Router:
             return
         for intent in decision.intents:
             intent = self._stamp_cloid(intent)
-            # SHR-83: journal the decision the instant the cloid is final, so
-            # every emitted order has a row regardless of whether it is later
-            # vetoed, rejected, or filled. Best-effort, off the hot path.
-            self._journal_decision(decision, intent, inputs, now_ns, recent_returns, halt)
             # Post-exit cooldown — applies to ENTRIES only (reduce_only exits
             # are always allowed, otherwise we couldn't close fast on a flip).
             # Catches v1-style churn where the strategy re-enters at the top
@@ -243,45 +328,36 @@ class Router:
                 last_exit = self._last_exit_ts.get(intent.question_idx, 0)
                 elapsed_s = (now_ns - last_exit) / 1e9
                 if last_exit > 0 and elapsed_s < cooldown_s:
-                    await self.bus.publish(
-                        RiskVeto(
-                            ts_ns=now_ns,
-                            account_alias=self.account_alias,
-                            reason="post_exit_cooldown",
-                            question_idx=intent.question_idx,
-                            detail={
-                                "cooldown_s": f"{cooldown_s}",
-                                "elapsed_s": f"{elapsed_s:.1f}",
-                            },
-                        )
+                    await self._emit_veto(
+                        reason="post_exit_cooldown",
+                        detail={"cooldown_s": f"{cooldown_s}", "elapsed_s": f"{elapsed_s:.1f}"},
+                        decision=decision,
+                        intent=intent,
+                        inputs=inputs,
+                        now_ns=now_ns,
+                        recent_returns=recent_returns,
+                        halt=halt,
                     )
-                    logger.info(
-                        "post_exit_cooldown veto q={} elapsed_s={:.1f} cooldown_s={}",
-                        intent.question_idx,
-                        elapsed_s,
-                        cooldown_s,
-                    )
-                    self._journal_reject(intent.cloid, "post_exit_cooldown")
                     continue
             verdict = self.gate.check_pre_trade(intent, inputs)
             if not verdict.approved:
-                self._journal_reject(intent.cloid, verdict.reason)
-                await self.bus.publish(
-                    RiskVeto(
-                        ts_ns=now_ns,
-                        account_alias=self.account_alias,
-                        reason=verdict.reason,
-                        question_idx=intent.question_idx,
-                        detail=verdict.detail or {},
-                    )
-                )
-                logger.info(
-                    "risk veto cloid={} reason={} detail={}",
-                    intent.cloid,
-                    verdict.reason,
-                    verdict.detail,
+                await self._emit_veto(
+                    reason=verdict.reason,
+                    detail=verdict.detail or {},
+                    decision=decision,
+                    intent=intent,
+                    inputs=inputs,
+                    now_ns=now_ns,
+                    recent_returns=recent_returns,
+                    halt=halt,
                 )
                 continue
+            # Approved. SHR-83: journal the decision now that the cloid is final
+            # and the order is about to be sent, so the subsequent send/fill
+            # updates have a row to attach to. (Vetoed intents are journaled
+            # inside _emit_veto, throttled for benign reasons; approved orders
+            # are always journaled.)
+            self._journal_decision(decision, intent, inputs, now_ns, recent_returns, halt)
             # Depth-walk may approve with a smaller size when at-limit liquidity
             # is below the intended quantity. Resize the intent before placement;
             # the strategy's topup loop closes the residual shortfall next tick.

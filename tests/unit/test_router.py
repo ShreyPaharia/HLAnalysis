@@ -730,6 +730,81 @@ async def test_post_exit_cooldown_disabled_when_seconds_is_zero(tmp_path):
     assert isinstance(ev, Entry)
 
 
+def _drain(sub) -> list:
+    """Pull every queued bus event without blocking."""
+    out: list = []
+    while True:
+        try:
+            out.append(sub.get_nowait())
+        except asyncio.QueueEmpty:
+            return out
+
+
+@pytest.mark.asyncio
+async def test_benign_veto_throttled_to_heartbeat(tmp_path):
+    """A benign market-condition veto (low_volume) that re-fires every scan tick
+    must publish only ONCE per throttle window (on-change + periodic heartbeat),
+    not on every call. Otherwise a thin-market slot floods the events DB,
+    trade_journal and journald — the v31_pm_eth_ms incident (613k risk_veto/day
+    evicting all real history within ~30h). Trading is unaffected: the order is
+    still vetoed every tick; only its journaling/logging is throttled."""
+    import sqlite3
+
+    from hlanalysis.engine.trade_journal import TradeJournal
+
+    db = tmp_path / "state.db"
+    dal = StateDAL(db)
+    dal.run_migrations()
+    bus = EventBus()
+    sub = bus.subscribe()
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
+    cfg = _strategy_cfg()
+    journal = TradeJournal(dal)
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg, journal=journal)
+
+    # recent_volume_usd below the min floor → gate vetoes low_volume (benign).
+    inputs = replace(_approval_inputs(), recent_volume_usd=0.0)
+    base = 10_000_000_000_000_001
+    for i in range(5):
+        d = Decision(action=Action.ENTER, intents=(replace(_decision_enter().intents[0], cloid=f"hla-lv-{i}"),))
+        await router.handle(d, inputs=inputs, now_ns=base + i)  # all within the throttle window
+    vetoes = [e for e in _drain(sub) if isinstance(e, RiskVeto) and e.reason == "low_volume"]
+    assert len(vetoes) == 1, f"expected 1 throttled veto, got {len(vetoes)}"
+    assert dal.get_order("hla-lv-0") is None  # still no order placed
+
+    # Advance past the window → heartbeat re-emits, carrying the suppressed count.
+    far = base + 400 * 1_000_000_000
+    d = Decision(action=Action.ENTER, intents=(replace(_decision_enter().intents[0], cloid="hla-lv-late"),))
+    await router.handle(d, inputs=inputs, now_ns=far)
+    later = [e for e in _drain(sub) if isinstance(e, RiskVeto) and e.reason == "low_volume"]
+    assert len(later) == 1
+    assert later[0].detail.get("suppressed_since_last") == "4"
+
+    # trade_journal must hold the emitted samples only, not all six vetoes.
+    n = sqlite3.connect(db).execute("select count(*) from trade_journal").fetchone()[0]
+    assert n <= 2, f"trade_journal flooded with {n} rows"
+
+
+@pytest.mark.asyncio
+async def test_non_benign_veto_not_throttled(tmp_path):
+    """Engine/risk-state vetoes (kill_switch_active) are fail-safe: they publish
+    EVERY time, never throttled, so a real risk condition is always visible."""
+    dal = StateDAL(tmp_path / "state.db")
+    dal.run_migrations()
+    bus = EventBus()
+    sub = bus.subscribe()
+    client = HLClient(account_address="0x", api_secret_key="0x", base_url="x", paper_mode=True)
+    cfg = _strategy_cfg()
+    router = Router(dal=dal, gate=RiskGate(cfg), bus=bus, exec_client=client, strategy_cfg=cfg)
+    inputs = replace(_approval_inputs(), kill_switch_active=True)  # reason kill_switch_active (not benign)
+    base = 10_000_000_000_000_001
+    for i in range(3):
+        d = Decision(action=Action.ENTER, intents=(replace(_decision_enter().intents[0], cloid=f"hla-ks-{i}"),))
+        await router.handle(d, inputs=inputs, now_ns=base + i)
+    vetoes = [e for e in _drain(sub) if isinstance(e, RiskVeto) and e.reason == "kill_switch_active"]
+    assert len(vetoes) == 3
+
+
 def _make_router(tmp_path, cfg=None) -> Router:
     """Build a Router pointed at tmp_path/state.db. Shared cooldown-persistence helper."""
     dal = StateDAL(tmp_path / "state.db")

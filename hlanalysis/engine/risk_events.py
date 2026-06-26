@@ -21,6 +21,51 @@ class RiskVeto(_Base):
     detail: dict[str, str] = Field(default_factory=dict)
 
 
+# RiskVeto reasons that reflect ordinary *market conditions* — the gate is
+# correctly declining to trade an illiquid/quiet/mispriced market — rather than
+# an engine or risk-state problem. They re-fire on every scan when a slot is
+# pointed at a thin/multi-strike market (the v31_pm_eth_ms ETH-multistrike
+# incident emitted 613k risk_veto/day, evicting all real history from the events
+# DB and journald), require no operator action, and self-heal when the market
+# moves.
+#
+# Single source of truth shared by THREE consumers so the classification can't
+# drift between them:
+#   * AlertRules — suppresses these from Telegram entirely (a thin market is not
+#     pageable).
+#   * Router — throttles their persistence/logging to on-change + a periodic
+#     heartbeat (the events DB, trade_journal and journald flood fix).
+#   * (TradeJournal carries its own configurable suppress set, a superset-safe
+#     subset of these, for the per-order journal.)
+#
+# Reasons NOT in this set are fail-safe: engine/risk-state vetoes
+# (daily_loss_cap, kill_switch_active, max_*_usd, stale_reconcile,
+# stale_reference, opposite_leg_held, size_invalid, no_reconcile_yet) and any
+# newly-added reason stay fully visible until explicitly classified as benign.
+BENIGN_VETO_REASONS = frozenset(
+    {
+        "low_volume",  # market notional below floor (thin book)
+        "stale_data",  # the trading leg's book has gone quiet (PM favorites do)
+        "strike_distance",  # favorite too far from the reference price
+        "tte_out_of_window",  # outside the slot's time-to-expiry window
+        "depth_walk_no_fill",  # no level marketable at our limit (book ticked away)
+        "depth_walk_slip",  # at-limit fill would exceed the slippage cap
+        "order_below_min_notional",  # effective size clamped below the min-notional floor
+        "post_exit_cooldown",  # churn guard — re-entry too soon after an exit
+        # Slot at its concurrent-position cap while the strategy keeps proposing
+        # entries every scan for every other candidate leg — the cap is the gate
+        # working as designed and re-fires every tick with no operator action
+        # possible (the #1 flood reason on v31_pm_eth_ms: 340k/day). An untracked
+        # position eating a slot still surfaces via the venue_orphan/qty_mismatch
+        # drift alerts, so throttling this loses no visibility.
+        "max_concurrent_positions",
+        "settled",  # market already cash-settled
+        "allowlist_no_match",  # question not in this slot's allowlist
+        "blocklist",  # question explicitly blocked
+    }
+)
+
+
 class RiskHalt(_Base):
     kind: Literal["risk_halt"] = "risk_halt"
     reason: str
