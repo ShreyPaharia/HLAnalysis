@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
     # Only needed for type annotations in builder return types — not at runtime.
@@ -63,6 +63,15 @@ class ThetaHarvesterParams(BaseModel):
     topup_min_notional_usd: float = 11.0
     # === optional: exit extras / vol estimator / jump gate ===
     exit_safety_d: float = 0.0
+    # Dwell/confirmation filter on the σ-normalized exit_safety_d soft-exit.
+    # The exit only fires after safety_d has stayed below exit_safety_d for this
+    # many CONSECUTIVE evaluate() scans — filtering single-tick reference
+    # excursions that revert and settle in-band (the v31 bucket whipsaw, e.g.
+    # leg #6460 sold @0.36 3min pre-settlement then settled @1.0). 1 == current
+    # behavior (exit on the first breach), so the default is bit-identical. The
+    # counter resets the moment safety_d recovers above threshold; the HARD
+    # stop_loss/time_stop/take_profit/exit_edge/settlement paths are unaffected.
+    exit_safety_d_dwell_scans: int = Field(default=1, ge=1)
     # Entry-side safety_d floor (mirrors v1's min_safety_d). Forms a hysteresis
     # band with exit_safety_d to stop enter→exit→re-enter churn. 0 disables.
     min_safety_d: float = 0.0
@@ -196,6 +205,11 @@ class ThetaHarvesterConfig:
     # drifting toward the boundary, catching long-TTE losers earlier.
     # 0.0 disables (legacy behavior). Typical values: 0.25-1.0 (σ-units).
     exit_safety_d: float = 0.0
+    # Dwell/confirmation count for the exit_safety_d soft-exit. The exit fires
+    # only after safety_d < exit_safety_d holds for this many CONSECUTIVE scans.
+    # 1 == legacy (exit on first breach; bit-identical). >1 filters single-tick
+    # reference excursions that revert. Counter resets when safety_d recovers.
+    exit_safety_d_dwell_scans: int = 1
     # Entry-side safety_d floor — the gate v1 (late_resolution) has but theta
     # historically lacked. Requires the candidate leg's σ√τ distance from its
     # nearest adverse boundary to be ≥ this before entering. Paired with a
@@ -379,6 +393,7 @@ def build_v3_theta_harvester(params: dict) -> ThetaHarvesterStrategy:
         topup_threshold_pct=float(params.get("topup_threshold_pct", _D.topup_threshold_pct)),
         topup_min_notional_usd=float(params.get("topup_min_notional_usd", _D.topup_min_notional_usd)),
         exit_safety_d=float(params.get("exit_safety_d", _D.exit_safety_d)),
+        exit_safety_d_dwell_scans=int(params.get("exit_safety_d_dwell_scans", _D.exit_safety_d_dwell_scans)),
         min_safety_d=float(params.get("min_safety_d", _D.min_safety_d)),
         vol_estimator=str(params.get("vol_estimator", _D.vol_estimator)),
         lm_threshold=(float(params["lm_threshold"]) if params.get("lm_threshold") is not None else _D.lm_threshold),
