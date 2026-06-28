@@ -1,0 +1,36 @@
+# Walk-forward grid for the exit_safety_d dwell/confirmation filter on HL buckets.
+# SWEEP: exit_safety_d_dwell_scans {1,2,3,5} x bucket vol_sampling_dt {2,4,6,10}.
+# All other knobs PINNED to the C3 bucket baseline (deliberate tail-guard
+# exit_safety_d=1.0). dwell=1 + dt=2 cell must reproduce C3 (re-baseline check).
+grids:
+  v3_theta_harvester:
+    # --- swept ---
+    exit_safety_d_dwell_scans: [1, 2, 3, 5]
+    vol_sampling_dt_seconds: [2, 4, 6, 10]
+    # --- pinned (C3 bucket baseline) ---
+    favorite_threshold: [0.85]
+    edge_buffer: [0.02]
+    vol_lookback_seconds: [2700]
+    exit_safety_d: [1.0]
+    min_safety_d: [2.0]
+    vol_estimator: [sample_std]
+    exit_edge_threshold: [0.0]
+    exit_take_profit_mode: [true]
+    tte_min_seconds: [0]
+    tte_max_seconds: [43200]
+    time_stop_seconds: [0]
+    fee_model: [flat]
+    fee_taker: [0.0]
+    half_spread_assumption: [0.005]
+    drift_lookback_seconds: [3600]
+    drift_blend: [0.0]
+    max_position_usd: [750.0]
+    vol_clip_min: [0.0]
+    vol_clip_max: [5.0]
+    exit_fee: [0.0007]
+
+run:
+  train_markets: 15
+  test_markets: 2
+  step_markets: 2
+  max_workers: 4
