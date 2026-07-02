@@ -112,6 +112,19 @@ _PRICE_EVENT_TYPES = (
     TradeEvent,
 )
 
+# Alert-only reconcile-drift throttle window (P2, 2026-07-02 flood). Live PM
+# reconcile emitted an identical alert-only ReconcileDrift (qty_mismatch_alert_only)
+# every ~15s reconcile cycle forever on a single position — alert-only mode keeps
+# the drift local, so it never converges (v31_pm: 1655 events in 65h on ONE
+# position, hl_qty=53.892109 vs db_qty=53.868533, a ~0.0236-share dust gap just
+# above the 2e-2 tolerance). Mirrors the router's benign-veto throttle
+# (`_BENIGN_VETO_THROTTLE_NS` / `Router._throttle_benign_veto`): emit on first
+# sight, emit again immediately on-change, otherwise suppress until this
+# heartbeat window elapses. Only alert-only drifts are throttled — anything
+# else (apply-mode adoptions, material drift, missing resolution) always
+# publishes, fail-safe.
+_DRIFT_ALERT_THROTTLE_NS = 30 * 60 * 1_000_000_000  # 30 minutes
+
 # Map of Binance SPOT symbols → internal remapped symbols used in MarketState.
 # PM strategy slots reference these via `reference_symbol: <SYMBOL>_SPOT` in
 # config/strategy.yaml — those YAML strings MUST match these values exactly, or
@@ -308,6 +321,13 @@ class EngineRuntime:
     # material_qty_drift blocks debounce/auto-clear.
     material_drift_debounce_cycles: int = 3
     material_drift_clear_cycles: int = 3
+    # Alert-only reconcile-drift throttle state (P2, see _DRIFT_ALERT_THROTTLE_NS).
+    # Keyed by (account_alias, question_idx, resolution). Bounded by live
+    # question/resolution churn — not evicted, but the key space is small
+    # relative to the process lifetime (mirrors the router's benign-veto dicts).
+    _drift_alert_last_emit_ns: dict[tuple[str, int | None, str], int] = field(default_factory=dict)
+    _drift_alert_last_sig: dict[tuple[str, int | None, str], str] = field(default_factory=dict)
+    _drift_alert_suppressed: dict[tuple[str, int | None, str], int] = field(default_factory=dict)
 
     # ---------- legacy single-strategy compatibility ----------
 
@@ -881,7 +901,43 @@ class EngineRuntime:
         if getattr(slot.exec_client, "paper_mode", False):
             return
         for ev in drift_events:
+            emit, suppressed = self._throttle_drift_alert(ev, ev.ts_ns)
+            if not emit:
+                continue
+            if suppressed:
+                ev = ev.model_copy(update={"detail": {**ev.detail, "suppressed_since_last": str(suppressed)}})
             await self.bus.publish(ev)
+
+    def _throttle_drift_alert(self, ev: ReconcileDrift, now_ns: int) -> tuple[bool, int]:
+        """Decide whether to publish this reconcile-drift event, throttling
+        alert-only resolutions to on-change + a periodic heartbeat.
+
+        Returns ``(emit, suppressed_since_last)``:
+          * Not alert-only (``detail["resolution"]`` missing or not ending in
+            ``_alert_only``) → ``(True, 0)`` always (fail-safe; never throttled).
+          * Alert-only + first sight of this key, OR the drift detail changed
+            since the last emit, OR the heartbeat window elapsed → ``(True, n)``
+            where ``n`` is how many were suppressed since the last emit (0 on
+            first-sight/on-change, >0 on a heartbeat emit).
+          * Alert-only + identical detail + within window → ``(False, 0)``; the
+            suppressed counter for this key is incremented.
+
+        See _DRIFT_ALERT_THROTTLE_NS for the window and the flood this fixes.
+        """
+        resolution = ev.detail.get("resolution", "")
+        if not resolution.endswith("_alert_only"):
+            return True, 0
+        key = (ev.account_alias, ev.question_idx, resolution)
+        sig = repr(sorted(ev.detail.items()))
+        last_ns = self._drift_alert_last_emit_ns.get(key)
+        last_sig = self._drift_alert_last_sig.get(key)
+        if last_ns is None or sig != last_sig or (now_ns - last_ns) >= _DRIFT_ALERT_THROTTLE_NS:
+            suppressed = self._drift_alert_suppressed.pop(key, 0)
+            self._drift_alert_last_emit_ns[key] = now_ns
+            self._drift_alert_last_sig[key] = sig
+            return True, suppressed
+        self._drift_alert_suppressed[key] = self._drift_alert_suppressed.get(key, 0) + 1
+        return False, 0
 
     def _gate_material_drift(self, slot: AccountSlot, material_drift: bool) -> str | None:
         """Debounce a material qty drift before halting, and auto-clear the block
