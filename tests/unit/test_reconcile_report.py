@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from hlanalysis.engine.exec_types import ClearinghouseState, VenuePosition
 from hlanalysis.engine.reconcile_report import SlotRecon, compare_slot
@@ -103,7 +104,7 @@ def test_compare_slot_skips_when_positions_unknown():
     assert r.realized_pnl == 3.0  # PnL still reported
 
 
-from hlanalysis.engine.reconcile_report import format_report, Drift
+from hlanalysis.engine.reconcile_report import Drift, format_report
 
 
 def test_compare_slot_paper_mode_divergence_is_not_drift():
@@ -428,6 +429,88 @@ def test_gather_slot_splits_outcome_fills_by_klass():
     assert r.fills_count == 3
 
 
+def test__sibling_coins_by_alias_excludes_own_and_unions_siblings():
+    # Pure helper (P1): two aliases sharing a wallet each get the OTHER's coins;
+    # a coin present in a slot's own map must never appear in its own sibling
+    # set (safety net even though underlyings are disjoint in practice); a
+    # solo-wallet slot gets an empty sibling set.
+    from hlanalysis.engine.reconcile_report import _sibling_coins_by_alias
+
+    slots = [
+        ("v31", "0xw1", {"#100", "#101"}),
+        ("v31_hype", "0xw1", {"#200"}),
+        ("v1_pm", "0xw2", {"#300"}),
+    ]
+    result = _sibling_coins_by_alias(slots)
+    assert result["v31"] == frozenset({"#200"})
+    assert result["v31_hype"] == frozenset({"#100", "#101"})
+    assert result["v1_pm"] == frozenset()
+
+    # Defensive: a coin appearing in BOTH maps is never excluded from its own slot.
+    slots2 = [
+        ("a", "0xw", {"#1", "#2"}),
+        ("b", "0xw", {"#2", "#3"}),
+    ]
+    result2 = _sibling_coins_by_alias(slots2)
+    assert result2["a"] == frozenset({"#3"})  # "#2" is a's own coin, never excluded from a
+    assert result2["b"] == frozenset({"#1"})  # "#2" is b's own coin, never excluded from b
+
+
+def test_gather_slot_excludes_sibling_coin_fills():
+    # P1: v31_hype's settled HYPE fills ("#9001") must be excluded from v31's
+    # (BTC) venue realized/fills/klass_breakdown even though HL's user_fills is
+    # account-wide and the HYPE position is already closed (settlement, not an
+    # open sibling position) — reproduces the 2026-07-02 v31 phantom -$29.71.
+    from hlanalysis.engine.reconcile_report import gather_slot
+
+    class FakeDAL:
+        def realized_pnl_since(self, since_ts_ns):
+            return 10.0
+
+        def all_positions(self):
+            return []
+
+        def coin_klass_map(self):
+            return {"#7200": "priceBucket"}
+
+    class FakeFill:
+        def __init__(self, symbol, closed_pnl, fee, ts_ns):
+            self.symbol = symbol
+            self.closed_pnl = closed_pnl
+            self.fee = fee
+            self.ts_ns = ts_ns
+
+    now_ns = time.time_ns()
+
+    class FakeClient:
+        def clearinghouse_state(self):
+            return ClearinghouseState(positions=(), account_value_usd=1.0)
+
+        def user_fills(self, *, since_ts_ns):
+            return [
+                FakeFill("#7200", 10.0, 0.0, now_ns),  # own coin
+                FakeFill("#9001", 999.0, 0.0, now_ns),  # sibling's coin — must be excluded
+            ]
+
+    r = gather_slot(
+        alias="v31",
+        dal=FakeDAL(),
+        exec_client=FakeClient(),
+        qty_tolerance=1e-6,
+        fetch_venue_realized=True,
+        now_ns=now_ns,
+        sibling_coins=frozenset({"#9001"}),
+    )
+    assert r.venue_realized_pnl == 10.0
+    assert r.fills_count == 1
+    assert r.venue_realized_pnl_window == 10.0
+    assert r.fills_count_window == 1
+    assert r.pnl_mismatch is False  # local realized_pnl_since (10.0) matches venue window
+    assert r.klass_breakdown is not None
+    assert "#9001" not in r.klass_breakdown
+    assert "unknown" not in r.klass_breakdown
+
+
 def test_gather_slot_unmapped_fill_is_unknown():
     from hlanalysis.engine.reconcile_report import gather_slot
 
@@ -519,6 +602,28 @@ def test_compare_slot_no_pnl_mismatch_within_tolerance():
     assert r.pnl_mismatch is False
     assert r.has_drift is False
     assert r.total_true_pnl == 100.0  # durable local mirror
+
+
+def test_format_report_pnl_mismatch_shows_window_delta():
+    # P5 bug B: the pnl_mismatch line prints ALL-TIME figures (local=realized_pnl
+    # vs venue=venue_realized_pnl) though the DRIFT flag is set from the 24h
+    # WINDOW comparison — misleading, since it shows the benign aged-out
+    # truncation gap rather than the window delta that actually triggered.
+    # Fix: also print the window basis with its own delta.
+    r = SlotRecon(
+        alias="v1",
+        realized_pnl=100.0,
+        open_mtm=0.0,
+        account_value_usd=10.0,
+        positions_known=True,
+        venue_realized_pnl=90.0,  # all-time delta = 10.0
+        pnl_mismatch=True,
+        realized_pnl_window=25.5,
+        venue_realized_pnl_window=20.0,  # window delta = 5.5 (differs from all-time)
+    )
+    text = format_report([r])
+    assert "pnl_mismatch" in text
+    assert "window: local_win=+25.50 vs venue_win=+20.00 (delta=+5.50)" in text
 
 
 def test_strategy_pnl_is_outcome_only_not_full_account():
@@ -908,6 +1013,154 @@ def test_compare_slot_windowed_fields_passthrough():
     assert r.fills_count_window == 3
     assert r.klass_breakdown_window is win_klass
     assert r.window_total_pnl == 15.0  # venue window (15) + open_mtm (0)
+
+
+# ---------------------------------------------------------------------------
+# P6: a slot whose venue read failed must never report as clean OK — it masks
+# real drift if the venue read is failing (e.g. HL 429 retries exhausted).
+# ---------------------------------------------------------------------------
+
+
+def test_status_unavailable_when_venue_read_failed():
+    r = SlotRecon(
+        alias="v1",
+        realized_pnl=0.0,
+        open_mtm=0.0,
+        account_value_usd=0.0,
+        positions_known=False,
+        drift=[],
+        venue_read_failed=True,
+    )
+    assert r.status == "UNAVAILABLE"
+    assert r.has_drift is False  # unknown, not falsely paged as DRIFT
+
+
+def test_format_report_shows_unavailable():
+    r = SlotRecon(
+        alias="v1",
+        realized_pnl=0.0,
+        open_mtm=0.0,
+        account_value_usd=0.0,
+        positions_known=False,
+        drift=[],
+        venue_read_failed=True,
+    )
+    text = format_report([r])
+    assert "UNAVAILABLE" in text
+    assert "venue read failed" in text
+    assert "DRIFT" not in text
+    assert "OK" not in text.split("\n")[2]  # the slot header line itself
+
+
+def test_build_report_marks_slot_unavailable_on_client_error(tmp_path, monkeypatch):
+    # Drive build_report end to end: a slot whose exec-client construction
+    # raises (e.g. HL 429 retries exhausted) must surface as UNAVAILABLE, not
+    # a clean OK with 0 PnL that would mask a real drift.
+    from hlanalysis.engine.config import (
+        AlertsConfig,
+        AllowlistEntry,
+        DeployConfig,
+        GlobalRiskConfig,
+        HyperliquidAccount,
+        StrategiesConfig,
+        StrategyConfig,
+        TelegramConfig,
+    )
+    from hlanalysis.engine.reconcile_report import build_report
+
+    entry = AllowlistEntry(
+        match={"class": "priceBinary", "underlying": "BTC"},
+        max_position_usd=100,
+        stop_loss_pct=None,
+        tte_min_seconds=0,
+        tte_max_seconds=7200,
+        price_extreme_threshold=0.85,
+        distance_from_strike_usd_min=0,
+        vol_max=100,
+        vol_lookback_seconds=3600,
+        vol_sampling_dt_seconds=60,
+    )
+    strat = StrategyConfig(
+        name="late_resolution",
+        account_alias="v1",
+        paper_mode=False,
+        strategy_type="late_resolution",
+        allowlist=[entry],
+        blocklist_question_idxs=[],
+        defaults=entry,
+        **{
+            "global": GlobalRiskConfig(
+                max_total_inventory_usd=500,
+                max_concurrent_positions=5,
+                daily_loss_cap_usd=200,
+                max_strike_distance_pct=50,
+                min_recent_volume_usd=100,
+                stale_data_halt_seconds=30,
+                reconcile_interval_seconds=60,
+            )
+        },
+    )
+    strategies_cfg = StrategiesConfig(strategies=[strat])
+    deploy_cfg = DeployConfig(
+        env="test",
+        accounts={
+            "v1": HyperliquidAccount(
+                account_address="0xv1", api_secret_key="0xv1", base_url="https://api.hyperliquid.xyz"
+            ),
+        },
+        alerts=AlertsConfig(telegram=TelegramConfig(bot_token="t", chat_id="c")),
+        state_db_path=str(tmp_path / "engine" / "state.db"),
+        kill_switch_path=str(tmp_path / "engine" / "halt"),
+    )
+
+    import hlanalysis.engine.config_builders as config_builders
+
+    def _raise(*a, **kw):
+        raise RuntimeError("HL 429 retries exhausted")
+
+    monkeypatch.setattr(config_builders, "build_exec_client", _raise)
+
+    recon = build_report(deploy_cfg, strategies_cfg, qty_tolerance=1e-6)
+    assert len(recon) == 1
+    assert recon[0].alias == "v1"
+    assert recon[0].venue_read_failed is True
+    assert recon[0].status == "UNAVAILABLE"
+    assert recon[0].has_drift is False
+
+    text = format_report(recon)
+    assert "UNAVAILABLE" in text
+
+
+# ---------------------------------------------------------------------------
+# P5: --json export must not crash on Drift, and pnl_mismatch line must show
+# the window basis that actually triggered the flag.
+# ---------------------------------------------------------------------------
+
+
+def test_json_payload_serializes_drift():
+    # P5 bug A: main()'s --json branch does `vars(d) for d in r.drift`, but
+    # Drift is @dataclass(frozen=True, slots=True) — no __dict__ — so vars()
+    # raises TypeError and `make reconcile-report JSON=1` emits nothing.
+    # _json_payload must use dataclasses.asdict instead, and the result must
+    # be JSON-serializable end to end.
+    import json as _json
+
+    from hlanalysis.engine.reconcile_report import Drift, SlotRecon, _json_payload
+
+    r = SlotRecon(
+        alias="v31",
+        realized_pnl=1.0,
+        open_mtm=0.0,
+        account_value_usd=10.0,
+        positions_known=True,
+        drift=[Drift("vanished", "ETH", 50.0, 0.0)],
+    )
+    payload = _json_payload([r], now_ns=123, has_drift=True)
+    assert payload["slots"][0]["drift"] == [
+        {"kind": "vanished", "symbol": "ETH", "db_qty": 50.0, "venue_qty": 0.0},
+    ]
+    text = _json.dumps(payload)  # must not raise
+    assert "vanished" in text
 
 
 # Import pytest for approx assertions used above

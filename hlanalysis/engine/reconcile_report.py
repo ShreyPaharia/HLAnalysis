@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import math
 import time
@@ -108,6 +109,11 @@ class SlotRecon:
     # never pages and never masks a genuine orphan on a live slot (2026-06-15).
     paper_mode: bool = False
 
+    # venue_read_failed: the venue client/DAL read for this slot errored out
+    # (e.g. HL 429 retries exhausted) — placed after other defaulted fields so
+    # existing positional construction elsewhere is unaffected. See `status`.
+    venue_read_failed: bool = False
+
     @property
     def total_true_pnl(self) -> float:
         """The STRATEGY's lifetime PnL: outcome-markets only.
@@ -153,8 +159,12 @@ class SlotRecon:
 
     @property
     def status(self) -> str:
-        """Report status label: DRIFT (live + real divergence), PAPER (paper slot
-        with the expected local-ledger/venue divergence), else OK."""
+        """Report status label: UNAVAILABLE (venue read failed — checked first,
+        so a failed read is never mistaken for a clean OK or masked as DRIFT),
+        DRIFT (live + real divergence), PAPER (paper slot with the expected
+        local-ledger/venue divergence), else OK."""
+        if self.venue_read_failed:
+            return "UNAVAILABLE"
         if self.has_drift:
             return "DRIFT"
         if self.paper_mode and self.has_divergence:
@@ -289,7 +299,8 @@ def format_report(recon: list[SlotRecon]) -> str:
     """
     lines: list[str] = ["Engine reconciliation report", ""]
     for r in recon:
-        lines.append(f"[{r.alias}] {r.status}")
+        status_suffix = " (venue read failed)" if r.venue_read_failed else ""
+        lines.append(f"[{r.alias}] {r.status}{status_suffix}")
         venue_str = f"{r.venue_realized_pnl:+.2f}" if r.venue_realized_pnl is not None else "n/a"
         lines.append(f"  strategy_pnl(outcome-only)={r.total_true_pnl:+.2f}  acct_value={r.account_value_usd:.2f}")
         lines.append(f"    venue_outcome_realized={venue_str}  local={r.realized_pnl:+.2f}  open_mtm={r.open_mtm:+.2f}")
@@ -308,6 +319,17 @@ def format_report(recon: list[SlotRecon]) -> str:
                 f"  {marker} pnl_mismatch: local={r.realized_pnl:+.2f} vs venue={venue_str} "
                 f"(local ledger diverges from venue truth)"
             )
+            # The DRIFT flag itself is set from the trailing-WINDOW comparison
+            # (compare_slot), not the all-time figures just printed above —
+            # showing only all-time is misleading (that gap is often the
+            # benign aged-out-fill truncation, not what triggered the flag).
+            # Print the window basis too whenever it was computed.
+            if r.venue_realized_pnl_window is not None:
+                window_delta = r.realized_pnl_window - r.venue_realized_pnl_window
+                lines.append(
+                    f"    window: local_win={r.realized_pnl_window:+.2f} "
+                    f"vs venue_win={r.venue_realized_pnl_window:+.2f} (delta={window_delta:+.2f})"
+                )
         for d in r.drift:
             lines.append(f"  {marker} {d.kind} {d.symbol}: db_qty={d.db_qty} venue_qty={d.venue_qty}")
         lines.append("")
@@ -394,6 +416,31 @@ def format_daily_summary(recon: list[SlotRecon], *, date_str: str | None = None)
     return "\n".join(lines)
 
 
+def _sibling_coins_by_alias(
+    slots: list[tuple[str, str, set[str]]],
+) -> dict[str, frozenset[str]]:
+    """Pure helper (P1, shared-account attribution): compute, per alias, the
+    union of coins owned by OTHER slots on the same wallet.
+
+    ``slots`` = list of ``(alias, wallet_address, own_coins)``. Two slots
+    sharing a ``wallet_address`` each get the other's coins; a solo-wallet slot
+    gets ``frozenset()``. A coin in a slot's OWN ``own_coins`` is never
+    included in that slot's own sibling set (even if it also happens to appear
+    in a sibling's map — disjoint underlyings make this a belt-and-braces
+    guard, not the expected case).
+    """
+    result: dict[str, frozenset[str]] = {}
+    for alias, wallet, own in slots:
+        union: set[str] = set()
+        for other_alias, other_wallet, other_own in slots:
+            if other_alias == alias:
+                continue
+            if other_wallet == wallet:
+                union |= other_own
+        result[alias] = frozenset(union - own)
+    return result
+
+
 def gather_slot(
     *,
     alias: str,
@@ -405,6 +452,7 @@ def gather_slot(
     now_ns: int | None = None,
     window_hours: float = 24.0,
     paper_mode: bool = False,
+    sibling_coins: frozenset[str] = frozenset(),
 ) -> SlotRecon:
     """IO: pull local + venue realized PnL + DB positions + venue state for one
     slot and run the pure compare. clearinghouse_state()/realized_pnl_since() are
@@ -420,6 +468,11 @@ def gather_slot(
     now_ns is injected by the caller (from main's clock) for testability; if
     None it defaults to time.time_ns(). window_hours controls the look-back
     window (default 24h) for the trailing-window PnL figures.
+
+    sibling_coins: coins owned by ANOTHER slot sharing this slot's HL wallet
+    (see the module-level note on ``_sibling_coins_by_alias`` / the module
+    comment inside this function below) — excluded from this slot's outcome
+    fills regardless of whether that sibling's position is still open.
     """
     if now_ns is None:
         now_ns = time.time_ns()
@@ -441,7 +494,29 @@ def gather_slot(
         # HL's (capped) fill history twice and risk a per-IP 429. outcome_only:
         # strategy = HIP-4 outcome markets ("#N"), excluding non-strategy perp/spot.
         try:
-            outcome = [f for f in exec_client.user_fills(since_ts_ns=0) if f.symbol.startswith("#")]
+            # Shared-account attribution (2026-07-02): v31 (BTC) and v31_hype
+            # (HYPE) trade on ONE HL wallet, so user_fills returns BOTH slots'
+            # fills with no coin filter. Filtering to this slot's OWN
+            # coin_klass_map (an earlier attempt) is WRONG: it also drops this
+            # slot's own coins whose klass didn't persist, breaking the
+            # "unknown" safety net (SHR-77). The bug's actual fills were HYPE
+            # SETTLEMENT fills — v31_hype's position was already closed — so a
+            # "current open sibling positions" filter would miss them too.
+            # Instead we exclude coins that belong to a SIBLING slot's
+            # coin_klass_map: that map is keyed by coin, persisted at
+            # scan-match, and is NOT cleared on settlement, so v31_hype's map
+            # still contains the HYPE coins even after they settle (see
+            # build_report / _sibling_coins_by_alias). Own coins (mapped or
+            # unmapped) are always kept; unmapped ones still fall into the
+            # "unknown" bucket. Sibling coins are excluded regardless of
+            # open/closed (fixes the v31 -$29.71 phantom from 7 HYPE
+            # settlement fills).
+            coin_klass = dal.coin_klass_map()
+            outcome = [
+                f
+                for f in exec_client.user_fills(since_ts_ns=0)
+                if f.symbol.startswith("#") and f.symbol not in sibling_coins
+            ]
             venue_realized = sum(f.closed_pnl - f.fee for f in outcome)
             fills_count = len(outcome)
             # SHR-77: split realized PnL + fills (and open-MTM) by market class.
@@ -452,7 +527,7 @@ def gather_slot(
             klass_breakdown = _split_by_klass(
                 outcome,
                 venue.positions,
-                dal.coin_klass_map(),
+                coin_klass,
             )
             # Trailing-window: filter the already-fetched fills — no second fetch.
             # Fills carry a ts_ns attribute; filter to those within the window.
@@ -466,7 +541,7 @@ def gather_slot(
             klass_breakdown_window = _split_by_klass(
                 outcome_window,
                 venue.positions,
-                dal.coin_klass_map(),
+                coin_klass,
             )
         except Exception:  # noqa: BLE001 — venue read is best-effort; report still useful
             venue_realized = None
@@ -538,6 +613,18 @@ def _build_recon_dal(deploy_cfg, alias: str, *, strategy_id: str | None = None):
     return StateDAL(Path(deploy_cfg.state_db_path_for(alias)))
 
 
+def _wallet_address(acct) -> str:
+    """Best-effort identifier for the venue wallet/account an ``acct`` config
+    entry points at, used to detect slots sharing one HL wallet (P1 sibling-coin
+    exclusion). Inlined here (not imported from runtime.py) to avoid a circular
+    import between reconcile_report and the live runtime module."""
+    from .config import HyperliquidAccount
+
+    if isinstance(acct, HyperliquidAccount):
+        return acct.account_address
+    return getattr(acct, "funder_address", None) or getattr(acct, "private_key", "")
+
+
 def build_report(
     deploy_cfg,
     strategies_cfg,
@@ -549,18 +636,24 @@ def build_report(
 ) -> list[SlotRecon]:
     """IO: build a read-only client + open the DAL per slot, gather each.
 
-    A slot whose client/DAL errors yields a positions_known=False SlotRecon so
-    one bad slot never aborts the whole report.
+    A slot whose client/DAL errors yields a ``venue_read_failed=True`` SlotRecon
+    (status UNAVAILABLE) so one bad slot never aborts the whole report but also
+    never silently reads as reconciled (P6).
 
-    now_ns is injected for testability; defaults to time.time_ns() in gather_slot.
-    window_hours controls the trailing PnL window (default 24h)."""
+    Two passes: (1) build each slot's client/DAL and its OWN coin set (HL only
+    — PM never fetches venue fills so it needs no sibling exclusion), (2)
+    compute sibling coin sets across same-wallet slots and gather each slot.
+    This avoids opening any DAL twice. now_ns is injected for testability;
+    defaults to time.time_ns() in gather_slot. window_hours controls the
+    trailing PnL window (default 24h)."""
     from .config import HyperliquidAccount
     from .config_builders import build_exec_client
 
     if now_ns is None:
         now_ns = time.time_ns()
 
-    out: list[SlotRecon] = []
+    records: dict[str, tuple] = {}
+    failed: dict[str, Exception] = {}
     for s_cfg in strategies_cfg.strategies:
         alias = s_cfg.account_alias
         try:
@@ -575,6 +668,45 @@ def build_report(
             # Only HL exposes an authoritative venue realized (user_fills
             # closedPnl); PM realized lives in our local settlement/fill ledger.
             fetch_venue_realized = isinstance(acct, HyperliquidAccount)
+            own_coins: set[str] = set()
+            wallet = ""
+            if fetch_venue_realized:
+                # Shared-account attribution (2026-07-02): two HL slots (e.g.
+                # v31/BTC and v31_hype/HYPE) can trade on the same wallet, so
+                # user_fills is account-wide. own_coins seeds the sibling-coin
+                # computation below (_sibling_coins_by_alias).
+                try:
+                    own_coins = set(dal.coin_klass_map())
+                except Exception:  # noqa: BLE001 — best-effort; empty own set is safe
+                    own_coins = set()
+                wallet = _wallet_address(acct)
+            records[alias] = (s_cfg, client, dal, fetch_venue_realized, own_coins, wallet)
+        except Exception as e:  # noqa: BLE001 — a bad slot must not abort the report
+            failed[alias] = e
+
+    sibling_map = _sibling_coins_by_alias(
+        [(alias, rec[5], rec[4]) for alias, rec in records.items()],
+    )
+
+    out: list[SlotRecon] = []
+    for s_cfg in strategies_cfg.strategies:
+        alias = s_cfg.account_alias
+        if alias in failed:
+            out.append(
+                SlotRecon(
+                    alias=alias,
+                    realized_pnl=0.0,
+                    open_mtm=0.0,
+                    account_value_usd=0.0,
+                    positions_known=False,
+                    drift=[],
+                    venue_read_failed=True,
+                )
+            )
+            logger.warning("recon slot {} failed: {}", alias, failed[alias])
+            continue
+        _s_cfg, client, dal, fetch_venue_realized, _own_coins, _wallet = records[alias]
+        try:
             out.append(
                 gather_slot(
                     alias=alias,
@@ -586,12 +718,19 @@ def build_report(
                     now_ns=now_ns,
                     window_hours=window_hours,
                     paper_mode=bool(getattr(s_cfg, "paper_mode", False)),
+                    sibling_coins=sibling_map.get(alias, frozenset()),
                 )
             )
         except Exception as e:  # noqa: BLE001 — a bad slot must not abort the report
             out.append(
                 SlotRecon(
-                    alias=alias, realized_pnl=0.0, open_mtm=0.0, account_value_usd=0.0, positions_known=False, drift=[]
+                    alias=alias,
+                    realized_pnl=0.0,
+                    open_mtm=0.0,
+                    account_value_usd=0.0,
+                    positions_known=False,
+                    drift=[],
+                    venue_read_failed=True,
                 )
             )
             logger.warning("recon slot {} failed: {}", alias, e)
@@ -643,6 +782,34 @@ async def _maybe_alert(
         session_factory=session_factory,
         tg_factory=tg_factory,
     )
+
+
+def _json_payload(recon: list[SlotRecon], now_ns: int, has_drift: bool) -> dict:
+    """Pure: build the machine-readable payload for `--json`.
+
+    Uses dataclasses.asdict for Drift (frozen, slots — no __dict__, so vars()
+    raises TypeError) so the payload is always JSON-serializable end to end."""
+    return {
+        "generated_at_ns": now_ns,
+        "has_drift": has_drift,
+        "slots": [
+            {
+                "alias": r.alias,
+                "status": r.status,
+                "paper_mode": r.paper_mode,
+                "realized_pnl": r.realized_pnl,
+                "venue_realized_pnl": r.venue_realized_pnl,
+                "account_pnl_all_time": r.account_pnl_all_time,
+                "pnl_mismatch": r.pnl_mismatch,
+                "open_mtm": r.open_mtm,
+                "total_true_pnl": r.total_true_pnl,
+                "account_value_usd": r.account_value_usd,
+                "positions_known": r.positions_known,
+                "drift": [dataclasses.asdict(d) for d in r.drift],
+            }
+            for r in recon
+        ],
+    }
 
 
 def main() -> None:
@@ -707,31 +874,7 @@ def main() -> None:
         raise SystemExit(1 if has_drift else 0)
 
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "generated_at_ns": now_ns,
-                    "has_drift": has_drift,
-                    "slots": [
-                        {
-                            "alias": r.alias,
-                            "status": r.status,
-                            "paper_mode": r.paper_mode,
-                            "realized_pnl": r.realized_pnl,
-                            "venue_realized_pnl": r.venue_realized_pnl,
-                            "account_pnl_all_time": r.account_pnl_all_time,
-                            "pnl_mismatch": r.pnl_mismatch,
-                            "open_mtm": r.open_mtm,
-                            "total_true_pnl": r.total_true_pnl,
-                            "account_value_usd": r.account_value_usd,
-                            "positions_known": r.positions_known,
-                            "drift": [vars(d) for d in r.drift],
-                        }
-                        for r in recon
-                    ],
-                }
-            )
-        )
+        print(json.dumps(_json_payload(recon, now_ns, has_drift)))
     else:
         print(text)
 
